@@ -26,6 +26,7 @@ export type RepoSnapshot = {
   path: string;
   name: string;
   head: string;
+  stateId: string;
   currentBranch: string;
   isRebasing: boolean;
   isDirty: boolean;
@@ -54,6 +55,7 @@ export type ActionPlan = {
   id: string;
   repoPath: string;
   head: string;
+  stateId: string;
   allowed: boolean;
   operation: Operation;
   args: Record<string, string>;

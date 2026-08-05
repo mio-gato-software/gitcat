@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { executePlan, getLlmConfig, getSnapshot, loadLlmConfig, planAction, prepareOperation, saveLlmConfig } from "./git-service.js";
 import type { ActionPlan, LlmConfigInput, Operation } from "../shared/types.js";
 
@@ -10,7 +10,8 @@ const openedRepositories = new Set<string>();
 const issuedPlans = new Map<string, ActionPlan>();
 
 function isTrustedFrame(url: string) {
-  return app.isPackaged ? url.startsWith("file://") : url.startsWith("http://127.0.0.1:5173/");
+  const rendererUrl = pathToFileURL(join(app.getAppPath(), "dist/index.html")).href;
+  return app.isPackaged ? url === rendererUrl : url.startsWith("http://127.0.0.1:5173/");
 }
 
 function assertTrustedSender(event: Electron.IpcMainInvokeEvent) {
@@ -23,7 +24,10 @@ function assertOpenedRepository(cwd: unknown) {
 }
 
 function rememberPlan(plan: ActionPlan) {
-  issuedPlans.set(plan.id, plan);
+  if (plan.allowed) {
+    if (issuedPlans.size >= 100) issuedPlans.delete(issuedPlans.keys().next().value ?? "");
+    issuedPlans.set(plan.id, plan);
+  }
   return plan;
 }
 

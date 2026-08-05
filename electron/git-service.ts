@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { safeStorage, app } from "electron";
 import type { ActionPlan, Branch, Commit, LlmConfig, LlmConfigInput, Operation, RepoSnapshot } from "../shared/types.js";
 
 type CommandResult = { stdout: string; stderr: string; code: number };
-type PlanDraft = Omit<ActionPlan, "id" | "repoPath" | "head">;
+type PlanDraft = Omit<ActionPlan, "id" | "repoPath" | "head" | "stateId">;
 
 const MODEL_FALLBACK = "luna";
 const branchNamePattern = /^[A-Za-z0-9._/@-]+$/;
@@ -21,7 +21,7 @@ function runGit(cwd: string, args: string[], timeoutMs = 60_000): Promise<Comman
   return new Promise((resolvePromise, reject) => {
     const child = spawn("git", args, {
       cwd,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no", GIT_EDITOR: "true" },
+      env: { ...process.env, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no", GIT_EDITOR: "true" },
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
@@ -89,17 +89,17 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   const statusRaw = await checkedGit(repoRoot, ["status", "--short", "-z"]);
   const branchRaw = await checkedGit(repoRoot, [
     "for-each-ref",
-    "--format=%(refname:short)%x1f%(upstream:short)%x1f%(upstream:track)%x1f%(objectname:short)%x1f%(subject)%x1f%(authorname)%x1f%(authoremail)%x1f%(authordate:iso-strict)",
+    "--format=%(refname:short)%00%(upstream:short)%00%(upstream:track)%00%(objectname:short)%00%(subject)%00%(authorname)%00%(authoremail)%00%(authordate:iso-strict)",
     "refs/heads"
   ]);
-  const logRaw = await optionalGit(repoRoot, [
+  const logRaw = head ? await checkedGit(repoRoot, [
     "log", "--all", "-n", "80", "--date=iso-strict",
     "--pretty=format:%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D"
-  ]);
+  ]) : "";
   const commits = logRaw.split("\n").map(parseCommit).filter((commit): commit is Commit => Boolean(commit));
   const commitsByHash = new Map(commits.map((commit) => [commit.shortHash, commit]));
   const branches: Branch[] = branchRaw.split("\n").filter(Boolean).map((line) => {
-    const [name, upstream, track, shortHash, subject, author, email, date] = line.split("\x1f");
+    const [name, upstream, track, shortHash, subject, author, email, date] = line.split("\0");
     return {
       name,
       upstream: upstream || undefined,
@@ -120,6 +120,7 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     path: repoRoot,
     name: basename(repoRoot),
     head,
+    stateId: createHash("sha256").update(`${head}\0${statusRaw}`).digest("hex"),
     currentBranch,
     isRebasing,
     isDirty: Boolean(statusRaw.trim()),
@@ -146,8 +147,7 @@ function refused(reason: string, source: ActionPlan["source"] = "guardrail"): Pl
 function localPlan(request: string, snapshot: RepoSnapshot): PlanDraft {
   const text = request.trim();
   const lower = text.toLocaleLowerCase("es");
-  const branchTerms = /git|rama|branch|rebase|merge|commit|cambio|estado|historial|remoto|pull|push|fetch|checkout|conflicto|autor|staged|diff|sincron/i;
-  if (!branchTerms.test(lower)) return refused("Solo puedo ayudarte con ramas, historial, cambios y operaciones Git.");
+  if (!isGitRequest(lower)) return refused("Solo puedo ayudarte con ramas, historial, cambios y operaciones Git.");
 
   const make = (operation: Operation, args: Record<string, string>, summary: string, rationale: string, risk: ActionPlan["risk"] = "low"): PlanDraft => ({
     allowed: true, operation, args, command: buildCommand(operation, args), summary, rationale, risk,
@@ -166,6 +166,8 @@ function localPlan(request: string, snapshot: RepoSnapshot): PlanDraft {
 
   const create = text.match(/(?:crear|nueva|nuevo)\s+(?:la\s+)?rama\s+([A-Za-z0-9._/@-]+)/i)?.[1];
   if (create) return isBranchNameSafe(create) ? make("create_branch", { name: create }, `Crear y cambiar a ${create}`, "Crea una rama local desde HEAD.", "medium") : refused("El nombre de la rama no es válido.", "local-fallback");
+  const remove = text.match(/(?:borrar|eliminar)\s+(?:la\s+)?rama\s+([A-Za-z0-9._/@-]+)/i)?.[1];
+  if (remove) return isBranchNameSafe(remove) ? make("delete_branch", { name: remove }, `Eliminar la rama ${remove}`, "Elimina una rama local ya integrada.", "high") : refused("El nombre de la rama no es válido.", "local-fallback");
   const checkout = text.match(/(?:cambiar(?:me)?|cámbiame|checkout|ir)\s+(?:a\s+)?(?:la\s+)?rama\s+([A-Za-z0-9._/@-]+)/i)?.[1];
   if (checkout) return isBranchNameSafe(checkout) ? make("checkout", { name: checkout }, `Cambiar a ${checkout}`, "Cambia la rama activa sin borrar cambios locales.", "medium") : refused("El nombre de la rama no es válido.", "local-fallback");
   const merge = text.match(/(?:merge|fusionar|mezclar)\s+(?:la\s+)?rama?\s*([A-Za-z0-9._/@-]+)/i)?.[1];
@@ -228,16 +230,8 @@ function planFromModel(value: Record<string, unknown>, source: "llm"): PlanDraft
   const branchArg = args.name || args.onto;
   if (branchArg && !isBranchNameSafe(branchArg)) return refused("El modelo propuso un nombre de rama no válido.", source);
   if (operation === "commit" && (!args.message || args.message.length > 120)) return refused("El mensaje de commit falta o es demasiado largo.", source);
-  const allowed = value.allowed === true && operation !== "none";
-  const summary = typeof value.summary === "string" ? value.summary : "Acción Git propuesta";
-  const rationale = typeof value.rationale === "string" ? value.rationale : "La acción fue interpretada por el proveedor configurado.";
-  const risk = value.risk === "high" || value.risk === "medium" ? value.risk : "low";
-  return {
-    allowed, operation, args, command: buildCommand(operation, args), summary,
-    rationale: allowed ? rationale : "Solo puedo ayudarte con ramas, historial, cambios y operaciones Git.",
-    risk, requiresConfirmation: allowed && ["rebase", "merge", "delete_branch", "push", "pull", "commit", "create_branch"].includes(operation),
-    source
-  };
+  if (value.allowed !== true || operation === "none") return refused("Solo puedo ayudarte con ramas, historial, cambios y operaciones Git.", source);
+  return { ...operationDraft(operation, args), source };
 }
 
 async function llmPlan(request: string, snapshot: RepoSnapshot): Promise<PlanDraft> {
@@ -267,12 +261,17 @@ Estado actual: rama=${snapshot.currentBranch}, ramas=${snapshot.branches.map((br
 }
 
 function bindPlan(snapshot: RepoSnapshot, draft: PlanDraft): ActionPlan {
-  return { ...draft, id: randomUUID(), repoPath: snapshot.path, head: snapshot.head };
+  return { ...draft, id: randomUUID(), repoPath: snapshot.path, head: snapshot.head, stateId: snapshot.stateId };
+}
+
+function isGitRequest(request: string) {
+  return /git|rama|branch|rebase|merge|commit|cambio|estado|historial|remoto|pull|push|fetch|checkout|conflicto|autor|staged|diff|sincron/i.test(request);
 }
 
 export async function planAction(cwd: string, request: string): Promise<ActionPlan> {
   const snapshot = await getSnapshot(cwd);
   if (!request.trim()) return bindPlan(snapshot, refused("Escribe una acción relacionada con la rama o el repositorio."));
+  if (!isGitRequest(request)) return bindPlan(snapshot, refused("Solo puedo ayudarte con ramas, historial, cambios y operaciones Git."));
   if (!llmState.apiKey.trim()) return bindPlan(snapshot, localPlan(request, snapshot));
   try {
     return bindPlan(snapshot, await llmPlan(request, snapshot));
@@ -324,6 +323,7 @@ function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot) {
   if (branchArg && !isBranchNameSafe(branchArg)) throw new Error("Nombre de rama no válido.");
   if (plan.repoPath !== snapshot.path) throw new Error("El plan pertenece a otro repositorio.");
   if (plan.head !== snapshot.head) throw new Error("El repositorio cambió desde que se preparó el plan. Prepara la acción de nuevo.");
+  if (plan.stateId !== snapshot.stateId) throw new Error("Los cambios locales variaron desde que se preparó el plan. Prepara la acción de nuevo.");
   if (["checkout", "create_branch", "delete_branch", "merge"].includes(plan.operation) && !plan.args.name) throw new Error("Falta el nombre de la rama.");
   if (plan.operation === "rebase" && !plan.args.onto) throw new Error("Falta la rama base.");
   if (plan.operation === "commit" && (!plan.args.message?.trim() || plan.args.message.length > 120)) throw new Error("El mensaje de commit no es válido.");
