@@ -1,8 +1,10 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { accessSync, constants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync, mkdirSync } from "node:fs";
-import { basename, join, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { basename, delimiter, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
+import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
 import type { ActionPlan, Branch, Commit, ConversationMessage, LlmConfig, LlmConfigInput, Operation, RepoSnapshot } from "../shared/types.js";
 import {
   buildPlannerInstructions, commitMessageLimit, executableOperations, isBranchNameSafe, operationArgs,
@@ -28,15 +30,53 @@ function isLlmConfigured() {
   return Boolean(llmState.apiKey.trim() && (llmState.model.trim() || MODEL_FALLBACK));
 }
 
+/**
+ * The user's login shell knows where their tools live; a GUI launch does not inherit that PATH.
+ * Asked once, with a timeout, and never allowed to block a command.
+ */
+function loginShellPath(): Promise<string | undefined> {
+  const shell = process.env.SHELL || (process.platform === "darwin" ? "/bin/zsh" : undefined);
+  if (process.platform === "win32" || !shell) return Promise.resolve(undefined);
+  return new Promise((resolvePromise) => {
+    execFile(shell, ["-ilc", 'printf "%s" "$PATH"'], { timeout: 5_000, encoding: "utf8" }, (_error, stdout) => {
+      resolvePromise(stdout?.trim().split("\n").pop()?.trim() || undefined);
+    });
+  });
+}
+
+let toolDirectoriesPromise: Promise<string[]> | undefined;
+const resolvedTools = new Map<string, string>();
+
+export function toolDirectories(): Promise<string[]> {
+  toolDirectoriesPromise ??= loginShellPath()
+    .catch(() => undefined)
+    .then((shellPath) => [...new Set([
+      ...pathEntries(process.env.PATH),
+      ...pathEntries(shellPath),
+      ...wellKnownToolDirectories(process.platform, homedir())
+    ])]);
+  return toolDirectoriesPromise;
+}
+
+async function resolveTool(name: string) {
+  const cached = resolvedTools.get(name);
+  if (cached) return cached;
+  const found = findExecutable(name, await toolDirectories(), isExecutableFile);
+  if (found) resolvedTools.set(name, found);
+  return found ?? name;
+}
+
 function runGit(cwd: string, args: string[], timeoutMs = 60_000): Promise<CommandResult> {
   return runCommand("git", args, cwd, timeoutMs);
 }
 
-function runCommand(command: string, args: string[], cwd: string, timeoutMs = 60_000, extraEnv: NodeJS.ProcessEnv = {}): Promise<CommandResult> {
+async function runCommand(command: string, args: string[], cwd: string, timeoutMs = 60_000, extraEnv: NodeJS.ProcessEnv = {}): Promise<CommandResult> {
+  const executable = await resolveTool(command);
+  const searchPath = (await toolDirectories()).join(delimiter);
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, {
+    const child = spawn(executable, args, {
       cwd,
-      env: { ...process.env, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no", GIT_EDITOR: "true", ...extraEnv },
+      env: { ...process.env, PATH: searchPath, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no", GIT_EDITOR: "true", ...extraEnv },
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
@@ -260,7 +300,10 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
   }
 
   const ghVersion = await runCommand("gh", ["--version"], sourcePath, 10_000, { GH_PROMPT_DISABLED: "1" }).catch(() => undefined);
-  if (!ghVersion || ghVersion.code !== 0) return blocked("GitHub CLI (gh) is not installed or not on PATH; it is required to create the repository");
+  if (!ghVersion || ghVersion.code !== 0) {
+    const searched = await toolDirectories();
+    return blocked(`GitHub CLI (gh) is required but no runnable gh was found in any of the ${searched.length} directories Branchline searched (including ${searched.slice(0, 6).join(", ")}). If gh is installed elsewhere, it is a PATH problem rather than a missing install`);
+  }
   const auth = await runCommand("gh", ["auth", "status", "--active", "--hostname", host], sourcePath, 20_000, { GH_PROMPT_DISABLED: "1" });
   if (auth.code !== 0) return blocked(`there is no active gh session for ${host}; the user must run: gh auth login --hostname ${host}`);
 

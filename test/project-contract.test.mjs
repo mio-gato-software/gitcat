@@ -24,8 +24,17 @@ test("la capa de Git evita ejecutar comandos libres", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   assert.match(service, /const allowedOperations = new Set/);
   assert.match(service, /runCommand\("git", args/);
-  assert.match(service, /spawn\(command, args/);
+  assert.match(service, /spawn\(executable, args/);
   assert.doesNotMatch(service, /exec\(.*command/);
+});
+
+test("las herramientas se localizan sin depender del PATH que hereda la app", async () => {
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  assert.match(service, /function loginShellPath/);
+  assert.match(service, /\["-ilc", 'printf "%s" "\$PATH"'\]/);
+  assert.match(service, /const executable = await resolveTool\(command\)/);
+  assert.match(service, /env: \{ \.\.\.process\.env, PATH: searchPath/);
+  assert.match(service, /no runnable gh was found in any of the/);
 });
 
 test("ninguna decisión sobre el mensaje del usuario se toma con palabras clave", async () => {
