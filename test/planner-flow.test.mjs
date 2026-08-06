@@ -87,6 +87,7 @@ test("una pregunta se responde con el texto del modelo sobre el estado real", as
   assert.match(requests[0].instructions, /same language as the user's latest message/);
   assert.match(requests[0].instructions, /"currentBranch": "main"/);
   assert.match(requests[0].instructions, /"author": "Prueba Uno"/);
+  assert.match(requests[0].instructions, /"remembered"/, "el modelo ve lo que ya se confirmó antes");
 });
 
 test("el imperativo “Guarda este repositorio” llega a la creación de repositorio", async () => {

@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { accessSync, constants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
@@ -8,7 +8,11 @@ import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories
 import {
   findAccount, isSshAuthenticated, parseGhAccounts, parseSshGreeting, parseSshResolvedHostName, sshConfigHostAliases
 } from "./host-identity.js";
-import type { ActionPlan, Branch, Commit, ConversationMessage, LlmConfig, LlmConfigInput, Operation, RepoSnapshot } from "../shared/types.js";
+import {
+  emptyMemory, forgetSshHost, recallIdentity, recallRepository, rememberIdentity, rememberRepository,
+  sanitizeMemory, type Memory
+} from "./memory.js";
+import type { ActionPlan, Branch, Commit, ConversationMessage, GitProtocol, LlmConfig, LlmConfigInput, Operation, RepoSnapshot } from "../shared/types.js";
 import {
   buildPlannerInstructions, commitMessageLimit, executableOperations, isBranchNameSafe, operationArgs,
   operationIssues, parseModelPlan, planResponseFormat, type ModelPlan, type PlanIssue
@@ -28,9 +32,33 @@ const LLM_REQUIRED =
 const allowedOperations = new Set<Operation>([...executableOperations, "github_create_repo", "none"]);
 
 let llmState: LlmConfigInput = { apiKey: "", model: MODEL_FALLBACK };
+let memory: Memory = emptyMemory();
 
 function isLlmConfigured() {
   return Boolean(llmState.apiKey.trim() && (llmState.model.trim() || MODEL_FALLBACK));
+}
+
+function memoryPath() { return join(app.getPath("userData"), "branchline-memory.json"); }
+
+export function loadMemory() {
+  try {
+    memory = sanitizeMemory(JSON.parse(readFileSync(memoryPath(), "utf8")));
+  } catch {
+    memory = emptyMemory();
+  }
+}
+
+function saveMemory(next: Memory) {
+  memory = next;
+  try {
+    mkdirSync(app.getPath("userData"), { recursive: true });
+    const target = memoryPath();
+    const temporary = `${target}.tmp`;
+    writeFileSync(temporary, JSON.stringify(memory, null, 2), { mode: 0o600 });
+    renameSync(temporary, target);
+  } catch (error) {
+    console.error("No se pudo guardar lo aprendido sobre este repositorio.", error);
+  }
 }
 
 /**
@@ -296,16 +324,35 @@ async function resolveSshHost(host: string, owner: string, cwd: string, requeste
   if (!await hasSshPrivateKey()) {
     return { problem: "no SSH private key was found on this machine and ssh-agent has none loaded; the user must configure an SSH key first" };
   }
-  const candidates = requested ? [requested] : [host, ...await sshAliasesFor(host, cwd)];
+  const remembered = recallIdentity(memory, host, owner)?.sshHost;
+  // Memory only reorders the search; every candidate still has to prove who it is.
+  const first = requested ? [requested] : [...new Set([remembered, host].filter((entry): entry is string => Boolean(entry)))];
   const attempts: string[] = [];
-  for (const candidate of candidates) {
+  const tried = new Set<string>();
+
+  const attempt = async (candidate: string): Promise<SshResolution | undefined> => {
+    if (tried.has(candidate)) return undefined;
+    tried.add(candidate);
     const identity = await sshIdentity(candidate, cwd);
     if (identity.authenticated && identity.login && identity.login.toLowerCase() === owner.toLowerCase()) return { sshHost: candidate };
     attempts.push(identity.authenticated
       ? `${candidate} authenticates as "${identity.login ?? "an unknown identity"}"`
       : `${candidate} did not authenticate (${identity.output.slice(0, 160)})`);
+    if (candidate === remembered) saveMemory(forgetSshHost(memory, host, owner));
     // A host that cannot name its identity still proves access; accept it when it is the one asked for.
     if (identity.authenticated && !identity.login && (requested || candidate === host)) return { sshHost: candidate };
+    return undefined;
+  };
+
+  for (const candidate of first) {
+    const resolved = await attempt(candidate);
+    if (resolved) return resolved;
+  }
+  if (!requested) {
+    for (const alias of await sshAliasesFor(host, cwd)) {
+      const resolved = await attempt(alias);
+      if (resolved) return resolved;
+    }
   }
   return {
     problem: requested
@@ -369,7 +416,8 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
   if (!accounts.length) return blocked(`no account is logged into ${host} with gh; the user must run: gh auth login --hostname ${host}`);
   const activeAccount = accounts.find((entry) => entry.active)?.login ?? accounts[0].login;
   const ownerAccount = findAccount(accounts, owner);
-  const account = ownerAccount?.login ?? activeAccount;
+  const rememberedAccount = recallIdentity(memory, host, owner)?.account;
+  const account = ownerAccount?.login ?? (rememberedAccount ? findAccount(accounts, rememberedAccount)?.login : undefined) ?? activeAccount;
   const available = accounts.map((entry) => `${entry.login}${entry.active ? " (active)" : ""}`).join(", ");
 
   // Owner is not one of the logged-in accounts, so it has to be an organization the account can publish to.
@@ -512,9 +560,8 @@ async function getWorkingTreeDiff(snapshot: RepoSnapshot) {
       ].filter(Boolean).join("\n");
   const untrackedRaw = await checkedGit(snapshot.path, ["ls-files", "--others", "--exclude-standard", "-z"]);
   const sections = [trackedDiff];
-  // No budget for the model: the only cap left keeps a single huge file out of memory.
-  const readableFileLimit = 4_000_000;
 
+  // Nothing is truncated: whatever the working tree holds is what the model gets to read.
   for (const relativePath of untrackedRaw.split("\0").filter(Boolean)) {
     const absolutePath = resolve(snapshot.path, relativePath);
     if (!absolutePath.startsWith(`${snapshot.path}${sep}`)) continue;
@@ -523,15 +570,12 @@ async function getWorkingTreeDiff(snapshot: RepoSnapshot) {
         sections.push(`\n+++ b/${relativePath}\n[enlace simbólico omitido]`);
         continue;
       }
-      const header = `\n--- /dev/null\n+++ b/${relativePath}\n@@ archivo nuevo @@\n`;
-      if (statSync(absolutePath).size > readableFileLimit) {
-        sections.push(`${header}[archivo de más de ${readableFileLimit / 1_000_000} MB omitido]`);
-        continue;
-      }
       const content = readFileSync(absolutePath);
+      const header = `\n--- /dev/null\n+++ b/${relativePath}\n@@ archivo nuevo @@\n`;
       sections.push(`${header}${content.includes(0) ? "[archivo binario omitido]" : content.toString("utf8")}`);
-    } catch {
-      sections.push(`\n+++ b/${relativePath}\n[contenido no legible]`);
+    } catch (reason) {
+      // A file too large for a single Buffer, or unreadable: reported, never silently dropped.
+      sections.push(`\n+++ b/${relativePath}\n[no se pudo leer: ${reason instanceof Error ? reason.message : "error desconocido"}]`);
     }
   }
   const diff = sections.filter(Boolean).join("\n");
@@ -585,7 +629,13 @@ function plannerState(snapshot: RepoSnapshot) {
     })),
     recentCommits: snapshot.commits.slice(0, 30).map((commit) => ({
       shortHash: commit.shortHash, subject: commit.subject, author: commit.author, date: commit.date, refs: commit.refs
-    }))
+    })),
+    remembered: {
+      thisRepository: recallRepository(memory, snapshot.path) ?? null,
+      identities: Object.entries(memory.identities).map(([hostAndOwner, entry]) => ({
+        hostAndOwner, account: entry.account ?? null, sshHost: entry.sshHost ?? null
+      }))
+    }
   };
 }
 
@@ -819,6 +869,17 @@ async function executeGithubRepositoryPlan(plan: ActionPlan) {
     repositoryCreated = true;
     await checkedGit(source, ["remote", "add", plan.args.remote, plan.args.remoteUrl]);
     const pushOutput = plan.args.push === "true" ? await checkedGit(source, ["push", "-u", plan.args.remote, "HEAD"]) : "";
+    // The user confirmed it and it worked: this is the moment the choice becomes worth remembering.
+    const now = new Date().toISOString();
+    saveMemory(rememberRepository(
+      rememberIdentity(memory, plan.args.host, plan.args.owner, {
+        account: plan.args.account,
+        ...(plan.args.protocol === "ssh" ? { sshHost: plan.args.sshHost } : {})
+      }, now),
+      source,
+      { host: plan.args.host, owner: plan.args.owner, protocol: plan.args.protocol as GitProtocol, remote: plan.args.remote },
+      now
+    ));
     return [createOutput, pushOutput].filter(Boolean).join("\n");
   } catch (error) {
     const createdRemote = await runGit(source, ["remote", "get-url", plan.args.remote]);

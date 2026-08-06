@@ -55,7 +55,7 @@ El modelo nunca entrega un comando shell ejecutable. Solo puede devolver una ope
 
 Cuando la validación local o una comprobación del entorno rechaza una propuesta, el defecto vuelve al modelo como una incidencia estructurada (`{field, problem}`) para que corrija o explique el problema en el idioma de la persona. Los fallos del proveedor —respuesta vacía, truncada por tokens, esquema inválido— se reportan tal cual; nunca se convierten en un rechazo silencioso. Una pregunta del asistente se presenta como pregunta, no como error.
 
-No hay límites artificiales sobre lo que se envía al modelo ni sobre lo que puede responder: ni longitud de solicitud, ni recorte de conversación, ni tope de tokens de salida. Los únicos límites que quedan protegen la memoria del proceso, no al modelo.
+No hay límites artificiales sobre lo que se envía al modelo ni sobre lo que puede responder: ni longitud de solicitud, ni recorte de conversación, ni tope de tokens de salida, ni truncado del diff. Un archivo que no se pueda leer se reporta en el propio diff en lugar de desaparecer en silencio.
 
 ## Identidades
 
@@ -64,5 +64,15 @@ Una misma máquina puede tener varias cuentas de GitHub y varias claves SSH. Bra
 - **Cuenta `gh`**: se leen todas las cuentas autenticadas del host (`gh auth status --json hosts`), no solo la activa. Si el propietario indicado es una de ellas, se usa esa; el cambio con `gh auth switch` aparece en los efectos del plan, ocurre solo al ejecutar y se restaura después. Nunca se leen ni se manipulan tokens.
 - **Clave SSH**: se marca cada candidato (`ssh -T`) y se comprueba **qué identidad responde**, no solo que la conexión autentique. Los alias de `~/.ssh/config` cuyo `HostName` resuelve al host se prueban también, y el que responde como el propietario es el que entra en la URL del remoto.
 - **Localización de binarios**: un lanzamiento gráfico no hereda el PATH del shell, así que se consulta al login shell y se añaden las rutas habituales de los gestores de paquetes antes de resolver `git`, `gh` y `ssh` a ruta absoluta.
+
+## Qué recuerda la aplicación
+
+La regla es una: **se recuerdan decisiones, se vuelve a medir el estado.**
+
+Una decisión es de la persona y no caduca sola —«para `eliaquin` en `github.com` uso esta cuenta y este alias SSH»— y se guarda en `branchline-memory.json` solo cuando una ejecución confirmada termina bien, nunca al proponer un plan. Las identidades se indexan por host y propietario, así que sirven en cualquier repositorio; por ruta se guarda además cómo se publicó ese repositorio en concreto (propietario, protocolo, remoto). Todo ello llega al planificador como `remembered`, para que el modelo no vuelva a preguntar lo que ya contestaste.
+
+El estado del entorno no se guarda jamás: si `gh` está instalado, dónde vive un binario o si una clave sigue autenticando se comprueba cada vez, porque cambia en silencio y darlo por hecho es exactamente cómo se publica con la identidad equivocada.
+
+Lo recordado **reordena la búsqueda, nunca sustituye la comprobación**: el alias recordado se marca primero, pero se verifica igual, y si responde otra identidad se descarta del recuerdo y la búsqueda continúa.
 
 La API key se conserva en el proceso principal y, cuando el sistema lo permite, se cifra con `safeStorage` de Electron. Para una aplicación distribuida convendría complementar esto con firma de builds, actualizaciones verificadas y un control más granular de permisos remotos.

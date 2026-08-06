@@ -145,6 +145,12 @@ account and which SSH key correspond to "owner", including accounts that are not
 keys that are not the default, so do not ask the user about credentials unless a validation issue
 below says the machine genuinely lacks them.
 
+"remembered" in the state holds choices the user already confirmed in earlier conversations: which
+account owns a host, which SSH alias belongs to them, how this repository was published. Reuse them
+instead of asking again, and only revisit one if the user says otherwise or a validation issue shows
+it no longer holds. The application re-verifies each of them before acting, so trust them as
+starting points, not as proof.
+
 Only the repository state below is true. Do not state facts that are not in it.
 Repository state (JSON):
 ${JSON.stringify(repositoryState, null, 2)}`;

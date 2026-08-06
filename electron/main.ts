@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { executePlan, generateCommitDescription, getLlmConfig, getSnapshot, loadLlmConfig, planAction, prepareOperation, saveLlmConfig } from "./git-service.js";
+import { executePlan, generateCommitDescription, getLlmConfig, getSnapshot, loadLlmConfig, loadMemory, planAction, prepareOperation, saveLlmConfig } from "./git-service.js";
 import type { ActionPlan, ConversationMessage, LlmConfigInput, Operation } from "../shared/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -98,6 +98,7 @@ async function createWindow() {
 
 app.whenReady().then(async () => {
   loadLlmConfig();
+  loadMemory();
   loadWorkspace();
   ipcMain.handle("workspace:restore", async (event) => {
     assertTrustedSender(event);

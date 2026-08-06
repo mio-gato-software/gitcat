@@ -288,3 +288,21 @@ test("no hay límites artificiales en lo que se envía o se recibe del LLM", asy
   assert.doesNotMatch(service, /max_output_tokens: 4_000|max_output_tokens: 2_000/);
   assert.doesNotMatch(app, /\.slice\(-20\)|\.slice\(-40\)/);
 });
+
+test("solo se recuerdan decisiones confirmadas, nunca estado del entorno", async () => {
+  const memory = await readFile(join(root, "electron/memory.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
+  assert.match(memory, /never measured state/);
+  assert.match(memory, /export function identityKey/);
+  // Se escribe solo tras una ejecución confirmada y correcta, nunca al proponer un plan.
+  assert.match(service, /const pushOutput = plan\.args\.push === "true"[\s\S]{0,400}saveMemory\(rememberRepository\(/);
+  assert.doesNotMatch(service, /saveMemory\([\s\S]{0,80}\)\s*;?\s*return \{\s*draft:/);
+  // Lo recordado reordena la búsqueda; la verificación sigue ocurriendo.
+  assert.match(service, /Memory only reorders the search/);
+  assert.match(service, /if \(candidate === remembered\) saveMemory\(forgetSshHost\(memory, host, owner\)\)/);
+  assert.match(service, /remembered: \{\s*\n\s*thisRepository: recallRepository/);
+  assert.match(planner, /"remembered" in the state holds choices the user already confirmed/);
+  // Nada de persistir lo que se puede volver a medir.
+  assert.doesNotMatch(memory, /toolDirectories|isExecutableFile|ghVersion/);
+});
