@@ -92,3 +92,14 @@ test("macOS reserva espacio para los controles de ventana", async () => {
   assert.match(main, /trafficLightPosition: \{ x: 16, y: 20 \}/);
   assert.match(styles, /\.app-shell\.platform-darwin \.topbar \{ padding-left: 88px; \}/);
 });
+
+test("las notificaciones de actividad se pueden cerrar y expiran", async () => {
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  const styles = await readFile(join(root, "src/styles.css"), "utf8");
+  assert.match(app, /const dismissActivity/);
+  assert.match(app, /activityTimers/);
+  assert.match(app, /item\.tone === "warning" \? 10_000 : 6_000/);
+  assert.match(app, /aria-label=\{`Cerrar notificación:/);
+  assert.match(styles, /\.activity-dock \{ position: fixed; z-index: 8; top: 68px; right: 16px;/);
+  assert.match(styles, /\.activity-close/);
+});

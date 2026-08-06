@@ -48,6 +48,7 @@ export default function App() {
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const requestSequence = useRef(0);
   const activitySequence = useRef(0);
+  const activityTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
   const workspaceRestored = useRef(false);
 
   const active = projects.find((project) => project.id === activeId);
@@ -79,6 +80,11 @@ export default function App() {
     });
   }, [projects, activeId, workspaceReady]);
 
+  useEffect(() => () => {
+    for (const timer of activityTimers.current.values()) clearTimeout(timer);
+    activityTimers.current.clear();
+  }, []);
+
   useEffect(() => {
     requestSequence.current += 1;
     setPendingPlan(null);
@@ -90,8 +96,21 @@ export default function App() {
     setPlanning(false);
   }, [activeId]);
 
+  const dismissActivity = (id: number) => {
+    const timer = activityTimers.current.get(id);
+    if (timer) clearTimeout(timer);
+    activityTimers.current.delete(id);
+    setActivity((items) => items.filter((item) => item.id !== id));
+  };
+
   const addActivity = (item: Omit<ActivityItem, "id">) => {
-    setActivity((items) => [{ ...item, id: ++activitySequence.current }, ...items].slice(0, 6));
+    const id = ++activitySequence.current;
+    setActivity((items) => [{ ...item, id }, ...items].slice(0, 4));
+    const timer = setTimeout(() => {
+      activityTimers.current.delete(id);
+      setActivity((items) => items.filter((activityItem) => activityItem.id !== id));
+    }, item.tone === "warning" ? 10_000 : 6_000);
+    activityTimers.current.set(id, timer);
   };
 
   const updateSnapshot = (path: string, next: RepoSnapshot) => {
@@ -263,7 +282,7 @@ export default function App() {
         </main>
         <footer className="statusbar"><div className="status-left"><span className="status-good"><CircleDot size={12} /> {snapshot.isDirty ? `${snapshot.changes.length} cambio${snapshot.changes.length === 1 ? "" : "s"}` : "Sin cambios locales"}</span><span className="status-separator" /><span>{snapshot.branches.length} ramas locales</span></div><div className="status-right"><span><Clock3 size={12} /> Última lectura {formatDate(active.loadedAt)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : "LLM no configurado"}</span></div></footer>
       </>}
-      {activity.length > 0 && <div className="activity-dock" aria-live="polite">{activity.slice(0, 3).map((item) => <div className={`activity-item ${item.tone}`} key={item.id}><span className="activity-symbol">{item.tone === "success" ? <Check size={13} /> : item.tone === "warning" ? <AlertTriangle size={13} /> : <GitCommitHorizontal size={13} />}</span><div><strong>{item.label}</strong><span>{item.detail}</span></div></div>)}</div>}
+      {activity.length > 0 && <div className="activity-dock" aria-live="polite">{activity.slice(0, 3).map((item) => <div className={`activity-item ${item.tone}`} role={item.tone === "warning" ? "alert" : "status"} key={item.id}><span className="activity-symbol">{item.tone === "success" ? <Check size={13} /> : item.tone === "warning" ? <AlertTriangle size={13} /> : <GitCommitHorizontal size={13} />}</span><div className="activity-copy"><strong>{item.label}</strong><span title={item.detail}>{item.detail}</span></div><button className="activity-close" onClick={() => dismissActivity(item.id)} aria-label={`Cerrar notificación: ${item.label}`}><X size={14} /></button></div>)}</div>}
       {toast && <div className={`toast ${toast.tone}`} role={toast.tone === "error" ? "alert" : "status"}>{toast.tone === "error" ? <AlertTriangle size={15} /> : <Check size={15} />}<span>{toast.message}</span><button onClick={() => setToast(undefined)} aria-label="Cerrar notificación"><X size={14} /></button></div>}
       {settingsOpen && <SettingsModal config={config} onClose={() => setSettingsOpen(false)} onSaved={(next) => { setConfig(next); setSettingsOpen(false); setToast({ message: "Configuración guardada.", tone: "success" }); }} />}
       {inputDialog && <InputModal dialog={inputDialog} branches={snapshot?.branches ?? []} onChange={(value) => setInputDialog({ ...inputDialog, value })} onClose={() => setInputDialog(undefined)} onSubmit={submitInputDialog} />}
