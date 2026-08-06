@@ -1,25 +1,32 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { basename, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
 import type { ActionPlan, Branch, Commit, ConversationMessage, LlmConfig, LlmConfigInput, Operation, RepoSnapshot } from "../shared/types.js";
+import {
+  buildPlannerInstructions, commitMessageLimit, executableOperations, isBranchNameSafe, operationArgs,
+  operationIssues, parseModelPlan, planResponseFormat, type ModelPlan, type PlanIssue
+} from "./llm-plan.js";
+import {
+  assertRepositoryPlan, buildRepositoryPlan, remoteNamePattern, repositoryHostPattern, repositoryNamePattern,
+  repositoryOwnerPattern, validateRepositoryFields, type RepositoryFields
+} from "./repository-plan.js";
 
 type CommandResult = { stdout: string; stderr: string; code: number };
 type PlanDraft = Omit<ActionPlan, "id" | "repoPath" | "head" | "stateId">;
 
 const MODEL_FALLBACK = "luna";
-const branchNamePattern = /^[A-Za-z0-9._/@-]+$/;
-const allowedOperations = new Set<Operation>([
-  "status", "checkout", "create_branch", "delete_branch", "fetch", "pull", "push",
-  "merge", "rebase", "abort_rebase", "continue_rebase", "commit", "github_create_repo", "branch_last_author", "none"
-]);
-const githubNamePattern = /^[A-Za-z0-9._-]{1,100}$/;
-const githubOwnerPattern = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
-const githubHostPattern = /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
-const remoteNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses";
+const LLM_REQUIRED =
+  "Branchline necesita un proveedor LLM configurado: toda interpretación de tus mensajes la hace el modelo, no reglas locales. Añade tu API key y tu modelo en Configuración.";
+const allowedOperations = new Set<Operation>([...executableOperations, "github_create_repo", "none"]);
 
 let llmState: LlmConfigInput = { apiKey: "", model: MODEL_FALLBACK };
+
+function isLlmConfigured() {
+  return Boolean(llmState.apiKey.trim() && (llmState.model.trim() || MODEL_FALLBACK));
+}
 
 function runGit(cwd: string, args: string[], timeoutMs = 60_000): Promise<CommandResult> {
   return runCommand("git", args, cwd, timeoutMs);
@@ -139,95 +146,11 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   };
 }
 
-function isBranchNameSafe(name: string) {
-  return Boolean(name) && branchNamePattern.test(name) && !name.includes("..") && !name.includes("@{") &&
-    !name.startsWith("-") && !name.startsWith(".") && !name.startsWith("/") && !name.endsWith("/") &&
-    !name.endsWith(".") && !name.includes("//") && !name.includes("/.") && !name.endsWith(".lock");
-}
-
-function refused(reason: string, source: ActionPlan["source"] = "guardrail"): PlanDraft {
+function refused(reason: string, source: ActionPlan["source"] = "guardrail", summary = "Solicitud rechazada"): PlanDraft {
   return {
-    allowed: false, operation: "none", args: {}, command: "—", summary: "Solicitud rechazada",
+    allowed: false, operation: "none", args: {}, command: "—", summary,
     rationale: reason, risk: "low", requiresConfirmation: false, source
   };
-}
-
-function formatAnswerDate(date: string) {
-  const value = new Date(date);
-  if (Number.isNaN(value.valueOf())) return date;
-  return new Intl.DateTimeFormat("es", { dateStyle: "medium", timeStyle: "short" }).format(value);
-}
-
-function localPlan(request: string, snapshot: RepoSnapshot): PlanDraft {
-  const text = request.trim();
-  const lower = text.toLocaleLowerCase("es");
-
-  if (/(?:crear|crea|nuevo).*(?:repositorio|repo).*(?:github|privad)|(?:repositorio|repo).*(?:privad).*(?:crear|crea)/i.test(lower)) {
-    const source = text.match(/(?:en|desde|source)\s+[`"“']?([^`"”'\s]+)[`"”']?/i)?.[1] ?? snapshot.path;
-    const owner = text.match(/(?:propietario|owner|organizaci[oó]n|usuario)\s+[`"“']?([A-Za-z0-9-]+)[`"”']?/i)?.[1] ?? "";
-    const host = text.match(/(?:host)\s+[`"“']?([A-Za-z0-9.-]+)[`"”']?/i)?.[1] ?? "";
-    const remote = text.match(/(?:remoto|remote)\s+[`"“']?([A-Za-z0-9._-]+)[`"”']?/i)?.[1] ?? "origin";
-    const push = /(?:sin\s+push|no\s+(?:publicar|subir))/i.test(lower) ? "false" : /(?:con\s+push|publicar|subir)/i.test(lower) ? "true" : "";
-    return {
-      allowed: true,
-      operation: "github_create_repo",
-      args: {
-        source,
-        name: basename(source),
-        owner,
-        host,
-        visibility: "private",
-        remote,
-        push,
-        replaceRemote: /(?:reemplazar|sobrescribir).*(?:remoto|remote)/i.test(lower) ? "true" : "false"
-      },
-      command: "—",
-      summary: "Validar creación de repositorio GitHub privado",
-      rationale: "Se comprobarán el origen local, gh, la autenticación, los permisos, el destino y los remotos antes de preparar un comando.",
-      risk: "high",
-      requiresConfirmation: true,
-      source: "local-fallback"
-    };
-  }
-
-  const make = (operation: Operation, args: Record<string, string>, summary: string, rationale: string, risk: ActionPlan["risk"] = "low"): PlanDraft => ({
-    allowed: true, operation, args, command: buildCommand(operation, args), summary, rationale, risk,
-    requiresConfirmation: ["rebase", "merge", "delete_branch", "push", "pull", "commit", "create_branch"].includes(operation),
-    source: "local-fallback"
-  });
-  const makeInfo = (operation: Operation) => ({ ...operationDraft(operation, {}, snapshot), source: "local-fallback" as const });
-
-  if (/(?:qui[eé]n|persona|autor).*(?:[uú]ltim|reciente|vez|trabaj)|(?:[uú]ltim|reciente).*(?:trabaj|commit|cambio|autor)/i.test(lower)) {
-    return makeInfo("branch_last_author");
-  }
-
-  if (/abortar|cancelar.*rebase|rebase.*cancelar/i.test(lower)) return make("abort_rebase", {}, "Abortar el rebase en curso", "Restaurar el estado previo al rebase.", "high");
-  if (/continuar.*rebase|resolver.*conflicto/i.test(lower)) return make("continue_rebase", {}, "Continuar el rebase", "Git continuará después de resolver los conflictos.", "high");
-
-  const rebaseTarget = text.match(/rebase(?:ar)?\s+(?:mi\s+)?(?:la\s+)?(?:rama\s+)?(?:sobre|en|a|onto)\s+([A-Za-z0-9._/@-]+)/i)?.[1]
-    ?? text.match(/rebase(?:ar)?\s+([A-Za-z0-9._/@-]+)/i)?.[1];
-  if (rebaseTarget) return isBranchNameSafe(rebaseTarget)
-    ? make("rebase", { onto: rebaseTarget }, `Rebase de ${snapshot.currentBranch} sobre ${rebaseTarget}`, "Se reescribe la base de la rama actual.", "high")
-    : refused("El nombre de la rama de destino no es válido.", "local-fallback");
-
-  const create = text.match(/(?:crear|nueva|nuevo)\s+(?:la\s+)?rama\s+([A-Za-z0-9._/@-]+)/i)?.[1];
-  if (create) return isBranchNameSafe(create) ? make("create_branch", { name: create }, `Crear y cambiar a ${create}`, "Crea una rama local desde HEAD.", "medium") : refused("El nombre de la rama no es válido.", "local-fallback");
-  const remove = text.match(/(?:borrar|eliminar)\s+(?:la\s+)?rama\s+([A-Za-z0-9._/@-]+)/i)?.[1];
-  if (remove) return isBranchNameSafe(remove) ? make("delete_branch", { name: remove }, `Eliminar la rama ${remove}`, "Elimina una rama local ya integrada.", "high") : refused("El nombre de la rama no es válido.", "local-fallback");
-  const checkout = text.match(/(?:cambiar(?:me)?|cámbiame|checkout|ir)\s+(?:a\s+)?(?:la\s+)?rama\s+([A-Za-z0-9._/@-]+)/i)?.[1];
-  if (checkout) return isBranchNameSafe(checkout) ? make("checkout", { name: checkout }, `Cambiar a ${checkout}`, "Cambia la rama activa sin borrar cambios locales.", "medium") : refused("El nombre de la rama no es válido.", "local-fallback");
-  const merge = text.match(/(?:merge|fusionar|mezclar)\s+(?:la\s+)?rama?\s*([A-Za-z0-9._/@-]+)/i)?.[1];
-  if (merge) return isBranchNameSafe(merge) ? make("merge", { name: merge }, `Fusionar ${merge}`, "Integra sus commits en la rama actual.", "high") : refused("El nombre de la rama no es válido.", "local-fallback");
-  if (/\bfetch\b|actualizar referencias|traer cambios/i.test(lower)) return make("fetch", {}, "Actualizar referencias remotas", "Descarga referencias y elimina remotas obsoletas.");
-  if (/\bpull\b|bajar cambios|sincronizar/i.test(lower)) return make("pull", {}, "Actualizar la rama actual", "Usa pull --ff-only para no crear merges implícitos.", "high");
-  if (/\bpush\b|subir cambios|publicar/i.test(lower)) return make("push", {}, "Publicar la rama actual", "Envía los commits al remoto configurado.", "high");
-  if (/mostrar detalles|ver detalles|detalles del commit|quién hizo cambios/i.test(lower)) return make("status", {}, "Actualizar la vista del repositorio", "Leeré el estado y el historial sin modificar archivos.");
-  if (/\bcommit\b|guardar cambios/i.test(lower)) {
-    const message = text.match(/(?:commit|guardar cambios)(?:\s+con\s+mensaje)?\s*[:\-]?\s*["“]?(.+?)["”]?$/i)?.[1]?.trim();
-    return message ? make("commit", { message }, `Crear commit “${message}”`, "Añade todos los cambios y crea un commit.", "high") : refused("Indica el mensaje del commit para poder prepararlo.", "local-fallback");
-  }
-  if (/estado|status|cambios|historial|quién|autor|rama actual|log/i.test(lower)) return make("status", {}, "Actualizar la vista del repositorio", "Leeré el estado y el historial sin modificar archivos.");
-  return refused("Entendí que se relaciona con Git, pero no pude convertirlo en una operación segura.", "local-fallback");
 }
 
 function buildCommand(operation: Operation, args: Record<string, string>) {
@@ -244,30 +167,52 @@ function buildCommand(operation: Operation, args: Record<string, string>) {
     case "continue_rebase": return "git rebase --continue";
     case "commit": return `git add -A && git commit -m "${args.message ?? ""}"`;
     case "github_create_repo": {
-      const flags = [`--${args.visibility}`, `--source ${JSON.stringify(args.source)}`, `--remote ${args.remote}`];
-      if (args.push === "true") flags.push("--push");
-      return `GH_HOST=${args.host} gh repo create ${args.owner}/${args.name} ${flags.join(" ")}`;
+      const create = `GH_HOST=${args.host} gh repo create ${args.owner}/${args.name} --private`;
+      const remote = `git -C ${JSON.stringify(args.source)} remote add ${args.remote} ${args.remoteUrl}`;
+      return args.push === "true" ? `${create} && ${remote} && git -C ${JSON.stringify(args.source)} push -u ${args.remote} HEAD` : `${create} && ${remote}`;
     }
     case "status": return "git status";
     default: return "—";
   }
 }
 
-function githubRefused(reason: string, source: ActionPlan["source"] = "guardrail"): PlanDraft {
-  return {
-    allowed: false,
-    operation: "github_create_repo",
-    args: {},
-    command: "—",
-    summary: "No se puede crear el repositorio privado",
-    rationale: reason,
-    risk: "high",
-    requiresConfirmation: false,
-    source
-  };
+/**
+ * Environment checks report machine-readable blockers instead of prose: the planner model turns
+ * them into an explanation written in the language the user is actually using.
+ */
+type RepositoryPreparation = { draft: PlanDraft } | { blockers: PlanIssue[] };
+
+function blocked(problem: string, field = "environment"): RepositoryPreparation {
+  return { blockers: [{ field, problem }] };
 }
 
-function parseBoolean(value: string | undefined) { return value === "true"; }
+function hasSshPrivateKey() {
+  const agent = runCommand("ssh-add", ["-L"], process.cwd(), 10_000).catch(() => undefined);
+  return agent.then((result) => {
+    if (result?.code === 0 && /^(?:ssh-|ecdsa-)/m.test(result.stdout)) return true;
+    const sshDirectory = join(process.env.HOME ?? "", ".ssh");
+    try {
+      return readdirSync(sshDirectory).some((name) => {
+        if (name.endsWith(".pub") || ["authorized_keys", "config", "known_hosts", "known_hosts.old"].includes(name)) return false;
+        const path = join(sshDirectory, name);
+        try {
+          return statSync(path).isFile() && /-----BEGIN (?:OPENSSH |RSA |EC |DSA )?PRIVATE KEY-----/.test(readFileSync(path, "utf8").slice(0, 200));
+        } catch { return false; }
+      });
+    } catch { return false; }
+  });
+}
+
+async function checkSshAccess(host: string, cwd: string) {
+  if (!await hasSshPrivateKey()) return "no SSH private key was found on this machine and ssh-agent has none loaded; the user must configure an SSH key first";
+  const result = await runCommand("ssh", [
+    "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new",
+    "-o", `UserKnownHostsFile=${process.platform === "win32" ? "NUL" : "/dev/null"}`, `git@${host}`
+  ], cwd, 15_000).catch(() => undefined);
+  const output = `${result?.stdout ?? ""}\n${result?.stderr ?? ""}`;
+  if (result && (result.code === 0 || /successfully authenticated|shell access is disabled|authenticated to/i.test(output))) return undefined;
+  return `an SSH key exists but authentication against ${host} failed; ssh reported: ${(output.trim() || "connection refused or timed out").slice(0, 300)}`;
+}
 
 async function checkedGh(args: string[], cwd: string, host?: string) {
   const result = await runCommand("gh", args, cwd, 60_000, {
@@ -278,50 +223,49 @@ async function checkedGh(args: string[], cwd: string, host?: string) {
   return result.stdout.trim();
 }
 
-async function prepareGithubRepository(snapshot: RepoSnapshot, rawArgs: Record<string, string>, source: ActionPlan["source"]): Promise<PlanDraft> {
+async function prepareGithubRepository(snapshot: RepoSnapshot, input: RepositoryFields, source: ActionPlan["source"]): Promise<RepositoryPreparation> {
+  const validation = validateRepositoryFields(input);
+  if (validation.issues.length) return { blockers: validation.issues.map((issue) => ({ field: `repository.${issue.field}`, problem: issue.problem })) };
+  let repositoryPlan = buildRepositoryPlan(validation.fields);
+
   let sourcePath: string;
   try {
-    if (!rawArgs.source?.trim()) return githubRefused("Indica la ruta del repositorio Git local que quieres publicar.", source);
-    sourcePath = realpathSync(resolve(rawArgs.source));
-    if (!statSync(sourcePath).isDirectory()) return githubRefused("La ruta indicada no es un directorio.", source);
+    sourcePath = realpathSync(repositoryPlan.localPath);
+    if (!statSync(sourcePath).isDirectory()) return blocked(`localPath "${repositoryPlan.localPath}" is not a directory`, "repository.localPath");
     accessSync(sourcePath, constants.R_OK | constants.W_OK);
   } catch {
-    return githubRefused("La ruta no existe o no es accesible. Verifica la ruta y sus permisos.", source);
+    return blocked(`localPath "${repositoryPlan.localPath}" does not exist or is not readable and writable`, "repository.localPath");
   }
+  repositoryPlan = buildRepositoryPlan({ ...validation.fields, localPath: sourcePath });
+  assertRepositoryPlan(repositoryPlan);
 
   let sourceSnapshot: RepoSnapshot;
   try {
     sourceSnapshot = await getSnapshot(sourcePath);
   } catch {
-    return githubRefused("La ruta no corresponde a un repositorio Git local. Abre o inicializa el repositorio primero; Branchline no lo inicializará sin una decisión explícita.", source);
+    return blocked(`"${sourcePath}" is not a Git repository; Branchline never runs git init on its own, the user must create or open the repository first`, "repository.localPath");
   }
-  if (sourceSnapshot.path !== sourcePath) return githubRefused(`La ruta pertenece al repositorio ${sourceSnapshot.path}. Usa la raíz exacta del repositorio como origen.`, source);
-  if (sourceSnapshot.path !== snapshot.path) return githubRefused("Por seguridad, abre ese repositorio como proyecto activo en Branchline antes de publicarlo.", source);
+  if (sourceSnapshot.path !== sourcePath) return blocked(`"${sourcePath}" is inside the repository "${sourceSnapshot.path}"; the exact repository root is required`, "repository.localPath");
+  if (sourceSnapshot.path !== snapshot.path) return blocked(`"${sourcePath}" is not the project currently open in Branchline ("${snapshot.path}"); for safety the user must open it as the active project before publishing it`, "repository.localPath");
 
-  const name = rawArgs.name?.trim();
-  const owner = rawArgs.owner?.trim();
-  const host = rawArgs.host?.trim().toLocaleLowerCase();
-  const visibility = rawArgs.visibility?.trim();
-  const remote = rawArgs.remote?.trim() || "origin";
-  const push = parseBoolean(rawArgs.push);
-  const replaceRemote = parseBoolean(rawArgs.replaceRemote);
-  if (!name || !githubNamePattern.test(name) || name === "." || name === ".." || name.endsWith(".git")) return githubRefused("El nombre del repositorio no es válido. Usa de 1 a 100 letras, números, puntos, guiones o guiones bajos, sin el sufijo .git.", source);
-  if (!owner) return githubRefused("Indica explícitamente el propietario de GitHub (usuario u organización); no se asumirá uno.", source);
-  if (!githubOwnerPattern.test(owner)) return githubRefused("El propietario de GitHub no es válido.", source);
-  if (!host) return githubRefused("Indica explícitamente el host de GitHub, por ejemplo github.com.", source);
-  if (!githubHostPattern.test(host)) return githubRefused("El host de GitHub no es válido.", source);
-  if (visibility !== "private") return githubRefused("Esta acción solo crea repositorios privados. Confirma explícitamente visibility=private.", source);
-  if (!remoteNamePattern.test(remote)) return githubRefused("El nombre del remoto no es válido.", source);
-  if (!["true", "false"].includes(rawArgs.push)) return githubRefused(`Indica explícitamente si quieres publicar los commits locales (${sourceSnapshot.head ? "push=true o push=false" : "push=false; todavía no hay commits"}).`, source);
-  if (push && !sourceSnapshot.head) return githubRefused("No hay commits locales que publicar. Crea un commit inicial o solicita la creación sin push.", source);
+  const { repository: name, owner, host, protocol, remoteUrl } = repositoryPlan;
+  const remote = validation.fields.remote ?? "origin";
+  const push = repositoryPlan.action === "create_repository_and_push";
+  const replaceRemote = validation.fields.replaceRemote === true;
+  if (push && !sourceSnapshot.head) return blocked("the local repository has no commits, so there is nothing to push; the user can create a first commit or ask to create the repository without pushing");
+
+  if (protocol === "ssh") {
+    const sshError = await checkSshAccess(host, sourcePath);
+    if (sshError) return blocked(sshError);
+  }
 
   const ghVersion = await runCommand("gh", ["--version"], sourcePath, 10_000, { GH_PROMPT_DISABLED: "1" }).catch(() => undefined);
-  if (!ghVersion || ghVersion.code !== 0) return githubRefused("GitHub CLI (gh) no está instalado o no está disponible en PATH. Instálalo y vuelve a intentarlo.", source);
+  if (!ghVersion || ghVersion.code !== 0) return blocked("GitHub CLI (gh) is not installed or not on PATH; it is required to create the repository");
   const auth = await runCommand("gh", ["auth", "status", "--active", "--hostname", host], sourcePath, 20_000, { GH_PROMPT_DISABLED: "1" });
-  if (auth.code !== 0) return githubRefused(`No hay una sesión activa válida para ${host}. Ejecuta “gh auth login --hostname ${host}” y vuelve a intentarlo.`, source);
+  if (auth.code !== 0) return blocked(`there is no active gh session for ${host}; the user must run: gh auth login --hostname ${host}`);
 
   const viewer = await runCommand("gh", ["api", "user", "--jq", ".login"], sourcePath, 20_000, { GH_PROMPT_DISABLED: "1", GH_HOST: host });
-  if (viewer.code !== 0 || !viewer.stdout.trim()) return githubRefused("No se pudo identificar la cuenta autenticada sin exponer credenciales. Revisa la sesión de gh.", source);
+  if (viewer.code !== 0 || !viewer.stdout.trim()) return blocked(`the authenticated account on ${host} could not be identified; the gh session needs to be checked`);
   if (viewer.stdout.trim().toLocaleLowerCase() !== owner.toLocaleLowerCase()) {
     const permission = await runCommand("gh", [
       "api", "graphql",
@@ -330,61 +274,108 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, rawArgs: Record<s
       "--jq", ".data.organization.viewerCanCreateRepositories"
     ], sourcePath, 20_000, { GH_PROMPT_DISABLED: "1", GH_HOST: host });
     if (permission.code !== 0 || permission.stdout.trim() !== "true") {
-      return githubRefused("La cuenta autenticada no tiene permisos suficientes para crear un repositorio privado para ese propietario u organización.", source);
+      return blocked(`the account authenticated on ${host} (${viewer.stdout.trim()}) cannot create private repositories for "${owner}"`, "repository.owner");
     }
   }
 
   const existing = await runCommand("gh", ["api", `repos/${owner}/${name}`, "--silent"], sourcePath, 20_000, { GH_PROMPT_DISABLED: "1", GH_HOST: host });
-  if (existing.code === 0) return githubRefused(`El repositorio ${host}/${owner}/${name} ya existe. Elige otro nombre.`, source);
+  if (existing.code === 0) return blocked(`the repository ${host}/${owner}/${name} already exists; a different name is needed`, "repository.repository");
   const existingError = `${existing.stderr}\n${existing.stdout}`;
-  if (!/HTTP 404|not found/i.test(existingError)) return githubRefused(`No se pudo comprobar si el repositorio remoto existe: ${existing.stderr.trim() || existing.stdout.trim() || "error de red o API"}. No se intentó crear nada.`, source);
+  if (!/HTTP 404|not found/i.test(existingError)) {
+    return blocked(`it could not be verified whether ${host}/${owner}/${name} already exists, so nothing was attempted; gh reported: ${(existing.stderr.trim() || existing.stdout.trim() || "network or API error").slice(0, 300)}`);
+  }
 
   const remoteResult = await runGit(sourcePath, ["remote", "get-url", remote]);
   const remoteExists = remoteResult.code === 0;
-  if (remoteExists && !replaceRemote) return githubRefused(`Ya existe el remoto “${remote}” (${remoteResult.stdout.trim()}). Para reemplazarlo debes solicitarlo y confirmarlo explícitamente.`, source);
+  if (remoteExists && !replaceRemote) {
+    return blocked(`the local remote "${remote}" already points to ${remoteResult.stdout.trim()}; replacing it requires the user to say so explicitly`, "repository.replaceRemote");
+  }
 
   const args = {
-    name, owner, host, visibility, source: sourcePath, remote,
+    name, owner, host, protocol, remoteUrl, visibility: "private", source: sourcePath, remote,
     push: String(push), replaceRemote: String(replaceRemote && remoteExists),
     existingRemoteHash: remoteExists ? createHash("sha256").update(remoteResult.stdout.trim()).digest("hex") : ""
   };
   const effects = [
-    `Crear ${host}/${owner}/${name} con visibilidad privada.`,
-    `Usar ${sourcePath} como repositorio Git local, sin inicializarlo ni crear commits.`,
-    `${remoteExists ? `Reemplazar el remoto local “${remote}” (${remoteResult.stdout.trim()})` : `Crear el remoto local “${remote}”`}.`,
-    push ? "Publicar los commits y referencias locales disponibles." : "No publicar commits locales."
+    `create: ${host}/${owner}/${name} (private)`,
+    `local: ${sourcePath}`,
+    `remote ${remote}: ${remoteExists ? `${remoteResult.stdout.trim()} → ${remoteUrl}` : remoteUrl}`,
+    `push: ${push ? `${remote} HEAD` : "no"}`
   ];
   return {
-    allowed: true,
-    operation: "github_create_repo",
-    args,
-    command: buildCommand("github_create_repo", args),
-    summary: `Crear repositorio privado ${owner}/${name}`,
-    rationale: "gh está instalado, la sesión está autenticada, el origen local es válido y el repositorio remoto no existe.",
-    effects,
-    targetPath: sourceSnapshot.path,
-    targetHead: sourceSnapshot.head,
-    targetStateId: sourceSnapshot.stateId,
-    risk: "high",
-    requiresConfirmation: true,
-    source
+    draft: {
+      allowed: true,
+      operation: "github_create_repo",
+      args,
+      command: buildCommand("github_create_repo", args),
+      summary: `${owner}/${name}`,
+      rationale: `gh ${host} · ${protocol} · ${sourcePath}`,
+      effects,
+      repositoryPlan,
+      targetPath: sourceSnapshot.path,
+      targetHead: sourceSnapshot.head,
+      targetStateId: sourceSnapshot.stateId,
+      risk: "high",
+      requiresConfirmation: true,
+      source
+    }
   };
 }
 
 function extractOutputText(body: any): string {
-  if (typeof body?.output_text === "string") return body.output_text;
+  if (typeof body?.output_text === "string" && body.output_text.trim()) return body.output_text;
   const textParts: string[] = [];
   for (const item of body?.output ?? []) {
-    for (const content of item?.content ?? []) if (typeof content?.text === "string") textParts.push(content.text);
+    for (const content of item?.content ?? []) {
+      if (typeof content?.refusal === "string" && content.refusal.trim()) throw new Error(`El modelo rechazó la petición: ${content.refusal.slice(0, 300)}`);
+      if (typeof content?.text === "string") textParts.push(content.text);
+    }
   }
   return textParts.join("\n").trim();
+}
+
+/**
+ * A truncated or empty provider answer used to fall back to a local keyword planner, which turned
+ * provider problems into silent, wrong refusals. Every failure mode is now explicit.
+ */
+async function askProvider(body: Record<string, unknown>, timeoutMs = 60_000, credentials: LlmConfigInput = llmState): Promise<string> {
+  const model = credentials.model.trim() || MODEL_FALLBACK;
+  if (!credentials.apiKey.trim()) throw new Error(LLM_REQUIRED);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(RESPONSES_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${credentials.apiKey}` },
+      body: JSON.stringify({ model, store: false, ...body }),
+      signal: controller.signal
+    });
+  } catch (error) {
+    throw new Error(controller.signal.aborted
+      ? `El proveedor no respondió en ${Math.round(timeoutMs / 1000)} s.`
+      : `No se pudo contactar con el proveedor: ${error instanceof Error ? error.message : "error de red"}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (!response.ok) throw new Error(`El proveedor respondió ${response.status}: ${(await response.text()).slice(0, 300)}`);
+  const payload = await response.json();
+  if (payload?.status === "incomplete") {
+    const reason = payload?.incomplete_details?.reason;
+    throw new Error(reason === "max_output_tokens"
+      ? `El modelo “${model}” agotó el presupuesto de tokens antes de emitir una respuesta. Usa un modelo con menos razonamiento intermedio o revisa su configuración.`
+      : `El proveedor no completó la respuesta (${reason ?? "motivo desconocido"}).`);
+  }
+  const text = extractOutputText(payload);
+  if (!text.trim()) throw new Error("El proveedor devolvió una respuesta vacía.");
+  return text;
 }
 
 function cleanCommitDescription(text: string) {
   const normalized = text.trim().replace(/^```(?:text)?\s*/i, "").replace(/\s*```$/, "").trim();
   const firstParagraph = normalized.split(/\n\s*\n/)[0]?.replace(/\s+/g, " ").replace(/^["“]|["”]$/g, "").trim() ?? "";
   if (!firstParagraph) throw new Error("El proveedor no devolvió una descripción de commit.");
-  return firstParagraph.slice(0, 120).trim();
+  return firstParagraph.slice(0, commitMessageLimit).trim();
 }
 
 async function getWorkingTreeDiff(snapshot: RepoSnapshot) {
@@ -426,146 +417,162 @@ async function getWorkingTreeDiff(snapshot: RepoSnapshot) {
 }
 
 export async function generateCommitDescription(cwd: string) {
-  if (!llmState.apiKey.trim()) throw new Error("Configura un proveedor LLM para generar la descripción. También puedes escribirla manualmente.");
+  if (!isLlmConfigured()) throw new Error(LLM_REQUIRED);
   const snapshot = await getSnapshot(cwd);
   if (!snapshot.changes.length) throw new Error("No hay cambios locales que describir.");
   const diff = await getWorkingTreeDiff(snapshot);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
-  let response: Response;
-  try {
-    response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${llmState.apiKey}` },
-      body: JSON.stringify({
-        model: llmState.model || MODEL_FALLBACK,
-        instructions: "Genera un único mensaje de commit conciso en español, máximo 120 caracteres. Describe la intención del cambio usando el diff real. Devuelve solo el mensaje, sin comillas, markdown, prefijos ni explicación.",
-        input: `Rama actual: ${snapshot.currentBranch}\n\nDiff del árbol de trabajo:\n${diff}`,
-        max_output_tokens: 80,
-        store: false
-      }),
-      signal: controller.signal
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-  if (!response.ok) throw new Error(`OpenAI respondió ${response.status}: ${(await response.text()).slice(0, 300)}`);
-  const description = cleanCommitDescription(extractOutputText(await response.json()));
+  const recentSubjects = snapshot.commits.slice(0, 15).map((commit) => commit.subject).filter(Boolean);
+  const instructions = `Write one commit message for the working tree diff below.
+Rules: a single line, ${commitMessageLimit} characters maximum, imperative mood, describing the intent of
+the change. No quotes, no markdown, no prefix, no explanation, nothing but the message itself.
+Write it in the same language as the recent commit subjects of this repository; if there are none, or
+they are mixed, write it in English.`;
+  const input = [
+    `Current branch: ${snapshot.currentBranch}`,
+    recentSubjects.length ? `Recent commit subjects:\n${recentSubjects.map((subject) => `- ${subject}`).join("\n")}` : "Recent commit subjects: none",
+    `Working tree diff:\n${diff}`
+  ].join("\n\n");
+  const text = await askProvider({ instructions, input, max_output_tokens: 2_000 }, 90_000);
+  const description = cleanCommitDescription(text);
   const current = await getSnapshot(snapshot.path);
   if (current.stateId !== snapshot.stateId) throw new Error("Los cambios variaron durante la generación. Inténtalo de nuevo.");
   return { description, stateId: snapshot.stateId };
 }
 
-function parseJsonObject(text: string): Record<string, unknown> | undefined {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) return undefined;
-  try {
-    const parsed = JSON.parse(text.slice(start, end + 1));
-    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function planFromModel(value: Record<string, unknown>, source: "llm", snapshot: RepoSnapshot): PlanDraft {
-  const operation = typeof value.operation === "string" && allowedOperations.has(value.operation as Operation) ? value.operation as Operation : "none";
-  const rawArgs = value.args && typeof value.args === "object" ? value.args as Record<string, unknown> : {};
-  const args = Object.fromEntries(Object.entries(rawArgs).filter(([, item]) => typeof item === "string")) as Record<string, string>;
-  if (operation === "github_create_repo") return {
-    allowed: true,
-    operation,
-    args,
-    command: "—",
-    summary: "Validar creación de repositorio GitHub",
-    rationale: "La solicitud se validará con Git, GitHub CLI y la API antes de presentar un plan.",
-    risk: "high",
-    requiresConfirmation: true,
-    source
+/** Everything the model is allowed to reason about: verified repository facts, never raw guesses. */
+function plannerState(snapshot: RepoSnapshot) {
+  return {
+    openRepositoryPath: snapshot.path,
+    openRepositoryName: snapshot.name,
+    currentBranch: snapshot.currentBranch,
+    detachedHead: snapshot.currentBranch === "HEAD",
+    isRebasing: snapshot.isRebasing,
+    hasLocalChanges: snapshot.isDirty,
+    localChanges: snapshot.changes.slice(0, 60),
+    remotes: snapshot.remotes,
+    branches: snapshot.branches.map((branch) => ({
+      name: branch.name,
+      isCurrent: branch.isCurrent,
+      upstream: branch.upstream ?? null,
+      ahead: branch.ahead,
+      behind: branch.behind,
+      lastCommit: branch.lastCommit
+        ? { shortHash: branch.lastCommit.shortHash, subject: branch.lastCommit.subject, author: branch.lastCommit.author, email: branch.lastCommit.email, date: branch.lastCommit.date }
+        : null
+    })),
+    recentCommits: snapshot.commits.slice(0, 30).map((commit) => ({
+      shortHash: commit.shortHash, subject: commit.subject, author: commit.author, date: commit.date, refs: commit.refs
+    }))
   };
-  const branchArg = args.name || args.onto;
-  if (branchArg && !isBranchNameSafe(branchArg)) return refused("El modelo propuso un nombre de rama no válido.", source);
-  if (operation === "commit" && (!args.message || args.message.length > 120)) return refused("El mensaje de commit falta o es demasiado largo.", source);
-  if (value.allowed !== true || operation === "none") return refused("Solo puedo ayudarte con ramas, historial, cambios y operaciones Git.", source);
-  return { ...operationDraft(operation, args, snapshot), source };
 }
 
-async function llmPlan(request: string, snapshot: RepoSnapshot, context: ConversationMessage[]): Promise<PlanDraft> {
-  const instructions = `Eres el planificador seguro de Branchline, una aplicación de escritorio para ramas Git.
-Decide por significado, no por palabras clave, si la solicitud trata sobre Git, ramas, commits, cambios, historial, autoría, remotos, conflictos o rebase. Acepta preguntas naturales indirectas sobre esos temas y rechaza únicamente solicitudes claramente ajenas.
-No ejecutes nada y no inventes comandos. Responde SOLO un JSON válido con estas claves: allowed (boolean), operation (status|checkout|create_branch|delete_branch|fetch|pull|push|merge|rebase|abort_rebase|continue_rebase|commit|github_create_repo|branch_last_author|none), args (objeto), summary, rationale y risk (low|medium|high).
-Usa branch_last_author para preguntas sobre quién trabajó, modificó o hizo el commit más reciente de la rama actual. Es una consulta informativa, no una operación modificadora.
-Para crear un repositorio GitHub usa github_create_repo y estos args string: source (ruta absoluta), name, owner, host, visibility (private), remote, push (true|false), replaceRemote (true|false). No asumas owner, host, inicialización ni commit inicial; si faltan, usa allowed=false y explica qué decisión falta.
-No propongas comandos de shell libres. Para nombres de rama usa args.name o args.onto; para commit usa args.message.
-Estado actual: ruta=${snapshot.path}, rama=${snapshot.currentBranch}, ramas=${snapshot.branches.map((branch) => branch.name).join(", ") || "ninguna"}, cambios=${snapshot.changes.length}, rebaseEnCurso=${snapshot.isRebasing}.`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
-  let response: Response;
-  try {
-    response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${llmState.apiKey}` },
-      body: JSON.stringify({
-        model: llmState.model || MODEL_FALLBACK,
-        instructions,
-        input: [...context.slice(-20), { role: "user", content: request }],
-        max_output_tokens: 500,
-        store: false
-      }),
-      signal: controller.signal
-    });
-  } finally {
-    clearTimeout(timeout);
+async function requestPlan(request: string, snapshot: RepoSnapshot, context: ConversationMessage[], issues: PlanIssue[] = []): Promise<ModelPlan> {
+  const text = await askProvider({
+    instructions: buildPlannerInstructions(plannerState(snapshot), issues),
+    input: [...context.slice(-20), { role: "user", content: request }],
+    text: { format: planResponseFormat },
+    max_output_tokens: 4_000
+  });
+  const plan = parseModelPlan(text);
+  if (!plan) throw new Error("El proveedor devolvió una respuesta que no cumple el esquema del plan.");
+  return plan;
+}
+
+function answerDraft(plan: ModelPlan): PlanDraft {
+  return {
+    allowed: true, operation: "none", args: {}, command: "—",
+    summary: plan.summary || plan.reply.slice(0, 80),
+    rationale: plan.rationale || plan.reply,
+    answer: plan.reply,
+    risk: "low", requiresConfirmation: false, source: "llm"
+  };
+}
+
+const riskOrder = { low: 0, medium: 1, high: 2 } as const;
+
+function highestRisk(a: ActionPlan["risk"], b: ActionPlan["risk"]): ActionPlan["risk"] {
+  return riskOrder[a] >= riskOrder[b] ? a : b;
+}
+
+/** The model chooses the operation and writes the prose; the deterministic draft owns risk, command and confirmation. */
+function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot): PlanDraft {
+  const draft = operationDraft(plan.operation, operationArgs(plan), snapshot);
+  return {
+    ...draft,
+    summary: plan.summary || draft.summary,
+    rationale: plan.rationale || draft.rationale,
+    risk: highestRisk(draft.risk, plan.risk),
+    source: "llm"
+  };
+}
+
+function repositoryFieldsFromPlan(plan: ModelPlan): RepositoryFields {
+  const { localPath, repository, owner, host, protocol, remote, push, replaceRemote } = plan.repository;
+  return {
+    localPath: localPath || undefined,
+    repository: repository || undefined,
+    owner: owner || undefined,
+    host: host || undefined,
+    protocol: protocol || undefined,
+    remote: remote || undefined,
+    push,
+    replaceRemote
+  };
+}
+
+const LAST_RESORT_REFUSAL =
+  "No pude convertir la solicitud en un plan verificable y el proveedor no explicó por qué. Reformula la petición o revisa la configuración del modelo.";
+
+/**
+ * Turns one model plan into a draft. When local validation or an environment check rejects it, the
+ * defects go back to the model as structured issues so it can correct itself or explain the problem
+ * to the user in their own language. Retried once; there is no keyword fallback.
+ */
+async function draftFromPlan(
+  plan: ModelPlan, snapshot: RepoSnapshot, request: string, context: ConversationMessage[], retried = false
+): Promise<PlanDraft> {
+  if (plan.intent === "answer") return answerDraft(plan);
+  if (plan.intent === "needs_information" || plan.intent === "out_of_scope") {
+    return refused(plan.reply || plan.rationale || LAST_RESORT_REFUSAL, "llm", plan.summary || "Solicitud rechazada");
   }
-  if (!response.ok) throw new Error(`OpenAI respondió ${response.status}: ${(await response.text()).slice(0, 300)}`);
-  const body = await response.json();
-  const text = extractOutputText(body);
-  const parsed = parseJsonObject(text);
-  return parsed ? planFromModel(parsed, "llm", snapshot) : refused("El proveedor no devolvió un plan JSON válido.", "llm");
+
+  const retry = async (issues: PlanIssue[]) => {
+    if (retried) return refused(plan.reply || plan.rationale || LAST_RESORT_REFUSAL, "llm", plan.summary || "Solicitud rechazada");
+    return draftFromPlan(await requestPlan(request, snapshot, context, issues), snapshot, request, context, true);
+  };
+
+  if (plan.intent === "git_operation") {
+    const issues = operationIssues(plan);
+    return issues.length ? retry(issues) : gitOperationDraft(plan, snapshot);
+  }
+
+  const preparation = await prepareGithubRepository(snapshot, repositoryFieldsFromPlan(plan), "llm");
+  if ("blockers" in preparation) return retry(preparation.blockers);
+  return {
+    ...preparation.draft,
+    summary: plan.summary || preparation.draft.summary,
+    rationale: plan.rationale || preparation.draft.rationale
+  };
 }
 
 function bindPlan(snapshot: RepoSnapshot, draft: PlanDraft): ActionPlan {
   return { ...draft, id: randomUUID(), repoPath: snapshot.path, head: snapshot.head, stateId: snapshot.stateId };
 }
 
+/** Every interpretation of what the user wrote happens in the model; this layer only validates. */
 export async function planAction(cwd: string, request: string, context: ConversationMessage[] = []): Promise<ActionPlan> {
   const snapshot = await getSnapshot(cwd);
-  if (!request.trim()) return bindPlan(snapshot, refused("Escribe una acción relacionada con la rama o el repositorio."));
-  if (!llmState.apiKey.trim()) {
-    const draft = localPlan(request, snapshot);
-    if (draft.operation === "github_create_repo") return bindPlan(snapshot, await prepareGithubRepository(snapshot, draft.args, "local-fallback"));
-    return bindPlan(snapshot, draft);
-  }
+  if (!isLlmConfigured()) return bindPlan(snapshot, refused(LLM_REQUIRED));
+  if (!request.trim()) return bindPlan(snapshot, refused("Escribe tu solicitud para el asistente."));
   try {
-    const draft = await llmPlan(request, snapshot, context);
-    if (draft.operation === "github_create_repo") {
-      const checked = await prepareGithubRepository(snapshot, draft.args, "llm");
-      return bindPlan(snapshot, checked);
-    }
-    return bindPlan(snapshot, draft);
+    const plan = await requestPlan(request, snapshot, context);
+    return bindPlan(snapshot, await draftFromPlan(plan, snapshot, request, context));
   } catch (error) {
     return bindPlan(snapshot, refused(`No pude consultar el proveedor LLM: ${error instanceof Error ? error.message : "error desconocido"}`, "llm"));
   }
 }
 
 function operationDraft(operation: Operation, args: Record<string, string>, snapshot?: RepoSnapshot): PlanDraft {
-  if (operation === "branch_last_author") {
-    const commit = snapshot?.branches.find((branch) => branch.isCurrent)?.lastCommit;
-    return {
-      allowed: true,
-      operation,
-      args: {},
-      command: "—",
-      summary: "Última persona en trabajar en esta rama",
-      rationale: "Consulta informativa basada en el commit más reciente de la rama actual.",
-      answer: commit
-        ? `${commit.author} fue la última persona en trabajar en ${snapshot?.currentBranch}. Su commit más reciente fue “${commit.subject || "Sin mensaje"}” el ${formatAnswerDate(commit.date)}.`
-        : `La rama ${snapshot?.currentBranch ?? "actual"} todavía no tiene un commit local que permita identificar a su último autor.`,
-      risk: "low",
-      requiresConfirmation: false,
-      source: "local-fallback"
-    };
-  }
   const details: Partial<Record<Operation, [string, string, ActionPlan["risk"]]>> = {
     status: ["Actualizar la vista del repositorio", "Lee el estado actual sin modificar archivos.", "low"],
     checkout: [`Cambiar a ${args.name}`, "Cambia la rama activa conservando los cambios locales compatibles.", "medium"],
@@ -591,13 +598,27 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     rationale: detail[1],
     risk: detail[2],
     requiresConfirmation: !["status", "fetch"].includes(operation),
-    source: "local-fallback"
+    source: "guardrail"
   };
 }
 
+/** Direct controls in the interface: the operation is already known, so no interpretation is needed. */
 export async function prepareOperation(cwd: string, operation: Operation, args: Record<string, string> = {}) {
   const snapshot = await getSnapshot(cwd);
-  if (operation === "github_create_repo") return bindPlan(snapshot, await prepareGithubRepository(snapshot, args, "local-fallback"));
+  if (operation === "github_create_repo") {
+    const preparation = await prepareGithubRepository(snapshot, {
+      localPath: args.localPath ?? args.source,
+      repository: args.repository ?? args.name,
+      owner: args.owner,
+      host: args.host,
+      protocol: args.protocol === "ssh" || args.protocol === "https" ? args.protocol : undefined,
+      push: args.push !== "false",
+      remote: args.remote,
+      replaceRemote: args.replaceRemote === "true"
+    }, "guardrail");
+    if ("blockers" in preparation) throw new Error(preparation.blockers.map((blocker) => `${blocker.field}: ${blocker.problem}`).join(" "));
+    return bindPlan(snapshot, preparation.draft);
+  }
   const draft = operationDraft(operation, args, snapshot);
   if (draft.allowed) validateExecution(bindPlan(snapshot, draft), snapshot);
   return bindPlan(snapshot, draft);
@@ -605,7 +626,7 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
 
 function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot) {
   if (!plan.allowed || plan.operation === "none" || !allowedOperations.has(plan.operation)) throw new Error("La acción no está permitida.");
-  if (plan.answer || plan.operation === "branch_last_author") throw new Error("Las consultas informativas no se ejecutan como operaciones Git.");
+  if (plan.answer) throw new Error("Las consultas informativas no se ejecutan como operaciones Git.");
   const branchArg = plan.args.name || plan.args.onto;
   if (branchArg && !isBranchNameSafe(branchArg)) throw new Error("Nombre de rama no válido.");
   if (plan.repoPath !== snapshot.path) throw new Error("El plan pertenece a otro repositorio.");
@@ -613,7 +634,7 @@ function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot) {
   if (plan.stateId !== snapshot.stateId) throw new Error("Los cambios locales variaron desde que se preparó el plan. Prepara la acción de nuevo.");
   if (["checkout", "create_branch", "delete_branch", "merge"].includes(plan.operation) && !plan.args.name) throw new Error("Falta el nombre de la rama.");
   if (plan.operation === "rebase" && !plan.args.onto) throw new Error("Falta la rama base.");
-  if (plan.operation === "commit" && (!plan.args.message?.trim() || plan.args.message.length > 120)) throw new Error("El mensaje de commit no es válido.");
+  if (plan.operation === "commit" && (!plan.args.message?.trim() || plan.args.message.length > commitMessageLimit)) throw new Error("El mensaje de commit no es válido.");
   if (plan.operation === "commit" && !snapshot.changes.length) throw new Error("No hay cambios locales para confirmar.");
   if (plan.operation === "checkout" && !snapshot.branches.some((branch) => branch.name === plan.args.name)) throw new Error(`La rama ${plan.args.name} no existe localmente.`);
   if (plan.operation === "create_branch" && snapshot.branches.some((branch) => branch.name === plan.args.name)) throw new Error(`La rama ${plan.args.name} ya existe.`);
@@ -624,12 +645,15 @@ function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot) {
 }
 
 function validateGithubPlan(plan: ActionPlan) {
-  const { name, owner, host, visibility, source, remote, push, replaceRemote } = plan.args;
-  if (!githubNamePattern.test(name ?? "") || !githubOwnerPattern.test(owner ?? "") || !githubHostPattern.test(host ?? "") || visibility !== "private" ||
-      !remoteNamePattern.test(remote ?? "") || !["true", "false"].includes(push) || !["true", "false"].includes(replaceRemote)) {
+  const { name, owner, host, protocol, remoteUrl, visibility, source, remote, push, replaceRemote } = plan.args;
+  if (!repositoryNamePattern.test(name ?? "") || !repositoryOwnerPattern.test(owner ?? "") || !repositoryHostPattern.test(host ?? "") || !["ssh", "https"].includes(protocol) ||
+      visibility !== "private" || !remoteNamePattern.test(remote ?? "") || !["true", "false"].includes(push) || !["true", "false"].includes(replaceRemote)) {
     throw new Error("El plan de creación de GitHub contiene argumentos no válidos.");
   }
   if (!source || resolve(source) !== plan.targetPath) throw new Error("La ruta de origen del plan no es válida.");
+  if (!plan.repositoryPlan) throw new Error("Falta el plan JSON verificable del repositorio.");
+  assertRepositoryPlan(plan.repositoryPlan);
+  if (plan.repositoryPlan.remoteUrl !== remoteUrl || plan.repositoryPlan.localPath !== source) throw new Error("El plan JSON no coincide con los argumentos de ejecución.");
 }
 
 async function executeGithubRepositoryPlan(plan: ActionPlan) {
@@ -644,6 +668,10 @@ async function executeGithubRepositoryPlan(plan: ActionPlan) {
   if (!ghVersion || ghVersion.code !== 0) throw new Error("GitHub CLI (gh) ya no está instalado o disponible en PATH.");
   const auth = await runCommand("gh", ["auth", "status", "--active", "--hostname", plan.args.host], source, 20_000, { GH_PROMPT_DISABLED: "1" });
   if (auth.code !== 0) throw new Error(`La sesión de gh para ${plan.args.host} ya no es válida.`);
+  if (plan.args.protocol === "ssh") {
+    const sshError = await checkSshAccess(plan.args.host, source);
+    if (sshError) throw new Error(sshError);
+  }
   const existing = await runCommand("gh", ["api", `repos/${plan.args.owner}/${plan.args.name}`, "--silent"], source, 20_000, { GH_PROMPT_DISABLED: "1", GH_HOST: plan.args.host });
   if (existing.code === 0) throw new Error(`El repositorio ${plan.args.owner}/${plan.args.name} ya existe.`);
   if (!/HTTP 404|not found/i.test(`${existing.stderr}\n${existing.stdout}`)) throw new Error("No se pudo confirmar que el repositorio remoto siga disponible.");
@@ -654,15 +682,19 @@ async function executeGithubRepositoryPlan(plan: ActionPlan) {
   const previousRemoteUrl = currentRemote.code === 0 ? currentRemote.stdout.trim() : "";
   if (currentRemote.code === 0) await checkedGit(source, ["remote", "remove", plan.args.remote]);
 
+  let repositoryCreated = false;
   try {
-    const args = ["repo", "create", `${plan.args.owner}/${plan.args.name}`, "--private", "--source", source, "--remote", plan.args.remote];
-    if (plan.args.push === "true") args.push("--push");
-    return await checkedGh(args, source, plan.args.host);
+    const createOutput = await checkedGh(["repo", "create", `${plan.args.owner}/${plan.args.name}`, "--private"], source, plan.args.host);
+    repositoryCreated = true;
+    await checkedGit(source, ["remote", "add", plan.args.remote, plan.args.remoteUrl]);
+    const pushOutput = plan.args.push === "true" ? await checkedGit(source, ["push", "-u", plan.args.remote, "HEAD"]) : "";
+    return [createOutput, pushOutput].filter(Boolean).join("\n");
   } catch (error) {
     const createdRemote = await runGit(source, ["remote", "get-url", plan.args.remote]);
     if (createdRemote.code === 0) await checkedGit(source, ["remote", "remove", plan.args.remote]).catch(() => undefined);
     if (currentRemote.code === 0) await checkedGit(source, ["remote", "add", plan.args.remote, previousRemoteUrl]).catch(() => undefined);
     const message = error instanceof Error ? error.message : "gh no pudo crear el repositorio.";
+    if (repositoryCreated) throw new Error(`El repositorio remoto se creó, pero no se pudo configurar o publicar el remoto local: ${message}`);
     if (/forbidden|permission|not accessible|403/i.test(message)) throw new Error("No hay permisos suficientes para crear el repositorio privado solicitado.");
     throw error;
   }
@@ -712,14 +744,28 @@ export function loadLlmConfig() {
 }
 
 export function getLlmConfig(): LlmConfig {
-  return { provider: "openai", model: llmState.model || MODEL_FALLBACK, configured: Boolean(llmState.apiKey) };
+  return { provider: "openai", model: llmState.model || MODEL_FALLBACK, configured: isLlmConfigured() };
 }
 
-export function saveLlmConfig(input: LlmConfigInput): LlmConfig {
+/**
+ * The credentials are checked against the provider before they are stored: an unusable key or model
+ * would otherwise only surface later, as an unexplained refusal inside a conversation.
+ */
+async function verifyLlmAccess(candidate: LlmConfigInput) {
+  try {
+    await askProvider({ instructions: "Reply with the single word: ok.", input: "ok", max_output_tokens: 1_000 }, 30_000, candidate);
+  } catch (error) {
+    throw new Error(`No se guardó la configuración porque el proveedor no respondió correctamente. ${error instanceof Error ? error.message : "Error desconocido."}`);
+  }
+}
+
+export async function saveLlmConfig(input: LlmConfigInput): Promise<LlmConfig> {
   if (!input || typeof input.apiKey !== "string" || typeof input.model !== "string") throw new Error("La configuración no es válida.");
   const nextApiKey = input.clearApiKey ? "" : input.apiKey.trim() || llmState.apiKey;
+  const nextModel = input.model.trim() || MODEL_FALLBACK;
   if (nextApiKey && !safeStorage.isEncryptionAvailable()) throw new Error("El almacenamiento seguro no está disponible; la API key no se guardó.");
-  llmState = { apiKey: nextApiKey, model: input.model.trim() || MODEL_FALLBACK };
+  if (nextApiKey) await verifyLlmAccess({ apiKey: nextApiKey, model: nextModel });
+  llmState = { apiKey: nextApiKey, model: nextModel };
   mkdirSync(app.getPath("userData"), { recursive: true });
   const payload: { model: string; encryptedApiKey?: string } = { model: llmState.model };
   if (llmState.apiKey && safeStorage.isEncryptionAvailable()) payload.encryptedApiKey = safeStorage.encryptString(llmState.apiKey).toString("base64");

@@ -50,8 +50,20 @@ export type Operation =
   | "continue_rebase"
   | "commit"
   | "github_create_repo"
-  | "branch_last_author"
   | "none";
+
+export type GitProtocol = "ssh" | "https";
+
+export type RepositoryPlan = {
+  action: "create_repository" | "create_repository_and_push";
+  host: string;
+  owner: string;
+  repository: string;
+  localPath: string;
+  protocol: GitProtocol;
+  remoteUrl: string;
+  requiresConfirmation: true;
+};
 
 export type ActionPlan = {
   id: string;
@@ -66,12 +78,14 @@ export type ActionPlan = {
   rationale: string;
   answer?: string;
   effects?: string[];
+  repositoryPlan?: RepositoryPlan;
   targetPath?: string;
   targetHead?: string;
   targetStateId?: string;
   risk: "low" | "medium" | "high";
   requiresConfirmation: boolean;
-  source: "llm" | "local-fallback" | "guardrail";
+  /** "llm": the model interpreted the request. "guardrail": a direct control or a local safety rule. */
+  source: "llm" | "guardrail";
 };
 
 export type LlmConfig = {

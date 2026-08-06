@@ -42,13 +42,17 @@ Los artefactos aparecen en `release/`. El build local no usa una identidad de de
 - Historial de commits con autor, correo, fecha y referencias.
 - Acciones esenciales: switch, crear/borrar rama, fetch, pull fast-forward only, push, merge, commit y rebase.
 - Rebase en curso: continuar o abortar.
-- Solicitudes en lenguaje natural con un plan visible antes de ejecutar.
-- OpenAI mediante Responses API. El modelo inicial queda configurado como `luna`, pero el campo es editable para usar el identificador habilitado en la cuenta.
+- Solicitudes en lenguaje natural, en cualquier idioma, con un plan visible antes de ejecutar.
+- OpenAI mediante Responses API. El proveedor es obligatorio: al guardarlo se verifica contra la API, y sin él la aplicación no interpreta nada.
 - Ícono de aplicación en `build/icon.svg`; el build genera `build/icon.png` y electron-builder lo convierte al formato nativo del instalador.
-- Filtro de alcance: las solicitudes que no tratan sobre ramas o Git son rechazadas.
+- Filtro de alcance: el modelo decide si la solicitud trata sobre el repositorio y rechaza el resto.
 
 ## Decisiones de seguridad
 
-El modelo nunca entrega un comando shell ejecutable. Solo puede devolver una operación de una lista permitida y argumentos validados; la aplicación compone el comando Git final y lo ejecuta con `spawn`, sin shell. Las operaciones con riesgo se presentan en una tarjeta de confirmación.
+**Toda evaluación de intención la hace el modelo.** No existe coincidencia de palabras clave, ni planificador local de reserva, ni extracción de datos por expresiones regulares sobre lo que escribe la persona: eso ataba la aplicación al español y fallaba con cualquier reformulación. El proceso principal solo valida.
+
+El modelo nunca entrega un comando shell ejecutable. Solo puede devolver una operación de una lista permitida y argumentos validados; la aplicación compone el comando Git final y lo ejecuta con `spawn`, sin shell. Las operaciones con riesgo se presentan en una tarjeta de confirmación, y el riesgo y la confirmación los fija la aplicación, no el modelo.
+
+Cuando la validación local o una comprobación del entorno rechaza una propuesta, el defecto vuelve al modelo como una incidencia estructurada (`{field, problem}`) para que corrija o explique el problema en el idioma de la persona. Los fallos del proveedor —respuesta vacía, truncada por tokens, esquema inválido— se reportan tal cual; nunca se convierten en un rechazo silencioso.
 
 La API key se conserva en el proceso principal y, cuando el sistema lo permite, se cifra con `safeStorage` de Electron. Para una aplicación distribuida convendría complementar esto con firma de builds, actualizaciones verificadas y un control más granular de permisos remotos.

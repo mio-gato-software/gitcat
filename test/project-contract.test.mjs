@@ -28,10 +28,37 @@ test("la capa de Git evita ejecutar comandos libres", async () => {
   assert.doesNotMatch(service, /exec\(.*command/);
 });
 
-test("el guardrail de alcance está presente", async () => {
+test("ninguna decisión sobre el mensaje del usuario se toma con palabras clave", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
-  assert.match(service, /Solo puedo ayudarte con ramas, historial, cambios y operaciones Git/);
-  assert.match(service, /source\s*\n/);
+  const repositoryPlan = await readFile(join(root, "electron/repository-plan.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.doesNotMatch(service, /function localPlan/);
+  assert.doesNotMatch(service, /toLocaleLowerCase\("es"\)/);
+  assert.doesNotMatch(service, /isRepositoryCreationConversation|collectRepositoryFields/);
+  assert.doesNotMatch(repositoryPlan, /collectRepositoryFields|isRepositoryCreationConversation|requestedFields|parseRemoteUrl|bareValue/);
+  assert.doesNotMatch(repositoryPlan, /crear|guardar|propietario|ruta local/i);
+  assert.doesNotMatch(app, /showRecentAuthors|showChangesAnswer/);
+  assert.match(app, /const askSuggestion/);
+});
+
+test("el proveedor LLM es obligatorio y no hay plan local de reserva", async () => {
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.match(service, /const LLM_REQUIRED =/);
+  assert.match(service, /if \(!isLlmConfigured\(\)\) return bindPlan\(snapshot, refused\(LLM_REQUIRED\)\)/);
+  assert.match(service, /configured: isLlmConfigured\(\)/);
+  assert.match(service, /await verifyLlmAccess\(\{ apiKey: nextApiKey, model: nextModel \}\)/);
+  assert.doesNotMatch(service, /local-fallback/);
+  assert.match(app, /!config\.configured \? <ProviderRequired/);
+});
+
+test("los fallos del proveedor se reportan, nunca se disfrazan de rechazo", async () => {
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  assert.match(service, /payload\?\.status === "incomplete"/);
+  assert.match(service, /incomplete_details\?\.reason/);
+  assert.match(service, /El proveedor devolvió una respuesta vacía/);
+  assert.match(service, /no cumple el esquema del plan/);
+  assert.doesNotMatch(service, /se generó y validó un plan local seguro/);
 });
 
 test("la aplicación empaquetada resuelve el renderer desde app.getAppPath", async () => {
@@ -61,18 +88,33 @@ test("los controles principales tienen implementaciones concretas", async () => 
   assert.match(app, /function ChangesView/);
   assert.match(app, /prepare\("delete_branch"/);
   assert.match(app, /function CommitModal/);
-  assert.match(app, /showRecentAuthors/);
+  assert.match(app, /askSuggestion\("¿Quién hizo cambios recientemente\?"\)/);
   assert.doesNotMatch(app, /MoreHorizontal/);
 });
 
-test("la relevancia se clasifica con el LLM y admite consultas informativas", async () => {
+test("el modelo clasifica la intención, responde preguntas y escribe en el idioma del usuario", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
   assert.doesNotMatch(service, /function isGitRequest/);
-  assert.match(service, /Decide por significado, no por palabras clave/);
-  assert.match(service, /branch_last_author/);
-  assert.match(service, /última persona en trabajar/);
+  assert.match(planner, /never by matching words or verb forms/);
+  assert.match(planner, /same language as the user's latest message/);
+  assert.match(planner, /"git_operation", "create_repository", "answer", "needs_information", "out_of_scope"/);
+  assert.match(service, /function plannerState/);
+  assert.match(service, /if \(plan\.intent === "answer"\) return answerDraft\(plan\)/);
   assert.match(app, /plan\.answer/);
+});
+
+test("los defectos vuelven al modelo como datos estructurados, no como texto en español", async () => {
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
+  const repositoryPlan = await readFile(join(root, "electron/repository-plan.ts"), "utf8");
+  assert.match(planner, /export function operationIssues/);
+  assert.match(planner, /Validation issues \(JSON\)/);
+  assert.match(repositoryPlan, /export type RepositoryIssue = \{ field: RepositoryFieldName; problem: string \}/);
+  assert.match(service, /type RepositoryPreparation = \{ draft: PlanDraft \} \| \{ blockers: PlanIssue\[\] \}/);
+  assert.match(service, /return issues\.length \? retry\(issues\) : gitOperationDraft\(plan, snapshot\)/);
+  assert.match(service, /if \("blockers" in preparation\) return retry\(preparation\.blockers\)/);
 });
 
 test("el workspace persiste y restaura los proyectos abiertos", async () => {
@@ -125,7 +167,7 @@ test("Cambios muestra estado, ruta y formulario manual sin LLM", async () => {
   assert.match(app, /function changeStatus/);
   assert.match(app, /className="change-status"/);
   assert.match(app, /className="change-path"/);
-  assert.match(app, /Configura un LLM para generar una descripción\. Puedes escribirla manualmente/);
+  assert.match(app, /sigue el idioma del historial de commits/);
   assert.match(app, /No hay cambios sin confirmar/);
 });
 
@@ -170,17 +212,20 @@ test("la creación GitHub hace todas las comprobaciones sin leer tokens", async 
   assert.match(service, /\["api", `repos\/\$\{owner\}\/\$\{name\}`/);
   assert.match(service, /viewerCanCreateRepositories/);
   assert.match(service, /\["remote", "get-url", remote\]/);
-  assert.match(service, /No hay commits locales que publicar/);
+  assert.match(service, /the local repository has no commits, so there is nothing to push/);
   assert.doesNotMatch(service, /auth token|GH_TOKEN.*stdout|GITHUB_TOKEN.*stdout/);
 });
 
-test("la validación GitHub exige decisiones explícitas y evita rutas arbitrarias", async () => {
+test("la validación GitHub cubre todos los campos y evita rutas arbitrarias", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
-  assert.match(service, /Indica explícitamente el propietario/);
-  assert.match(service, /Indica explícitamente el host/);
-  assert.match(service, /Indica explícitamente si quieres publicar/);
-  assert.match(service, /abre ese repositorio como proyecto activo/);
-  assert.match(service, /Ya existe el remoto/);
+  const repositoryPlan = await readFile(join(root, "electron/repository-plan.ts"), "utf8");
+  assert.match(service, /repositoryFieldsFromPlan/);
+  assert.match(service, /validateRepositoryFields/);
+  assert.match(repositoryPlan, /if \(!fields\.localPath\) issues\.push\(missing\("localPath"\)\)/);
+  assert.match(repositoryPlan, /if \(!fields\.repository\) issues\.push\(missing\("repository"\)\)/);
+  assert.doesNotMatch(repositoryPlan, /basename\(.*localPath|basename\(.*source/);
+  assert.match(service, /is not the project currently open in Branchline/);
+  assert.match(service, /already points to/);
 });
 
 test("la ejecución gh no usa shell y revierte cambios locales ante fallo", async () => {
