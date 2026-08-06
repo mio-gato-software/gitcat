@@ -33,6 +33,12 @@ const RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses";
 const LLM_REQUIRED =
   "Branchline necesita un proveedor LLM configurado: toda interpretación de tus mensajes la hace el modelo, no reglas locales. Añade tu API key y tu modelo en Configuración.";
 const allowedOperations = new Set<Operation>([...executableOperations, "github_create_repo", "none"]);
+/**
+ * Operations that run without asking. The bar is deliberately high: they must leave the working tree,
+ * the branch history and everything already published untouched, and running one again must be
+ * harmless. Nothing here can lose work, so a confirmation would only be a click in the way.
+ */
+const unattendedOperations = new Set<Operation>(["status", "fetch"]);
 
 let llmState: LlmConfigInput = { apiKey: "", model: MODEL_FALLBACK };
 let memory: Memory = emptyMemory();
@@ -887,7 +893,7 @@ function sequenceDraft(steps: PlanStep[], rationale: string): PlanDraft {
     summary: steps.length === 1 ? steps[0].summary : steps.map((step) => step.summary).join(", luego "),
     rationale,
     risk,
-    requiresConfirmation: steps.some((step) => !["status", "fetch"].includes(step.operation)),
+    requiresConfirmation: steps.some((step) => !unattendedOperations.has(step.operation)),
     kind: "plan",
     source: "guardrail"
   };

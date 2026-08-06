@@ -392,12 +392,15 @@ export default function App() {
         addActivity({ label: "Respuesta preparada", detail: plan.summary, tone: "neutral" });
         return;
       }
+      const unattended = plan.allowed && !plan.requiresConfirmation;
       updateTurn(path, turnId, (turn) => ({ ...turn, plan, status: plan.allowed ? "ready" : "completed" }));
       addActivity({
-        label: plan.allowed ? "Plan preparado" : plan.kind === "question" ? "El asistente pregunta" : "Solicitud rechazada",
+        label: unattended ? "Acción en curso" : plan.allowed ? "Plan preparado" : plan.kind === "question" ? "El asistente pregunta" : "Solicitud rechazada",
         detail: plan.summary,
         tone: plan.kind === "refusal" ? "warning" : "neutral"
       });
+      // Nothing to weigh up: a plan that changes no work does not need a click to say so.
+      if (unattended) await runPlan(turnId, plan);
     } catch (error) {
       const message = error instanceof Error ? error.message : "No se pudo preparar la acción.";
       updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
@@ -713,7 +716,13 @@ function PlanCard({ plan, onApply, onDismiss, busy }: { plan: ActionPlan; onAppl
   return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? "Interpretado por el proveedor LLM" : "Acción directa validada"}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? "Descartar pregunta" : "Descartar plan"}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}{plan.repositoryPlan && <pre className="repository-plan-json">{JSON.stringify(plan.repositoryPlan, null, 2)}</pre>}{plan.allowed && (plan.steps.length > 1
       ? <ol className="plan-steps">{plan.steps.map((step, index) => <li key={`${step.command}-${index}`}><span className="step-summary">{step.summary}</span><code><TerminalSquare size={11} />{step.command}</code></li>)}</ol>
       : <div className="command-preview"><TerminalSquare size={14} /><code>{plan.command}</code></div>)}
-    {plan.allowed && plan.steps.length > 1 && <p className="plan-hint">Al confirmar se ejecutan los {plan.steps.length} pasos en orden. Si alguno falla, el plan se detiene ahí y te digo qué quedó sin hacer.</p>}{plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>Cancelar</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {plan.requiresConfirmation ? "Confirmar acción" : "Aplicar"}</button></div> : asking ? <p className="plan-hint">Responde en el cuadro de abajo para continuar.</p> : <button className="ghost-button plan-close" onClick={onDismiss}>Entendido</button>}</div>;
+    {plan.allowed && plan.requiresConfirmation && plan.steps.length > 1 && <p className="plan-hint">Al confirmar se ejecutan los {plan.steps.length} pasos en orden. Si alguno falla, el plan se detiene ahí y te digo qué quedó sin hacer.</p>}
+    {/* A plan with nothing to confirm is already running, so it offers no button that could decide otherwise. */}
+    {plan.allowed && !plan.requiresConfirmation
+      ? <p className="plan-running"><LoaderCircle className="spin" size={12} /> Sin nada que confirmar: se ejecuta sola.</p>
+      : plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>Cancelar</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} Confirmar acción</button></div>
+      : asking ? <p className="plan-hint">Responde en el cuadro de abajo para continuar.</p>
+      : <button className="ghost-button plan-close" onClick={onDismiss}>Entendido</button>}</div>;
 }
 
 function SettingsModal({ config, onClose, onSaved }: { config: LlmConfig; onClose: () => void; onSaved: (config: LlmConfig) => void }) {

@@ -115,6 +115,18 @@ test("la integración de una rama es un hecho de Git en el estado, no algo que e
   assert.match(app, /mergedInto\.length/);
 });
 
+test("una acción que no puede perder trabajo se ejecuta sin pedir confirmación", async () => {
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  // El criterio vive en un solo sitio y es restrictivo a propósito.
+  assert.match(service, /const unattendedOperations = new Set<Operation>\(\["status", "fetch"\]\)/);
+  assert.match(service, /requiresConfirmation: steps\.some\(\(step\) => !unattendedOperations\.has\(step\.operation\)\)/);
+  // El flag ahora manda: se ejecuta solo, y la tarjeta no ofrece un botón que no decide nada.
+  assert.match(app, /if \(unattended\) await runPlan\(turnId, plan\)/);
+  assert.match(app, /plan\.allowed && !plan\.requiresConfirmation/);
+  assert.doesNotMatch(app, /"Confirmar acción" : "Aplicar"/, "ya no hay una variante del botón para lo que no se confirma");
+});
+
 test("las herramientas se localizan sin depender del PATH que hereda la app", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   assert.match(service, /function loginShellPath/);

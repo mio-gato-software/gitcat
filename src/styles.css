@@ -38,6 +38,9 @@ button:disabled { cursor: default; opacity: .55; }
 .asking .plan-header span { color: #7c9ab5; }
 .asking p { color: #a8bccd; }
 .plan-hint { margin: 10px 0 0 !important; padding-top: 8px; border-top: 1px solid #24384a; color: #7c9ab5 !important; font-size: 9px !important; }
+/* A plan that runs on its own says so instead of offering a button that decides nothing. */
+.plan-running { display: flex; align-items: center; gap: 6px; margin: 10px 0 0 !important; color: #79b7ae !important; font-size: 9px !important; }
+.plan-running svg { flex: none; }
 .plan-card p { white-space: pre-line; }
 .plan-effects { margin: 9px 0; padding-left: 18px; color: #8fa7a5; font-size: 9px; line-height: 1.5; }
 .plan-effects li + li { margin-top: 3px; }
