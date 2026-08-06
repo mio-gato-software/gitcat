@@ -233,7 +233,8 @@ export default function App() {
       rebase: `Rebasear sobre ${args.onto}`,
       abort_rebase: "Abortar el rebase en curso",
       continue_rebase: "Continuar el rebase",
-      commit: `Crear un commit: ${args.message}`
+      commit: `Crear un commit: ${args.message}`,
+      github_create_repo: `Crear el repositorio privado ${args.owner}/${args.name} en ${args.host}`
     };
     const path = snapshot.path;
     await showPlan(question ?? labels[operation] ?? "Preparar una operación Git", () => window.branchline.prepareOperation(path, operation, args), path);
@@ -412,7 +413,7 @@ function ConversationEntry({ turn, busy, onApply, onDismiss }: { turn: Conversat
 }
 
 function PlanCard({ plan, onApply, onDismiss, busy }: { plan: ActionPlan; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean }) {
-  return <div className={`plan-card ${plan.allowed ? "allowed" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? "Interpretado por el proveedor LLM" : plan.source === "local-fallback" ? "Plan local validado" : "Regla de alcance"}</span></div><button className="mini-icon" onClick={onDismiss} aria-label="Descartar plan"><X size={14} /></button></div><p>{plan.rationale}</p>{plan.allowed && <div className="command-preview"><TerminalSquare size={14} /><code>{plan.command}</code></div>}{plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>Cancelar</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {plan.requiresConfirmation ? "Confirmar acción" : "Aplicar"}</button></div> : <button className="ghost-button plan-close" onClick={onDismiss}>Entendido</button>}</div>;
+  return <div className={`plan-card ${plan.allowed ? "allowed" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? "Interpretado por el proveedor LLM" : plan.source === "local-fallback" ? "Plan local validado" : "Regla de alcance"}</span></div><button className="mini-icon" onClick={onDismiss} aria-label="Descartar plan"><X size={14} /></button></div><p>{plan.rationale}</p>{plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}{plan.allowed && <div className="command-preview"><TerminalSquare size={14} /><code>{plan.command}</code></div>}{plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>Cancelar</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {plan.requiresConfirmation ? "Confirmar acción" : "Aplicar"}</button></div> : <button className="ghost-button plan-close" onClick={onDismiss}>Entendido</button>}</div>;
 }
 
 function SettingsModal({ config, onClose, onSaved }: { config: LlmConfig; onClose: () => void; onSaved: (config: LlmConfig) => void }) {

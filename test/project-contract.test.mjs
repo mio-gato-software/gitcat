@@ -23,7 +23,8 @@ test("el build tiene un asset de icono reproducible", async () => {
 test("la capa de Git evita ejecutar comandos libres", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   assert.match(service, /const allowedOperations = new Set/);
-  assert.match(service, /spawn\("git", args/);
+  assert.match(service, /runCommand\("git", args/);
+  assert.match(service, /spawn\(command, args/);
   assert.doesNotMatch(service, /exec\(.*command/);
 });
 
@@ -149,4 +150,46 @@ test("respuestas y planes quedan asociados a su turno", async () => {
   assert.match(app, /updateTurn\(path, turnId/);
   assert.match(app, /applyPlan\(turn\.id, plan\)/);
   assert.match(app, /Plan descartado sin modificar el repositorio/);
+});
+
+test("GitHub privado usa una operación estructurada y confirmada", async () => {
+  const types = await readFile(join(root, "shared/types.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.match(types, /\| "github_create_repo"/);
+  assert.match(service, /"github_create_repo"/);
+  assert.match(service, /gh repo create/);
+  assert.match(service, /requiresConfirmation: true/);
+  assert.match(app, /plan\.effects/);
+});
+
+test("la creación GitHub hace todas las comprobaciones sin leer tokens", async () => {
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  assert.match(service, /\["--version"\]/);
+  assert.match(service, /\["auth", "status", "--active", "--hostname", host\]/);
+  assert.match(service, /\["api", `repos\/\$\{owner\}\/\$\{name\}`/);
+  assert.match(service, /viewerCanCreateRepositories/);
+  assert.match(service, /\["remote", "get-url", remote\]/);
+  assert.match(service, /No hay commits locales que publicar/);
+  assert.doesNotMatch(service, /auth token|GH_TOKEN.*stdout|GITHUB_TOKEN.*stdout/);
+});
+
+test("la validación GitHub exige decisiones explícitas y evita rutas arbitrarias", async () => {
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  assert.match(service, /Indica explícitamente el propietario/);
+  assert.match(service, /Indica explícitamente el host/);
+  assert.match(service, /Indica explícitamente si quieres publicar/);
+  assert.match(service, /abre ese repositorio como proyecto activo/);
+  assert.match(service, /Ya existe el remoto/);
+});
+
+test("la ejecución gh no usa shell y revierte cambios locales ante fallo", async () => {
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  assert.match(service, /runCommand\("gh", args/);
+  assert.match(service, /GH_PROMPT_DISABLED: "1"/);
+  assert.match(service, /\["remote", "remove", plan\.args\.remote\]/);
+  assert.match(service, /\["remote", "add", plan\.args\.remote, previousRemoteUrl\]/);
+  assert.match(service, /existingRemoteHash/);
+  assert.doesNotMatch(service, /existingRemoteUrl/);
+  assert.doesNotMatch(service, /spawn\([^\n]+shell:\s*true/);
 });
