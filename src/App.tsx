@@ -5,12 +5,14 @@ import {
   GitMerge, Info, LoaderCircle, MessageCircle, Plus, RefreshCcw, Search, Send,
   Settings2, ShieldCheck, Sparkles, TerminalSquare, Trash2, UserRound, X
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import type { ActionPlan, Branch, Commit, ConversationMessage, LlmConfig, Operation, RepoSnapshot } from "../shared/types";
 
 type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string };
 type ActivityItem = { id: number; label: string; detail: string; tone: "success" | "neutral" | "warning" };
 type Toast = { message: string; tone: "success" | "error" };
 type InputDialog = { operation: "create_branch" | "merge"; title: string; label: string; value: string };
+type Suggestion = { key: string; icon: LucideIcon; label: string } & ({ question: string } | { dialog: InputDialog });
 type ConversationTurn = {
   id: number;
   question: string;
@@ -36,6 +38,91 @@ function shortPath(path: string) {
 }
 
 function branchColor(index: number) { return palette[index % palette.length]; }
+
+function plural(count: number, singular: string, many: string) { return `${count} ${count === 1 ? singular : many}`; }
+
+const baseBranchNames = ["main", "master", "develop", "trunk"];
+
+/**
+ * The panel offers what this repository needs right now, so the shortcuts never repeat what the
+ * history and changes views already show. They are still ordinary requests: the model decides what
+ * each one means and answers or plans accordingly.
+ */
+function suggestionsFor(snapshot: RepoSnapshot): Suggestion[] {
+  const current = snapshot.branches.find((branch) => branch.isCurrent);
+  const branch = current?.name ?? snapshot.currentBranch;
+  const base = baseBranchNames
+    .map((name) => snapshot.branches.find((item) => item.name === name))
+    .find((item) => item && !item.isCurrent);
+  const options: Suggestion[] = [];
+
+  if (snapshot.isRebasing) options.push({
+    key: "rebase",
+    icon: AlertTriangle,
+    label: "Terminar el rebase en curso",
+    question: `El rebase de ${branch} está a medias. Dime en qué punto quedó, qué falta por resolver y cómo lo termino sin perder trabajo.`
+  });
+  if (snapshot.isDirty) options.push({
+    key: "changes",
+    icon: FileDiff,
+    label: snapshot.changes.length === 1 ? "Revisar mi cambio sin confirmar" : `Revisar mis ${plural(snapshot.changes.length, "cambio", "cambios")} sin confirmar`,
+    question: "Explícame qué hacen mis cambios sin confirmar, agrúpalos por intención y propón un mensaje de commit."
+  });
+  if (current?.behind) options.push({
+    key: "behind",
+    icon: ArrowDownToLine,
+    label: `Traer ${plural(current.behind, "commit nuevo", "commits nuevos")} del remoto`,
+    question: current.behind === 1
+      ? `Integra en ${branch} el commit que ya está en ${current.upstream ?? "el remoto"}.`
+      : `Integra en ${branch} los ${current.behind} commits que ya están en ${current.upstream ?? "el remoto"}.`
+  });
+  if (current?.ahead) options.push({
+    key: "ahead",
+    icon: ArrowUpFromLine,
+    label: `Revisar ${plural(current.ahead, "commit", "commits")} sin publicar`,
+    question: current.ahead === 1
+      ? `Resume el commit de ${branch} que todavía no está publicado y avísame si hay algo riesgoso antes de subirlo.`
+      : `Resume los ${current.ahead} commits de ${branch} que todavía no están publicados y avísame si hay algo riesgoso antes de subirlos.`
+  });
+  if (!snapshot.remotes.length) options.push({
+    key: "publish",
+    icon: Cloud,
+    label: "Publicar este repositorio",
+    question: "Este repositorio no tiene remoto configurado. Ayúdame a publicarlo en GitHub como repositorio privado."
+  });
+  if (base) options.push({
+    key: "merge",
+    icon: GitMerge,
+    label: `Fusionar ${base.name} en ${branch}`,
+    dialog: { operation: "merge", title: "Fusionar rama", label: "Rama que quieres fusionar", value: base.name }
+  });
+  if (base) options.push({
+    key: "compare",
+    icon: GitBranch,
+    label: `Comparar ${branch} con ${base.name}`,
+    question: `¿En qué se diferencia ${branch} de ${base.name}? Dime qué commits y archivos tiene de más o de menos.`
+  });
+  options.push({
+    key: "cleanup",
+    icon: Trash2,
+    label: "Buscar ramas que ya puedo borrar",
+    question: "¿Qué ramas locales ya están integradas y puedo borrar sin perder trabajo?"
+  });
+  options.push({
+    key: "authors",
+    icon: UserRound,
+    label: "Ver quién tocó esto último",
+    question: "¿Quién hizo los cambios más recientes en este repositorio y sobre qué archivos trabajó cada persona?"
+  });
+  options.push({
+    key: "review",
+    icon: Sparkles,
+    label: "Revisar el estado del repositorio",
+    question: `Revisa el estado de ${branch}: dime si hay algo que deba atender antes de seguir trabajando.`
+  });
+
+  return options.slice(0, 3);
+}
 
 export default function App() {
   const [projects, setProjects] = useState<ProjectTab[]>([]);
@@ -357,7 +444,7 @@ export default function App() {
               : <ChangesView snapshot={snapshot} formOpen={commitFormOpen} message={commitMessage} generating={generatingDescription} busy={planning} onOpenForm={() => setCommitFormOpen(true)} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit} />}
           </section>
 
-          <aside className="inspector"><div className="inspector-header"><div><div className="eyebrow">ASISTENTE DE RAMAS</div><h2>¿Qué quieres saber o hacer?</h2></div><div className="assistant-icon"><Bot size={18} /></div></div><p className="assistant-copy">Pregunta sobre el repositorio o describe una acción de Git. Las acciones se muestran como un plan verificable antes de ejecutarse.</p>{conversation.length === 0 && <div className="suggestion-list"><button onClick={() => askSuggestion("¿Quién hizo cambios recientemente?")} disabled={planning}><UserRound size={15} /><span>¿Quién hizo cambios recientemente?</span></button><button onClick={() => setInputDialog({ operation: "merge", title: "Fusionar rama", label: "Rama que quieres fusionar", value: "" })}><GitMerge size={15} /><span>Fusionar otra rama</span></button><button onClick={() => askSuggestion("Resume los cambios locales del repositorio.")} disabled={planning}><FileDiff size={15} /><span>Ver cambios del repositorio</span></button></div>}<div className="conversation-toolbar"><span>{conversation.length ? `${conversation.length} mensaje${conversation.length === 1 ? "" : "s"}` : "Nueva conversación"}</span><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> Limpiar conversación</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: "Plan descartado sin modificar el repositorio." }))} />)}<div ref={conversationEnd} /></div><div className="chat-compose"><textarea aria-label="Solicitud para el asistente" value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder="Ej. ¿quién trabajó en esta rama la última vez?" rows={3} /><button className="send-button" aria-label="Preparar solicitud" onClick={() => void propose(request)} disabled={planning || !request.trim()}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div></aside>
+          <aside className="inspector"><div className="inspector-header"><div><div className="eyebrow">ASISTENTE DE RAMAS</div><h2>¿Qué quieres saber o hacer?</h2></div><div className="assistant-icon"><Bot size={18} /></div></div><p className="assistant-copy">Pregunta sobre el repositorio o describe una acción de Git. Las acciones se muestran como un plan verificable antes de ejecutarse.</p>{conversation.length === 0 && <div className="suggestion-list">{suggestionsFor(snapshot).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? `${conversation.length} mensaje${conversation.length === 1 ? "" : "s"}` : "Nueva conversación"}</span><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> Limpiar conversación</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: "Plan descartado sin modificar el repositorio." }))} />)}<div ref={conversationEnd} /></div><div className="chat-compose"><textarea aria-label="Solicitud para el asistente" value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder="Ej. ¿quién trabajó en esta rama la última vez?" rows={3} /><button className="send-button" aria-label="Preparar solicitud" onClick={() => void propose(request)} disabled={planning || !request.trim()}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div></aside>
         </main>
         <footer className="statusbar"><div className="status-left"><span className="status-good"><CircleDot size={12} /> {snapshot.isDirty ? `${snapshot.changes.length} cambio${snapshot.changes.length === 1 ? "" : "s"}` : "Sin cambios locales"}</span><span className="status-separator" /><span>{snapshot.branches.length} ramas locales</span></div><div className="status-right"><span><Clock3 size={12} /> Última lectura {formatDate(active.loadedAt)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : "LLM no configurado"}</span></div></footer>
       </>}

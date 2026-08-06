@@ -97,7 +97,9 @@ test("los controles principales tienen implementaciones concretas", async () => 
   assert.match(app, /function ChangesView/);
   assert.match(app, /prepare\("delete_branch"/);
   assert.match(app, /function CommitModal/);
-  assert.match(app, /askSuggestion\("¿Quién hizo cambios recientemente\?"\)/);
+  assert.match(app, /function suggestionsFor\(snapshot: RepoSnapshot\)/);
+  assert.match(app, /askSuggestion\(suggestion\.question\)/);
+  assert.match(app, /if \(snapshot\.isRebasing\) options\.push/);
   assert.doesNotMatch(app, /MoreHorizontal/);
 });
 
