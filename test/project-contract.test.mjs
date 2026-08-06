@@ -103,3 +103,27 @@ test("las notificaciones de actividad se pueden cerrar y expiran", async () => {
   assert.match(styles, /\.activity-dock \{ position: fixed; z-index: 8; top: 68px; right: 16px;/);
   assert.match(styles, /\.activity-close/);
 });
+
+test("la descripción de commit usa el diff real y conserva la confirmación", async () => {
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
+  const preload = await readFile(join(root, "electron/preload.cjs"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.match(service, /export async function generateCommitDescription/);
+  assert.match(service, /"diff", "--no-ext-diff", "--unified=3", "HEAD"/);
+  assert.match(service, /"ls-files", "--others", "--exclude-standard", "-z"/);
+  assert.match(service, /Los cambios variaron durante la generación/);
+  assert.match(main, /ipcMain\.handle\("commit:generate-description"/);
+  assert.match(preload, /generateCommitDescription/);
+  assert.match(app, /Generar descripción/);
+  assert.match(app, /prepare\("commit", \{ message \}\)/);
+});
+
+test("Cambios muestra estado, ruta y formulario manual sin LLM", async () => {
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.match(app, /function changeStatus/);
+  assert.match(app, /className="change-status"/);
+  assert.match(app, /className="change-path"/);
+  assert.match(app, /Configura un LLM para generar una descripción\. Puedes escribirla manualmente/);
+  assert.match(app, /No hay cambios sin confirmar/);
+});

@@ -87,6 +87,11 @@ export type ExecutionResult = {
   error?: string;
 };
 
+export type CommitDescriptionResult = {
+  description: string;
+  stateId: string;
+};
+
 export type RestoredWorkspace = {
   projects: RepoSnapshot[];
   activePath?: string;
@@ -100,6 +105,7 @@ export type GitlineApi = {
   getSnapshot: (path: string) => Promise<RepoSnapshot>;
   planAction: (path: string, request: string) => Promise<ActionPlan>;
   prepareOperation: (path: string, operation: Operation, args?: Record<string, string>) => Promise<ActionPlan>;
+  generateCommitDescription: (path: string) => Promise<CommitDescriptionResult>;
   executePlan: (path: string, planId: string) => Promise<ExecutionResult>;
   getLlmConfig: () => Promise<LlmConfig>;
   saveLlmConfig: (config: LlmConfigInput) => Promise<LlmConfig>;

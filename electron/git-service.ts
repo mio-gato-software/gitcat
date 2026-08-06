@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { existsSync, lstatSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { basename, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
 import type { ActionPlan, Branch, Commit, LlmConfig, LlmConfigInput, Operation, RepoSnapshot } from "../shared/types.js";
 
@@ -221,6 +221,82 @@ function extractOutputText(body: any): string {
   return textParts.join("\n").trim();
 }
 
+function cleanCommitDescription(text: string) {
+  const normalized = text.trim().replace(/^```(?:text)?\s*/i, "").replace(/\s*```$/, "").trim();
+  const firstParagraph = normalized.split(/\n\s*\n/)[0]?.replace(/\s+/g, " ").replace(/^["“]|["”]$/g, "").trim() ?? "";
+  if (!firstParagraph) throw new Error("El proveedor no devolvió una descripción de commit.");
+  return firstParagraph.slice(0, 120).trim();
+}
+
+async function getWorkingTreeDiff(snapshot: RepoSnapshot) {
+  const trackedDiff = snapshot.head
+    ? await checkedGit(snapshot.path, ["diff", "--no-ext-diff", "--unified=3", "HEAD", "--"])
+    : [
+        await checkedGit(snapshot.path, ["diff", "--cached", "--no-ext-diff", "--unified=3", "--"]),
+        await checkedGit(snapshot.path, ["diff", "--no-ext-diff", "--unified=3", "--"])
+      ].filter(Boolean).join("\n");
+  const untrackedRaw = await checkedGit(snapshot.path, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  const sections = [trackedDiff];
+  let remaining = 60_000 - trackedDiff.length;
+
+  for (const relativePath of untrackedRaw.split("\0").filter(Boolean)) {
+    if (remaining <= 0) break;
+    const absolutePath = resolve(snapshot.path, relativePath);
+    if (!absolutePath.startsWith(`${snapshot.path}${sep}`)) continue;
+    try {
+      if (lstatSync(absolutePath).isSymbolicLink()) {
+        sections.push(`\n+++ b/${relativePath}\n[enlace simbólico omitido]`);
+        continue;
+      }
+      const content = readFileSync(absolutePath);
+      const header = `\n--- /dev/null\n+++ b/${relativePath}\n@@ archivo nuevo @@\n`;
+      const body = content.includes(0)
+        ? "[archivo binario omitido]"
+        : content.toString("utf8", 0, Math.min(content.length, 16_000));
+      const suffix = content.length > 16_000 ? "\n[contenido truncado]" : "";
+      const section = `${header}${body}${suffix}`.slice(0, remaining);
+      sections.push(section);
+      remaining -= section.length;
+    } catch {
+      sections.push(`\n+++ b/${relativePath}\n[contenido no legible]`);
+    }
+  }
+  const diff = sections.filter(Boolean).join("\n").slice(0, 60_000);
+  if (!diff.trim()) throw new Error("No hay un diff de texto disponible para describir.");
+  return diff;
+}
+
+export async function generateCommitDescription(cwd: string) {
+  if (!llmState.apiKey.trim()) throw new Error("Configura un proveedor LLM para generar la descripción. También puedes escribirla manualmente.");
+  const snapshot = await getSnapshot(cwd);
+  if (!snapshot.changes.length) throw new Error("No hay cambios locales que describir.");
+  const diff = await getWorkingTreeDiff(snapshot);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  let response: Response;
+  try {
+    response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${llmState.apiKey}` },
+      body: JSON.stringify({
+        model: llmState.model || MODEL_FALLBACK,
+        instructions: "Genera un único mensaje de commit conciso en español, máximo 120 caracteres. Describe la intención del cambio usando el diff real. Devuelve solo el mensaje, sin comillas, markdown, prefijos ni explicación.",
+        input: `Rama actual: ${snapshot.currentBranch}\n\nDiff del árbol de trabajo:\n${diff}`,
+        max_output_tokens: 80,
+        store: false
+      }),
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (!response.ok) throw new Error(`OpenAI respondió ${response.status}: ${(await response.text()).slice(0, 300)}`);
+  const description = cleanCommitDescription(extractOutputText(await response.json()));
+  const current = await getSnapshot(snapshot.path);
+  if (current.stateId !== snapshot.stateId) throw new Error("Los cambios variaron durante la generación. Inténtalo de nuevo.");
+  return { description, stateId: snapshot.stateId };
+}
+
 function parseJsonObject(text: string): Record<string, unknown> | undefined {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
@@ -351,6 +427,7 @@ function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot) {
   if (["checkout", "create_branch", "delete_branch", "merge"].includes(plan.operation) && !plan.args.name) throw new Error("Falta el nombre de la rama.");
   if (plan.operation === "rebase" && !plan.args.onto) throw new Error("Falta la rama base.");
   if (plan.operation === "commit" && (!plan.args.message?.trim() || plan.args.message.length > 120)) throw new Error("El mensaje de commit no es válido.");
+  if (plan.operation === "commit" && !snapshot.changes.length) throw new Error("No hay cambios locales para confirmar.");
   if (plan.operation === "checkout" && !snapshot.branches.some((branch) => branch.name === plan.args.name)) throw new Error(`La rama ${plan.args.name} no existe localmente.`);
   if (plan.operation === "create_branch" && snapshot.branches.some((branch) => branch.name === plan.args.name)) throw new Error(`La rama ${plan.args.name} ya existe.`);
   if (plan.operation === "delete_branch" && plan.args.name === snapshot.currentBranch) throw new Error("No puedes borrar la rama activa.");

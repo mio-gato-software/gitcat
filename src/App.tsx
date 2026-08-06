@@ -10,7 +10,7 @@ import type { ActionPlan, Branch, Commit, LlmConfig, Operation, RepoSnapshot } f
 type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string };
 type ActivityItem = { id: number; label: string; detail: string; tone: "success" | "neutral" | "warning" };
 type Toast = { message: string; tone: "success" | "error" };
-type InputDialog = { operation: "create_branch" | "commit" | "merge"; title: string; label: string; value: string };
+type InputDialog = { operation: "create_branch" | "merge"; title: string; label: string; value: string };
 
 const palette = ["#62d6c8", "#c59bff", "#f0b26e", "#7da7ff", "#ef7c95"];
 
@@ -45,6 +45,9 @@ export default function App() {
   const [selectedCommit, setSelectedCommit] = useState<Commit>();
   const [assistantResult, setAssistantResult] = useState<string>();
   const [inputDialog, setInputDialog] = useState<InputDialog>();
+  const [commitFormOpen, setCommitFormOpen] = useState(false);
+  const [commitMessage, setCommitMessage] = useState("");
+  const [generatingDescription, setGeneratingDescription] = useState(false);
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const requestSequence = useRef(0);
   const activitySequence = useRef(0);
@@ -93,6 +96,9 @@ export default function App() {
     setBranchFilter("");
     setCommitFilter("");
     setView("history");
+    setCommitFormOpen(false);
+    setCommitMessage("");
+    setGeneratingDescription(false);
     setPlanning(false);
   }, [activeId]);
 
@@ -206,6 +212,10 @@ export default function App() {
       } else {
         addActivity({ label: "Acción ejecutada", detail: plan.command, tone: "success" });
         setToast({ message: result.output || `${plan.summary} completado.`, tone: "success" });
+        if (plan.operation === "commit") {
+          setCommitMessage("");
+          setCommitFormOpen(false);
+        }
       }
     } catch (error) {
       setPendingPlan(null);
@@ -216,12 +226,40 @@ export default function App() {
 
   const submitInputDialog = () => {
     if (!inputDialog?.value.trim()) return;
-    const args: Record<string, string> = inputDialog.operation === "commit" ? { message: inputDialog.value.trim() }
-      : inputDialog.operation === "merge" ? { name: inputDialog.value.trim() }
-      : { name: inputDialog.value.trim() };
+    const args: Record<string, string> = { name: inputDialog.value.trim() };
     const operation = inputDialog.operation;
     setInputDialog(undefined);
     void prepare(operation, args);
+  };
+
+  const openCommitForm = () => {
+    if (!snapshot?.changes.length) return;
+    setView("changes");
+    setCommitFormOpen(true);
+  };
+
+  const generateDescription = async () => {
+    if (!snapshot?.changes.length || !config.configured || generatingDescription) return;
+    const repoPath = snapshot.path;
+    const stateId = snapshot.stateId;
+    const sequence = requestSequence.current;
+    setGeneratingDescription(true);
+    try {
+      const result = await window.branchline.generateCommitDescription(repoPath);
+      if (requestSequence.current === sequence && result.stateId === stateId) {
+        setCommitMessage(result.description);
+        setCommitFormOpen(true);
+      }
+    } catch (error) {
+      setToast({ message: error instanceof Error ? error.message : "No se pudo generar la descripción.", tone: "error" });
+      await refreshProject(repoPath, false);
+    } finally { setGeneratingDescription(false); }
+  };
+
+  const prepareCommit = () => {
+    const message = commitMessage.trim();
+    if (!snapshot?.changes.length || !message || message.length > 120) return;
+    void prepare("commit", { message });
   };
 
   const showRecentAuthors = () => {
@@ -273,9 +311,9 @@ export default function App() {
           <section className="graph-area">
             <div className="graph-toolbar"><div className="view-tabs"><button className={`view-tab ${view === "history" ? "active" : ""}`} onClick={() => setView("history")}>Historial</button><button className={`view-tab ${view === "changes" ? "active" : ""}`} onClick={() => setView("changes")}>Cambios <span className="count-badge">{snapshot.changes.length}</span></button></div>{view === "history" && <div className="graph-tools"><div className="search-field commit-search"><Search size={14} /><input aria-label="Buscar commits" value={commitFilter} onChange={(event) => setCommitFilter(event.target.value)} placeholder="Buscar commits" /></div></div>}</div>
             {snapshot.isRebasing && <div className="rebase-banner"><AlertTriangle size={16} /><div><strong>Rebase en curso</strong><span>Resuelve los conflictos y elige cómo continuar.</span></div><button className="outline-button small" onClick={() => void prepare("continue_rebase")}>Continuar</button><button className="danger-link" onClick={() => void prepare("abort_rebase")}>Abortar</button></div>}
-            <div className="current-branch-card"><div className="branch-dot" style={{ background: branchColor(0) }} /><div><span className="eyebrow">RAMA ACTUAL</span><div className="current-branch-name">{snapshot.currentBranch}<span className="branch-status">{snapshot.isDirty ? "Cambios locales" : "Limpia"}</span></div></div><div className="branch-stats"><span><ArrowDownToLine size={13} />{snapshot.branches.find((branch) => branch.isCurrent)?.behind ?? 0} detrás</span><span><ArrowUpFromLine size={13} />{snapshot.branches.find((branch) => branch.isCurrent)?.ahead ?? 0} adelante</span></div><button className="outline-button small" onClick={() => setInputDialog({ operation: "commit", title: "Crear commit", label: "Mensaje del commit", value: "" })} disabled={!snapshot.isDirty || planning}><GitCommitHorizontal size={14} /> Commit</button></div>
+            <div className="current-branch-card"><div className="branch-dot" style={{ background: branchColor(0) }} /><div><span className="eyebrow">RAMA ACTUAL</span><div className="current-branch-name">{snapshot.currentBranch}<span className="branch-status">{snapshot.isDirty ? "Cambios locales" : "Limpia"}</span></div></div><div className="branch-stats"><span><ArrowDownToLine size={13} />{snapshot.branches.find((branch) => branch.isCurrent)?.behind ?? 0} detrás</span><span><ArrowUpFromLine size={13} />{snapshot.branches.find((branch) => branch.isCurrent)?.ahead ?? 0} adelante</span></div><button className="outline-button small" onClick={openCommitForm} disabled={!snapshot.isDirty || planning}><GitCommitHorizontal size={14} /> Commit</button></div>
             {view === "history" ? <div className="graph-scroll"><div className="graph-header"><span>HISTORIAL DE COMMITS</span><span>{filteredCommits.length} commits visibles</span></div>{filteredCommits.length ? filteredCommits.map((commit, index) => <CommitRow commit={commit} index={index} key={commit.hash} onSelect={() => setSelectedCommit(commit)} />) : <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>No hay commits que mostrar</strong><span>El repositorio todavía no tiene historial o el filtro no coincide.</span></div>}</div>
-              : <ChangesView snapshot={snapshot} />}
+              : <ChangesView snapshot={snapshot} configured={config.configured} formOpen={commitFormOpen} message={commitMessage} generating={generatingDescription} busy={planning} onOpenForm={() => setCommitFormOpen(true)} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit} />}
           </section>
 
           <aside className="inspector"><div className="inspector-header"><div><div className="eyebrow">ASISTENTE DE RAMAS</div><h2>¿Qué quieres saber o hacer?</h2></div><div className="assistant-icon"><Bot size={18} /></div></div><p className="assistant-copy">Pregunta sobre el repositorio o describe una acción de Git. Las acciones se muestran como un plan verificable antes de ejecutarse.</p><div className="suggestion-list"><button onClick={showRecentAuthors}><UserRound size={15} /><span>¿Quién hizo cambios recientemente?</span></button><button onClick={() => setInputDialog({ operation: "merge", title: "Fusionar rama", label: "Rama que quieres fusionar", value: "" })}><GitMerge size={15} /><span>Fusionar otra rama</span></button><button onClick={() => { setView("changes"); setAssistantResult(`${snapshot.changes.length} cambio${snapshot.changes.length === 1 ? "" : "s"} local${snapshot.changes.length === 1 ? "" : "es"}.`); }}><FileDiff size={15} /><span>Ver cambios del repositorio</span></button></div>{assistantResult && <div className="assistant-result"><Info size={15} /><span>{assistantResult}</span><button onClick={() => setAssistantResult(undefined)} aria-label="Cerrar resultado"><X size={13} /></button></div>}<div className="chat-compose"><textarea aria-label="Solicitud para el asistente" value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder="Ej. ¿quién trabajó en esta rama la última vez?" rows={3} /><button className="send-button" aria-label="Preparar solicitud" onClick={() => void propose(request)} disabled={planning || !request.trim()}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div>{pendingPlan && pendingPlan.repoPath === snapshot.path && <PlanCard plan={pendingPlan} onApply={applyPlan} onDismiss={() => setPendingPlan(null)} busy={planning} />}</aside>
@@ -303,8 +341,19 @@ function CommitRow({ commit, index, onSelect }: { commit: Commit; index: number;
   return <div className="commit-row"><div className="graph-track"><span className="track-line" /><span className="commit-node" style={{ borderColor: branchColor(index), boxShadow: `0 0 0 4px ${branchColor(index)}18` }} /></div><div className="commit-content"><div className="commit-main"><div className="commit-subject">{commit.subject || "Commit sin mensaje"}</div><div className="commit-meta"><span className="hash-chip">{commit.shortHash}</span><span>{commit.author}</span><span className="meta-divider">·</span><span>{formatDate(commit.date)}</span></div></div><div className="commit-refs">{commit.refs.slice(0, 3).map((ref) => <span className="ref-tag" key={ref}><GitBranch size={11} />{ref.replace("HEAD -> ", "")}</span>)}</div><button className="commit-more" onClick={onSelect} aria-label={`Ver detalles del commit ${commit.shortHash}`}><Info size={15} /></button></div></div>;
 }
 
-function ChangesView({ snapshot }: { snapshot: RepoSnapshot }) {
-  return <div className="changes-view"><div className="changes-heading"><div><span className="eyebrow">ÁRBOL DE TRABAJO</span><h3>{snapshot.changes.length ? `${snapshot.changes.length} cambios locales` : "Todo está limpio"}</h3></div><FileDiff size={19} /></div>{snapshot.changes.length ? <div className="change-list">{snapshot.changes.map((change, index) => <div className="change-row" key={`${change.path}-${index}`}><span className={`change-code code-${change.code[0]?.toLowerCase()}`}>{change.code}</span><span title={change.path}>{change.path}</span></div>)}</div> : <div className="graph-empty"><Check size={26} /><strong>No hay cambios sin confirmar</strong><span>El árbol de trabajo coincide con el último commit.</span></div>}</div>;
+function changeStatus(code: string) {
+  if (code.includes("?")) return "Sin seguimiento";
+  if (code.includes("R")) return "Renombrado";
+  if (code.includes("C")) return "Copiado";
+  if (code.includes("A")) return "Añadido";
+  if (code.includes("D")) return "Eliminado";
+  if (code.includes("U")) return "Conflicto";
+  return "Modificado";
+}
+
+function ChangesView({ snapshot, configured, formOpen, message, generating, busy, onOpenForm, onMessageChange, onGenerate, onPrepare }: { snapshot: RepoSnapshot; configured: boolean; formOpen: boolean; message: string; generating: boolean; busy: boolean; onOpenForm: () => void; onMessageChange: (message: string) => void; onGenerate: () => void; onPrepare: () => void }) {
+  const hasChanges = snapshot.changes.length > 0;
+  return <div className="changes-view"><div className="changes-heading"><div><span className="eyebrow">ÁRBOL DE TRABAJO · {snapshot.currentBranch}</span><h3>{hasChanges ? `${snapshot.changes.length} cambios locales` : "Todo está limpio"}</h3></div><div className="changes-heading-actions"><button className="outline-button small" onClick={onOpenForm} disabled={!hasChanges || busy}><GitCommitHorizontal size={14} /> Commit</button><FileDiff size={19} /></div></div>{hasChanges ? <><div className="change-list">{snapshot.changes.map((change, index) => <div className="change-row" key={`${change.path}-${index}`}><span className={`change-code code-${change.code[0]?.toLowerCase()}`}>{change.code}</span><span className="change-status">{changeStatus(change.code)}</span><span className="change-path" title={change.path}>{change.path}</span></div>)}</div>{formOpen && <div className="commit-form"><div className="commit-form-heading"><div><span className="eyebrow">NUEVO COMMIT</span><h3>Describe estos cambios</h3></div><button className="outline-button" onClick={onGenerate} disabled={!configured || generating || busy}>{generating ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />} Generar descripción</button></div><label htmlFor="commit-description">Mensaje del commit</label><textarea id="commit-description" value={message} onChange={(event) => onMessageChange(event.target.value)} maxLength={120} rows={3} placeholder="Escribe una descripción concisa de los cambios…" /><div className="commit-form-meta"><span>{configured ? "La generación analiza el diff local de esta rama." : "Configura un LLM para generar una descripción. Puedes escribirla manualmente."}</span><span>{message.length}/120</span></div><div className="commit-form-actions"><button className="primary-button" onClick={onPrepare} disabled={!message.trim() || busy}><ShieldCheck size={14} /> Preparar commit</button></div></div>}</> : <div className="graph-empty"><Check size={26} /><strong>No hay cambios sin confirmar</strong><span>El árbol de trabajo coincide con el último commit.</span></div>}</div>;
 }
 
 function PlanCard({ plan, onApply, onDismiss, busy }: { plan: ActionPlan; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean }) {
@@ -331,7 +380,7 @@ function SettingsModal({ config, onClose, onSaved }: { config: LlmConfig; onClos
 function InputModal({ dialog, branches, onChange, onClose, onSubmit }: { dialog: InputDialog; branches: Branch[]; onChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
   useEscape(onClose);
   const listId = dialog.operation === "merge" ? "branch-options" : undefined;
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal" role="dialog" aria-modal="true" aria-labelledby="input-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><div className="modal-heading"><div><div className="eyebrow">OPERACIÓN GIT</div><h2 id="input-modal-title">{dialog.title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label="Cerrar"><X size={17} /></button></div><label>{dialog.label}<input autoFocus value={dialog.value} onChange={(event) => onChange(event.target.value)} list={listId} maxLength={dialog.operation === "commit" ? 120 : 200} /></label>{listId && <datalist id={listId}>{branches.filter((branch) => !branch.isCurrent).map((branch) => <option value={branch.name} key={branch.name} />)}</datalist>}<div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>Cancelar</button><button className="primary-button" disabled={!dialog.value.trim()}>{dialog.operation === "commit" ? <GitCommitHorizontal size={14} /> : <GitBranch size={14} />} Preparar</button></div></form></div>;
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal" role="dialog" aria-modal="true" aria-labelledby="input-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><div className="modal-heading"><div><div className="eyebrow">OPERACIÓN GIT</div><h2 id="input-modal-title">{dialog.title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label="Cerrar"><X size={17} /></button></div><label>{dialog.label}<input autoFocus value={dialog.value} onChange={(event) => onChange(event.target.value)} list={listId} maxLength={200} /></label>{listId && <datalist id={listId}>{branches.filter((branch) => !branch.isCurrent).map((branch) => <option value={branch.name} key={branch.name} />)}</datalist>}<div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>Cancelar</button><button className="primary-button" disabled={!dialog.value.trim()}><GitBranch size={14} /> Preparar</button></div></form></div>;
 }
 
 function CommitModal({ commit, onClose }: { commit: Commit; onClose: () => void }) {

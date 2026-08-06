@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { executePlan, getLlmConfig, getSnapshot, loadLlmConfig, planAction, prepareOperation, saveLlmConfig } from "./git-service.js";
+import { executePlan, generateCommitDescription, getLlmConfig, getSnapshot, loadLlmConfig, planAction, prepareOperation, saveLlmConfig } from "./git-service.js";
 import type { ActionPlan, LlmConfigInput, Operation } from "../shared/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -141,6 +141,10 @@ app.whenReady().then(async () => {
   ipcMain.handle("action:prepare", async (event, cwd: string, operation: Operation, args?: Record<string, string>) => {
     assertTrustedSender(event);
     return rememberPlan(await prepareOperation(assertOpenedRepository(cwd), operation, args));
+  });
+  ipcMain.handle("commit:generate-description", async (event, cwd: string) => {
+    assertTrustedSender(event);
+    return generateCommitDescription(assertOpenedRepository(cwd));
   });
   ipcMain.handle("action:execute", async (event, cwd: string, planId: string) => {
     assertTrustedSender(event);
