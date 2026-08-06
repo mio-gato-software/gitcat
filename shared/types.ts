@@ -49,6 +49,7 @@ export type Operation =
   | "abort_rebase"
   | "continue_rebase"
   | "commit"
+  | "branch_last_author"
   | "none";
 
 export type ActionPlan = {
@@ -62,6 +63,7 @@ export type ActionPlan = {
   command: string;
   summary: string;
   rationale: string;
+  answer?: string;
   risk: "low" | "medium" | "high";
   requiresConfirmation: boolean;
   source: "llm" | "local-fallback" | "guardrail";

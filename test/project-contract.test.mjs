@@ -63,3 +63,13 @@ test("los controles principales tienen implementaciones concretas", async () => 
   assert.match(app, /showRecentAuthors/);
   assert.doesNotMatch(app, /MoreHorizontal/);
 });
+
+test("la relevancia se clasifica con el LLM y admite consultas informativas", async () => {
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.doesNotMatch(service, /function isGitRequest/);
+  assert.match(service, /Decide por significado, no por palabras clave/);
+  assert.match(service, /branch_last_author/);
+  assert.match(service, /última persona en trabajar/);
+  assert.match(app, /if \(plan\.answer\)/);
+});

@@ -12,7 +12,7 @@ const MODEL_FALLBACK = "luna";
 const branchNamePattern = /^[A-Za-z0-9._/@-]+$/;
 const allowedOperations = new Set<Operation>([
   "status", "checkout", "create_branch", "delete_branch", "fetch", "pull", "push",
-  "merge", "rebase", "abort_rebase", "continue_rebase", "commit", "none"
+  "merge", "rebase", "abort_rebase", "continue_rebase", "commit", "branch_last_author", "none"
 ]);
 
 let llmState: LlmConfigInput = { apiKey: "", model: MODEL_FALLBACK };
@@ -144,16 +144,26 @@ function refused(reason: string, source: ActionPlan["source"] = "guardrail"): Pl
   };
 }
 
+function formatAnswerDate(date: string) {
+  const value = new Date(date);
+  if (Number.isNaN(value.valueOf())) return date;
+  return new Intl.DateTimeFormat("es", { dateStyle: "medium", timeStyle: "short" }).format(value);
+}
+
 function localPlan(request: string, snapshot: RepoSnapshot): PlanDraft {
   const text = request.trim();
   const lower = text.toLocaleLowerCase("es");
-  if (!isGitRequest(lower)) return refused("Solo puedo ayudarte con ramas, historial, cambios y operaciones Git.");
 
   const make = (operation: Operation, args: Record<string, string>, summary: string, rationale: string, risk: ActionPlan["risk"] = "low"): PlanDraft => ({
     allowed: true, operation, args, command: buildCommand(operation, args), summary, rationale, risk,
     requiresConfirmation: ["rebase", "merge", "delete_branch", "push", "pull", "commit", "create_branch"].includes(operation),
     source: "local-fallback"
   });
+  const makeInfo = (operation: Operation) => ({ ...operationDraft(operation, {}, snapshot), source: "local-fallback" as const });
+
+  if (/(?:qui[eé]n|persona|autor).*(?:[uú]ltim|reciente|vez|trabaj)|(?:[uú]ltim|reciente).*(?:trabaj|commit|cambio|autor)/i.test(lower)) {
+    return makeInfo("branch_last_author");
+  }
 
   if (/abortar|cancelar.*rebase|rebase.*cancelar/i.test(lower)) return make("abort_rebase", {}, "Abortar el rebase en curso", "Restaurar el estado previo al rebase.", "high");
   if (/continuar.*rebase|resolver.*conflicto/i.test(lower)) return make("continue_rebase", {}, "Continuar el rebase", "Git continuará después de resolver los conflictos.", "high");
@@ -223,7 +233,7 @@ function parseJsonObject(text: string): Record<string, unknown> | undefined {
   }
 }
 
-function planFromModel(value: Record<string, unknown>, source: "llm"): PlanDraft {
+function planFromModel(value: Record<string, unknown>, source: "llm", snapshot: RepoSnapshot): PlanDraft {
   const operation = typeof value.operation === "string" && allowedOperations.has(value.operation as Operation) ? value.operation as Operation : "none";
   const rawArgs = value.args && typeof value.args === "object" ? value.args as Record<string, unknown> : {};
   const args = Object.fromEntries(Object.entries(rawArgs).filter(([, item]) => typeof item === "string")) as Record<string, string>;
@@ -231,13 +241,14 @@ function planFromModel(value: Record<string, unknown>, source: "llm"): PlanDraft
   if (branchArg && !isBranchNameSafe(branchArg)) return refused("El modelo propuso un nombre de rama no válido.", source);
   if (operation === "commit" && (!args.message || args.message.length > 120)) return refused("El mensaje de commit falta o es demasiado largo.", source);
   if (value.allowed !== true || operation === "none") return refused("Solo puedo ayudarte con ramas, historial, cambios y operaciones Git.", source);
-  return { ...operationDraft(operation, args), source };
+  return { ...operationDraft(operation, args, snapshot), source };
 }
 
 async function llmPlan(request: string, snapshot: RepoSnapshot): Promise<PlanDraft> {
   const instructions = `Eres el planificador seguro de Branchline, una aplicación de escritorio para ramas Git.
-Solo atiendes operaciones relacionadas con Git, ramas, commits, cambios, historial, remotos, conflictos y rebase. Para cualquier otra pregunta debes rechazarla.
-No ejecutes nada y no inventes comandos. Responde SOLO un JSON válido con estas claves: allowed (boolean), operation (status|checkout|create_branch|delete_branch|fetch|pull|push|merge|rebase|abort_rebase|continue_rebase|commit|none), args (objeto), summary, rationale y risk (low|medium|high).
+Decide por significado, no por palabras clave, si la solicitud trata sobre Git, ramas, commits, cambios, historial, autoría, remotos, conflictos o rebase. Acepta preguntas naturales indirectas sobre esos temas y rechaza únicamente solicitudes claramente ajenas.
+No ejecutes nada y no inventes comandos. Responde SOLO un JSON válido con estas claves: allowed (boolean), operation (status|checkout|create_branch|delete_branch|fetch|pull|push|merge|rebase|abort_rebase|continue_rebase|commit|branch_last_author|none), args (objeto), summary, rationale y risk (low|medium|high).
+Usa branch_last_author para preguntas sobre quién trabajó, modificó o hizo el commit más reciente de la rama actual. Es una consulta informativa, no una operación modificadora.
 No propongas comandos de shell libres. Para nombres de rama usa args.name o args.onto; para commit usa args.message.
 Estado actual: rama=${snapshot.currentBranch}, ramas=${snapshot.branches.map((branch) => branch.name).join(", ") || "ninguna"}, cambios=${snapshot.changes.length}, rebaseEnCurso=${snapshot.isRebasing}.`;
   const controller = new AbortController();
@@ -257,21 +268,16 @@ Estado actual: rama=${snapshot.currentBranch}, ramas=${snapshot.branches.map((br
   const body = await response.json();
   const text = extractOutputText(body);
   const parsed = parseJsonObject(text);
-  return parsed ? planFromModel(parsed, "llm") : refused("El proveedor no devolvió un plan JSON válido.", "llm");
+  return parsed ? planFromModel(parsed, "llm", snapshot) : refused("El proveedor no devolvió un plan JSON válido.", "llm");
 }
 
 function bindPlan(snapshot: RepoSnapshot, draft: PlanDraft): ActionPlan {
   return { ...draft, id: randomUUID(), repoPath: snapshot.path, head: snapshot.head, stateId: snapshot.stateId };
 }
 
-function isGitRequest(request: string) {
-  return /git|rama|branch|rebase|merge|commit|cambio|estado|historial|remoto|pull|push|fetch|checkout|conflicto|autor|staged|diff|sincron/i.test(request);
-}
-
 export async function planAction(cwd: string, request: string): Promise<ActionPlan> {
   const snapshot = await getSnapshot(cwd);
   if (!request.trim()) return bindPlan(snapshot, refused("Escribe una acción relacionada con la rama o el repositorio."));
-  if (!isGitRequest(request)) return bindPlan(snapshot, refused("Solo puedo ayudarte con ramas, historial, cambios y operaciones Git."));
   if (!llmState.apiKey.trim()) return bindPlan(snapshot, localPlan(request, snapshot));
   try {
     return bindPlan(snapshot, await llmPlan(request, snapshot));
@@ -280,7 +286,24 @@ export async function planAction(cwd: string, request: string): Promise<ActionPl
   }
 }
 
-function operationDraft(operation: Operation, args: Record<string, string>): PlanDraft {
+function operationDraft(operation: Operation, args: Record<string, string>, snapshot?: RepoSnapshot): PlanDraft {
+  if (operation === "branch_last_author") {
+    const commit = snapshot?.branches.find((branch) => branch.isCurrent)?.lastCommit;
+    return {
+      allowed: true,
+      operation,
+      args: {},
+      command: "—",
+      summary: "Última persona en trabajar en esta rama",
+      rationale: "Consulta informativa basada en el commit más reciente de la rama actual.",
+      answer: commit
+        ? `${commit.author} fue la última persona en trabajar en ${snapshot?.currentBranch}. Su commit más reciente fue “${commit.subject || "Sin mensaje"}” el ${formatAnswerDate(commit.date)}.`
+        : `La rama ${snapshot?.currentBranch ?? "actual"} todavía no tiene un commit local que permita identificar a su último autor.`,
+      risk: "low",
+      requiresConfirmation: false,
+      source: "local-fallback"
+    };
+  }
   const details: Partial<Record<Operation, [string, string, ActionPlan["risk"]]>> = {
     status: ["Actualizar la vista del repositorio", "Lee el estado actual sin modificar archivos.", "low"],
     checkout: [`Cambiar a ${args.name}`, "Cambia la rama activa conservando los cambios locales compatibles.", "medium"],
@@ -312,13 +335,14 @@ function operationDraft(operation: Operation, args: Record<string, string>): Pla
 
 export async function prepareOperation(cwd: string, operation: Operation, args: Record<string, string> = {}) {
   const snapshot = await getSnapshot(cwd);
-  const draft = operationDraft(operation, args);
+  const draft = operationDraft(operation, args, snapshot);
   if (draft.allowed) validateExecution(bindPlan(snapshot, draft), snapshot);
   return bindPlan(snapshot, draft);
 }
 
 function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot) {
   if (!plan.allowed || plan.operation === "none" || !allowedOperations.has(plan.operation)) throw new Error("La acción no está permitida.");
+  if (plan.answer || plan.operation === "branch_last_author") throw new Error("Las consultas informativas no se ejecutan como operaciones Git.");
   const branchArg = plan.args.name || plan.args.onto;
   if (branchArg && !isBranchNameSafe(branchArg)) throw new Error("Nombre de rama no válido.");
   if (plan.repoPath !== snapshot.path) throw new Error("El plan pertenece a otro repositorio.");

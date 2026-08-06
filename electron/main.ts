@@ -24,7 +24,7 @@ function assertOpenedRepository(cwd: unknown) {
 }
 
 function rememberPlan(plan: ActionPlan) {
-  if (plan.allowed) {
+  if (plan.allowed && !plan.answer) {
     if (issuedPlans.size >= 100) issuedPlans.delete(issuedPlans.keys().next().value ?? "");
     issuedPlans.set(plan.id, plan);
   }
