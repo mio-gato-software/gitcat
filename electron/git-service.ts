@@ -176,6 +176,39 @@ function parseTrack(track: string) {
   return { ahead, behind };
 }
 
+const conventionalDefaults = ["main", "master", "develop", "trunk"];
+
+/**
+ * The branch integration is measured against. A remote's own HEAD is the repository's own answer, so
+ * it is asked first; only when no remote publishes one does a conventional name decide.
+ */
+async function resolveDefaultBranch(repoRoot: string, remotes: string[], localNames: Set<string>) {
+  for (const remote of remotes) {
+    const head = await optionalGit(repoRoot, ["symbolic-ref", "--short", `refs/remotes/${remote}/HEAD`]);
+    const name = head.startsWith(`${remote}/`) ? head.slice(remote.length + 1) : "";
+    if (name && name !== "HEAD") return name;
+  }
+  return conventionalDefaults.find((name) => localNames.has(name));
+}
+
+/**
+ * Fills in which reference branches already contain each branch's tip. One walk per target answers it
+ * for every branch at once, which is why integration is reported against the default and current
+ * branches rather than against every possible pair.
+ */
+async function markIntegration(repoRoot: string, branches: Branch[], targets: (string | undefined)[]) {
+  const wanted = [...new Set(targets.filter((name): name is string => Boolean(name) && name !== "HEAD"))];
+  for (const target of wanted) {
+    const raw = await optionalGit(repoRoot, ["for-each-ref", "--format=%(refname:short)", "--merged", target, "refs/heads", "refs/remotes"]);
+    const contained = new Set(raw.split("\n").filter(Boolean));
+    for (const branch of branches) {
+      // A branch trivially contains itself; saying so would only be noise.
+      if (branch.name === target) continue;
+      if (contained.has(branch.name) || (branch.remoteRef && contained.has(branch.remoteRef))) branch.mergedInto.push(target);
+    }
+  }
+}
+
 /**
  * Remote-tracking branches keyed by the local branch name they correspond to, so the interface can
  * say whether a branch lives here, on a remote, or on both. The remote prefix is stripped using the
@@ -237,6 +270,7 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
       upstream: upstream || undefined,
       remoteRef,
       presence: remoteRef ? "both" as const : "local" as const,
+      mergedInto: [] as string[],
       ...parseTrack(track || ""),
       isCurrent: name === currentBranch,
       lastCommit: shortHash ? (commitsByHash.get(shortHash) ?? {
@@ -247,8 +281,10 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   const localNames = new Set(branches.map((branch) => branch.name));
   for (const [name, remote] of remoteRefs) {
     if (localNames.has(name)) continue;
-    branches.push({ name, remoteRef: remote.ref, presence: "remote", ahead: 0, behind: 0, isCurrent: false, lastCommit: remote.lastCommit });
+    branches.push({ name, remoteRef: remote.ref, presence: "remote", mergedInto: [], ahead: 0, behind: 0, isCurrent: false, lastCommit: remote.lastCommit });
   }
+  const defaultBranch = await resolveDefaultBranch(repoRoot, remotes, localNames);
+  await markIntegration(repoRoot, branches, [defaultBranch, currentBranch]);
   const gitDir = await optionalGit(repoRoot, ["rev-parse", "--git-dir"]);
   const rebaseMerge = await optionalGit(repoRoot, ["rev-parse", "--git-path", "rebase-merge"]);
   const rebaseApply = await optionalGit(repoRoot, ["rev-parse", "--git-path", "rebase-apply"]);
@@ -260,6 +296,7 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     head,
     stateId: createHash("sha256").update(`${head}\0${statusRaw}`).digest("hex"),
     currentBranch,
+    defaultBranch,
     isRebasing,
     isDirty: Boolean(statusRaw.trim()),
     changes: parseStatus(statusRaw),
@@ -670,6 +707,7 @@ function plannerState(snapshot: RepoSnapshot) {
     openRepositoryPath: snapshot.path,
     openRepositoryName: snapshot.name,
     currentBranch: snapshot.currentBranch,
+    defaultBranch: snapshot.defaultBranch ?? null,
     detachedHead: snapshot.currentBranch === "HEAD",
     isRebasing: snapshot.isRebasing,
     hasLocalChanges: snapshot.isDirty,
@@ -680,7 +718,10 @@ function plannerState(snapshot: RepoSnapshot) {
       isCurrent: branch.isCurrent,
       // "remote": it exists only on a remote, so switching to it creates the local branch.
       presence: branch.presence,
+      // Verified containment: these branches already hold this one's work. [] means neither does.
+      mergedInto: branch.mergedInto,
       upstream: branch.upstream ?? null,
+      // Against the upstream only. These say nothing about integration into another branch.
       ahead: branch.ahead,
       behind: branch.behind,
       lastCommit: branch.lastCommit

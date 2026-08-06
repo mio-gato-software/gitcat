@@ -181,6 +181,14 @@ instead of asking again, and only revisit one if the user says otherwise or a va
 it no longer holds. The application re-verifies each of them before acting, so trust them as
 starting points, not as proof.
 
+Each branch carries "mergedInto": the reference branches whose history already contains that branch's
+tip. It is computed by Git, so it is proof, not a guess: a name listed there means the work is
+integrated in that branch and deleting the branch loses nothing, and an empty list means it is
+integrated in neither the default nor the current branch. Answer questions about what is integrated or
+safe to delete from this field, and do not treat two branches pointing at different commits as
+unintegrated: an older tip that the default branch already contains is integrated. Never fall back to
+comparing "ahead" and "behind" for this, as they only compare a branch with its own upstream.
+
 Only the repository state below is true. Do not state facts that are not in it.
 Repository state (JSON):
 ${JSON.stringify(repositoryState, null, 2)}`;

@@ -98,6 +98,23 @@ test("un commit pedido al asistente deduce su mensaje del diff, nunca lo pregunt
   assert.match(service, /if \("blocker" in steps\) return asking\(steps\.blocker, plan\.summary\)/);
 });
 
+test("la integración de una rama es un hecho de Git en el estado, no algo que el modelo deduzca", async () => {
+  const types = await readFile(join(root, "shared/types.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.match(types, /mergedInto: string\[\]/);
+  assert.match(service, /async function markIntegration/);
+  assert.match(service, /"--merged", target, "refs\/heads", "refs\/remotes"/);
+  assert.match(service, /async function resolveDefaultBranch/);
+  // El HEAD que publica el remoto manda sobre cualquier nombre convencional.
+  assert.match(service, /symbolic-ref", "--short", `refs\/remotes\/\$\{remote\}\/HEAD/);
+  assert.match(service, /mergedInto: branch\.mergedInto/);
+  // El modelo tiene que saber que ahead\/behind no responden esta pregunta.
+  assert.match(planner, /Never fall back to\ncomparing "ahead" and "behind" for this/);
+  assert.match(app, /mergedInto\.length/);
+});
+
 test("las herramientas se localizan sin depender del PATH que hereda la app", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   assert.match(service, /function loginShellPath/);

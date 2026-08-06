@@ -7,6 +7,12 @@ export type Branch = {
   /** The remote-tracking ref this branch corresponds to, such as "origin/main". */
   remoteRef?: string;
   presence: BranchPresence;
+  /**
+   * Reference branches whose history already contains this branch's tip, so its work is integrated
+   * there and deleting it loses nothing. Empty means it is integrated into none of them. Note that
+   * ahead/behind compare against the upstream only, and say nothing about this.
+   */
+  mergedInto: string[];
   ahead: number;
   behind: number;
   isCurrent: boolean;
@@ -34,6 +40,8 @@ export type RepoSnapshot = {
   head: string;
   stateId: string;
   currentBranch: string;
+  /** The branch integration is measured against, resolved from the remote HEAD or a conventional name. */
+  defaultBranch?: string;
   isRebasing: boolean;
   isDirty: boolean;
   changes: FileChange[];

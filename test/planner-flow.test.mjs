@@ -277,6 +277,73 @@ test("un commit planificado sin cambios locales lo dice en vez de inventar un me
   assert.equal(requests.length, 1, "sin cambios no se gasta una llamada describiendo el diff");
 });
 
+test("el estado dice qué ramas ya están integradas, aunque apunten a otro commit", async () => {
+  const work = mkdtempSync(join(tmpdir(), "branchline-integradas-"));
+  const run = (...args) => execFileSync("git", args, { cwd: work, encoding: "utf8" });
+  run("init", "-b", "main");
+  run("config", "user.email", "prueba@example.com");
+  run("config", "user.name", "Prueba Uno");
+  writeFileSync(join(work, "README.md"), "hola\n");
+  run("add", "-A");
+  run("commit", "-m", "primer commit");
+
+  // Integrada de verdad: tiene su propio commit y main lo absorbió, así que su punta ya no es main.
+  run("switch", "-c", "integrada");
+  writeFileSync(join(work, "integrada.txt"), "trabajo\n");
+  run("add", "-A");
+  run("commit", "-m", "trabajo integrado");
+  run("switch", "main");
+  run("merge", "--no-ff", "--no-edit", "integrada");
+  // Pendiente: su commit no está en main.
+  run("switch", "-c", "pendiente");
+  writeFileSync(join(work, "pendiente.txt"), "sin integrar\n");
+  run("add", "-A");
+  run("commit", "-m", "trabajo sin integrar");
+  run("switch", "main");
+
+  const snapshot = await service.getSnapshot(work);
+  const byName = new Map(snapshot.branches.map((branch) => [branch.name, branch]));
+  assert.equal(snapshot.defaultBranch, "main", "sin remoto decide un nombre convencional");
+  assert.deepEqual(byName.get("integrada").mergedInto, ["main"]);
+  assert.deepEqual(byName.get("pendiente").mergedInto, []);
+  assert.deepEqual(byName.get("main").mergedInto, [], "una rama no se declara integrada en sí misma");
+  // El dato que faltaba: la punta de "integrada" no coincide con main y aun así está integrada.
+  assert.notEqual(run("rev-parse", "integrada").trim(), run("rev-parse", "main").trim());
+  assert.equal(byName.get("integrada").ahead, 0, "ahead/behind son contra el upstream y aquí no dicen nada");
+  assert.equal(byName.get("pendiente").ahead, 0);
+
+  // El modelo recibe la integración verificada, no solo ahead/behind.
+  reply(plan({ intent: "answer", summary: "Ramas", reply: "integrada ya está en main.", rationale: "Del estado." }));
+  await service.planAction(work, "¿qué ramas puedo borrar?");
+  const state = JSON.parse(requests[0].instructions.slice(requests[0].instructions.indexOf("{")));
+  assert.equal(state.defaultBranch, "main");
+  assert.deepEqual(state.branches.find((branch) => branch.name === "integrada").mergedInto, ["main"]);
+  assert.deepEqual(state.branches.find((branch) => branch.name === "pendiente").mergedInto, []);
+  assert.match(requests[0].instructions, /it is proof, not a guess/);
+});
+
+test("la rama por defecto sale del HEAD que publica el remoto, no de un nombre adivinado", async () => {
+  const origin = mkdtempSync(join(tmpdir(), "branchline-origen-def-"));
+  execFileSync("git", ["init", "--bare", "-b", "produccion"], { cwd: origin, encoding: "utf8" });
+  const work = mkdtempSync(join(tmpdir(), "branchline-def-"));
+  const run = (...args) => execFileSync("git", args, { cwd: work, encoding: "utf8" });
+  run("init", "-b", "produccion");
+  run("config", "user.email", "prueba@example.com");
+  run("config", "user.name", "Prueba Uno");
+  writeFileSync(join(work, "README.md"), "hola\n");
+  run("add", "-A");
+  run("commit", "-m", "primer commit");
+  run("remote", "add", "origin", origin);
+  run("push", "-u", "origin", "produccion");
+  run("remote", "set-head", "origin", "produccion");
+  // Existe una rama llamada "main" que no es la de referencia: el nombre convencional no debe ganar.
+  run("branch", "main");
+
+  const snapshot = await service.getSnapshot(work);
+  assert.equal(snapshot.defaultBranch, "produccion");
+  assert.equal(snapshot.branches.some((branch) => branch.name === "HEAD"), false);
+});
+
 test("una key que el proveedor rechaza no se guarda", async () => {
   queue.push({ ok: false, status: 401, raw: "invalid api key" });
   await assert.rejects(() => service.saveLlmConfig({ apiKey: "sk-malo", model: "otro-modelo" }), /No se guardó la configuración/);
