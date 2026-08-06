@@ -8,12 +8,14 @@ export type RepositoryFields = {
   owner?: string;
   host?: string;
   protocol?: GitProtocol;
+  /** Optional ~/.ssh/config alias when the default key for `host` is not the owner's. */
+  sshHost?: string;
   push?: boolean;
   remote?: string;
   replaceRemote?: boolean;
 };
 
-export type RepositoryFieldName = "localPath" | "repository" | "owner" | "host" | "protocol" | "remote";
+export type RepositoryFieldName = "localPath" | "repository" | "owner" | "host" | "protocol" | "remote" | "sshHost";
 
 /** Machine-readable defect, written for the planner model rather than for the user. */
 export type RepositoryIssue = { field: RepositoryFieldName; problem: string };
@@ -27,6 +29,7 @@ export const repositoryNamePattern = /^[A-Za-z0-9._-]{1,100}$/;
 export const repositoryOwnerPattern = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 export const repositoryHostPattern = /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
 export const remoteNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const sshHostPattern = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$/;
 
 const expectations: Record<RepositoryFieldName, string> = {
   localPath: "absolute path of the local Git repository to publish",
@@ -34,7 +37,8 @@ const expectations: Record<RepositoryFieldName, string> = {
   owner: "GitHub user or organization login",
   host: "DNS host name without scheme, port or path, for example github.com",
   protocol: "\"ssh\" or \"https\"",
-  remote: "Git remote name, for example origin"
+  remote: "Git remote name, for example origin",
+  sshHost: "SSH host name or ~/.ssh/config alias, without user, scheme or path"
 };
 
 function missing(field: RepositoryFieldName): RepositoryIssue {
@@ -62,6 +66,7 @@ export function validateRepositoryFields(input: RepositoryFields): RepositoryVal
     ...(input.owner?.trim() ? { owner: input.owner.trim() } : {}),
     ...(input.host?.trim() ? { host: normalizeHost(input.host) } : {}),
     ...(input.protocol ? { protocol: input.protocol.toLowerCase() as GitProtocol } : {}),
+    ...(input.sshHost?.trim() ? { sshHost: input.sshHost.trim() } : {}),
     push: input.push !== false,
     remote: input.remote?.trim() || "origin",
     replaceRemote: input.replaceRemote === true
@@ -86,6 +91,7 @@ export function validateRepositoryFields(input: RepositoryFields): RepositoryVal
   else if (!["ssh", "https"].includes(fields.protocol)) issues.push(invalid("protocol", fields.protocol));
 
   if (!remoteNamePattern.test(fields.remote ?? "")) issues.push(invalid("remote", fields.remote ?? ""));
+  if (fields.sshHost && !sshHostPattern.test(fields.sshHost)) issues.push(invalid("sshHost", fields.sshHost));
 
   return { fields, issues };
 }
@@ -94,7 +100,9 @@ export function buildRepositoryPlan(input: RepositoryFields): RepositoryPlan {
   const { fields, issues } = validateRepositoryFields(input);
   if (issues.length) throw new Error(issues.map((issue) => `${issue.field}: ${issue.problem}`).join(" "));
   const { host, owner, repository, localPath, protocol } = fields as Required<Pick<RepositoryFields, "host" | "owner" | "repository" | "localPath" | "protocol">>;
-  const remoteUrl = protocol === "ssh" ? `git@${host}:${owner}/${repository}.git` : `https://${host}/${owner}/${repository}.git`;
+  // An alias only reaches the remote URL for SSH; HTTPS always addresses the DNS host.
+  const sshHost = protocol === "ssh" ? (fields.sshHost || host) : "";
+  const remoteUrl = protocol === "ssh" ? `git@${sshHost}:${owner}/${repository}.git` : `https://${host}/${owner}/${repository}.git`;
   return {
     action: fields.push === false ? "create_repository" : "create_repository_and_push",
     host,
@@ -102,13 +110,14 @@ export function buildRepositoryPlan(input: RepositoryFields): RepositoryPlan {
     repository,
     localPath,
     protocol,
+    sshHost,
     remoteUrl,
     requiresConfirmation: true
   };
 }
 
 export function assertRepositoryPlan(value: RepositoryPlan) {
-  const expectedKeys = ["action", "host", "localPath", "owner", "protocol", "remoteUrl", "repository", "requiresConfirmation"].sort();
+  const expectedKeys = ["action", "host", "localPath", "owner", "protocol", "remoteUrl", "repository", "requiresConfirmation", "sshHost"].sort();
   if (!value || Object.keys(value).sort().join("\0") !== expectedKeys.join("\0")) throw new Error("El esquema del plan de repositorio no es válido.");
   const rebuilt = buildRepositoryPlan({
     host: value.host,
@@ -116,6 +125,7 @@ export function assertRepositoryPlan(value: RepositoryPlan) {
     repository: value.repository,
     localPath: value.localPath,
     protocol: value.protocol,
+    sshHost: value.sshHost,
     push: value.action === "create_repository_and_push"
   });
   if (JSON.stringify(rebuilt) !== JSON.stringify(value) || value.requiresConfirmation !== true) throw new Error("El contenido del plan de repositorio no es válido.");

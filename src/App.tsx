@@ -182,7 +182,7 @@ export default function App() {
 
   const addTurn = (path: string, question: string) => {
     const turn: ConversationTurn = { id: ++conversationSequence.current, question, status: "loading" };
-    setConversations((items) => ({ ...items, [path]: [...(items[path] ?? []), turn].slice(-40) }));
+    setConversations((items) => ({ ...items, [path]: [...(items[path] ?? []), turn] }));
     return turn.id;
   };
 
@@ -191,7 +191,7 @@ export default function App() {
       ? `${turn.plan.allowed ? "Plan" : "Rechazo"}: ${turn.plan.summary}. ${turn.plan.rationale}`
       : undefined);
     return response ? [{ role: "user" as const, content: turn.question }, { role: "assistant" as const, content: response }] : [];
-  }).slice(-20);
+  });
 
   const showPlan = async (question: string, loader: () => Promise<ActionPlan>, path = snapshot?.path) => {
     if (!path || planning) return;
@@ -205,7 +205,11 @@ export default function App() {
         return;
       }
       updateTurn(path, turnId, (turn) => ({ ...turn, plan, status: plan.allowed ? "ready" : "completed" }));
-      addActivity({ label: plan.allowed ? "Plan preparado" : "Solicitud rechazada", detail: plan.summary, tone: plan.allowed ? "neutral" : "warning" });
+      addActivity({
+        label: plan.allowed ? "Plan preparado" : plan.kind === "question" ? "El asistente pregunta" : "Solicitud rechazada",
+        detail: plan.summary,
+        tone: plan.kind === "refusal" ? "warning" : "neutral"
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : "No se pudo preparar la acción.";
       updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
@@ -406,7 +410,8 @@ function ConversationEntry({ turn, busy, onApply, onDismiss }: { turn: Conversat
 }
 
 function PlanCard({ plan, onApply, onDismiss, busy }: { plan: ActionPlan; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean }) {
-  return <div className={`plan-card ${plan.allowed ? "allowed" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? "Interpretado por el proveedor LLM" : "Acción directa validada"}</span></div><button className="mini-icon" onClick={onDismiss} aria-label="Descartar plan"><X size={14} /></button></div><p>{plan.rationale}</p>{plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}{plan.repositoryPlan && <pre className="repository-plan-json">{JSON.stringify(plan.repositoryPlan, null, 2)}</pre>}{plan.allowed && <div className="command-preview"><TerminalSquare size={14} /><code>{plan.command}</code></div>}{plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>Cancelar</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {plan.requiresConfirmation ? "Confirmar acción" : "Aplicar"}</button></div> : <button className="ghost-button plan-close" onClick={onDismiss}>Entendido</button>}</div>;
+  const asking = plan.kind === "question";
+  return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? "Interpretado por el proveedor LLM" : "Acción directa validada"}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? "Descartar pregunta" : "Descartar plan"}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}{plan.repositoryPlan && <pre className="repository-plan-json">{JSON.stringify(plan.repositoryPlan, null, 2)}</pre>}{plan.allowed && <div className="command-preview"><TerminalSquare size={14} /><code>{plan.command}</code></div>}{plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>Cancelar</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {plan.requiresConfirmation ? "Confirmar acción" : "Aplicar"}</button></div> : asking ? <p className="plan-hint">Responde en el cuadro de abajo para continuar.</p> : <button className="ghost-button plan-close" onClick={onDismiss}>Entendido</button>}</div>;
 }
 
 function SettingsModal({ config, onClose, onSaved }: { config: LlmConfig; onClose: () => void; onSaved: (config: LlmConfig) => void }) {

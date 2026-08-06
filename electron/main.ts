@@ -135,9 +135,10 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle("action:plan", async (event, cwd: string, request: string, context?: ConversationMessage[]) => {
     assertTrustedSender(event);
-    if (typeof request !== "string" || request.length > 1000) throw new Error("La solicitud no es válida.");
-    if (context !== undefined && (!Array.isArray(context) || context.length > 20 || context.some((message) =>
-      !message || !["user", "assistant"].includes(message.role) || typeof message.content !== "string" || message.content.length > 2000
+    // Shape is still checked; length is not. The model decides what it can handle.
+    if (typeof request !== "string") throw new Error("La solicitud no es válida.");
+    if (context !== undefined && (!Array.isArray(context) || context.some((message) =>
+      !message || !["user", "assistant"].includes(message.role) || typeof message.content !== "string"
     ))) throw new Error("El contexto de conversación no es válido.");
     return rememberPlan(await planAction(assertOpenedRepository(cwd), request, context));
   });

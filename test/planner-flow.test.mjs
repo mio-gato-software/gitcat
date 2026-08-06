@@ -44,7 +44,7 @@ const plan = (overrides) => ({
   intent: "git_operation",
   operation: "none",
   args: { name: "", onto: "", message: "" },
-  repository: { localPath: "", repository: "", owner: "", host: "", protocol: "", remote: "", push: true, replaceRemote: false },
+  repository: { localPath: "", repository: "", owner: "", host: "", protocol: "", sshHost: "", remote: "", push: true, replaceRemote: false },
   summary: "", rationale: "", reply: "", risk: "low",
   ...overrides
 });
@@ -92,7 +92,7 @@ test("una pregunta se responde con el texto del modelo sobre el estado real", as
 test("el imperativo “Guarda este repositorio” llega a la creación de repositorio", async () => {
   reply(plan({
     intent: "create_repository",
-    repository: { localPath: "/no/existe", repository: "mio-gato-software", owner: "eliaquin", host: "github.com", protocol: "ssh", remote: "origin", push: true, replaceRemote: false },
+    repository: { localPath: "/no/existe", repository: "mio-gato-software", owner: "eliaquin", host: "github.com", protocol: "ssh", sshHost: "", remote: "origin", push: true, replaceRemote: false },
     summary: "Crear mio-gato-software", rationale: "El usuario pidió publicarlo.", risk: "high"
   }));
   reply(plan({ intent: "needs_information", summary: "Falta la ruta local", reply: "La ruta /no/existe no existe. Indícame la ruta del repositorio que quieres publicar." }));
@@ -120,7 +120,7 @@ test("una respuesta truncada por tokens se reporta, no se disfraza de rechazo", 
   queue.push({ payload: { status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [{ type: "reasoning", summary: [] }] } });
   const result = await service.planAction(repo, "¿qué ramas hay?");
   assert.equal(result.allowed, false);
-  assert.match(result.rationale, /agotó el presupuesto de tokens/);
+  assert.match(result.rationale, /agotó su presupuesto de tokens/);
   assert.doesNotMatch(result.rationale, /plan local/);
 });
 

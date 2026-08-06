@@ -180,14 +180,13 @@ test("Cambios muestra estado, ruta y formulario manual sin LLM", async () => {
   assert.match(app, /No hay cambios sin confirmar/);
 });
 
-test("el asistente conserva conversación y envía contexto acotado", async () => {
+test("el asistente conserva la conversación completa y la envía entera", async () => {
   const types = await readFile(join(root, "shared/types.ts"), "utf8");
   const main = await readFile(join(root, "electron/main.ts"), "utf8");
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
   assert.match(types, /export type ConversationMessage/);
-  assert.match(main, /context\.length > 20/);
-  assert.match(service, /input: \[\.\.\.context\.slice\(-20\)/);
+  assert.match(service, /input: \[\.\.\.context, \{ role: "user", content: request \}\]/);
   assert.match(app, /type ConversationTurn/);
   assert.match(app, /const \[conversations, setConversations\]/);
   assert.match(app, /setRequest\(""\)/);
@@ -217,11 +216,13 @@ test("GitHub privado usa una operación estructurada y confirmada", async () => 
 test("la creación GitHub hace todas las comprobaciones sin leer tokens", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   assert.match(service, /\["--version"\]/);
-  assert.match(service, /\["auth", "status", "--active", "--hostname", host\]/);
+  assert.match(service, /\["auth", "status", "--hostname", host, "--json", "hosts"\]/);
   assert.match(service, /\["api", `repos\/\$\{owner\}\/\$\{name\}`/);
   assert.match(service, /viewerCanCreateRepositories/);
   assert.match(service, /\["remote", "get-url", remote\]/);
   assert.match(service, /the local repository has no commits, so there is nothing to push/);
+  assert.match(service, /gh has no per-command account flag/);
+  assert.match(service, /\["auth", "switch", "--hostname", plan\.args\.host, "--user", plan\.args\.activeAccount\]/);
   assert.doesNotMatch(service, /auth token|GH_TOKEN.*stdout|GITHUB_TOKEN.*stdout/);
 });
 
@@ -246,4 +247,44 @@ test("la ejecución gh no usa shell y revierte cambios locales ante fallo", asyn
   assert.match(service, /existingRemoteHash/);
   assert.doesNotMatch(service, /existingRemoteUrl/);
   assert.doesNotMatch(service, /spawn\([^\n]+shell:\s*true/);
+});
+
+test("la cuenta gh y la clave SSH se resuelven por identidad, no se asumen", async () => {
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const identity = await readFile(join(root, "electron/host-identity.ts"), "utf8");
+  const types = await readFile(join(root, "shared/types.ts"), "utf8");
+  assert.match(identity, /export function parseSshGreeting/);
+  assert.match(identity, /export function parseGhAccounts/);
+  assert.match(service, /async function resolveSshHost/);
+  assert.match(service, /identity\.login\.toLowerCase\(\) === owner\.toLowerCase\(\)/);
+  assert.match(service, /const ownerAccount = findAccount\(accounts, owner\)/);
+  assert.match(types, /sshHost: string/);
+  // Una cuenta inactiva pero autenticada es utilizable; la activa deja de ser la única opción.
+  assert.doesNotMatch(service, /"auth", "status", "--active"/);
+});
+
+test("las preguntas del asistente no se presentan como errores", async () => {
+  const types = await readFile(join(root, "shared/types.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  const styles = await readFile(join(root, "src/styles.css"), "utf8");
+  assert.match(types, /kind: "plan" \| "question" \| "refusal"/);
+  assert.match(service, /function asking/);
+  assert.match(service, /if \(plan\.intent === "needs_information"\) return asking/);
+  assert.match(planner, /never ask "shall I proceed\?"/);
+  assert.match(app, /const asking = plan\.kind === "question"/);
+  assert.match(app, /tone: plan\.kind === "refusal" \? "warning" : "neutral"/);
+  assert.match(styles, /\.plan-card\.asking/);
+});
+
+test("no hay límites artificiales en lo que se envía o se recibe del LLM", async () => {
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.doesNotMatch(main, /request\.length > \d+|context\.length > \d+|content\.length > \d+/);
+  assert.doesNotMatch(service, /context\.slice\(-\d+\)/);
+  assert.match(service, /input: \[\.\.\.context, \{ role: "user", content: request \}\]/);
+  assert.doesNotMatch(service, /max_output_tokens: 4_000|max_output_tokens: 2_000/);
+  assert.doesNotMatch(app, /\.slice\(-20\)|\.slice\(-40\)/);
 });

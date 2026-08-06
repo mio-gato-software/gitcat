@@ -5,6 +5,9 @@ import { homedir } from "node:os";
 import { basename, delimiter, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
 import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
+import {
+  findAccount, isSshAuthenticated, parseGhAccounts, parseSshGreeting, parseSshResolvedHostName, sshConfigHostAliases
+} from "./host-identity.js";
 import type { ActionPlan, Branch, Commit, ConversationMessage, LlmConfig, LlmConfigInput, Operation, RepoSnapshot } from "../shared/types.js";
 import {
   buildPlannerInstructions, commitMessageLimit, executableOperations, isBranchNameSafe, operationArgs,
@@ -12,7 +15,7 @@ import {
 } from "./llm-plan.js";
 import {
   assertRepositoryPlan, buildRepositoryPlan, remoteNamePattern, repositoryHostPattern, repositoryNamePattern,
-  repositoryOwnerPattern, validateRepositoryFields, type RepositoryFields
+  repositoryOwnerPattern, sshHostPattern, validateRepositoryFields, type RepositoryFields
 } from "./repository-plan.js";
 
 type CommandResult = { stdout: string; stderr: string; code: number };
@@ -186,11 +189,16 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   };
 }
 
-function refused(reason: string, source: ActionPlan["source"] = "guardrail", summary = "Solicitud rechazada"): PlanDraft {
+function refused(reason: string, source: ActionPlan["source"] = "guardrail", summary = "Solicitud rechazada", kind: ActionPlan["kind"] = "refusal"): PlanDraft {
   return {
     allowed: false, operation: "none", args: {}, command: "—", summary,
-    rationale: reason, risk: "low", requiresConfirmation: false, source
+    rationale: reason, risk: "low", requiresConfirmation: false, kind, source
   };
+}
+
+/** The assistant needs something from the user. A question, not a failure. */
+function asking(reason: string, summary: string): PlanDraft {
+  return refused(reason, "llm", summary || "Necesito un dato más", "question");
 }
 
 function buildCommand(operation: Operation, args: Record<string, string>) {
@@ -207,9 +215,13 @@ function buildCommand(operation: Operation, args: Record<string, string>) {
     case "continue_rebase": return "git rebase --continue";
     case "commit": return `git add -A && git commit -m "${args.message ?? ""}"`;
     case "github_create_repo": {
-      const create = `GH_HOST=${args.host} gh repo create ${args.owner}/${args.name} --private`;
-      const remote = `git -C ${JSON.stringify(args.source)} remote add ${args.remote} ${args.remoteUrl}`;
-      return args.push === "true" ? `${create} && ${remote} && git -C ${JSON.stringify(args.source)} push -u ${args.remote} HEAD` : `${create} && ${remote}`;
+      const steps = [];
+      if (args.account && args.account !== args.activeAccount) steps.push(`gh auth switch --hostname ${args.host} --user ${args.account}`);
+      steps.push(`GH_HOST=${args.host} gh repo create ${args.owner}/${args.name} --private`);
+      steps.push(`git -C ${JSON.stringify(args.source)} remote add ${args.remote} ${args.remoteUrl}`);
+      if (args.push === "true") steps.push(`git -C ${JSON.stringify(args.source)} push -u ${args.remote} HEAD`);
+      if (args.account && args.account !== args.activeAccount) steps.push(`gh auth switch --hostname ${args.host} --user ${args.activeAccount}`);
+      return steps.join(" && ");
     }
     case "status": return "git status";
     default: return "—";
@@ -243,15 +255,69 @@ function hasSshPrivateKey() {
   });
 }
 
-async function checkSshAccess(host: string, cwd: string) {
-  if (!await hasSshPrivateKey()) return "no SSH private key was found on this machine and ssh-agent has none loaded; the user must configure an SSH key first";
+/** Dials one SSH host and reports which identity answered, so the wrong key cannot slip through. */
+async function sshIdentity(sshHost: string, cwd: string) {
   const result = await runCommand("ssh", [
     "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new",
-    "-o", `UserKnownHostsFile=${process.platform === "win32" ? "NUL" : "/dev/null"}`, `git@${host}`
+    "-o", `UserKnownHostsFile=${process.platform === "win32" ? "NUL" : "/dev/null"}`, `git@${sshHost}`
   ], cwd, 15_000).catch(() => undefined);
-  const output = `${result?.stdout ?? ""}\n${result?.stderr ?? ""}`;
-  if (result && (result.code === 0 || /successfully authenticated|shell access is disabled|authenticated to/i.test(output))) return undefined;
-  return `an SSH key exists but authentication against ${host} failed; ssh reported: ${(output.trim() || "connection refused or timed out").slice(0, 300)}`;
+  const output = `${result?.stdout ?? ""}\n${result?.stderr ?? ""}`.trim();
+  return {
+    authenticated: isSshAuthenticated(output, result?.code),
+    login: parseSshGreeting(output),
+    output: output || "connection refused or timed out"
+  };
+}
+
+/** ~/.ssh/config aliases whose effective HostName is the target host, cheapest candidates first. */
+async function sshAliasesFor(host: string, cwd: string) {
+  let config = "";
+  try {
+    config = readFileSync(join(homedir(), ".ssh", "config"), "utf8");
+  } catch {
+    return [];
+  }
+  const aliases: string[] = [];
+  for (const alias of sshConfigHostAliases(config)) {
+    if (alias.toLowerCase() === host.toLowerCase()) continue;
+    const resolved = await runCommand("ssh", ["-G", alias], cwd, 10_000).catch(() => undefined);
+    if (resolved && parseSshResolvedHostName(resolved.stdout) === host.toLowerCase()) aliases.push(alias);
+  }
+  return aliases;
+}
+
+type SshResolution = { sshHost: string } | { problem: string };
+
+/**
+ * The default key for a host is not necessarily the owner's. Every candidate is dialled and the
+ * greeting checked, so the remote URL ends up on the alias that actually authenticates as `owner`.
+ */
+async function resolveSshHost(host: string, owner: string, cwd: string, requested?: string): Promise<SshResolution> {
+  if (!await hasSshPrivateKey()) {
+    return { problem: "no SSH private key was found on this machine and ssh-agent has none loaded; the user must configure an SSH key first" };
+  }
+  const candidates = requested ? [requested] : [host, ...await sshAliasesFor(host, cwd)];
+  const attempts: string[] = [];
+  for (const candidate of candidates) {
+    const identity = await sshIdentity(candidate, cwd);
+    if (identity.authenticated && identity.login && identity.login.toLowerCase() === owner.toLowerCase()) return { sshHost: candidate };
+    attempts.push(identity.authenticated
+      ? `${candidate} authenticates as "${identity.login ?? "an unknown identity"}"`
+      : `${candidate} did not authenticate (${identity.output.slice(0, 160)})`);
+    // A host that cannot name its identity still proves access; accept it when it is the one asked for.
+    if (identity.authenticated && !identity.login && (requested || candidate === host)) return { sshHost: candidate };
+  }
+  return {
+    problem: requested
+      ? `the requested SSH host "${requested}" does not authenticate as "${owner}": ${attempts.join("; ")}`
+      : `no SSH host on this machine authenticates against ${host} as "${owner}". Tried: ${attempts.join("; ")}. The user can add a Host alias in ~/.ssh/config with the key for "${owner}" and name it, or say which existing alias to use`
+  };
+}
+
+/** Every account logged into the host, not only the active one: the right one may be inactive. */
+async function ghAccounts(host: string, cwd: string) {
+  const status = await runCommand("gh", ["auth", "status", "--hostname", host, "--json", "hosts"], cwd, 20_000, { GH_PROMPT_DISABLED: "1" }).catch(() => undefined);
+  return status?.code === 0 ? parseGhAccounts(status.stdout, host) : [];
 }
 
 async function checkedGh(args: string[], cwd: string, host?: string) {
@@ -288,28 +354,26 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
   if (sourceSnapshot.path !== sourcePath) return blocked(`"${sourcePath}" is inside the repository "${sourceSnapshot.path}"; the exact repository root is required`, "repository.localPath");
   if (sourceSnapshot.path !== snapshot.path) return blocked(`"${sourcePath}" is not the project currently open in Branchline ("${snapshot.path}"); for safety the user must open it as the active project before publishing it`, "repository.localPath");
 
-  const { repository: name, owner, host, protocol, remoteUrl } = repositoryPlan;
+  const { repository: name, owner, host, protocol } = repositoryPlan;
   const remote = validation.fields.remote ?? "origin";
   const push = repositoryPlan.action === "create_repository_and_push";
   const replaceRemote = validation.fields.replaceRemote === true;
   if (push && !sourceSnapshot.head) return blocked("the local repository has no commits, so there is nothing to push; the user can create a first commit or ask to create the repository without pushing");
-
-  if (protocol === "ssh") {
-    const sshError = await checkSshAccess(host, sourcePath);
-    if (sshError) return blocked(sshError);
-  }
 
   const ghVersion = await runCommand("gh", ["--version"], sourcePath, 10_000, { GH_PROMPT_DISABLED: "1" }).catch(() => undefined);
   if (!ghVersion || ghVersion.code !== 0) {
     const searched = await toolDirectories();
     return blocked(`GitHub CLI (gh) is required but no runnable gh was found in any of the ${searched.length} directories Branchline searched (including ${searched.slice(0, 6).join(", ")}). If gh is installed elsewhere, it is a PATH problem rather than a missing install`);
   }
-  const auth = await runCommand("gh", ["auth", "status", "--active", "--hostname", host], sourcePath, 20_000, { GH_PROMPT_DISABLED: "1" });
-  if (auth.code !== 0) return blocked(`there is no active gh session for ${host}; the user must run: gh auth login --hostname ${host}`);
+  const accounts = await ghAccounts(host, sourcePath);
+  if (!accounts.length) return blocked(`no account is logged into ${host} with gh; the user must run: gh auth login --hostname ${host}`);
+  const activeAccount = accounts.find((entry) => entry.active)?.login ?? accounts[0].login;
+  const ownerAccount = findAccount(accounts, owner);
+  const account = ownerAccount?.login ?? activeAccount;
+  const available = accounts.map((entry) => `${entry.login}${entry.active ? " (active)" : ""}`).join(", ");
 
-  const viewer = await runCommand("gh", ["api", "user", "--jq", ".login"], sourcePath, 20_000, { GH_PROMPT_DISABLED: "1", GH_HOST: host });
-  if (viewer.code !== 0 || !viewer.stdout.trim()) return blocked(`the authenticated account on ${host} could not be identified; the gh session needs to be checked`);
-  if (viewer.stdout.trim().toLocaleLowerCase() !== owner.toLocaleLowerCase()) {
+  // Owner is not one of the logged-in accounts, so it has to be an organization the account can publish to.
+  if (!ownerAccount) {
     const permission = await runCommand("gh", [
       "api", "graphql",
       "-f", "query=query($login:String!){organization(login:$login){viewerCanCreateRepositories}}",
@@ -317,9 +381,19 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
       "--jq", ".data.organization.viewerCanCreateRepositories"
     ], sourcePath, 20_000, { GH_PROMPT_DISABLED: "1", GH_HOST: host });
     if (permission.code !== 0 || permission.stdout.trim() !== "true") {
-      return blocked(`the account authenticated on ${host} (${viewer.stdout.trim()}) cannot create private repositories for "${owner}"`, "repository.owner");
+      return blocked(`"${owner}" is neither an organization that ${account} can create repositories in, nor an account logged into ${host} on this machine. Accounts available here: ${available}. The user can pick one of those as the owner, or run: gh auth login --hostname ${host}`, "repository.owner");
     }
   }
+
+  let sshHost = "";
+  if (protocol === "ssh") {
+    const resolution = await resolveSshHost(host, owner, sourcePath, validation.fields.sshHost);
+    if ("problem" in resolution) return blocked(resolution.problem, "repository.sshHost");
+    sshHost = resolution.sshHost;
+    repositoryPlan = buildRepositoryPlan({ ...validation.fields, localPath: sourcePath, sshHost });
+    assertRepositoryPlan(repositoryPlan);
+  }
+  const { remoteUrl } = repositoryPlan;
 
   const existing = await runCommand("gh", ["api", `repos/${owner}/${name}`, "--silent"], sourcePath, 20_000, { GH_PROMPT_DISABLED: "1", GH_HOST: host });
   if (existing.code === 0) return blocked(`the repository ${host}/${owner}/${name} already exists; a different name is needed`, "repository.repository");
@@ -335,13 +409,16 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
   }
 
   const args = {
-    name, owner, host, protocol, remoteUrl, visibility: "private", source: sourcePath, remote,
+    name, owner, host, protocol, sshHost, remoteUrl, visibility: "private", source: sourcePath, remote,
+    account, activeAccount,
     push: String(push), replaceRemote: String(replaceRemote && remoteExists),
     existingRemoteHash: remoteExists ? createHash("sha256").update(remoteResult.stdout.trim()).digest("hex") : ""
   };
   const effects = [
     `create: ${host}/${owner}/${name} (private)`,
     `local: ${sourcePath}`,
+    `gh account: ${account}${account === activeAccount ? " (active)" : ` (temporarily active instead of ${activeAccount}, restored afterwards)`}`,
+    ...(protocol === "ssh" ? [`ssh identity: ${sshHost} → ${owner}`] : []),
     `remote ${remote}: ${remoteExists ? `${remoteResult.stdout.trim()} → ${remoteUrl}` : remoteUrl}`,
     `push: ${push ? `${remote} HEAD` : "no"}`
   ];
@@ -360,6 +437,7 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
       targetStateId: sourceSnapshot.stateId,
       risk: "high",
       requiresConfirmation: true,
+      kind: "plan",
       source
     }
   };
@@ -381,7 +459,7 @@ function extractOutputText(body: any): string {
  * A truncated or empty provider answer used to fall back to a local keyword planner, which turned
  * provider problems into silent, wrong refusals. Every failure mode is now explicit.
  */
-async function askProvider(body: Record<string, unknown>, timeoutMs = 60_000, credentials: LlmConfigInput = llmState): Promise<string> {
+async function callProvider(body: Record<string, unknown>, timeoutMs = 180_000, credentials: LlmConfigInput = llmState): Promise<any> {
   const model = credentials.model.trim() || MODEL_FALLBACK;
   if (!credentials.apiKey.trim()) throw new Error(LLM_REQUIRED);
   const controller = new AbortController();
@@ -402,11 +480,15 @@ async function askProvider(body: Record<string, unknown>, timeoutMs = 60_000, cr
     clearTimeout(timeout);
   }
   if (!response.ok) throw new Error(`El proveedor respondió ${response.status}: ${(await response.text()).slice(0, 300)}`);
-  const payload = await response.json();
+  return response.json();
+}
+
+async function askProvider(body: Record<string, unknown>, timeoutMs?: number): Promise<string> {
+  const payload = await callProvider(body, timeoutMs);
   if (payload?.status === "incomplete") {
     const reason = payload?.incomplete_details?.reason;
     throw new Error(reason === "max_output_tokens"
-      ? `El modelo “${model}” agotó el presupuesto de tokens antes de emitir una respuesta. Usa un modelo con menos razonamiento intermedio o revisa su configuración.`
+      ? `El modelo “${llmState.model || MODEL_FALLBACK}” agotó su presupuesto de tokens antes de emitir una respuesta.`
       : `El proveedor no completó la respuesta (${reason ?? "motivo desconocido"}).`);
   }
   const text = extractOutputText(payload);
@@ -430,10 +512,10 @@ async function getWorkingTreeDiff(snapshot: RepoSnapshot) {
       ].filter(Boolean).join("\n");
   const untrackedRaw = await checkedGit(snapshot.path, ["ls-files", "--others", "--exclude-standard", "-z"]);
   const sections = [trackedDiff];
-  let remaining = 60_000 - trackedDiff.length;
+  // No budget for the model: the only cap left keeps a single huge file out of memory.
+  const readableFileLimit = 4_000_000;
 
   for (const relativePath of untrackedRaw.split("\0").filter(Boolean)) {
-    if (remaining <= 0) break;
     const absolutePath = resolve(snapshot.path, relativePath);
     if (!absolutePath.startsWith(`${snapshot.path}${sep}`)) continue;
     try {
@@ -441,20 +523,18 @@ async function getWorkingTreeDiff(snapshot: RepoSnapshot) {
         sections.push(`\n+++ b/${relativePath}\n[enlace simbólico omitido]`);
         continue;
       }
-      const content = readFileSync(absolutePath);
       const header = `\n--- /dev/null\n+++ b/${relativePath}\n@@ archivo nuevo @@\n`;
-      const body = content.includes(0)
-        ? "[archivo binario omitido]"
-        : content.toString("utf8", 0, Math.min(content.length, 16_000));
-      const suffix = content.length > 16_000 ? "\n[contenido truncado]" : "";
-      const section = `${header}${body}${suffix}`.slice(0, remaining);
-      sections.push(section);
-      remaining -= section.length;
+      if (statSync(absolutePath).size > readableFileLimit) {
+        sections.push(`${header}[archivo de más de ${readableFileLimit / 1_000_000} MB omitido]`);
+        continue;
+      }
+      const content = readFileSync(absolutePath);
+      sections.push(`${header}${content.includes(0) ? "[archivo binario omitido]" : content.toString("utf8")}`);
     } catch {
       sections.push(`\n+++ b/${relativePath}\n[contenido no legible]`);
     }
   }
-  const diff = sections.filter(Boolean).join("\n").slice(0, 60_000);
+  const diff = sections.filter(Boolean).join("\n");
   if (!diff.trim()) throw new Error("No hay un diff de texto disponible para describir.");
   return diff;
 }
@@ -475,7 +555,7 @@ they are mixed, write it in English.`;
     recentSubjects.length ? `Recent commit subjects:\n${recentSubjects.map((subject) => `- ${subject}`).join("\n")}` : "Recent commit subjects: none",
     `Working tree diff:\n${diff}`
   ].join("\n\n");
-  const text = await askProvider({ instructions, input, max_output_tokens: 2_000 }, 90_000);
+  const text = await askProvider({ instructions, input }, 180_000);
   const description = cleanCommitDescription(text);
   const current = await getSnapshot(snapshot.path);
   if (current.stateId !== snapshot.stateId) throw new Error("Los cambios variaron durante la generación. Inténtalo de nuevo.");
@@ -512,9 +592,8 @@ function plannerState(snapshot: RepoSnapshot) {
 async function requestPlan(request: string, snapshot: RepoSnapshot, context: ConversationMessage[], issues: PlanIssue[] = []): Promise<ModelPlan> {
   const text = await askProvider({
     instructions: buildPlannerInstructions(plannerState(snapshot), issues),
-    input: [...context.slice(-20), { role: "user", content: request }],
-    text: { format: planResponseFormat },
-    max_output_tokens: 4_000
+    input: [...context, { role: "user", content: request }],
+    text: { format: planResponseFormat }
   });
   const plan = parseModelPlan(text);
   if (!plan) throw new Error("El proveedor devolvió una respuesta que no cumple el esquema del plan.");
@@ -527,7 +606,7 @@ function answerDraft(plan: ModelPlan): PlanDraft {
     summary: plan.summary || plan.reply.slice(0, 80),
     rationale: plan.rationale || plan.reply,
     answer: plan.reply,
-    risk: "low", requiresConfirmation: false, source: "llm"
+    risk: "low", requiresConfirmation: false, kind: "question", source: "llm"
   };
 }
 
@@ -575,12 +654,11 @@ async function draftFromPlan(
   plan: ModelPlan, snapshot: RepoSnapshot, request: string, context: ConversationMessage[], retried = false
 ): Promise<PlanDraft> {
   if (plan.intent === "answer") return answerDraft(plan);
-  if (plan.intent === "needs_information" || plan.intent === "out_of_scope") {
-    return refused(plan.reply || plan.rationale || LAST_RESORT_REFUSAL, "llm", plan.summary || "Solicitud rechazada");
-  }
+  if (plan.intent === "needs_information") return asking(plan.reply || plan.rationale || LAST_RESORT_REFUSAL, plan.summary);
+  if (plan.intent === "out_of_scope") return refused(plan.reply || plan.rationale || LAST_RESORT_REFUSAL, "llm", plan.summary || "Solicitud rechazada");
 
   const retry = async (issues: PlanIssue[]) => {
-    if (retried) return refused(plan.reply || plan.rationale || LAST_RESORT_REFUSAL, "llm", plan.summary || "Solicitud rechazada");
+    if (retried) return asking(plan.reply || plan.rationale || LAST_RESORT_REFUSAL, plan.summary);
     return draftFromPlan(await requestPlan(request, snapshot, context, issues), snapshot, request, context, true);
   };
 
@@ -641,6 +719,7 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     rationale: detail[1],
     risk: detail[2],
     requiresConfirmation: !["status", "fetch"].includes(operation),
+    kind: "plan",
     source: "guardrail"
   };
 }
@@ -688,11 +767,13 @@ function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot) {
 }
 
 function validateGithubPlan(plan: ActionPlan) {
-  const { name, owner, host, protocol, remoteUrl, visibility, source, remote, push, replaceRemote } = plan.args;
+  const { name, owner, host, protocol, sshHost, remoteUrl, visibility, source, remote, push, replaceRemote, account, activeAccount } = plan.args;
   if (!repositoryNamePattern.test(name ?? "") || !repositoryOwnerPattern.test(owner ?? "") || !repositoryHostPattern.test(host ?? "") || !["ssh", "https"].includes(protocol) ||
       visibility !== "private" || !remoteNamePattern.test(remote ?? "") || !["true", "false"].includes(push) || !["true", "false"].includes(replaceRemote)) {
     throw new Error("El plan de creación de GitHub contiene argumentos no válidos.");
   }
+  if (!repositoryOwnerPattern.test(account ?? "") || !repositoryOwnerPattern.test(activeAccount ?? "")) throw new Error("La cuenta de GitHub del plan no es válida.");
+  if (protocol === "ssh" ? !sshHostPattern.test(sshHost ?? "") : sshHost !== "") throw new Error("El host SSH del plan no es válido.");
   if (!source || resolve(source) !== plan.targetPath) throw new Error("La ruta de origen del plan no es válida.");
   if (!plan.repositoryPlan) throw new Error("Falta el plan JSON verificable del repositorio.");
   assertRepositoryPlan(plan.repositoryPlan);
@@ -709,11 +790,14 @@ async function executeGithubRepositoryPlan(plan: ActionPlan) {
   if (plan.args.push === "true" && !snapshot.head) throw new Error("No hay commits locales que publicar.");
   const ghVersion = await runCommand("gh", ["--version"], source, 10_000, { GH_PROMPT_DISABLED: "1" }).catch(() => undefined);
   if (!ghVersion || ghVersion.code !== 0) throw new Error("GitHub CLI (gh) ya no está instalado o disponible en PATH.");
-  const auth = await runCommand("gh", ["auth", "status", "--active", "--hostname", plan.args.host], source, 20_000, { GH_PROMPT_DISABLED: "1" });
-  if (auth.code !== 0) throw new Error(`La sesión de gh para ${plan.args.host} ya no es válida.`);
+  const accounts = await ghAccounts(plan.args.host, source);
+  if (!findAccount(accounts, plan.args.account)) throw new Error(`La cuenta ${plan.args.account} ya no está autenticada en ${plan.args.host}.`);
   if (plan.args.protocol === "ssh") {
-    const sshError = await checkSshAccess(plan.args.host, source);
-    if (sshError) throw new Error(sshError);
+    const identity = await sshIdentity(plan.args.sshHost, source);
+    if (!identity.authenticated) throw new Error(`SSH ya no autentica contra ${plan.args.sshHost}: ${identity.output.slice(0, 200)}`);
+    if (identity.login && identity.login.toLowerCase() !== plan.args.owner.toLowerCase()) {
+      throw new Error(`${plan.args.sshHost} ahora autentica como ${identity.login}, no como ${plan.args.owner}.`);
+    }
   }
   const existing = await runCommand("gh", ["api", `repos/${plan.args.owner}/${plan.args.name}`, "--silent"], source, 20_000, { GH_PROMPT_DISABLED: "1", GH_HOST: plan.args.host });
   if (existing.code === 0) throw new Error(`El repositorio ${plan.args.owner}/${plan.args.name} ya existe.`);
@@ -724,6 +808,10 @@ async function executeGithubRepositoryPlan(plan: ActionPlan) {
   if (currentRemote.code === 0 && createHash("sha256").update(currentRemote.stdout.trim()).digest("hex") !== plan.args.existingRemoteHash) throw new Error(`El remoto “${plan.args.remote}” cambió desde la validación.`);
   const previousRemoteUrl = currentRemote.code === 0 ? currentRemote.stdout.trim() : "";
   if (currentRemote.code === 0) await checkedGit(source, ["remote", "remove", plan.args.remote]);
+
+  // gh has no per-command account flag, so the active one is switched and restored around the work.
+  const switching = plan.args.account !== plan.args.activeAccount;
+  if (switching) await checkedGh(["auth", "switch", "--hostname", plan.args.host, "--user", plan.args.account], source);
 
   let repositoryCreated = false;
   try {
@@ -740,6 +828,11 @@ async function executeGithubRepositoryPlan(plan: ActionPlan) {
     if (repositoryCreated) throw new Error(`El repositorio remoto se creó, pero no se pudo configurar o publicar el remoto local: ${message}`);
     if (/forbidden|permission|not accessible|403/i.test(message)) throw new Error("No hay permisos suficientes para crear el repositorio privado solicitado.");
     throw error;
+  } finally {
+    if (switching) {
+      await checkedGh(["auth", "switch", "--hostname", plan.args.host, "--user", plan.args.activeAccount], source)
+        .catch(() => console.error(`No se pudo restaurar la cuenta activa de gh a ${plan.args.activeAccount}.`));
+    }
   }
 }
 
@@ -796,7 +889,8 @@ export function getLlmConfig(): LlmConfig {
  */
 async function verifyLlmAccess(candidate: LlmConfigInput) {
   try {
-    await askProvider({ instructions: "Reply with the single word: ok.", input: "ok", max_output_tokens: 1_000 }, 30_000, candidate);
+    // A 200 proves the key and the model id; the answer itself is irrelevant here.
+    await callProvider({ instructions: "Reply with the single word: ok.", input: "ok", max_output_tokens: 1_000 }, 60_000, candidate);
   } catch (error) {
     throw new Error(`No se guardó la configuración porque el proveedor no respondió correctamente. ${error instanceof Error ? error.message : "Error desconocido."}`);
   }

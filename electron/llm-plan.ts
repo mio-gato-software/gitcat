@@ -10,6 +10,7 @@ export type PlannedRepository = {
   owner: string;
   host: string;
   protocol: "ssh" | "https" | "";
+  sshHost: string;
   remote: string;
   push: boolean;
   replaceRemote: boolean;
@@ -40,7 +41,7 @@ const intents: PlannerIntent[] = ["git_operation", "create_repository", "answer"
 const risks = ["low", "medium", "high"];
 const planKeys = ["args", "intent", "operation", "rationale", "reply", "repository", "risk", "summary"];
 const argsKeys = ["message", "name", "onto"];
-const repositoryKeys = ["host", "localPath", "owner", "protocol", "push", "remote", "replaceRemote", "repository"];
+const repositoryKeys = ["host", "localPath", "owner", "protocol", "push", "remote", "replaceRemote", "repository", "sshHost"];
 const branchNamePattern = /^[A-Za-z0-9._/@-]+$/;
 
 export function isBranchNameSafe(name: string) {
@@ -76,6 +77,7 @@ export const planResponseFormat = {
           owner: { type: "string" },
           host: { type: "string" },
           protocol: { type: "string", enum: ["ssh", "https", ""] },
+          sshHost: { type: "string" },
           remote: { type: "string" },
           push: { type: "boolean" },
           replaceRemote: { type: "boolean" }
@@ -104,6 +106,11 @@ understanding the message, never by matching words or verb forms. Always write "
 You never execute anything and you never invent shell commands, repository data or values the user
 did not provide. Answer with a single JSON object that matches the schema.
 
+The application, not you, owns confirmation: every plan is shown to the user as a card they must
+approve before anything runs. So never ask "shall I proceed?", never announce what you are about to
+do, and never describe a plan inside "reply". When you have what you need, return the plan itself
+and let the card do the asking. If the user has just approved something, act on it.
+
 Pick exactly one intent:
 - "git_operation": the user wants a Git operation on the open repository. Set "operation" and the args it needs.
 - "create_repository": the user wants to create a remote repository for a local repository, optionally pushing to it. Fill "repository".
@@ -123,6 +130,9 @@ Leave every arg you do not need as "".
 - owner: GitHub user or organization login that will own it.
 - host: DNS host name only, such as "github.com". No scheme, no port, no path.
 - protocol: "ssh" or "https", whichever the user asked for.
+- sshHost: leave "" unless the user names a specific SSH host or ~/.ssh/config alias. The application
+  dials every candidate itself and picks the one that authenticates as "owner", so a non-default key
+  is normal and needs no question. Never guess an alias.
 - remote: name of the local Git remote, "origin" unless the user names another one.
 - push: true unless the user asked to create the repository without pushing.
 - replaceRemote: true only when the user explicitly authorized replacing an existing local remote.
@@ -130,8 +140,10 @@ Never guess an owner, host, repository name or path. A value like "/foo/bar" is 
 never an owner or a repository name. If part of the data is missing, use "needs_information" and ask
 for the rest instead of filling it in yourself.
 
-Repositories are always created private, and the user confirms every plan before it runs, so
-describe what would happen rather than promising it already happened.
+Repositories are always created private. The application resolves by itself which authenticated gh
+account and which SSH key correspond to "owner", including accounts that are not the active one and
+keys that are not the default, so do not ask the user about credentials unless a validation issue
+below says the machine genuinely lacks them.
 
 Only the repository state below is true. Do not state facts that are not in it.
 Repository state (JSON):
@@ -230,7 +242,7 @@ function validate(value: unknown): ModelPlan | undefined {
   if (!hasExactKeys(record.args, argsKeys) || !Object.values(record.args as object).every((item) => typeof item === "string")) return undefined;
   if (!hasExactKeys(record.repository, repositoryKeys)) return undefined;
   const repository = record.repository as Record<string, unknown>;
-  for (const key of ["localPath", "repository", "owner", "host", "remote"]) if (typeof repository[key] !== "string") return undefined;
+  for (const key of ["localPath", "repository", "owner", "host", "remote", "sshHost"]) if (typeof repository[key] !== "string") return undefined;
   if (!["ssh", "https", ""].includes(repository.protocol as string)) return undefined;
   if (typeof repository.push !== "boolean" || typeof repository.replaceRemote !== "boolean") return undefined;
   return record as ModelPlan;

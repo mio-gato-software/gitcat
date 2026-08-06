@@ -61,6 +61,8 @@ export type RepositoryPlan = {
   repository: string;
   localPath: string;
   protocol: GitProtocol;
+  /** SSH host or ~/.ssh/config alias that authenticates as `owner`. Empty for HTTPS. */
+  sshHost: string;
   remoteUrl: string;
   requiresConfirmation: true;
 };
@@ -84,6 +86,8 @@ export type ActionPlan = {
   targetStateId?: string;
   risk: "low" | "medium" | "high";
   requiresConfirmation: boolean;
+  /** "question" is the assistant asking for something, not a failure; the interface must not dress it as one. */
+  kind: "plan" | "question" | "refusal";
   /** "llm": the model interpreted the request. "guardrail": a direct control or a local safety rule. */
   source: "llm" | "guardrail";
 };

@@ -32,6 +32,12 @@ button:disabled { cursor: default; opacity: .55; }
 .inspector { min-height: 0; overflow: hidden; }
 .chat-compose, .plan-card { flex: none; }
 .plan-header strong, .plan-card p { overflow-wrap: anywhere; }
+.plan-card.asking { border-color: #2f4a63; background: #131f2b; }
+.asking .plan-icon { color: #8dc2f0; background: #1d334a; }
+.asking .plan-header strong { color: #dce9f6; }
+.asking .plan-header span { color: #7c9ab5; }
+.asking p { color: #a8bccd; }
+.plan-hint { margin: 10px 0 0 !important; padding-top: 8px; border-top: 1px solid #24384a; color: #7c9ab5 !important; font-size: 9px !important; }
 .plan-card p { white-space: pre-line; }
 .plan-effects { margin: 9px 0; padding-left: 18px; color: #8fa7a5; font-size: 9px; line-height: 1.5; }
 .plan-effects li + li { margin-top: 3px; }

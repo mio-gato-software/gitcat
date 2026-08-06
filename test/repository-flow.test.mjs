@@ -11,7 +11,7 @@ const basePlan = {
   intent: "git_operation",
   operation: "status",
   args: { name: "", onto: "", message: "" },
-  repository: { localPath: "", repository: "", owner: "", host: "", protocol: "", remote: "", push: true, replaceRemote: false },
+  repository: { localPath: "", repository: "", owner: "", host: "", protocol: "", sshHost: "", remote: "", push: true, replaceRemote: false },
   summary: "Estado",
   rationale: "Consulta segura",
   reply: "",
@@ -94,6 +94,7 @@ test("normaliza y genera el esquema JSON exacto", () => {
     repository: "mio-gato-software",
     localPath: "/mio-gato-software",
     protocol: "ssh",
+    sshHost: "github.com",
     remoteUrl: "git@github.com:eliaquin/mio-gato-software.git",
     requiresConfirmation: true
   });
@@ -117,4 +118,29 @@ test("rechaza planes LLM con esquema incompleto, campos extra o tipos incorrecto
   assert.equal(llm.parseModelPlan(JSON.stringify({ ...basePlan, operation: "github_create_repo" })), undefined);
   assert.equal(llm.parseModelPlan(JSON.stringify({ ...basePlan, repository: { ...basePlan.repository, protocol: "ftp" } })), undefined);
   assert.equal(llm.parseModelPlan(JSON.stringify({ ...basePlan, repository: { ...basePlan.repository, push: "true" } })), undefined);
+});
+
+test("un alias de ssh_config llega a la URL del remoto; HTTPS nunca lo usa", () => {
+  const base = { localPath: "/repo", repository: "gitcat", owner: "eliaquin", host: "github.com", push: true };
+  const conAlias = repository.buildRepositoryPlan({ ...base, protocol: "ssh", sshHost: "github-personal" });
+  assert.equal(conAlias.sshHost, "github-personal");
+  assert.equal(conAlias.remoteUrl, "git@github-personal:eliaquin/gitcat.git");
+  assert.doesNotThrow(() => repository.assertRepositoryPlan(conAlias));
+  // Un plan manipulado para apuntar a otra identidad no sobrevive a la revalidación.
+  assert.throws(() => repository.assertRepositoryPlan({ ...conAlias, sshHost: "github.com" }), /contenido/);
+
+  const sinAlias = repository.buildRepositoryPlan({ ...base, protocol: "ssh" });
+  assert.equal(sinAlias.remoteUrl, "git@github.com:eliaquin/gitcat.git");
+
+  const https = repository.buildRepositoryPlan({ ...base, protocol: "https", sshHost: "github-personal" });
+  assert.equal(https.sshHost, "");
+  assert.equal(https.remoteUrl, "https://github.com/eliaquin/gitcat.git");
+});
+
+test("un alias SSH con forma inválida se reporta como incidencia", () => {
+  const { issues } = repository.validateRepositoryFields({
+    localPath: "/repo", repository: "gitcat", owner: "eliaquin", host: "github.com", protocol: "ssh", sshHost: "git@github.com:ruta"
+  });
+  assert.deepEqual(issues.map((issue) => issue.field), ["sshHost"]);
+  assert.match(issues[0].problem, /SSH host name or ~\/.ssh\/config alias/);
 });
