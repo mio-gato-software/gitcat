@@ -16,10 +16,11 @@ export type PlannedRepository = {
   replaceRemote: boolean;
 };
 
+export type PlannedStep = { operation: Operation; args: PlannedArgs };
+
 export type ModelPlan = {
   intent: PlannerIntent;
-  operation: Operation;
-  args: PlannedArgs;
+  steps: PlannedStep[];
   repository: PlannedRepository;
   summary: string;
   rationale: string;
@@ -31,6 +32,8 @@ export type ModelPlan = {
 export type PlanIssue = { field: string; problem: string };
 
 export const commitMessageLimit = 120;
+/** A plan long enough for any real Git errand; beyond this the model is guessing rather than planning. */
+export const planStepLimit = 6;
 
 export const executableOperations = new Set<Operation>([
   "status", "checkout", "create_branch", "delete_branch", "fetch", "pull", "push",
@@ -39,7 +42,8 @@ export const executableOperations = new Set<Operation>([
 const branchOperations = new Set<Operation>(["checkout", "create_branch", "delete_branch", "merge"]);
 const intents: PlannerIntent[] = ["git_operation", "create_repository", "answer", "needs_information", "out_of_scope"];
 const risks = ["low", "medium", "high"];
-const planKeys = ["args", "intent", "operation", "rationale", "reply", "repository", "risk", "summary"];
+const planKeys = ["intent", "rationale", "reply", "repository", "risk", "steps", "summary"];
+const stepKeys = ["args", "operation"];
 const argsKeys = ["message", "name", "onto"];
 const repositoryKeys = ["host", "localPath", "owner", "protocol", "push", "remote", "replaceRemote", "repository", "sshHost"];
 const branchNamePattern = /^[A-Za-z0-9._/@-]+$/;
@@ -60,12 +64,22 @@ export const planResponseFormat = {
     required: planKeys,
     properties: {
       intent: { type: "string", enum: intents },
-      operation: { type: "string", enum: [...executableOperations, "none"] },
-      args: {
-        type: "object",
-        additionalProperties: false,
-        required: argsKeys,
-        properties: { name: { type: "string" }, onto: { type: "string" }, message: { type: "string" } }
+      steps: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: stepKeys,
+          properties: {
+            operation: { type: "string", enum: [...executableOperations, "none"] },
+            args: {
+              type: "object",
+              additionalProperties: false,
+              required: argsKeys,
+              properties: { name: { type: "string" }, onto: { type: "string" }, message: { type: "string" } }
+            }
+          }
+        }
       },
       repository: {
         type: "object",
@@ -107,22 +121,33 @@ You never execute anything and you never invent shell commands, repository data 
 did not provide. Answer with a single JSON object that matches the schema.
 
 The application, not you, owns confirmation: every plan is shown to the user as a card they must
-approve before anything runs. So never ask "shall I proceed?", never announce what you are about to
-do, and never describe a plan inside "reply". When you have what you need, return the plan itself
-and let the card do the asking. If the user has just approved something, act on it.
+approve before anything runs, and approving it runs the whole plan from the first step to the last.
+So never ask "shall I proceed?", never announce what you are about to do, never describe a plan
+inside "reply", and never split an errand across turns waiting to be told to continue. When you have
+what you need, return the plan itself and let the card do the asking. If the user has just approved
+something, act on it.
 
 Pick exactly one intent:
-- "git_operation": the user wants a Git operation on the open repository. Set "operation" and the args it needs.
+- "git_operation": the user wants something done with Git in the open repository. Put in "steps" every operation it takes, in the order they must run.
 - "create_repository": the user wants to create a remote repository for a local repository, optionally pushing to it. Fill "repository".
 - "answer": the user asks something the repository state below already answers. Put the full answer in "reply".
 - "needs_information": the request is in scope but a required value is missing or ambiguous. Ask for exactly what is missing in "reply".
 - "out_of_scope": the request has nothing to do with this repository, with Git or with creating a repository. Say so briefly in "reply".
 
-Operations: status, checkout, create_branch, delete_branch, fetch, pull, push, merge, rebase,
-abort_rebase, continue_rebase, commit. Use "none" for every intent other than "git_operation".
-args.name is the branch for checkout, create_branch, delete_branch and merge. args.onto is the base
-branch for rebase. args.message is the commit message, ${commitMessageLimit} characters maximum.
-Leave every arg you do not need as "".
+You decide how to reach what the user asked for. Plenty of ordinary requests take several operations,
+and it is your job to work out which ones and in what order, from the repository state below:
+- "merge this branch into main" is checkout main, then merge the branch that was active. Read its
+  name from the state; after the checkout it is no longer the current branch.
+- "publish my work" may be commit, then push.
+- "get me up to date and continue" may be fetch, then pull.
+Each step runs against the repository as the previous step left it, so order matters: a branch you
+create in step 1 is available in step 2. Use as few steps as the request truly needs, never more than
+${planStepLimit}, and leave "steps" empty for every intent other than "git_operation".
+
+Operations for each step: status, checkout, create_branch, delete_branch, fetch, pull, push, merge,
+rebase, abort_rebase, continue_rebase, commit. args.name is the branch for checkout, create_branch,
+delete_branch and merge. args.onto is the base branch for rebase. args.message is the commit message,
+${commitMessageLimit} characters maximum. Leave every arg a step does not need as "".
 
 "repository" is only meaningful for "create_repository". Use "" or false for anything unknown:
 - localPath: absolute path of the local repository to publish. When the user means "this repository", use the open repository path from the state below.
@@ -166,35 +191,46 @@ Validation issues (JSON):
 ${JSON.stringify(issues, null, 2)}`;
 }
 
-/** Every arg that the chosen operation actually uses; anything else the model sent is dropped. */
-export function operationArgs(plan: ModelPlan): Record<string, string> {
-  switch (plan.operation) {
-    case "checkout": case "create_branch": case "delete_branch": case "merge": return { name: plan.args.name.trim() };
-    case "rebase": return { onto: plan.args.onto.trim() };
-    case "commit": return { message: plan.args.message.trim() };
+/** Every arg that the step's operation actually uses; anything else the model sent is dropped. */
+export function operationArgs(step: PlannedStep): Record<string, string> {
+  switch (step.operation) {
+    case "checkout": case "create_branch": case "delete_branch": case "merge": return { name: step.args.name.trim() };
+    case "rebase": return { onto: step.args.onto.trim() };
+    case "commit": return { message: step.args.message.trim() };
     default: return {};
   }
 }
 
-export function operationIssues(plan: ModelPlan): PlanIssue[] {
-  if (!executableOperations.has(plan.operation)) {
-    return [{ field: "operation", problem: `"${plan.operation}" cannot be executed; use one of ${[...executableOperations].join(", ")} or another intent` }];
+/** Defects in one step, addressed by index so the model knows which of its own steps to fix. */
+export function operationIssues(step: PlannedStep, index = 0): PlanIssue[] {
+  const at = `steps[${index}]`;
+  if (!executableOperations.has(step.operation)) {
+    return [{ field: `${at}.operation`, problem: `"${step.operation}" cannot be executed; use one of ${[...executableOperations].join(", ")} or another intent` }];
   }
-  const args = operationArgs(plan);
+  const args = operationArgs(step);
   const issues: PlanIssue[] = [];
-  if (branchOperations.has(plan.operation)) {
-    if (!args.name) issues.push({ field: "args.name", problem: `missing; ${plan.operation} needs the branch name the user meant` });
-    else if (!isBranchNameSafe(args.name)) issues.push({ field: "args.name", problem: `"${args.name}" is not a valid Git branch name` });
+  if (branchOperations.has(step.operation)) {
+    if (!args.name) issues.push({ field: `${at}.args.name`, problem: `missing; ${step.operation} needs the branch name the user meant` });
+    else if (!isBranchNameSafe(args.name)) issues.push({ field: `${at}.args.name`, problem: `"${args.name}" is not a valid Git branch name` });
   }
-  if (plan.operation === "rebase") {
-    if (!args.onto) issues.push({ field: "args.onto", problem: "missing; rebase needs the base branch" });
-    else if (!isBranchNameSafe(args.onto)) issues.push({ field: "args.onto", problem: `"${args.onto}" is not a valid Git branch name` });
+  if (step.operation === "rebase") {
+    if (!args.onto) issues.push({ field: `${at}.args.onto`, problem: "missing; rebase needs the base branch" });
+    else if (!isBranchNameSafe(args.onto)) issues.push({ field: `${at}.args.onto`, problem: `"${args.onto}" is not a valid Git branch name` });
   }
-  if (plan.operation === "commit") {
-    if (!args.message) issues.push({ field: "args.message", problem: "missing; a commit needs a message written by you or given by the user" });
-    else if (args.message.length > commitMessageLimit) issues.push({ field: "args.message", problem: `${args.message.length} characters; the limit is ${commitMessageLimit}` });
+  if (step.operation === "commit") {
+    if (!args.message) issues.push({ field: `${at}.args.message`, problem: "missing; a commit needs a message written by you or given by the user" });
+    else if (args.message.length > commitMessageLimit) issues.push({ field: `${at}.args.message`, problem: `${args.message.length} characters; the limit is ${commitMessageLimit}` });
   }
   return issues;
+}
+
+/** The sequence as a whole: it must exist, stay within the limit, and every step must stand on its own. */
+export function planIssues(plan: ModelPlan): PlanIssue[] {
+  if (!plan.steps.length) return [{ field: "steps", problem: "empty; a git_operation needs at least one step, or use another intent" }];
+  if (plan.steps.length > planStepLimit) {
+    return [{ field: "steps", problem: `${plan.steps.length} steps; the limit is ${planStepLimit}. Plan only what the request needs` }];
+  }
+  return plan.steps.flatMap((step, index) => operationIssues(step, index));
 }
 
 function candidates(text: string) {
@@ -242,10 +278,15 @@ function validate(value: unknown): ModelPlan | undefined {
   if (!hasExactKeys(value, planKeys)) return undefined;
   const record = value as Record<string, unknown>;
   if (typeof record.intent !== "string" || !intents.includes(record.intent as PlannerIntent)) return undefined;
-  if (typeof record.operation !== "string" || !(executableOperations.has(record.operation as Operation) || record.operation === "none")) return undefined;
   if (typeof record.risk !== "string" || !risks.includes(record.risk)) return undefined;
   for (const key of ["summary", "rationale", "reply"]) if (typeof record[key] !== "string") return undefined;
-  if (!hasExactKeys(record.args, argsKeys) || !Object.values(record.args as object).every((item) => typeof item === "string")) return undefined;
+  if (!Array.isArray(record.steps)) return undefined;
+  for (const step of record.steps) {
+    if (!hasExactKeys(step, stepKeys)) return undefined;
+    const entry = step as Record<string, unknown>;
+    if (typeof entry.operation !== "string" || !(executableOperations.has(entry.operation as Operation) || entry.operation === "none")) return undefined;
+    if (!hasExactKeys(entry.args, argsKeys) || !Object.values(entry.args as object).every((item) => typeof item === "string")) return undefined;
+  }
   if (!hasExactKeys(record.repository, repositoryKeys)) return undefined;
   const repository = record.repository as Record<string, unknown>;
   for (const key of ["localPath", "repository", "owner", "host", "remote", "sshHost"]) if (typeof repository[key] !== "string") return undefined;

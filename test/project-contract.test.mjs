@@ -28,6 +28,28 @@ test("la capa de Git evita ejecutar comandos libres", async () => {
   assert.doesNotMatch(service, /exec\(.*command/);
 });
 
+test("un plan es una secuencia que el modelo compone y la app ejecuta de principio a fin", async () => {
+  const types = await readFile(join(root, "shared/types.ts"), "utf8");
+  const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.match(types, /export type PlanStep/);
+  assert.match(types, /steps: PlanStep\[\]/);
+  // El modelo decide qué pasos y en qué orden; el esquema no lo limita a uno solo.
+  assert.match(planner, /steps: \{\s*\n\s*type: "array"/);
+  assert.match(planner, /export function planIssues/);
+  assert.match(planner, /export const planStepLimit/);
+  // Cada paso se valida contra el repositorio que dejó el anterior, y el primer fallo detiene la secuencia.
+  assert.match(service, /for \(const \[index, step\] of plan\.steps\.entries\(\)\)/);
+  assert.match(service, /if \(index > 0\) \{\s*\n\s*snapshot = await getSnapshot\(cwd\);\s*\n\s*validateStep\(step, snapshot\);/);
+  assert.match(service, /status: "failed"/);
+  assert.match(service, /function failureReport/);
+  assert.doesNotMatch(service, /switch \(plan\.operation\)/, "la ejecución ya no depende de una sola operación del plan");
+  // La tarjeta muestra la secuencia completa antes de aprobarla.
+  assert.match(app, /plan\.steps\.length > 1/);
+  assert.match(app, /plan\.steps\.map\(\(step, index\)/);
+});
+
 test("las herramientas se localizan sin depender del PATH que hereda la app", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   assert.match(service, /function loginShellPath/);
@@ -124,7 +146,7 @@ test("los defectos vuelven al modelo como datos estructurados, no como texto en 
   assert.match(planner, /Validation issues \(JSON\)/);
   assert.match(repositoryPlan, /export type RepositoryIssue = \{ field: RepositoryFieldName; problem: string \}/);
   assert.match(service, /type RepositoryPreparation = \{ draft: PlanDraft \} \| \{ blockers: PlanIssue\[\] \}/);
-  assert.match(service, /return issues\.length \? retry\(issues\) : gitOperationDraft\(plan, snapshot\)/);
+  assert.match(service, /return issues\.length \? retry\(issues\) : gitOperationDraft\(plan\)/);
   assert.match(service, /if \("blockers" in preparation\) return retry\(preparation\.blockers\)/);
 });
 

@@ -40,10 +40,10 @@ globalThis.fetch = async (_url, init) => {
   };
 };
 const reply = (value) => queue.push({ payload: { status: "completed", output_text: typeof value === "string" ? value : JSON.stringify(value) } });
+const step = (operation, args = {}) => ({ operation, args: { name: "", onto: "", message: "", ...args } });
 const plan = (overrides) => ({
   intent: "git_operation",
-  operation: "none",
-  args: { name: "", onto: "", message: "" },
+  steps: [],
   repository: { localPath: "", repository: "", owner: "", host: "", protocol: "", sshHost: "", remote: "", push: true, replaceRemote: false },
   summary: "", rationale: "", reply: "", risk: "low",
   ...overrides
@@ -68,7 +68,7 @@ test("guardar la configuración verifica la key y el modelo contra el proveedor"
 
 test("una petición en inglés se convierte en una operación Git", async () => {
   reply(plan({
-    intent: "git_operation", operation: "checkout", args: { name: "main", onto: "", message: "" },
+    intent: "git_operation", steps: [step("checkout", { name: "main" })],
     summary: "Switch to main", rationale: "Moves the active branch.", risk: "medium"
   }));
   const result = await service.planAction(repo, "hey, put me on the main branch please");
@@ -108,7 +108,7 @@ test("el imperativo “Guarda este repositorio” llega a la creación de reposi
 });
 
 test("un nombre de rama peligroso vuelve al modelo en vez de ejecutarse", async () => {
-  reply(plan({ intent: "git_operation", operation: "delete_branch", args: { name: "--upload-pack=touch /tmp/x", onto: "", message: "" }, summary: "Borrar", rationale: "…", risk: "high" }));
+  reply(plan({ intent: "git_operation", steps: [step("delete_branch", { name: "--upload-pack=touch /tmp/x" })], summary: "Borrar", rationale: "…", risk: "high" }));
   reply(plan({ intent: "needs_information", summary: "¿Qué rama?", reply: "Ese nombre no es una rama válida. ¿Cuál quieres borrar?" }));
   const result = await service.planAction(repo, "borra esa rama");
   assert.equal(requests.length, 2);
@@ -133,10 +133,70 @@ test("un JSON que no cumple el esquema no activa ningún planificador local", as
 });
 
 test("el riesgo y la confirmación deterministas prevalecen sobre los del modelo", async () => {
-  reply(plan({ intent: "git_operation", operation: "push", summary: "Push", rationale: "…", risk: "low" }));
+  reply(plan({ intent: "git_operation", steps: [step("push")], summary: "Push", rationale: "…", risk: "low" }));
   const result = await service.planAction(repo, "push it");
   assert.equal(result.risk, "high");
   assert.equal(result.requiresConfirmation, true);
+});
+
+test("“merge this branch to main” se planifica y se ejecuta de principio a fin", async () => {
+  git("switch", "-c", "feature/x");
+  writeFileSync(join(repo, "feature.txt"), "trabajo\n");
+  git("add", "-A");
+  git("commit", "-m", "trabajo de la rama");
+
+  reply(plan({
+    intent: "git_operation",
+    steps: [step("checkout", { name: "main" }), step("merge", { name: "feature/x" })],
+    summary: "Switch to main, then merge feature/x", rationale: "Merging needs main to be the active branch first.", risk: "high"
+  }));
+  const result = await service.planAction(repo, "merge this branch to main");
+  assert.equal(requests.length, 1, "una sola pasada al modelo planifica toda la secuencia");
+  assert.equal(result.allowed, true);
+  assert.deepEqual(result.steps.map((item) => item.command), ["git switch main", "git merge --no-edit feature/x"]);
+  assert.equal(result.command, "git switch main && git merge --no-edit feature/x");
+
+  const execution = await service.executePlan(repo, result);
+  assert.equal(execution.error, undefined, execution.error);
+  assert.deepEqual(execution.outcomes.map((item) => item.status), ["completed", "completed"]);
+  assert.equal(execution.snapshot.currentBranch, "main");
+  assert.match(execution.output, /Switched to branch 'main'/);
+  assert.match(execution.output, /feature\.txt/, "el resultado del merge se ve, no queda en silencio");
+  assert.equal(git("log", "-1", "--pretty=%s").trim(), "trabajo de la rama", "main recibió el trabajo de la rama");
+});
+
+test("una secuencia sigue anclada al estado que la creó: si el repositorio se movió, no se ejecuta", async () => {
+  git("switch", "main");
+  reply(plan({
+    intent: "git_operation",
+    steps: [step("status"), step("fetch")],
+    summary: "Ver y actualizar", rationale: "…", risk: "low"
+  }));
+  const result = await service.planAction(repo, "mira el estado y trae los remotos");
+  assert.equal(result.steps.length, 2);
+  writeFileSync(join(repo, "movido.txt"), "el repositorio cambió después de planificar\n");
+  await assert.rejects(() => service.executePlan(repo, result), /Los cambios locales variaron|El repositorio cambió/);
+});
+
+test("un paso que Git rechaza detiene el plan y nombra los pasos no ejecutados", async () => {
+  git("switch", "main");
+  const plans = await service.prepareOperation(repo, "status");
+  // Una secuencia armada a mano: el segundo paso es imposible porque ya se borró la rama en el primero.
+  const sequence = {
+    ...plans,
+    steps: [
+      { operation: "delete_branch", args: { name: "feature/x" }, command: "git branch -d feature/x", summary: "Eliminar la rama feature/x", risk: "high" },
+      { operation: "checkout", args: { name: "feature/x" }, command: "git switch feature/x", summary: "Cambiar a feature/x", risk: "medium" },
+      { operation: "fetch", args: {}, command: "git fetch --prune", summary: "Actualizar referencias remotas", risk: "low" }
+    ]
+  };
+  const execution = await service.executePlan(repo, sequence);
+  assert.deepEqual(execution.outcomes.map((item) => item.status), ["completed", "failed", "skipped"]);
+  assert.match(execution.error, /Se completaron 1 de 3 pasos/);
+  assert.match(execution.error, /no existe localmente/);
+  assert.match(execution.error, /No se ejecutó: Actualizar referencias remotas/);
+  assert.match(execution.output, /✓ Eliminar la rama feature\/x/);
+  assert.match(execution.output, /· Actualizar referencias remotas/);
 });
 
 test("una key que el proveedor rechaza no se guarda", async () => {

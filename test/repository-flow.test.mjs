@@ -7,10 +7,11 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = await import(pathToFileURL(join(root, "dist-electron/electron/repository-plan.js")));
 const llm = await import(pathToFileURL(join(root, "dist-electron/electron/llm-plan.js")));
 
+const noArgs = { name: "", onto: "", message: "" };
+const step = (operation, args = {}) => ({ operation, args: { ...noArgs, ...args } });
 const basePlan = {
   intent: "git_operation",
-  operation: "status",
-  args: { name: "", onto: "", message: "" },
+  steps: [step("status")],
   repository: { localPath: "", repository: "", owner: "", host: "", protocol: "", sshHost: "", remote: "", push: true, replaceRemote: false },
   summary: "Estado",
   rationale: "Consulta segura",
@@ -34,24 +35,45 @@ test("los defectos vuelven al modelo como incidencias estructuradas", () => {
 });
 
 test("solo llegan a Git los argumentos que la operación usa", () => {
-  const plan = { ...basePlan, operation: "checkout", args: { name: "feature", onto: "main", message: "hola" } };
-  assert.deepEqual(llm.operationArgs(plan), { name: "feature" });
-  assert.deepEqual(llm.operationArgs({ ...plan, operation: "rebase" }), { onto: "main" });
-  assert.deepEqual(llm.operationArgs({ ...plan, operation: "fetch" }), {});
+  const args = { name: "feature", onto: "main", message: "hola" };
+  assert.deepEqual(llm.operationArgs(step("checkout", args)), { name: "feature" });
+  assert.deepEqual(llm.operationArgs(step("rebase", args)), { onto: "main" });
+  assert.deepEqual(llm.operationArgs(step("fetch", args)), {});
 });
 
 test("una operación mal formada del modelo produce incidencias, no un plan", () => {
-  assert.deepEqual(llm.operationIssues({ ...basePlan, operation: "status" }), []);
-  const missingName = llm.operationIssues({ ...basePlan, operation: "checkout" });
+  assert.deepEqual(llm.operationIssues(step("status")), []);
+  const missingName = llm.operationIssues(step("checkout"));
   assert.equal(missingName.length, 1);
-  assert.equal(missingName[0].field, "args.name");
-  const unsafeName = llm.operationIssues({ ...basePlan, operation: "delete_branch", args: { ...basePlan.args, name: "--upload-pack=rm" } });
+  assert.equal(missingName[0].field, "steps[0].args.name");
+  const unsafeName = llm.operationIssues(step("delete_branch", { name: "--upload-pack=rm" }));
   assert.match(unsafeName[0].problem, /not a valid Git branch name/);
-  const noBase = llm.operationIssues({ ...basePlan, operation: "rebase" });
-  assert.equal(noBase[0].field, "args.onto");
-  const longMessage = llm.operationIssues({ ...basePlan, operation: "commit", args: { ...basePlan.args, message: "x".repeat(121) } });
+  const noBase = llm.operationIssues(step("rebase"));
+  assert.equal(noBase[0].field, "steps[0].args.onto");
+  const longMessage = llm.operationIssues(step("commit", { message: "x".repeat(121) }));
   assert.match(longMessage[0].problem, /the limit is 120/);
-  assert.match(llm.operationIssues({ ...basePlan, operation: "none" })[0].problem, /cannot be executed/);
+  assert.match(llm.operationIssues(step("none"))[0].problem, /cannot be executed/);
+});
+
+test("la secuencia completa se valida, y cada incidencia señala su propio paso", () => {
+  assert.deepEqual(llm.planIssues({ ...basePlan, steps: [step("checkout", { name: "main" }), step("merge", { name: "feature" })] }), []);
+  const empty = llm.planIssues({ ...basePlan, steps: [] });
+  assert.equal(empty[0].field, "steps");
+  assert.match(empty[0].problem, /at least one step/);
+  const secondBroken = llm.planIssues({ ...basePlan, steps: [step("checkout", { name: "main" }), step("merge")] });
+  assert.equal(secondBroken.length, 1);
+  assert.equal(secondBroken[0].field, "steps[1].args.name");
+  const tooMany = llm.planIssues({ ...basePlan, steps: Array.from({ length: llm.planStepLimit + 1 }, () => step("fetch")) });
+  assert.match(tooMany[0].problem, new RegExp(`the limit is ${llm.planStepLimit}`));
+});
+
+test("el esquema del plan acepta una secuencia y rechaza la forma antigua de un solo paso", () => {
+  const parsed = llm.parseModelPlan(JSON.stringify({ ...basePlan, steps: [step("checkout", { name: "main" }), step("merge", { name: "feature" })] }));
+  assert.equal(parsed.steps.length, 2);
+  assert.equal(parsed.steps[1].operation, "merge");
+  const legacy = { ...basePlan, operation: "checkout", args: noArgs };
+  delete legacy.steps;
+  assert.equal(llm.parseModelPlan(JSON.stringify(legacy)), undefined);
 });
 
 test("los nombres de rama peligrosos se rechazan", () => {

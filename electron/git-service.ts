@@ -12,10 +12,13 @@ import {
   emptyMemory, forgetSshHost, recallIdentity, recallRepository, rememberIdentity, rememberRepository,
   sanitizeMemory, type Memory
 } from "./memory.js";
-import type { ActionPlan, Branch, Commit, ConversationMessage, GitProtocol, LlmConfig, LlmConfigInput, Operation, RepoSnapshot } from "../shared/types.js";
+import type {
+  ActionPlan, Branch, Commit, ConversationMessage, GitProtocol, LlmConfig, LlmConfigInput, Operation,
+  PlanStep, RepoSnapshot, StepOutcome
+} from "../shared/types.js";
 import {
   buildPlannerInstructions, commitMessageLimit, executableOperations, isBranchNameSafe, operationArgs,
-  operationIssues, parseModelPlan, planResponseFormat, type ModelPlan, type PlanIssue
+  planIssues, parseModelPlan, planResponseFormat, type ModelPlan, type PlanIssue
 } from "./llm-plan.js";
 import {
   assertRepositoryPlan, buildRepositoryPlan, remoteNamePattern, repositoryHostPattern, repositoryNamePattern,
@@ -139,6 +142,17 @@ async function checkedGit(cwd: string, args: string[]): Promise<string> {
   return result.stdout.trim();
 }
 
+/**
+ * Like checkedGit, but keeps what Git says on stderr. Most of what a person needs to read
+ * ("Switched to branch 'main'", "Fast-forward") is written there, not to stdout.
+ */
+async function reportedGit(cwd: string, args: string[]): Promise<string> {
+  const result = await runGit(cwd, args);
+  const detail = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
+  if (result.code !== 0) throw new Error(detail || `git ${args.join(" ")} terminó con código ${result.code}`);
+  return detail;
+}
+
 async function optionalGit(cwd: string, args: string[]): Promise<string> {
   const result = await runGit(cwd, args);
   return result.code === 0 ? result.stdout.trim() : "";
@@ -219,7 +233,7 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
 
 function refused(reason: string, source: ActionPlan["source"] = "guardrail", summary = "Solicitud rechazada", kind: ActionPlan["kind"] = "refusal"): PlanDraft {
   return {
-    allowed: false, operation: "none", args: {}, command: "—", summary,
+    allowed: false, steps: [], operation: "none", args: {}, command: "—", summary,
     rationale: reason, risk: "low", requiresConfirmation: false, kind, source
   };
 }
@@ -473,6 +487,7 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
   return {
     draft: {
       allowed: true,
+      steps: [{ operation: "github_create_repo", args, command: buildCommand("github_create_repo", args), summary: `${owner}/${name}`, risk: "high" }],
       operation: "github_create_repo",
       args,
       command: buildCommand("github_create_repo", args),
@@ -652,7 +667,7 @@ async function requestPlan(request: string, snapshot: RepoSnapshot, context: Con
 
 function answerDraft(plan: ModelPlan): PlanDraft {
   return {
-    allowed: true, operation: "none", args: {}, command: "—",
+    allowed: true, steps: [], operation: "none", args: {}, command: "—",
     summary: plan.summary || plan.reply.slice(0, 80),
     rationale: plan.rationale || plan.reply,
     answer: plan.reply,
@@ -666,9 +681,15 @@ function highestRisk(a: ActionPlan["risk"], b: ActionPlan["risk"]): ActionPlan["
   return riskOrder[a] >= riskOrder[b] ? a : b;
 }
 
-/** The model chooses the operation and writes the prose; the deterministic draft owns risk, command and confirmation. */
-function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot): PlanDraft {
-  const draft = operationDraft(plan.operation, operationArgs(plan), snapshot);
+/**
+ * The model chooses the operations and their order and writes the prose; the deterministic table owns
+ * each command, its risk and whether the plan needs confirmation. A step the table does not recognise
+ * cannot reach Git, so an unknown operation collapses the whole plan into a refusal.
+ */
+function gitOperationDraft(plan: ModelPlan): PlanDraft {
+  const steps = plan.steps.map((step) => stepFrom(step.operation, operationArgs(step)));
+  if (steps.some((step) => !step)) return refused("El plan incluye una operación que no está permitida.", "llm", plan.summary);
+  const draft = sequenceDraft(steps as PlanStep[], plan.rationale || "");
   return {
     ...draft,
     summary: plan.summary || draft.summary,
@@ -713,8 +734,8 @@ async function draftFromPlan(
   };
 
   if (plan.intent === "git_operation") {
-    const issues = operationIssues(plan);
-    return issues.length ? retry(issues) : gitOperationDraft(plan, snapshot);
+    const issues = planIssues(plan);
+    return issues.length ? retry(issues) : gitOperationDraft(plan);
   }
 
   const preparation = await prepareGithubRepository(snapshot, repositoryFieldsFromPlan(plan), "llm");
@@ -760,18 +781,34 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
   };
   const detail = details[operation];
   if (!detail || operation === "none") return refused("La operación solicitada no está permitida.");
+  return sequenceDraft([{ operation, args, command: buildCommand(operation, args), summary: detail[0], risk: detail[2] }], detail[1]);
+}
+
+/**
+ * Assembles the steps into the single plan the user approves. The plan speaks for the whole sequence:
+ * its risk is the highest of its steps and its command line shows every one of them in order.
+ */
+function sequenceDraft(steps: PlanStep[], rationale: string): PlanDraft {
+  const risk = steps.reduce<ActionPlan["risk"]>((worst, step) => highestRisk(worst, step.risk), "low");
   return {
     allowed: true,
-    operation,
-    args,
-    command: buildCommand(operation, args),
-    summary: detail[0],
-    rationale: detail[1],
-    risk: detail[2],
-    requiresConfirmation: !["status", "fetch"].includes(operation),
+    steps,
+    operation: steps[0].operation,
+    args: steps[0].args,
+    command: steps.map((step) => step.command).join(" && "),
+    summary: steps.length === 1 ? steps[0].summary : steps.map((step) => step.summary).join(", luego "),
+    rationale,
+    risk,
+    requiresConfirmation: steps.some((step) => !["status", "fetch"].includes(step.operation)),
     kind: "plan",
     source: "guardrail"
   };
+}
+
+/** A step the model asked for, described and priced by the deterministic table above. */
+function stepFrom(operation: Operation, args: Record<string, string>): PlanStep | undefined {
+  const draft = operationDraft(operation, args);
+  return draft.allowed ? draft.steps[0] : undefined;
 }
 
 /** Direct controls in the interface: the operation is already known, so no interpretation is needed. */
@@ -796,24 +833,37 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
   return bindPlan(snapshot, draft);
 }
 
-function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot) {
-  if (!plan.allowed || plan.operation === "none" || !allowedOperations.has(plan.operation)) throw new Error("La acción no está permitida.");
-  if (plan.answer) throw new Error("Las consultas informativas no se ejecutan como operaciones Git.");
-  const branchArg = plan.args.name || plan.args.onto;
+/**
+ * A step against the repository as it stands right now. Every step of a sequence goes through this,
+ * including the ones prepared before the earlier steps moved the repository, so nothing runs on a
+ * state it was not checked against.
+ */
+function validateStep(step: PlanStep, snapshot: RepoSnapshot) {
+  const { operation, args } = step;
+  if (operation === "none" || !allowedOperations.has(operation)) throw new Error("La acción no está permitida.");
+  const branchArg = args.name || args.onto;
   if (branchArg && !isBranchNameSafe(branchArg)) throw new Error("Nombre de rama no válido.");
+  if (["checkout", "create_branch", "delete_branch", "merge"].includes(operation) && !args.name) throw new Error("Falta el nombre de la rama.");
+  if (operation === "rebase" && !args.onto) throw new Error("Falta la rama base.");
+  if (operation === "commit" && (!args.message?.trim() || args.message.length > commitMessageLimit)) throw new Error("El mensaje de commit no es válido.");
+  if (operation === "commit" && !snapshot.changes.length) throw new Error("No hay cambios locales para confirmar.");
+  if (operation === "checkout" && !snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(`La rama ${args.name} no existe localmente.`);
+  if (operation === "create_branch" && snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(`La rama ${args.name} ya existe.`);
+  if (operation === "delete_branch" && args.name === snapshot.currentBranch) throw new Error("No puedes borrar la rama activa.");
+  if (["delete_branch", "merge"].includes(operation) && !snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(`La rama ${args.name} no existe localmente.`);
+  if (operation === "merge" && args.name === snapshot.currentBranch) throw new Error(`No puedes fusionar ${args.name} consigo misma.`);
+  if (operation === "rebase" && !snapshot.branches.some((branch) => branch.name === args.onto)) throw new Error(`La rama base ${args.onto} no existe localmente.`);
+  if (["abort_rebase", "continue_rebase"].includes(operation) && !snapshot.isRebasing) throw new Error("No hay un rebase en curso.");
+}
+
+/** The plan as issued: it must belong to this repository, and the repository must not have moved under it. */
+function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot) {
+  if (!plan.allowed || !plan.steps.length) throw new Error("La acción no está permitida.");
+  if (plan.answer) throw new Error("Las consultas informativas no se ejecutan como operaciones Git.");
   if (plan.repoPath !== snapshot.path) throw new Error("El plan pertenece a otro repositorio.");
   if (plan.head !== snapshot.head) throw new Error("El repositorio cambió desde que se preparó el plan. Prepara la acción de nuevo.");
   if (plan.stateId !== snapshot.stateId) throw new Error("Los cambios locales variaron desde que se preparó el plan. Prepara la acción de nuevo.");
-  if (["checkout", "create_branch", "delete_branch", "merge"].includes(plan.operation) && !plan.args.name) throw new Error("Falta el nombre de la rama.");
-  if (plan.operation === "rebase" && !plan.args.onto) throw new Error("Falta la rama base.");
-  if (plan.operation === "commit" && (!plan.args.message?.trim() || plan.args.message.length > commitMessageLimit)) throw new Error("El mensaje de commit no es válido.");
-  if (plan.operation === "commit" && !snapshot.changes.length) throw new Error("No hay cambios locales para confirmar.");
-  if (plan.operation === "checkout" && !snapshot.branches.some((branch) => branch.name === plan.args.name)) throw new Error(`La rama ${plan.args.name} no existe localmente.`);
-  if (plan.operation === "create_branch" && snapshot.branches.some((branch) => branch.name === plan.args.name)) throw new Error(`La rama ${plan.args.name} ya existe.`);
-  if (plan.operation === "delete_branch" && plan.args.name === snapshot.currentBranch) throw new Error("No puedes borrar la rama activa.");
-  if (["delete_branch", "merge"].includes(plan.operation) && !snapshot.branches.some((branch) => branch.name === plan.args.name)) throw new Error(`La rama ${plan.args.name} no existe localmente.`);
-  if (plan.operation === "rebase" && !snapshot.branches.some((branch) => branch.name === plan.args.onto)) throw new Error(`La rama base ${plan.args.onto} no existe localmente.`);
-  if (["abort_rebase", "continue_rebase"].includes(plan.operation) && !snapshot.isRebasing) throw new Error("No hay un rebase en curso.");
+  validateStep(plan.steps[0], snapshot);
 }
 
 function validateGithubPlan(plan: ActionPlan) {
@@ -897,37 +947,79 @@ async function executeGithubRepositoryPlan(plan: ActionPlan) {
   }
 }
 
-export async function executePlan(cwd: string, plan: ActionPlan) {
-  const snapshot = await getSnapshot(cwd);
-  validateExecution(plan, snapshot);
-  let output = "";
-  try {
-    switch (plan.operation) {
-      case "status": break;
-      case "checkout": output = await checkedGit(cwd, ["switch", plan.args.name]); break;
-      case "create_branch": output = await checkedGit(cwd, ["switch", "-c", plan.args.name]); break;
-      case "delete_branch": output = await checkedGit(cwd, ["branch", "-d", "--", plan.args.name]); break;
-      case "fetch": output = await checkedGit(cwd, ["fetch", "--prune"]); break;
-      case "pull": output = await checkedGit(cwd, ["pull", "--ff-only"]); break;
-      case "push": output = await checkedGit(cwd, ["push"]); break;
-      case "merge": output = await checkedGit(cwd, ["merge", "--no-edit", "--", plan.args.name]); break;
-      case "rebase": output = await checkedGit(cwd, ["rebase", plan.args.onto]); break;
-      case "abort_rebase": output = await checkedGit(cwd, ["rebase", "--abort"]); break;
-      case "continue_rebase": output = await checkedGit(cwd, ["rebase", "--continue"]); break;
-      case "commit":
-        await checkedGit(cwd, ["add", "-A"]);
-        output = await checkedGit(cwd, ["commit", "-m", plan.args.message]);
-        break;
-      case "github_create_repo": output = await executeGithubRepositoryPlan(plan); break;
-    }
-    return { snapshot: await getSnapshot(cwd), output };
-  } catch (error) {
-    return {
-      snapshot: await getSnapshot(cwd),
-      output,
-      error: error instanceof Error ? error.message : "Git no pudo completar la acción."
-    };
+async function runStep(cwd: string, step: PlanStep, plan: ActionPlan): Promise<string> {
+  const { args } = step;
+  switch (step.operation) {
+    case "status": return "";
+    case "checkout": return reportedGit(cwd, ["switch", args.name]);
+    case "create_branch": return reportedGit(cwd, ["switch", "-c", args.name]);
+    case "delete_branch": return reportedGit(cwd, ["branch", "-d", "--", args.name]);
+    case "fetch": return reportedGit(cwd, ["fetch", "--prune"]);
+    case "pull": return reportedGit(cwd, ["pull", "--ff-only"]);
+    case "push": return reportedGit(cwd, ["push"]);
+    case "merge": return reportedGit(cwd, ["merge", "--no-edit", "--", args.name]);
+    case "rebase": return reportedGit(cwd, ["rebase", args.onto]);
+    case "abort_rebase": return reportedGit(cwd, ["rebase", "--abort"]);
+    case "continue_rebase": return reportedGit(cwd, ["rebase", "--continue"]);
+    case "commit":
+      await checkedGit(cwd, ["add", "-A"]);
+      return reportedGit(cwd, ["commit", "-m", args.message]);
+    case "github_create_repo": return executeGithubRepositoryPlan(plan);
+    default: throw new Error("La acción no está permitida.");
   }
+}
+
+/** What the user reads afterwards. A single step keeps Git's own words; a sequence is listed step by step. */
+function executionReport(outcomes: StepOutcome[]) {
+  if (outcomes.length === 1) return outcomes[0].output.trim();
+  return outcomes.map((outcome) => {
+    const mark = outcome.status === "completed" ? "✓" : outcome.status === "failed" ? "✗" : "·";
+    const detail = outcome.status === "skipped" ? "sin ejecutar" : outcome.output.trim();
+    return `${mark} ${outcome.summary}${detail ? `\n${detail}` : ""}`;
+  }).join("\n");
+}
+
+/**
+ * A sequence that stops halfway needs to say where it stopped, because the repository is now in a
+ * state the user did not have before and did not fully ask for either.
+ */
+function failureReport(outcomes: StepOutcome[], failed: StepOutcome, detail: string) {
+  if (outcomes.length === 1) return detail;
+  const done = outcomes.filter((outcome) => outcome.status === "completed").length;
+  const skipped = outcomes.filter((outcome) => outcome.status === "skipped");
+  const tail = skipped.length ? ` No se ejecutó: ${skipped.map((outcome) => outcome.summary).join(", ")}.` : "";
+  return `Se completaron ${done} de ${outcomes.length} pasos. Falló «${failed.summary}»: ${detail}${tail}`;
+}
+
+/**
+ * Runs the approved plan end to end. Each step is validated against the repository the previous step
+ * produced, and the first failure stops the sequence: a half-finished merge must never be reported as
+ * done, and the steps that never ran are named so the user knows exactly where things stand.
+ */
+export async function executePlan(cwd: string, plan: ActionPlan): Promise<{ snapshot: RepoSnapshot; output: string; error?: string; outcomes: StepOutcome[] }> {
+  let snapshot = await getSnapshot(cwd);
+  validateExecution(plan, snapshot);
+  const outcomes: StepOutcome[] = plan.steps.map((step) => ({ command: step.command, summary: step.summary, status: "skipped", output: "" }));
+
+  for (const [index, step] of plan.steps.entries()) {
+    try {
+      if (index > 0) {
+        snapshot = await getSnapshot(cwd);
+        validateStep(step, snapshot);
+      }
+      outcomes[index] = { ...outcomes[index], status: "completed", output: await runStep(cwd, step, plan) };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Git no pudo completar la acción.";
+      outcomes[index] = { ...outcomes[index], status: "failed", output: detail };
+      return {
+        snapshot: await getSnapshot(cwd),
+        output: executionReport(outcomes),
+        error: failureReport(outcomes, outcomes[index], detail),
+        outcomes
+      };
+    }
+  }
+  return { snapshot: await getSnapshot(cwd), output: executionReport(outcomes), outcomes };
 }
 
 function settingsPath() { return join(app.getPath("userData"), "branchline-settings.json"); }

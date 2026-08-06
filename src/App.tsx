@@ -338,7 +338,9 @@ export default function App() {
       const result = await window.branchline.executePlan(plan.repoPath, plan.id);
       updateSnapshot(plan.repoPath, result.snapshot);
       if (result.error) {
-        updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, error: result.error, status: "error" }));
+        // A sequence that stopped halfway did change the repository: show what ran, not only the failure.
+        const progress = plan.steps.length > 1 ? result.output : undefined;
+        updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome: progress, error: result.error, status: "error" }));
         addActivity({ label: "Git requiere atención", detail: result.error, tone: "warning" });
         setToast({ message: result.error, tone: "error" });
       } else {
@@ -346,7 +348,7 @@ export default function App() {
         updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome, status: "completed" }));
         addActivity({ label: "Acción ejecutada", detail: plan.command, tone: "success" });
         setToast({ message: outcome, tone: "success" });
-        if (plan.operation === "commit") {
+        if (plan.steps.some((step) => step.operation === "commit")) {
           setCommitMessage("");
           setCommitFormOpen(false);
         }
@@ -493,12 +495,17 @@ function ChangesView({ snapshot, formOpen, message, generating, busy, onOpenForm
 }
 
 function ConversationEntry({ turn, busy, onApply, onDismiss }: { turn: ConversationTurn; busy: boolean; onApply: (plan: ActionPlan) => void; onDismiss: () => void }) {
-  return <article className="conversation-turn"><div className="conversation-question"><span>Tú</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><Bot size={13} /></span><div>{turn.status === "loading" && <div className="conversation-loading"><LoaderCircle className="spin" size={14} /> Preparando respuesta…</div>}{turn.answer && <p>{turn.answer}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.outcome && <div className="conversation-outcome"><Check size={13} />{turn.outcome}</div>}{turn.error && <div className="conversation-error"><AlertTriangle size={13} />{turn.error}</div>}</div></div></article>;
+  // A sequence reports itself step by step, marks included, so it needs no outer verdict icon or colour.
+  const sequence = (turn.plan?.steps.length ?? 0) > 1;
+  return <article className="conversation-turn"><div className="conversation-question"><span>Tú</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><Bot size={13} /></span><div>{turn.status === "loading" && <div className="conversation-loading"><LoaderCircle className="spin" size={14} /> Preparando respuesta…</div>}{turn.answer && <p>{turn.answer}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
 }
 
 function PlanCard({ plan, onApply, onDismiss, busy }: { plan: ActionPlan; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean }) {
   const asking = plan.kind === "question";
-  return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? "Interpretado por el proveedor LLM" : "Acción directa validada"}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? "Descartar pregunta" : "Descartar plan"}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}{plan.repositoryPlan && <pre className="repository-plan-json">{JSON.stringify(plan.repositoryPlan, null, 2)}</pre>}{plan.allowed && <div className="command-preview"><TerminalSquare size={14} /><code>{plan.command}</code></div>}{plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>Cancelar</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {plan.requiresConfirmation ? "Confirmar acción" : "Aplicar"}</button></div> : asking ? <p className="plan-hint">Responde en el cuadro de abajo para continuar.</p> : <button className="ghost-button plan-close" onClick={onDismiss}>Entendido</button>}</div>;
+  return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? "Interpretado por el proveedor LLM" : "Acción directa validada"}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? "Descartar pregunta" : "Descartar plan"}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}{plan.repositoryPlan && <pre className="repository-plan-json">{JSON.stringify(plan.repositoryPlan, null, 2)}</pre>}{plan.allowed && (plan.steps.length > 1
+      ? <ol className="plan-steps">{plan.steps.map((step, index) => <li key={`${step.command}-${index}`}><span className="step-summary">{step.summary}</span><code><TerminalSquare size={11} />{step.command}</code></li>)}</ol>
+      : <div className="command-preview"><TerminalSquare size={14} /><code>{plan.command}</code></div>)}
+    {plan.allowed && plan.steps.length > 1 && <p className="plan-hint">Al confirmar se ejecutan los {plan.steps.length} pasos en orden. Si alguno falla, el plan se detiene ahí y te digo qué quedó sin hacer.</p>}{plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>Cancelar</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {plan.requiresConfirmation ? "Confirmar acción" : "Aplicar"}</button></div> : asking ? <p className="plan-hint">Responde en el cuadro de abajo para continuar.</p> : <button className="ghost-button plan-close" onClick={onDismiss}>Entendido</button>}</div>;
 }
 
 function SettingsModal({ config, onClose, onSaved }: { config: LlmConfig; onClose: () => void; onSaved: (config: LlmConfig) => void }) {

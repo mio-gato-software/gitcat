@@ -67,12 +67,33 @@ export type RepositoryPlan = {
   requiresConfirmation: true;
 };
 
+/** One Git operation inside a plan. The model orders the steps; this shape is what the code validates and runs. */
+export type PlanStep = {
+  operation: Operation;
+  args: Record<string, string>;
+  command: string;
+  summary: string;
+  risk: "low" | "medium" | "high";
+};
+
+export type StepOutcome = {
+  command: string;
+  summary: string;
+  status: "completed" | "failed" | "skipped";
+  output: string;
+};
+
 export type ActionPlan = {
   id: string;
   repoPath: string;
   head: string;
   stateId: string;
   allowed: boolean;
+  /**
+   * Everything the plan will run, in order, approved as a whole. A request like "merge this branch
+   * into main" needs more than one operation, so a plan is never assumed to be a single step.
+   */
+  steps: PlanStep[];
   operation: Operation;
   args: Record<string, string>;
   command: string;
@@ -108,6 +129,8 @@ export type ExecutionResult = {
   snapshot: RepoSnapshot;
   output: string;
   error?: string;
+  /** What each step of the plan actually did, so a sequence that stops halfway is never reported as a success. */
+  outcomes?: StepOutcome[];
 };
 
 export type CommitDescriptionResult = {
