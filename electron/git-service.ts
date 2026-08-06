@@ -176,6 +176,28 @@ function parseTrack(track: string) {
   return { ahead, behind };
 }
 
+/**
+ * Remote-tracking branches keyed by the local branch name they correspond to, so the interface can
+ * say whether a branch lives here, on a remote, or on both. The remote prefix is stripped using the
+ * configured remote names, because a branch name may itself contain slashes.
+ */
+function parseRemoteRefs(raw: string, remotes: string[], commitsByHash: Map<string, Commit>) {
+  const byLocalName = new Map<string, { ref: string; lastCommit?: Commit }>();
+  for (const line of raw.split("\n").filter(Boolean)) {
+    const [ref, shortHash, subject, author, email, date] = line.split("\0");
+    const remote = remotes.find((candidate) => ref.startsWith(`${candidate}/`));
+    if (!remote) continue;
+    const name = ref.slice(remote.length + 1);
+    // "origin/HEAD" is a symbolic pointer, not a branch anyone can check out.
+    if (!name || name === "HEAD" || byLocalName.has(name)) continue;
+    byLocalName.set(name, {
+      ref,
+      lastCommit: shortHash ? (commitsByHash.get(shortHash) ?? { hash: shortHash, shortHash, subject, author, email, date, refs: [] }) : undefined
+    });
+  }
+  return byLocalName;
+}
+
 function parseCommit(raw: string): Commit | undefined {
   const [hash, shortHash, author, email, date, subject, refs = ""] = raw.split("\x1f");
   if (!hash || !shortHash) return undefined;
@@ -192,17 +214,29 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     "--format=%(refname:short)%00%(upstream:short)%00%(upstream:track)%00%(objectname:short)%00%(subject)%00%(authorname)%00%(authoremail)%00%(authordate:iso-strict)",
     "refs/heads"
   ]);
+  const remoteBranchRaw = await checkedGit(repoRoot, [
+    "for-each-ref",
+    "--format=%(refname:short)%00%(objectname:short)%00%(subject)%00%(authorname)%00%(authoremail)%00%(authordate:iso-strict)",
+    "refs/remotes"
+  ]);
   const logRaw = head ? await checkedGit(repoRoot, [
     "log", "--all", "-n", "80", "--date=iso-strict",
     "--pretty=format:%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D"
   ]) : "";
   const commits = logRaw.split("\n").map(parseCommit).filter((commit): commit is Commit => Boolean(commit));
   const commitsByHash = new Map(commits.map((commit) => [commit.shortHash, commit]));
+  const remotes = (await checkedGit(repoRoot, ["remote"])).split("\n").filter(Boolean);
+  const remoteRefs = parseRemoteRefs(remoteBranchRaw, remotes, commitsByHash);
   const branches: Branch[] = branchRaw.split("\n").filter(Boolean).map((line) => {
     const [name, upstream, track, shortHash, subject, author, email, date] = line.split("\0");
+    // A branch lives on a remote too when it has a counterpart there, whether or not it is its upstream.
+    const tracked = upstream && [...remoteRefs.values()].some((remote) => remote.ref === upstream);
+    const remoteRef = (tracked ? upstream : undefined) ?? remoteRefs.get(name)?.ref;
     return {
       name,
       upstream: upstream || undefined,
+      remoteRef,
+      presence: remoteRef ? "both" as const : "local" as const,
       ...parseTrack(track || ""),
       isCurrent: name === currentBranch,
       lastCommit: shortHash ? (commitsByHash.get(shortHash) ?? {
@@ -210,11 +244,15 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
       }) : undefined
     };
   });
+  const localNames = new Set(branches.map((branch) => branch.name));
+  for (const [name, remote] of remoteRefs) {
+    if (localNames.has(name)) continue;
+    branches.push({ name, remoteRef: remote.ref, presence: "remote", ahead: 0, behind: 0, isCurrent: false, lastCommit: remote.lastCommit });
+  }
   const gitDir = await optionalGit(repoRoot, ["rev-parse", "--git-dir"]);
   const rebaseMerge = await optionalGit(repoRoot, ["rev-parse", "--git-path", "rebase-merge"]);
   const rebaseApply = await optionalGit(repoRoot, ["rev-parse", "--git-path", "rebase-apply"]);
   const isRebasing = Boolean(gitDir && ((rebaseMerge && existsSync(resolve(repoRoot, rebaseMerge))) || (rebaseApply && existsSync(resolve(repoRoot, rebaseApply)))));
-  const remotes = (await checkedGit(repoRoot, ["remote"])).split("\n").filter(Boolean);
 
   return {
     path: repoRoot,
@@ -598,10 +636,8 @@ async function getWorkingTreeDiff(snapshot: RepoSnapshot) {
   return diff;
 }
 
-export async function generateCommitDescription(cwd: string) {
-  if (!isLlmConfigured()) throw new Error(LLM_REQUIRED);
-  const snapshot = await getSnapshot(cwd);
-  if (!snapshot.changes.length) throw new Error("No hay cambios locales que describir.");
+/** One commit message read off the real diff. Shared by the manual button and by any planned commit. */
+async function describeChanges(snapshot: RepoSnapshot) {
   const diff = await getWorkingTreeDiff(snapshot);
   const recentSubjects = snapshot.commits.slice(0, 15).map((commit) => commit.subject).filter(Boolean);
   const instructions = `Write one commit message for the working tree diff below.
@@ -615,7 +651,14 @@ they are mixed, write it in English.`;
     `Working tree diff:\n${diff}`
   ].join("\n\n");
   const text = await askProvider({ instructions, input }, 180_000);
-  const description = cleanCommitDescription(text);
+  return cleanCommitDescription(text);
+}
+
+export async function generateCommitDescription(cwd: string) {
+  if (!isLlmConfigured()) throw new Error(LLM_REQUIRED);
+  const snapshot = await getSnapshot(cwd);
+  if (!snapshot.changes.length) throw new Error("No hay cambios locales que describir.");
+  const description = await describeChanges(snapshot);
   const current = await getSnapshot(snapshot.path);
   if (current.stateId !== snapshot.stateId) throw new Error("Los cambios variaron durante la generación. Inténtalo de nuevo.");
   return { description, stateId: snapshot.stateId };
@@ -635,6 +678,8 @@ function plannerState(snapshot: RepoSnapshot) {
     branches: snapshot.branches.map((branch) => ({
       name: branch.name,
       isCurrent: branch.isCurrent,
+      // "remote": it exists only on a remote, so switching to it creates the local branch.
+      presence: branch.presence,
       upstream: branch.upstream ?? null,
       ahead: branch.ahead,
       behind: branch.behind,
@@ -686,10 +731,12 @@ function highestRisk(a: ActionPlan["risk"], b: ActionPlan["risk"]): ActionPlan["
  * each command, its risk and whether the plan needs confirmation. A step the table does not recognise
  * cannot reach Git, so an unknown operation collapses the whole plan into a refusal.
  */
-function gitOperationDraft(plan: ModelPlan): PlanDraft {
-  const steps = plan.steps.map((step) => stepFrom(step.operation, operationArgs(step)));
-  if (steps.some((step) => !step)) return refused("El plan incluye una operación que no está permitida.", "llm", plan.summary);
-  const draft = sequenceDraft(steps as PlanStep[], plan.rationale || "");
+async function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot): Promise<PlanDraft> {
+  const proposed = plan.steps.map((step) => stepFrom(step.operation, operationArgs(step)));
+  if (proposed.some((step) => !step)) return refused("El plan incluye una operación que no está permitida.", "llm", plan.summary);
+  const steps = await writeCommitMessages(proposed as PlanStep[], snapshot);
+  if ("blocker" in steps) return asking(steps.blocker, plan.summary);
+  const draft = sequenceDraft(steps, plan.rationale || "");
   return {
     ...draft,
     summary: plan.summary || draft.summary,
@@ -735,7 +782,7 @@ async function draftFromPlan(
 
   if (plan.intent === "git_operation") {
     const issues = planIssues(plan);
-    return issues.length ? retry(issues) : gitOperationDraft(plan);
+    return issues.length ? retry(issues) : gitOperationDraft(plan, snapshot);
   }
 
   const preparation = await prepareGithubRepository(snapshot, repositoryFieldsFromPlan(plan), "llm");
@@ -811,6 +858,25 @@ function stepFrom(operation: Operation, args: Record<string, string>): PlanStep 
   return draft.allowed ? draft.steps[0] : undefined;
 }
 
+/**
+ * A commit nobody dictated a message for. The diff is right there, so the app writes the message
+ * itself instead of stopping to ask for something it can read, and the card shows what it wrote
+ * before anything is committed.
+ */
+async function writeCommitMessages(steps: PlanStep[], snapshot: RepoSnapshot): Promise<PlanStep[] | { blocker: string }> {
+  const pending = (step: PlanStep) => step.operation === "commit" && !step.args.message?.trim();
+  if (!steps.some(pending)) return steps;
+  if (!snapshot.changes.length) return { blocker: "No hay cambios locales que confirmar, así que no hay nada de lo que escribir un commit." };
+  let message: string;
+  try {
+    message = await describeChanges(snapshot);
+  } catch (error) {
+    return { blocker: `No pude escribir el mensaje del commit a partir de los cambios: ${error instanceof Error ? error.message : "error desconocido"}` };
+  }
+  if (!message) return { blocker: "El proveedor no devolvió un mensaje de commit utilizable a partir de los cambios." };
+  return steps.map((step) => pending(step) ? stepFrom("commit", { ...step.args, message }) ?? step : step);
+}
+
 /** Direct controls in the interface: the operation is already known, so no interpretation is needed. */
 export async function prepareOperation(cwd: string, operation: Operation, args: Record<string, string> = {}) {
   const snapshot = await getSnapshot(cwd);
@@ -851,6 +917,12 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot) {
   if (operation === "create_branch" && snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(`La rama ${args.name} ya existe.`);
   if (operation === "delete_branch" && args.name === snapshot.currentBranch) throw new Error("No puedes borrar la rama activa.");
   if (["delete_branch", "merge"].includes(operation) && !snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(`La rama ${args.name} no existe localmente.`);
+  // A remote-only branch has no local ref: switching to it creates one, but deleting or merging it cannot work.
+  if (["delete_branch", "merge", "rebase"].includes(operation)) {
+    const target = args.name || args.onto;
+    const remoteOnly = snapshot.branches.find((branch) => branch.name === target)?.presence === "remote";
+    if (remoteOnly) throw new Error(`La rama ${target} solo existe en el remoto. Cámbiate a ella primero para tenerla en local.`);
+  }
   if (operation === "merge" && args.name === snapshot.currentBranch) throw new Error(`No puedes fusionar ${args.name} consigo misma.`);
   if (operation === "rebase" && !snapshot.branches.some((branch) => branch.name === args.onto)) throw new Error(`La rama base ${args.onto} no existe localmente.`);
   if (["abort_rebase", "continue_rebase"].includes(operation) && !snapshot.isRebasing) throw new Error("No hay un rebase en curso.");

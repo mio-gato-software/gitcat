@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import {
   AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Bot, Check, ChevronDown, CircleDot,
-  Clock3, Cloud, FileDiff, FolderOpen, GitBranch, GitCommitHorizontal, GitFork,
-  GitMerge, Info, LoaderCircle, MessageCircle, Plus, RefreshCcw, Search, Send,
+  Clock3, Cloud, Eye, FileDiff, FolderOpen, GitBranch, GitCommitHorizontal, GitFork,
+  GitMerge, Info, Laptop, LoaderCircle, MessageCircle, Plus, RefreshCcw, Search, Send,
   Settings2, ShieldCheck, Sparkles, TerminalSquare, Trash2, UserRound, X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -39,6 +40,34 @@ function shortPath(path: string) {
 
 function branchColor(index: number) { return palette[index % palette.length]; }
 
+type PaneWidths = { sidebar: number; inspector: number };
+
+const paneStorageKey = "branchline-pane-widths";
+const defaultPanes: PaneWidths = { sidebar: 235, inspector: 330 };
+/** The middle column holds the graph, so it keeps a floor no drag can take away. */
+const paneRange = { sidebar: [180, 460], inspector: [255, 620], centre: 340 } as const;
+
+function readPaneWidths(): PaneWidths | undefined {
+  try {
+    const stored = JSON.parse(localStorage.getItem(paneStorageKey) ?? "null");
+    if (typeof stored?.sidebar === "number" && typeof stored?.inspector === "number" &&
+        Number.isFinite(stored.sidebar) && Number.isFinite(stored.inspector)) {
+      return { sidebar: stored.sidebar, inspector: stored.inspector };
+    }
+  } catch { /* a corrupt entry just means the defaults */ }
+  return undefined;
+}
+
+function clamp(value: number, min: number, max: number) { return Math.min(Math.max(value, min), max); }
+
+/** Keeps both side panes inside their own range and never lets them squeeze the graph below its floor. */
+function clampPanes({ sidebar, inspector }: PaneWidths, total: number): PaneWidths {
+  const room = total > 0 ? total - paneRange.centre : Number.POSITIVE_INFINITY;
+  const nextSidebar = clamp(sidebar, paneRange.sidebar[0], Math.min(paneRange.sidebar[1], room - paneRange.inspector[0]));
+  const nextInspector = clamp(inspector, paneRange.inspector[0], Math.min(paneRange.inspector[1], room - nextSidebar));
+  return { sidebar: Math.round(nextSidebar), inspector: Math.round(nextInspector) };
+}
+
 function plural(count: number, singular: string, many: string) { return `${count} ${count === 1 ? singular : many}`; }
 
 const baseBranchNames = ["main", "master", "develop", "trunk"];
@@ -51,9 +80,10 @@ const baseBranchNames = ["main", "master", "develop", "trunk"];
 function suggestionsFor(snapshot: RepoSnapshot): Suggestion[] {
   const current = snapshot.branches.find((branch) => branch.isCurrent);
   const branch = current?.name ?? snapshot.currentBranch;
+  // A branch that only exists on a remote cannot be merged into anything yet, so it is no base.
   const base = baseBranchNames
     .map((name) => snapshot.branches.find((item) => item.name === name))
-    .find((item) => item && !item.isCurrent);
+    .find((item) => item && !item.isCurrent && item.presence !== "remote");
   const options: Suggestion[] = [];
 
   if (snapshot.isRebasing) options.push({
@@ -143,17 +173,88 @@ export default function App() {
   const [commitMessage, setCommitMessage] = useState("");
   const [generatingDescription, setGeneratingDescription] = useState(false);
   const [workspaceReady, setWorkspaceReady] = useState(false);
+  const [exploring, setExploring] = useState(false);
+  const [panes, setPanes] = useState<PaneWidths | undefined>(readPaneWidths);
   const requestSequence = useRef(0);
   const activitySequence = useRef(0);
   const conversationSequence = useRef(0);
   const activityTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
   const workspaceRestored = useRef(false);
   const conversationEnd = useRef<HTMLDivElement>(null);
+  const layoutRef = useRef<HTMLElement>(null);
 
   const active = projects.find((project) => project.id === activeId);
   const snapshot = active?.snapshot;
   const conversation = snapshot ? conversations[snapshot.path] ?? [] : [];
   const planning = conversation.some((turn) => turn.status === "loading" || turn.status === "executing");
+  const paneStyle = panes
+    ? { "--sidebar-w": `${panes.sidebar}px`, "--inspector-w": `${panes.inspector}px` } as CSSProperties
+    : undefined;
+
+  // Adopt whatever widths the stylesheet chose for this window, so the handles start on the real borders.
+  useLayoutEffect(() => {
+    if (panes || !layoutRef.current) return;
+    const columns = getComputedStyle(layoutRef.current).gridTemplateColumns.split(" ").map(Number.parseFloat);
+    if (columns.length === 3 && columns.every(Number.isFinite)) setPanes({ sidebar: columns[0], inspector: columns[2] });
+  }, [panes, snapshot, workspaceReady, exploring, config.configured]);
+
+  useEffect(() => {
+    if (panes) try { localStorage.setItem(paneStorageKey, JSON.stringify(panes)); } catch { /* a full quota must not break resizing */ }
+  }, [panes]);
+
+  /**
+   * Widths saved on a wide screen may not fit a narrower window, so they are pulled back inside the
+   * available room on mount and whenever the window changes size. Unchanged widths keep the same
+   * object, so a resize that needs no correction costs no render.
+   */
+  useEffect(() => {
+    const reclamp = () => {
+      const total = availableWidth();
+      if (!total) return;
+      setPanes((current) => {
+        if (!current) return current;
+        const next = clampPanes(current, total);
+        return next.sidebar === current.sidebar && next.inspector === current.inspector ? current : next;
+      });
+    };
+    reclamp();
+    window.addEventListener("resize", reclamp);
+    return () => window.removeEventListener("resize", reclamp);
+  }, [snapshot, panes]);
+
+  /**
+   * The room the three columns have to share. Measured on the container, never on the grid itself:
+   * a grid whose columns already overflow reports its own stretched width and would confirm any size.
+   */
+  const availableWidth = () => layoutRef.current?.parentElement?.clientWidth ?? 0;
+
+  const resizePane = (edge: keyof PaneWidths, width: number) => {
+    const total = availableWidth();
+    setPanes((current) => current && clampPanes({ ...current, [edge]: width }, total));
+  };
+
+  const startResize = (edge: keyof PaneWidths) => (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!panes || event.button !== 0) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const startX = event.clientX;
+    const startWidth = panes[edge];
+    handle.setPointerCapture(event.pointerId);
+    // The sidebar grows to the right, the inspector to the left, so their deltas have opposite signs.
+    const move = (moveEvent: PointerEvent) => resizePane(edge, startWidth + (edge === "sidebar" ? moveEvent.clientX - startX : startX - moveEvent.clientX));
+    const stop = () => {
+      handle.releasePointerCapture(event.pointerId);
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", stop);
+      handle.removeEventListener("pointercancel", stop);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", stop);
+    handle.addEventListener("pointercancel", stop);
+  };
+
+  const nudgePane = (edge: keyof PaneWidths, delta: number) => { if (panes) resizePane(edge, panes[edge] + delta); };
+  const resetPane = (edge: keyof PaneWidths) => resizePane(edge, defaultPanes[edge]);
 
   useEffect(() => {
     window.branchline.getLlmConfig().then(setConfig).catch((error) => {
@@ -333,6 +434,10 @@ export default function App() {
 
   const applyPlan = async (turnId: number, plan: ActionPlan) => {
     if (!plan.allowed || planning) return;
+    await runPlan(turnId, plan);
+  };
+
+  const runPlan = async (turnId: number, plan: ActionPlan) => {
     updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, status: "executing" }));
     try {
       const result = await window.branchline.executePlan(plan.repoPath, plan.id);
@@ -358,6 +463,32 @@ export default function App() {
       updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
       setToast({ message, tone: "error" });
       await refreshProject(plan.repoPath, false);
+    }
+  };
+
+  /**
+   * A double click on a branch is the whole intent, so it prepares the switch and runs it. Anything
+   * that gets in the way — a dirty tree, a branch that vanished — is reported in the assistant column
+   * instead of being swallowed.
+   */
+  const switchBranch = async (name: string) => {
+    if (!snapshot || planning) return;
+    const path = snapshot.path;
+    const turnId = addTurn(path, `Cambiar a la rama ${name}`);
+    try {
+      const plan = await window.branchline.prepareOperation(path, "checkout", { name });
+      if (plan.repoPath !== path) throw new Error("El plan pertenece a otro repositorio.");
+      if (!plan.allowed) {
+        updateTurn(path, turnId, (turn) => ({ ...turn, plan, status: "completed" }));
+        addActivity({ label: "No se pudo cambiar de rama", detail: plan.summary, tone: "warning" });
+        return;
+      }
+      updateTurn(path, turnId, (turn) => ({ ...turn, plan }));
+      await runPlan(turnId, plan);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo cambiar de rama.";
+      updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
+      addActivity({ label: "No se pudo cambiar de rama", detail: message, tone: "warning" });
     }
   };
 
@@ -402,6 +533,11 @@ export default function App() {
   /** Suggestions are ordinary questions: the model answers them, in whatever language they arrive. */
   const askSuggestion = (question: string) => { void propose(question); };
 
+  // The list now includes branches that only exist on a remote, so the count has to tell them apart.
+  const branchCount = useMemo(() => ({
+    local: snapshot?.branches.filter((branch) => branch.presence !== "remote").length ?? 0,
+    remoteOnly: snapshot?.branches.filter((branch) => branch.presence === "remote").length ?? 0
+  }), [snapshot]);
   const filteredBranches = useMemo(() => snapshot?.branches.filter((branch) => branch.name.toLocaleLowerCase().includes(branchFilter.toLocaleLowerCase())) ?? [], [snapshot, branchFilter]);
   const filteredCommits = useMemo(() => snapshot?.commits.filter((commit) => {
     const query = commitFilter.toLocaleLowerCase();
@@ -422,16 +558,19 @@ export default function App() {
         <div className="top-actions"><div className="sync-pill"><span className="pulse-dot" /> Local</div><button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Configuración"><Settings2 size={17} /></button></div>
       </header>
 
-      {!workspaceReady ? <div className="workspace-loading"><LoaderCircle className="spin" size={24} /><span>Restaurando proyectos…</span></div> : !config.configured ? <ProviderRequired onConfigure={() => setSettingsOpen(true)} /> : !snapshot ? <Welcome openProject={openProject} /> : <>
+      {!workspaceReady ? <div className="workspace-loading"><LoaderCircle className="spin" size={24} /><span>Restaurando proyectos…</span></div> : !config.configured && !exploring ? <ProviderRequired onConfigure={() => setSettingsOpen(true)} onExplore={() => setExploring(true)} /> : !snapshot ? <Welcome openProject={openProject} /> : <>
+        {!config.configured && <div className="provider-banner" role="status"><Eye size={14} /><span><strong>Estás viendo la interfaz sin proveedor.</strong> Git funciona, pero el asistente no puede interpretar nada ni planificar acciones.</span><button className="outline-button small" onClick={() => setSettingsOpen(true)}><Settings2 size={13} /> Configurar</button></div>}
         <div className="workspace-header">
           <div className="project-title"><div className="folder-icon"><FolderOpen size={17} /></div><div><div className="eyebrow">PROYECTO ACTIVO</div><div className="project-name">{snapshot.name}<span className="project-path" title={snapshot.path}>{shortPath(snapshot.path)}</span></div></div></div>
           <div className="workspace-actions"><button className="ghost-button" onClick={() => void refreshProject()} disabled={Boolean(refreshingPath)}>{refreshingPath === snapshot.path ? <LoaderCircle className="spin" size={15} /> : <RefreshCcw size={15} />} Actualizar</button><button className="outline-button" onClick={() => void prepare("fetch")} disabled={planning}><ArrowDownToLine size={15} /> Fetch</button><button className="primary-button" onClick={() => void prepare("push")} disabled={planning}><ArrowUpFromLine size={15} /> Push</button></div>
         </div>
 
-        <main className="main-layout">
+        <main className="main-layout" ref={layoutRef} style={paneStyle}>
+          {panes && <PaneDivider edge="sidebar" width={panes.sidebar} onPointerDown={startResize("sidebar")} onNudge={(delta) => nudgePane("sidebar", delta)} onReset={() => resetPane("sidebar")} />}
+          {panes && <PaneDivider edge="inspector" width={panes.inspector} onPointerDown={startResize("inspector")} onNudge={(delta) => nudgePane("inspector", delta)} onReset={() => resetPane("inspector")} />}
           <aside className="sidebar">
             <div className="sidebar-section branch-section"><div className="section-heading"><span>RAMAS</span><button className="mini-icon" onClick={() => setInputDialog({ operation: "create_branch", title: "Nueva rama", label: "Nombre de la rama", value: "" })} aria-label="Crear rama"><Plus size={14} /></button></div><div className="search-field"><Search size={14} /><input aria-label="Filtrar ramas" value={branchFilter} onChange={(event) => setBranchFilter(event.target.value)} placeholder="Filtrar ramas" /></div><div className="branch-list">
-              {filteredBranches.map((branch, index) => <BranchRow branch={branch} index={index} key={branch.name} busy={planning} onSwitch={() => void prepare("checkout", { name: branch.name })} onDelete={() => void prepare("delete_branch", { name: branch.name })} />)}
+              {filteredBranches.map((branch, index) => <BranchRow branch={branch} index={index} key={branch.name} busy={planning} onSwitch={() => void prepare("checkout", { name: branch.name })} onSwitchNow={() => void switchBranch(branch.name)} onDelete={() => void prepare("delete_branch", { name: branch.name })} />)}
               {!filteredBranches.length && <div className="empty-small">No hay ramas que coincidan.</div>}
             </div></div>
             <div className="sidebar-section"><div className="section-heading"><span>REMOTOS</span><button className="mini-icon" onClick={() => void prepare("fetch")} aria-label="Actualizar remotos" disabled={planning}><RefreshCcw size={13} /></button></div>{snapshot.remotes.length ? snapshot.remotes.map((remote) => <div className="remote-row" key={remote}><Cloud size={14} /><span>{remote}</span><span className="remote-count">configurado</span></div>) : <div className="empty-small">Sin remotos configurados.</div>}</div>
@@ -446,9 +585,9 @@ export default function App() {
               : <ChangesView snapshot={snapshot} formOpen={commitFormOpen} message={commitMessage} generating={generatingDescription} busy={planning} onOpenForm={() => setCommitFormOpen(true)} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit} />}
           </section>
 
-          <aside className="inspector"><div className="inspector-header"><div><div className="eyebrow">ASISTENTE DE RAMAS</div><h2>¿Qué quieres saber o hacer?</h2></div><div className="assistant-icon"><Bot size={18} /></div></div><p className="assistant-copy">Pregunta sobre el repositorio o describe una acción de Git. Las acciones se muestran como un plan verificable antes de ejecutarse.</p>{conversation.length === 0 && <div className="suggestion-list">{suggestionsFor(snapshot).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? `${conversation.length} mensaje${conversation.length === 1 ? "" : "s"}` : "Nueva conversación"}</span><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> Limpiar conversación</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: "Plan descartado sin modificar el repositorio." }))} />)}<div ref={conversationEnd} /></div><div className="chat-compose"><textarea aria-label="Solicitud para el asistente" value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder="Ej. ¿quién trabajó en esta rama la última vez?" rows={3} /><button className="send-button" aria-label="Preparar solicitud" onClick={() => void propose(request)} disabled={planning || !request.trim()}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div></aside>
+          <aside className="inspector"><div className="inspector-header"><div><div className="eyebrow">ASISTENTE DE RAMAS</div><h2>¿Qué quieres saber o hacer?</h2></div><div className="assistant-icon"><Bot size={18} /></div></div><p className="assistant-copy">{config.configured ? "Pregunta sobre el repositorio o describe una acción de Git. Las acciones se muestran como un plan verificable antes de ejecutarse." : "Sin proveedor LLM el asistente no puede interpretar nada. Configúralo para preguntar o describir acciones; el resto de la interfaz funciona igual."}</p>{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? `${conversation.length} mensaje${conversation.length === 1 ? "" : "s"}` : "Nueva conversación"}</span><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> Limpiar conversación</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: "Plan descartado sin modificar el repositorio." }))} />)}<div ref={conversationEnd} /></div><div className="chat-compose"><textarea aria-label="Solicitud para el asistente" disabled={!config.configured} value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder={config.configured ? "Ej. ¿quién trabajó en esta rama la última vez?" : "Configura un proveedor LLM para escribirle al asistente"} rows={3} /><button className="send-button" aria-label="Preparar solicitud" onClick={() => void propose(request)} disabled={planning || !request.trim() || !config.configured}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div></aside>
         </main>
-        <footer className="statusbar"><div className="status-left"><span className="status-good"><CircleDot size={12} /> {snapshot.isDirty ? `${snapshot.changes.length} cambio${snapshot.changes.length === 1 ? "" : "s"}` : "Sin cambios locales"}</span><span className="status-separator" /><span>{snapshot.branches.length} ramas locales</span></div><div className="status-right"><span><Clock3 size={12} /> Última lectura {formatDate(active.loadedAt)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : "LLM no configurado"}</span></div></footer>
+        <footer className="statusbar"><div className="status-left"><span className="status-good"><CircleDot size={12} /> {snapshot.isDirty ? `${snapshot.changes.length} cambio${snapshot.changes.length === 1 ? "" : "s"}` : "Sin cambios locales"}</span><span className="status-separator" /><span>{branchCount.local === 1 ? "1 rama local" : `${branchCount.local} ramas locales`}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} solo en el remoto` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> Última lectura {formatDate(active.loadedAt)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : "LLM no configurado"}</span></div></footer>
       </>}
       {activity.length > 0 && <div className="activity-dock" aria-live="polite">{activity.slice(0, 3).map((item) => <div className={`activity-item ${item.tone}`} role={item.tone === "warning" ? "alert" : "status"} key={item.id}><span className="activity-symbol">{item.tone === "success" ? <Check size={13} /> : item.tone === "warning" ? <AlertTriangle size={13} /> : <GitCommitHorizontal size={13} />}</span><div className="activity-copy"><strong>{item.label}</strong><span title={item.detail}>{item.detail}</span></div><button className="activity-close" onClick={() => dismissActivity(item.id)} aria-label={`Cerrar notificación: ${item.label}`}><X size={14} /></button></div>)}</div>}
       {toast && <div className={`toast ${toast.tone}`} role={toast.tone === "error" ? "alert" : "status"}>{toast.tone === "error" ? <AlertTriangle size={15} /> : <Check size={15} />}<span>{toast.message}</span><button onClick={() => setToast(undefined)} aria-label="Cerrar notificación"><X size={14} /></button></div>}
@@ -467,12 +606,73 @@ function Welcome({ openProject }: { openProject: () => Promise<void> }) {
  * Branchline interprets every request with the configured model — there is no keyword fallback — so
  * the provider is a hard requirement rather than an optional extra.
  */
-function ProviderRequired({ onConfigure }: { onConfigure: () => void }) {
-  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card"><div className="welcome-mark"><Sparkles size={30} /></div><div className="eyebrow">PROVEEDOR LLM REQUERIDO</div><h1>Conecta tu modelo.</h1><p>Branchline entiende lo que escribes con el modelo que configures, en cualquier idioma. Sin proveedor no hay interpretación: no existe un modo de reglas locales.</p><button className="primary-button welcome-button" onClick={onConfigure}><Settings2 size={16} /> Configurar proveedor</button><div className="welcome-features"><span><MessageCircle size={14} /> Cualquier idioma</span><span><ShieldCheck size={14} /> Planes verificados</span><span><Bot size={14} /> Sin palabras clave</span></div><div className="welcome-footnote">La API key se cifra con el almacenamiento seguro del sistema.</div></div></div>;
+function ProviderRequired({ onConfigure, onExplore }: { onConfigure: () => void; onExplore: () => void }) {
+  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card"><div className="welcome-mark"><Sparkles size={30} /></div><div className="eyebrow">PROVEEDOR LLM REQUERIDO</div><h1>Conecta tu modelo.</h1><p>Branchline entiende lo que escribes con el modelo que configures, en cualquier idioma. Sin proveedor no hay interpretación: no existe un modo de reglas locales.</p><button className="primary-button welcome-button" onClick={onConfigure}><Settings2 size={16} /> Configurar proveedor</button><button className="ghost-button welcome-button" onClick={onExplore}><Eye size={15} /> Ver la interfaz sin configurar</button><div className="welcome-features"><span><MessageCircle size={14} /> Cualquier idioma</span><span><ShieldCheck size={14} /> Planes verificados</span><span><Bot size={14} /> Sin palabras clave</span></div><div className="welcome-footnote">La API key se cifra con el almacenamiento seguro del sistema.</div></div></div>;
 }
 
-function BranchRow({ branch, index, busy, onSwitch, onDelete }: { branch: Branch; index: number; busy: boolean; onSwitch: () => void; onDelete: () => void }) {
-  return <div className={`branch-row ${branch.isCurrent ? "current" : ""}`}><button className="branch-main" onClick={onSwitch} disabled={branch.isCurrent || busy} aria-current={branch.isCurrent}><span className="branch-color" style={{ background: branchColor(index) }} /><GitBranch size={14} /><span className="branch-label">{branch.name}</span>{branch.isCurrent && <span className="current-pill">actual</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`}><Trash2 size={12} /></button>}</div>;
+/**
+ * The draggable border between two panes. It sits on top of the grid line instead of inside the grid,
+ * so the three columns stay a plain template. Arrow keys move it too, and a double click resets it.
+ */
+function PaneDivider({ edge, width, onPointerDown, onNudge, onReset }: {
+  edge: keyof PaneWidths; width: number;
+  onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onNudge: (delta: number) => void; onReset: () => void;
+}) {
+  const label = edge === "sidebar" ? "Ancho de la columna de ramas" : "Ancho de la columna del asistente";
+  const keys: Record<string, number> = { ArrowLeft: -16, ArrowRight: 16 };
+  return <div
+    className={`pane-divider ${edge}`}
+    role="separator"
+    aria-orientation="vertical"
+    aria-label={label}
+    aria-valuenow={Math.round(width)}
+    aria-valuemin={paneRange[edge][0]}
+    aria-valuemax={paneRange[edge][1]}
+    tabIndex={0}
+    title={`${label} · arrastra, usa las flechas o haz doble clic para restaurarla`}
+    onPointerDown={onPointerDown}
+    onDoubleClick={onReset}
+    onKeyDown={(event) => {
+      const step = keys[event.key];
+      if (step === undefined) return;
+      event.preventDefault();
+      onNudge(edge === "sidebar" ? step : -step);
+    }}
+  ><span /></div>;
+}
+
+const presenceLabel: Record<Branch["presence"], string> = {
+  local: "Solo en local",
+  remote: "Solo en el remoto",
+  both: "En local y en el remoto"
+};
+
+/** Where the branch lives, at a glance: the machine, the cloud, or both. */
+function PresenceBadge({ branch }: { branch: Branch }) {
+  const detail = branch.remoteRef ? `${presenceLabel[branch.presence]} (${branch.remoteRef})` : presenceLabel[branch.presence];
+  return <span className={`branch-presence ${branch.presence}`} title={detail} aria-label={detail} role="img">
+    {branch.presence !== "remote" && <Laptop size={12} />}
+    {branch.presence !== "local" && <Cloud size={12} />}
+  </span>;
+}
+
+/**
+ * One click prepares the switch as a plan; a double click just does it. The single-click action waits
+ * out the double-click window so the same gesture never produces both.
+ */
+function BranchRow({ branch, index, busy, onSwitch, onSwitchNow, onDelete }: { branch: Branch; index: number; busy: boolean; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void }) {
+  const pendingClick = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(pendingClick.current), []);
+  const click = () => {
+    window.clearTimeout(pendingClick.current);
+    pendingClick.current = window.setTimeout(onSwitch, 230);
+  };
+  const doubleClick = () => {
+    window.clearTimeout(pendingClick.current);
+    onSwitchNow();
+  };
+  return <div className={`branch-row ${branch.isCurrent ? "current" : ""} ${branch.presence}`}><button className="branch-main" onClick={click} onDoubleClick={doubleClick} disabled={branch.isCurrent || busy} aria-current={branch.isCurrent} title={branch.isCurrent ? `${branch.name} · ${presenceLabel[branch.presence]}` : `Doble clic para cambiar a ${branch.name} · ${presenceLabel[branch.presence]}`}><span className="branch-color" style={{ background: branchColor(index) }} /><GitBranch size={14} /><span className="branch-label">{branch.name}</span><PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">actual</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`}><Trash2 size={12} /></button>}</div>;
 }
 
 function CommitRow({ commit, index, onSelect }: { commit: Commit; index: number; onSelect: () => void }) {

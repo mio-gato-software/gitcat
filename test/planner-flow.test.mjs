@@ -199,6 +199,84 @@ test("un paso que Git rechaza detiene el plan y nombra los pasos no ejecutados",
   assert.match(execution.output, /· Actualizar referencias remotas/);
 });
 
+test("una rama se distingue si está solo en local, solo en el remoto o en ambos", async () => {
+  const origin = mkdtempSync(join(tmpdir(), "branchline-origin-"));
+  execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: origin, encoding: "utf8" });
+  const clone = mkdtempSync(join(tmpdir(), "branchline-clone-"));
+  const local = (...args) => execFileSync("git", args, { cwd: clone, encoding: "utf8" });
+  local("init", "-b", "main");
+  local("config", "user.email", "prueba@example.com");
+  local("config", "user.name", "Prueba Uno");
+  writeFileSync(join(clone, "README.md"), "hola\n");
+  local("add", "-A");
+  local("commit", "-m", "primer commit");
+  local("remote", "add", "origin", origin);
+  local("push", "-u", "origin", "main");
+  local("switch", "-c", "solo-local");
+  local("switch", "-c", "solo-remota");
+  local("push", "-u", "origin", "solo-remota");
+  local("switch", "main");
+  local("branch", "-D", "solo-remota");
+
+  const snapshot = await service.getSnapshot(clone);
+  const byName = new Map(snapshot.branches.map((branch) => [branch.name, branch]));
+  assert.equal(byName.get("main").presence, "both");
+  assert.equal(byName.get("main").remoteRef, "origin/main");
+  assert.equal(byName.get("solo-local").presence, "local");
+  assert.equal(byName.get("solo-local").remoteRef, undefined);
+  assert.equal(byName.get("solo-remota").presence, "remote", "la rama que solo vive en el remoto sigue siendo visible");
+  assert.equal(byName.get("solo-remota").remoteRef, "origin/solo-remota");
+  assert.equal(snapshot.branches.some((branch) => branch.name === "HEAD"), false, "origin/HEAD no es una rama");
+
+  // Se puede cambiar a ella (Git crea la local), pero no fusionarla ni borrarla sin tenerla en local.
+  const checkout = await service.prepareOperation(clone, "checkout", { name: "solo-remota" });
+  assert.equal(checkout.allowed, true);
+  await assert.rejects(() => service.prepareOperation(clone, "merge", { name: "solo-remota" }), /solo existe en el remoto/);
+  await assert.rejects(() => service.prepareOperation(clone, "delete_branch", { name: "solo-remota" }), /solo existe en el remoto/);
+});
+
+test("pedir un commit no pregunta el mensaje: se escribe a partir del diff real", async () => {
+  git("switch", "main");
+  writeFileSync(join(repo, "auto.txt"), "algo que confirmar\n");
+
+  reply(plan({
+    intent: "git_operation",
+    steps: [step("commit"), step("push")],
+    summary: "Commit and push", rationale: "El usuario pidió confirmar y subir.", risk: "high"
+  }));
+  reply("Añade auto.txt con el contenido inicial");
+  const result = await service.planAction(repo, "haz commit de lo que hay y súbelo");
+
+  assert.equal(result.allowed, true, result.rationale);
+  assert.equal(result.kind, "plan", "no debe preguntar por el mensaje");
+  assert.equal(result.steps[0].args.message, "Añade auto.txt con el contenido inicial");
+  assert.match(result.steps[0].command, /git add -A && git commit -m "Añade auto\.txt con el contenido inicial"/);
+  assert.match(requests[1].input, /Working tree diff:/, "el mensaje sale del diff, no de los nombres de archivo");
+  assert.match(requests[1].input, /auto\.txt/);
+
+  git("checkout", "--", ".");
+  execFileSync("rm", ["-f", join(repo, "auto.txt")]);
+});
+
+test("un commit planificado sin cambios locales lo dice en vez de inventar un mensaje", async () => {
+  // Repositorio propio: los tests anteriores dejan cambios sin confirmar en el compartido.
+  const clean = mkdtempSync(join(tmpdir(), "branchline-limpio-"));
+  const pristine = (...args) => execFileSync("git", args, { cwd: clean, encoding: "utf8" });
+  pristine("init", "-b", "main");
+  pristine("config", "user.email", "prueba@example.com");
+  pristine("config", "user.name", "Prueba Uno");
+  writeFileSync(join(clean, "README.md"), "hola\n");
+  pristine("add", "-A");
+  pristine("commit", "-m", "primer commit");
+
+  reply(plan({ intent: "git_operation", steps: [step("commit")], summary: "Commit", rationale: "…", risk: "high" }));
+  const result = await service.planAction(clean, "haz commit");
+  assert.equal(result.allowed, false);
+  assert.equal(result.kind, "question");
+  assert.match(result.rationale, /No hay cambios locales que confirmar/);
+  assert.equal(requests.length, 1, "sin cambios no se gasta una llamada describiendo el diff");
+});
+
 test("una key que el proveedor rechaza no se guarda", async () => {
   queue.push({ ok: false, status: 401, raw: "invalid api key" });
   await assert.rejects(() => service.saveLlmConfig({ apiKey: "sk-malo", model: "otro-modelo" }), /No se guardó la configuración/);

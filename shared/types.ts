@@ -1,6 +1,12 @@
+/** Where the branch actually exists: only here, only on a remote, or on both. */
+export type BranchPresence = "local" | "remote" | "both";
+
 export type Branch = {
   name: string;
   upstream?: string;
+  /** The remote-tracking ref this branch corresponds to, such as "origin/main". */
+  remoteRef?: string;
+  presence: BranchPresence;
   ahead: number;
   behind: number;
   isCurrent: boolean;

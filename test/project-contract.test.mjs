@@ -50,6 +50,54 @@ test("un plan es una secuencia que el modelo compone y la app ejecuta de princip
   assert.match(app, /plan\.steps\.map\(\(step, index\)/);
 });
 
+test("las columnas se redimensionan con el ratón y el ancho sobrevive al reinicio", async () => {
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  const styles = await readFile(join(root, "src/styles.css"), "utf8");
+  assert.match(app, /function PaneDivider/);
+  assert.match(app, /setPointerCapture\(event\.pointerId\)/);
+  assert.match(app, /localStorage\.setItem\(paneStorageKey/);
+  assert.match(app, /function clampPanes/);
+  // Accesible con teclado, no solo con el ratón.
+  assert.match(app, /role="separator"/);
+  assert.match(app, /aria-orientation="vertical"/);
+  // El grid se controla por variables, así que las media queries siguen mandando en pantallas estrechas.
+  assert.match(styles, /grid-template-columns: var\(--sidebar-w, 235px\).*var\(--inspector-w, 330px\)/);
+  assert.match(styles, /\.pane-divider \{[^}]*cursor: col-resize/);
+});
+
+test("doble clic cambia de rama y los impedimentos se explican en la columna del asistente", async () => {
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.match(app, /const switchBranch = async \(name: string\)/);
+  assert.match(app, /onDoubleClick=\{doubleClick\}/);
+  // El clic simple espera la ventana del doble clic para que un gesto no dispare las dos cosas.
+  assert.match(app, /pendingClick\.current = window\.setTimeout\(onSwitch, 230\)/);
+  assert.match(app, /addTurn\(path, `Cambiar a la rama \$\{name\}`\)/);
+  assert.match(app, /error: message, status: "error"/);
+});
+
+test("una rama dice si vive en local, en el remoto o en ambos", async () => {
+  const types = await readFile(join(root, "shared/types.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.match(types, /export type BranchPresence = "local" \| "remote" \| "both"/);
+  assert.match(service, /function parseRemoteRefs/);
+  assert.match(service, /"refs\/remotes"/);
+  assert.match(service, /presence: "remote"/);
+  assert.match(service, /solo existe en el remoto/);
+  assert.match(app, /function PresenceBadge/);
+  assert.match(app, /presenceLabel/);
+});
+
+test("un commit pedido al asistente deduce su mensaje del diff, nunca lo pregunta", async () => {
+  const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  assert.match(planner, /never ask the user what the commit\nmessage should be/);
+  assert.doesNotMatch(planner, /a commit needs a message written by you or given by the user/);
+  assert.match(service, /async function describeChanges/);
+  assert.match(service, /async function writeCommitMessages/);
+  assert.match(service, /if \("blocker" in steps\) return asking\(steps\.blocker, plan\.summary\)/);
+});
+
 test("las herramientas se localizan sin depender del PATH que hereda la app", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   assert.match(service, /function loginShellPath/);
@@ -80,7 +128,11 @@ test("el proveedor LLM es obligatorio y no hay plan local de reserva", async () 
   assert.match(service, /configured: isLlmConfigured\(\)/);
   assert.match(service, /await verifyLlmAccess\(\{ apiKey: nextApiKey, model: nextModel \}\)/);
   assert.doesNotMatch(service, /local-fallback/);
-  assert.match(app, /!config\.configured \? <ProviderRequired/);
+  // Se puede mirar la interfaz sin proveedor, pero el asistente queda inerte y lo dice.
+  assert.match(app, /!config\.configured && !exploring \? <ProviderRequired/);
+  assert.match(app, /provider-banner/);
+  assert.match(app, /conversation\.length === 0 && config\.configured &&/);
+  assert.match(app, /disabled=\{planning \|\| !request\.trim\(\) \|\| !config\.configured\}/);
 });
 
 test("los fallos del proveedor se reportan, nunca se disfrazan de rechazo", async () => {
@@ -146,7 +198,7 @@ test("los defectos vuelven al modelo como datos estructurados, no como texto en 
   assert.match(planner, /Validation issues \(JSON\)/);
   assert.match(repositoryPlan, /export type RepositoryIssue = \{ field: RepositoryFieldName; problem: string \}/);
   assert.match(service, /type RepositoryPreparation = \{ draft: PlanDraft \} \| \{ blockers: PlanIssue\[\] \}/);
-  assert.match(service, /return issues\.length \? retry\(issues\) : gitOperationDraft\(plan\)/);
+  assert.match(service, /return issues\.length \? retry\(issues\) : gitOperationDraft\(plan, snapshot\)/);
   assert.match(service, /if \("blockers" in preparation\) return retry\(preparation\.blockers\)/);
 });
 

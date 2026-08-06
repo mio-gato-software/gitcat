@@ -146,8 +146,13 @@ ${planStepLimit}, and leave "steps" empty for every intent other than "git_opera
 
 Operations for each step: status, checkout, create_branch, delete_branch, fetch, pull, push, merge,
 rebase, abort_rebase, continue_rebase, commit. args.name is the branch for checkout, create_branch,
-delete_branch and merge. args.onto is the base branch for rebase. args.message is the commit message,
-${commitMessageLimit} characters maximum. Leave every arg a step does not need as "".
+delete_branch and merge. args.onto is the base branch for rebase. Leave every arg a step does not
+need as "".
+
+args.message is the commit message, ${commitMessageLimit} characters maximum. Leave it "" unless the
+user dictated the message themselves: the application reads the actual diff and writes the message
+for you, and shows it on the card before anything is committed. So never ask the user what the commit
+message should be, and never invent one from the file names in the state.
 
 "repository" is only meaningful for "create_repository". Use "" or false for anything unknown:
 - localPath: absolute path of the local repository to publish. When the user means "this repository", use the open repository path from the state below.
@@ -217,9 +222,9 @@ export function operationIssues(step: PlannedStep, index = 0): PlanIssue[] {
     if (!args.onto) issues.push({ field: `${at}.args.onto`, problem: "missing; rebase needs the base branch" });
     else if (!isBranchNameSafe(args.onto)) issues.push({ field: `${at}.args.onto`, problem: `"${args.onto}" is not a valid Git branch name` });
   }
-  if (step.operation === "commit") {
-    if (!args.message) issues.push({ field: `${at}.args.message`, problem: "missing; a commit needs a message written by you or given by the user" });
-    else if (args.message.length > commitMessageLimit) issues.push({ field: `${at}.args.message`, problem: `${args.message.length} characters; the limit is ${commitMessageLimit}` });
+  // An empty commit message is not a defect: the application writes one from the real diff.
+  if (step.operation === "commit" && args.message.length > commitMessageLimit) {
+    issues.push({ field: `${at}.args.message`, problem: `${args.message.length} characters; the limit is ${commitMessageLimit}` });
   }
   return issues;
 }
