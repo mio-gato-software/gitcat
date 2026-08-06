@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { executePlan, getLlmConfig, getSnapshot, loadLlmConfig, planAction, prepareOperation, saveLlmConfig } from "./git-service.js";
@@ -8,6 +9,45 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 const openedRepositories = new Set<string>();
 const issuedPlans = new Map<string, ActionPlan>();
+let persistedWorkspace: { paths: string[]; activePath?: string } = { paths: [] };
+
+function workspacePath() { return join(app.getPath("userData"), "branchline-workspace.json"); }
+
+function loadWorkspace() {
+  try {
+    const value = JSON.parse(readFileSync(workspacePath(), "utf8")) as { paths?: unknown; activePath?: unknown };
+    const paths = Array.isArray(value.paths)
+      ? [...new Set(value.paths.filter((path): path is string => typeof path === "string").map((path) => resolve(path)))]
+      : [];
+    const activePath = typeof value.activePath === "string" && paths.includes(resolve(value.activePath)) ? resolve(value.activePath) : undefined;
+    persistedWorkspace = { paths, activePath };
+  } catch { /* first launch or an unreadable workspace */ }
+}
+
+function saveWorkspace() {
+  mkdirSync(app.getPath("userData"), { recursive: true });
+  const target = workspacePath();
+  const temporary = `${target}.tmp`;
+  writeFileSync(temporary, JSON.stringify(persistedWorkspace, null, 2), { mode: 0o600 });
+  renameSync(temporary, target);
+}
+
+async function restoreWorkspace() {
+  const projects = [];
+  for (const path of persistedWorkspace.paths) {
+    try {
+      const snapshot = await getSnapshot(path);
+      openedRepositories.add(snapshot.path);
+      projects.push(snapshot);
+    } catch { /* moved, deleted, or no longer a Git repository */ }
+  }
+  persistedWorkspace.paths = projects.map((project) => project.path);
+  if (!persistedWorkspace.activePath || !persistedWorkspace.paths.includes(persistedWorkspace.activePath)) {
+    persistedWorkspace.activePath = persistedWorkspace.paths[0];
+  }
+  saveWorkspace();
+  return { projects, activePath: persistedWorkspace.activePath };
+}
 
 function isTrustedFrame(url: string) {
   const rendererUrl = pathToFileURL(join(app.getAppPath(), "dist/index.html")).href;
@@ -39,6 +79,7 @@ async function createWindow() {
     minHeight: 700,
     backgroundColor: "#0b1018",
     titleBarStyle: "hiddenInset",
+    ...(process.platform === "darwin" ? { trafficLightPosition: { x: 16, y: 20 } } : {}),
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -57,6 +98,25 @@ async function createWindow() {
 
 app.whenReady().then(async () => {
   loadLlmConfig();
+  loadWorkspace();
+  ipcMain.handle("workspace:restore", async (event) => {
+    assertTrustedSender(event);
+    return restoreWorkspace();
+  });
+  ipcMain.handle("workspace:save", (event, paths: string[], activePath?: string) => {
+    assertTrustedSender(event);
+    if (!Array.isArray(paths) || paths.some((path) => typeof path !== "string")) throw new Error("El estado del workspace no es válido.");
+    const normalized = [...new Set(paths.map((path) => resolve(path)))];
+    if (normalized.some((path) => !openedRepositories.has(path))) throw new Error("El workspace contiene un repositorio no autorizado.");
+    const normalizedActivePath = typeof activePath === "string" ? resolve(activePath) : undefined;
+    persistedWorkspace = {
+      paths: normalized,
+      activePath: normalizedActivePath && normalized.includes(normalizedActivePath) ? normalizedActivePath : normalized[0]
+    };
+    for (const path of openedRepositories) if (!normalized.includes(path)) openedRepositories.delete(path);
+    for (const [id, plan] of issuedPlans) if (!normalized.includes(plan.repoPath)) issuedPlans.delete(id);
+    saveWorkspace();
+  });
   ipcMain.handle("project:select", async (event) => {
     assertTrustedSender(event);
     if (!mainWindow) return null;
@@ -64,6 +124,9 @@ app.whenReady().then(async () => {
     if (result.canceled || !result.filePaths[0]) return null;
     const snapshot = await getSnapshot(result.filePaths[0]);
     openedRepositories.add(snapshot.path);
+    persistedWorkspace.paths = [...persistedWorkspace.paths.filter((path) => path !== snapshot.path), snapshot.path];
+    persistedWorkspace.activePath = snapshot.path;
+    saveWorkspace();
     return snapshot;
   });
   ipcMain.handle("repo:snapshot", (event, cwd: string) => {

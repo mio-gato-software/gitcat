@@ -73,3 +73,22 @@ test("la relevancia se clasifica con el LLM y admite consultas informativas", as
   assert.match(service, /última persona en trabajar/);
   assert.match(app, /if \(plan\.answer\)/);
 });
+
+test("el workspace persiste y restaura los proyectos abiertos", async () => {
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
+  const preload = await readFile(join(root, "electron/preload.cjs"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.match(main, /branchline-workspace\.json/);
+  assert.match(main, /ipcMain\.handle\("workspace:restore"/);
+  assert.match(main, /ipcMain\.handle\("workspace:save"/);
+  assert.match(preload, /restoreWorkspace/);
+  assert.match(app, /workspaceRestored/);
+  assert.match(app, /saveWorkspace\(paths, activePath\)/);
+});
+
+test("macOS reserva espacio para los controles de ventana", async () => {
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
+  const styles = await readFile(join(root, "src/styles.css"), "utf8");
+  assert.match(main, /trafficLightPosition: \{ x: 16, y: 20 \}/);
+  assert.match(styles, /\.app-shell\.platform-darwin \.topbar \{ padding-left: 88px; \}/);
+});

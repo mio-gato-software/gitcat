@@ -117,3 +117,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
   .activity-dock { display: none; }
   .toast { right: 12px; bottom: 38px; left: 12px; max-width: none; }
 }
+
+.workspace-loading { flex: 1; display: grid; place-content: center; justify-items: center; gap: 12px; color: #74899c; font-size: 11px; }
+.workspace-loading svg { color: #6bd8cb; }
+.app-shell.platform-darwin .topbar { padding-left: 88px; }

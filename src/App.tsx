@@ -45,8 +45,10 @@ export default function App() {
   const [selectedCommit, setSelectedCommit] = useState<Commit>();
   const [assistantResult, setAssistantResult] = useState<string>();
   const [inputDialog, setInputDialog] = useState<InputDialog>();
+  const [workspaceReady, setWorkspaceReady] = useState(false);
   const requestSequence = useRef(0);
   const activitySequence = useRef(0);
+  const workspaceRestored = useRef(false);
 
   const active = projects.find((project) => project.id === activeId);
   const snapshot = active?.snapshot;
@@ -55,7 +57,27 @@ export default function App() {
     window.branchline.getLlmConfig().then(setConfig).catch((error) => {
       setToast({ message: error instanceof Error ? error.message : "No se pudo leer la configuración.", tone: "error" });
     });
+    window.branchline.restoreWorkspace().then((workspace) => {
+      const loadedAt = new Date().toISOString();
+      const restored = workspace.projects.map((project) => ({ id: project.path, snapshot: project, loadedAt }));
+      setProjects(restored);
+      setActiveId(restored.find((project) => project.snapshot.path === workspace.activePath)?.id ?? restored[0]?.id);
+    }).catch((error) => {
+      setToast({ message: error instanceof Error ? error.message : "No se pudieron restaurar los proyectos.", tone: "error" });
+    }).finally(() => {
+      workspaceRestored.current = true;
+      setWorkspaceReady(true);
+    });
   }, []);
+
+  useEffect(() => {
+    if (!workspaceRestored.current || !workspaceReady) return;
+    const paths = projects.map((project) => project.snapshot.path);
+    const activePath = projects.find((project) => project.id === activeId)?.snapshot.path;
+    window.branchline.saveWorkspace(paths, activePath).catch((error) => {
+      setToast({ message: error instanceof Error ? error.message : "No se pudo guardar el workspace.", tone: "error" });
+    });
+  }, [projects, activeId, workspaceReady]);
 
   useEffect(() => {
     requestSequence.current += 1;
@@ -200,7 +222,7 @@ export default function App() {
   }) ?? [], [snapshot, commitFilter]);
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell platform-${window.branchline.platform}`}>
       <header className="topbar">
         <div className="brand-lockup"><div className="brand-mark"><GitFork size={18} strokeWidth={2.4} /></div><span>branchline</span><span className="brand-beta">BETA</span></div>
         <div className="window-tabs" role="tablist" aria-label="Proyectos abiertos">
@@ -213,7 +235,7 @@ export default function App() {
         <div className="top-actions"><div className="sync-pill"><span className="pulse-dot" /> Local</div><button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Configuración"><Settings2 size={17} /></button></div>
       </header>
 
-      {!snapshot ? <Welcome openProject={openProject} configured={config.configured} /> : <>
+      {!workspaceReady ? <div className="workspace-loading"><LoaderCircle className="spin" size={24} /><span>Restaurando proyectos…</span></div> : !snapshot ? <Welcome openProject={openProject} configured={config.configured} /> : <>
         <div className="workspace-header">
           <div className="project-title"><div className="folder-icon"><FolderOpen size={17} /></div><div><div className="eyebrow">PROYECTO ACTIVO</div><div className="project-name">{snapshot.name}<span className="project-path" title={snapshot.path}>{shortPath(snapshot.path)}</span></div></div></div>
           <div className="workspace-actions"><button className="ghost-button" onClick={() => void refreshProject()} disabled={Boolean(refreshingPath)}>{refreshingPath === snapshot.path ? <LoaderCircle className="spin" size={15} /> : <RefreshCcw size={15} />} Actualizar</button><button className="outline-button" onClick={() => void prepare("fetch")} disabled={planning}><ArrowDownToLine size={15} /> Fetch</button><button className="primary-button" onClick={() => void prepare("push")} disabled={planning}><ArrowUpFromLine size={15} /> Push</button></div>

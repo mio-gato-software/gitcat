@@ -1,7 +1,10 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("branchline", {
+  platform: process.platform,
   selectProject: () => ipcRenderer.invoke("project:select"),
+  restoreWorkspace: () => ipcRenderer.invoke("workspace:restore"),
+  saveWorkspace: (paths, activePath) => ipcRenderer.invoke("workspace:save", paths, activePath),
   getSnapshot: (path) => ipcRenderer.invoke("repo:snapshot", path),
   planAction: (path, request) => ipcRenderer.invoke("action:plan", path, request),
   prepareOperation: (path, operation, args) => ipcRenderer.invoke("action:prepare", path, operation, args),

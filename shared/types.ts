@@ -87,8 +87,16 @@ export type ExecutionResult = {
   error?: string;
 };
 
+export type RestoredWorkspace = {
+  projects: RepoSnapshot[];
+  activePath?: string;
+};
+
 export type GitlineApi = {
+  platform: NodeJS.Platform;
   selectProject: () => Promise<RepoSnapshot | null>;
+  restoreWorkspace: () => Promise<RestoredWorkspace>;
+  saveWorkspace: (paths: string[], activePath?: string) => Promise<void>;
   getSnapshot: (path: string) => Promise<RepoSnapshot>;
   planAction: (path: string, request: string) => Promise<ActionPlan>;
   prepareOperation: (path: string, operation: Operation, args?: Record<string, string>) => Promise<ActionPlan>;
