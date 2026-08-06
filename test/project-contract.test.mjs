@@ -71,7 +71,7 @@ test("la relevancia se clasifica con el LLM y admite consultas informativas", as
   assert.match(service, /Decide por significado, no por palabras clave/);
   assert.match(service, /branch_last_author/);
   assert.match(service, /última persona en trabajar/);
-  assert.match(app, /if \(plan\.answer\)/);
+  assert.match(app, /plan\.answer/);
 });
 
 test("el workspace persiste y restaura los proyectos abiertos", async () => {
@@ -126,4 +126,27 @@ test("Cambios muestra estado, ruta y formulario manual sin LLM", async () => {
   assert.match(app, /className="change-path"/);
   assert.match(app, /Configura un LLM para generar una descripción\. Puedes escribirla manualmente/);
   assert.match(app, /No hay cambios sin confirmar/);
+});
+
+test("el asistente conserva conversación y envía contexto acotado", async () => {
+  const types = await readFile(join(root, "shared/types.ts"), "utf8");
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.match(types, /export type ConversationMessage/);
+  assert.match(main, /context\.length > 20/);
+  assert.match(service, /input: \[\.\.\.context\.slice\(-20\)/);
+  assert.match(app, /type ConversationTurn/);
+  assert.match(app, /const \[conversations, setConversations\]/);
+  assert.match(app, /setRequest\(""\)/);
+  assert.match(app, /Limpiar conversación/);
+  assert.match(app, /Preparando respuesta/);
+});
+
+test("respuestas y planes quedan asociados a su turno", async () => {
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.match(app, /function ConversationEntry/);
+  assert.match(app, /updateTurn\(path, turnId/);
+  assert.match(app, /applyPlan\(turn\.id, plan\)/);
+  assert.match(app, /Plan descartado sin modificar el repositorio/);
 });

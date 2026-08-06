@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { basename, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
-import type { ActionPlan, Branch, Commit, LlmConfig, LlmConfigInput, Operation, RepoSnapshot } from "../shared/types.js";
+import type { ActionPlan, Branch, Commit, ConversationMessage, LlmConfig, LlmConfigInput, Operation, RepoSnapshot } from "../shared/types.js";
 
 type CommandResult = { stdout: string; stderr: string; code: number };
 type PlanDraft = Omit<ActionPlan, "id" | "repoPath" | "head" | "stateId">;
@@ -320,7 +320,7 @@ function planFromModel(value: Record<string, unknown>, source: "llm", snapshot: 
   return { ...operationDraft(operation, args, snapshot), source };
 }
 
-async function llmPlan(request: string, snapshot: RepoSnapshot): Promise<PlanDraft> {
+async function llmPlan(request: string, snapshot: RepoSnapshot, context: ConversationMessage[]): Promise<PlanDraft> {
   const instructions = `Eres el planificador seguro de Branchline, una aplicación de escritorio para ramas Git.
 Decide por significado, no por palabras clave, si la solicitud trata sobre Git, ramas, commits, cambios, historial, autoría, remotos, conflictos o rebase. Acepta preguntas naturales indirectas sobre esos temas y rechaza únicamente solicitudes claramente ajenas.
 No ejecutes nada y no inventes comandos. Responde SOLO un JSON válido con estas claves: allowed (boolean), operation (status|checkout|create_branch|delete_branch|fetch|pull|push|merge|rebase|abort_rebase|continue_rebase|commit|branch_last_author|none), args (objeto), summary, rationale y risk (low|medium|high).
@@ -334,7 +334,13 @@ Estado actual: rama=${snapshot.currentBranch}, ramas=${snapshot.branches.map((br
     response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${llmState.apiKey}` },
-      body: JSON.stringify({ model: llmState.model || MODEL_FALLBACK, instructions, input: request, max_output_tokens: 500, store: false }),
+      body: JSON.stringify({
+        model: llmState.model || MODEL_FALLBACK,
+        instructions,
+        input: [...context.slice(-20), { role: "user", content: request }],
+        max_output_tokens: 500,
+        store: false
+      }),
       signal: controller.signal
     });
   } finally {
@@ -351,12 +357,12 @@ function bindPlan(snapshot: RepoSnapshot, draft: PlanDraft): ActionPlan {
   return { ...draft, id: randomUUID(), repoPath: snapshot.path, head: snapshot.head, stateId: snapshot.stateId };
 }
 
-export async function planAction(cwd: string, request: string): Promise<ActionPlan> {
+export async function planAction(cwd: string, request: string, context: ConversationMessage[] = []): Promise<ActionPlan> {
   const snapshot = await getSnapshot(cwd);
   if (!request.trim()) return bindPlan(snapshot, refused("Escribe una acción relacionada con la rama o el repositorio."));
   if (!llmState.apiKey.trim()) return bindPlan(snapshot, localPlan(request, snapshot));
   try {
-    return bindPlan(snapshot, await llmPlan(request, snapshot));
+    return bindPlan(snapshot, await llmPlan(request, snapshot, context));
   } catch (error) {
     return bindPlan(snapshot, refused(`No pude consultar el proveedor LLM: ${error instanceof Error ? error.message : "error desconocido"}`, "llm"));
   }

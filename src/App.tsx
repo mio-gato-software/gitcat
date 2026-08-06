@@ -5,12 +5,21 @@ import {
   GitMerge, Info, LoaderCircle, MessageCircle, Plus, RefreshCcw, Search, Send,
   Settings2, ShieldCheck, Sparkles, TerminalSquare, Trash2, UserRound, X
 } from "lucide-react";
-import type { ActionPlan, Branch, Commit, LlmConfig, Operation, RepoSnapshot } from "../shared/types";
+import type { ActionPlan, Branch, Commit, ConversationMessage, LlmConfig, Operation, RepoSnapshot } from "../shared/types";
 
 type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string };
 type ActivityItem = { id: number; label: string; detail: string; tone: "success" | "neutral" | "warning" };
 type Toast = { message: string; tone: "success" | "error" };
 type InputDialog = { operation: "create_branch" | "merge"; title: string; label: string; value: string };
+type ConversationTurn = {
+  id: number;
+  question: string;
+  status: "loading" | "ready" | "executing" | "completed" | "cancelled" | "error";
+  answer?: string;
+  plan?: ActionPlan;
+  outcome?: string;
+  error?: string;
+};
 
 const palette = ["#62d6c8", "#c59bff", "#f0b26e", "#7da7ff", "#ef7c95"];
 
@@ -34,8 +43,7 @@ export default function App() {
   const [branchFilter, setBranchFilter] = useState("");
   const [commitFilter, setCommitFilter] = useState("");
   const [request, setRequest] = useState("");
-  const [pendingPlan, setPendingPlan] = useState<ActionPlan | null>(null);
-  const [planning, setPlanning] = useState(false);
+  const [conversations, setConversations] = useState<Record<string, ConversationTurn[]>>({});
   const [refreshingPath, setRefreshingPath] = useState<string>();
   const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -43,7 +51,6 @@ export default function App() {
   const [toast, setToast] = useState<Toast>();
   const [view, setView] = useState<"history" | "changes">("history");
   const [selectedCommit, setSelectedCommit] = useState<Commit>();
-  const [assistantResult, setAssistantResult] = useState<string>();
   const [inputDialog, setInputDialog] = useState<InputDialog>();
   const [commitFormOpen, setCommitFormOpen] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
@@ -51,11 +58,15 @@ export default function App() {
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const requestSequence = useRef(0);
   const activitySequence = useRef(0);
+  const conversationSequence = useRef(0);
   const activityTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
   const workspaceRestored = useRef(false);
+  const conversationEnd = useRef<HTMLDivElement>(null);
 
   const active = projects.find((project) => project.id === activeId);
   const snapshot = active?.snapshot;
+  const conversation = snapshot ? conversations[snapshot.path] ?? [] : [];
+  const planning = conversation.some((turn) => turn.status === "loading" || turn.status === "executing");
 
   useEffect(() => {
     window.branchline.getLlmConfig().then(setConfig).catch((error) => {
@@ -90,8 +101,6 @@ export default function App() {
 
   useEffect(() => {
     requestSequence.current += 1;
-    setPendingPlan(null);
-    setAssistantResult(undefined);
     setRequest("");
     setBranchFilter("");
     setCommitFilter("");
@@ -99,8 +108,11 @@ export default function App() {
     setCommitFormOpen(false);
     setCommitMessage("");
     setGeneratingDescription(false);
-    setPlanning(false);
   }, [activeId]);
+
+  useEffect(() => {
+    conversationEnd.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [conversation]);
 
   const dismissActivity = (id: number) => {
     const timer = activityTimers.current.get(id);
@@ -152,7 +164,6 @@ export default function App() {
   const refreshProject = async (path = snapshot?.path, announce = true) => {
     if (!path || refreshingPath) return;
     setRefreshingPath(path);
-    setPendingPlan(null);
     try {
       const next = await window.branchline.getSnapshot(path);
       updateSnapshot(path, next);
@@ -162,66 +173,98 @@ export default function App() {
     } finally { setRefreshingPath(undefined); }
   };
 
-  const showPlan = async (loader: () => Promise<ActionPlan>) => {
-    if (!snapshot || planning) return;
-    const sequence = ++requestSequence.current;
-    const repoPath = snapshot.path;
-    setPlanning(true);
-    setPendingPlan(null);
-    setAssistantResult(undefined);
+  const updateTurn = (path: string, id: number, update: (turn: ConversationTurn) => ConversationTurn) => {
+    setConversations((items) => ({
+      ...items,
+      [path]: (items[path] ?? []).map((turn) => turn.id === id ? update(turn) : turn)
+    }));
+  };
+
+  const addTurn = (path: string, question: string) => {
+    const turn: ConversationTurn = { id: ++conversationSequence.current, question, status: "loading" };
+    setConversations((items) => ({ ...items, [path]: [...(items[path] ?? []), turn].slice(-40) }));
+    return turn.id;
+  };
+
+  const conversationContext = (turns: ConversationTurn[]): ConversationMessage[] => turns.flatMap((turn) => {
+    const response = turn.answer ?? turn.error ?? turn.outcome ?? (turn.plan
+      ? `${turn.plan.allowed ? "Plan" : "Rechazo"}: ${turn.plan.summary}. ${turn.plan.rationale}`
+      : undefined);
+    return response ? [{ role: "user" as const, content: turn.question }, { role: "assistant" as const, content: response }] : [];
+  }).slice(-20);
+
+  const showPlan = async (question: string, loader: () => Promise<ActionPlan>, path = snapshot?.path) => {
+    if (!path || planning) return;
+    const turnId = addTurn(path, question);
     try {
       const plan = await loader();
-      if (sequence !== requestSequence.current || plan.repoPath !== repoPath) return;
+      if (plan.repoPath !== path) throw new Error("El plan pertenece a otro repositorio.");
       if (plan.answer) {
-        setAssistantResult(plan.answer);
-        setPendingPlan(null);
+        updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, status: "completed" }));
         addActivity({ label: "Respuesta preparada", detail: plan.summary, tone: "neutral" });
         return;
       }
-      setPendingPlan(plan);
+      updateTurn(path, turnId, (turn) => ({ ...turn, plan, status: plan.allowed ? "ready" : "completed" }));
       addActivity({ label: plan.allowed ? "Plan preparado" : "Solicitud rechazada", detail: plan.summary, tone: plan.allowed ? "neutral" : "warning" });
     } catch (error) {
-      if (sequence === requestSequence.current) setToast({ message: error instanceof Error ? error.message : "No se pudo preparar la acción.", tone: "error" });
-    } finally {
-      if (sequence === requestSequence.current) setPlanning(false);
+      const message = error instanceof Error ? error.message : "No se pudo preparar la acción.";
+      updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
     }
   };
 
   const propose = async (text: string) => {
     if (!snapshot || !text.trim()) return;
-    setRequest(text);
-    await showPlan(() => window.branchline.planAction(snapshot.path, text));
+    const question = text.trim();
+    const path = snapshot.path;
+    const context = conversationContext(conversations[path] ?? []);
+    setRequest("");
+    await showPlan(question, () => window.branchline.planAction(path, question, context), path);
   };
 
-  const prepare = async (operation: Operation, args: Record<string, string> = {}) => {
+  const prepare = async (operation: Operation, args: Record<string, string> = {}, question?: string) => {
     if (!snapshot) return;
-    await showPlan(() => window.branchline.prepareOperation(snapshot.path, operation, args));
+    const labels: Partial<Record<Operation, string>> = {
+      checkout: `Cambiar a la rama ${args.name}`,
+      create_branch: `Crear la rama ${args.name}`,
+      delete_branch: `Eliminar la rama ${args.name}`,
+      fetch: "Actualizar las referencias remotas",
+      push: "Publicar la rama actual",
+      merge: `Fusionar la rama ${args.name}`,
+      rebase: `Rebasear sobre ${args.onto}`,
+      abort_rebase: "Abortar el rebase en curso",
+      continue_rebase: "Continuar el rebase",
+      commit: `Crear un commit: ${args.message}`
+    };
+    const path = snapshot.path;
+    await showPlan(question ?? labels[operation] ?? "Preparar una operación Git", () => window.branchline.prepareOperation(path, operation, args), path);
   };
 
-  const applyPlan = async () => {
-    if (!pendingPlan?.allowed || planning) return;
-    const plan = pendingPlan;
-    setPlanning(true);
+  const applyPlan = async (turnId: number, plan: ActionPlan) => {
+    if (!plan.allowed || planning) return;
+    updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, status: "executing" }));
     try {
       const result = await window.branchline.executePlan(plan.repoPath, plan.id);
       updateSnapshot(plan.repoPath, result.snapshot);
-      setPendingPlan(null);
       if (result.error) {
+        updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, error: result.error, status: "error" }));
         addActivity({ label: "Git requiere atención", detail: result.error, tone: "warning" });
         setToast({ message: result.error, tone: "error" });
       } else {
+        const outcome = result.output || `${plan.summary} completado.`;
+        updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome, status: "completed" }));
         addActivity({ label: "Acción ejecutada", detail: plan.command, tone: "success" });
-        setToast({ message: result.output || `${plan.summary} completado.`, tone: "success" });
+        setToast({ message: outcome, tone: "success" });
         if (plan.operation === "commit") {
           setCommitMessage("");
           setCommitFormOpen(false);
         }
       }
     } catch (error) {
-      setPendingPlan(null);
-      setToast({ message: error instanceof Error ? error.message : "Git no pudo completar la acción.", tone: "error" });
+      const message = error instanceof Error ? error.message : "Git no pudo completar la acción.";
+      updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
+      setToast({ message, tone: "error" });
       await refreshProject(plan.repoPath, false);
-    } finally { setPlanning(false); }
+    }
   };
 
   const submitInputDialog = () => {
@@ -268,8 +311,16 @@ export default function App() {
     snapshot.commits.slice(0, 30).forEach((commit) => counts.set(commit.author, (counts.get(commit.author) ?? 0) + 1));
     const summary = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)
       .map(([author, count]) => `${author}: ${count}`).join(" · ");
-    setAssistantResult(summary || "No hay commits recientes que analizar.");
-    setPendingPlan(null);
+    const answer = summary || "No hay commits recientes que analizar.";
+    const turnId = addTurn(snapshot.path, "¿Quién hizo cambios recientemente?");
+    updateTurn(snapshot.path, turnId, (turn) => ({ ...turn, answer, status: "completed" }));
+  };
+
+  const showChangesAnswer = () => {
+    if (!snapshot) return;
+    setView("changes");
+    const turnId = addTurn(snapshot.path, "Ver cambios del repositorio");
+    updateTurn(snapshot.path, turnId, (turn) => ({ ...turn, answer: `${snapshot.changes.length} cambio${snapshot.changes.length === 1 ? "" : "s"} local${snapshot.changes.length === 1 ? "" : "es"}.`, status: "completed" }));
   };
 
   const filteredBranches = useMemo(() => snapshot?.branches.filter((branch) => branch.name.toLocaleLowerCase().includes(branchFilter.toLocaleLowerCase())) ?? [], [snapshot, branchFilter]);
@@ -316,7 +367,7 @@ export default function App() {
               : <ChangesView snapshot={snapshot} configured={config.configured} formOpen={commitFormOpen} message={commitMessage} generating={generatingDescription} busy={planning} onOpenForm={() => setCommitFormOpen(true)} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit} />}
           </section>
 
-          <aside className="inspector"><div className="inspector-header"><div><div className="eyebrow">ASISTENTE DE RAMAS</div><h2>¿Qué quieres saber o hacer?</h2></div><div className="assistant-icon"><Bot size={18} /></div></div><p className="assistant-copy">Pregunta sobre el repositorio o describe una acción de Git. Las acciones se muestran como un plan verificable antes de ejecutarse.</p><div className="suggestion-list"><button onClick={showRecentAuthors}><UserRound size={15} /><span>¿Quién hizo cambios recientemente?</span></button><button onClick={() => setInputDialog({ operation: "merge", title: "Fusionar rama", label: "Rama que quieres fusionar", value: "" })}><GitMerge size={15} /><span>Fusionar otra rama</span></button><button onClick={() => { setView("changes"); setAssistantResult(`${snapshot.changes.length} cambio${snapshot.changes.length === 1 ? "" : "s"} local${snapshot.changes.length === 1 ? "" : "es"}.`); }}><FileDiff size={15} /><span>Ver cambios del repositorio</span></button></div>{assistantResult && <div className="assistant-result"><Info size={15} /><span>{assistantResult}</span><button onClick={() => setAssistantResult(undefined)} aria-label="Cerrar resultado"><X size={13} /></button></div>}<div className="chat-compose"><textarea aria-label="Solicitud para el asistente" value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder="Ej. ¿quién trabajó en esta rama la última vez?" rows={3} /><button className="send-button" aria-label="Preparar solicitud" onClick={() => void propose(request)} disabled={planning || !request.trim()}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div>{pendingPlan && pendingPlan.repoPath === snapshot.path && <PlanCard plan={pendingPlan} onApply={applyPlan} onDismiss={() => setPendingPlan(null)} busy={planning} />}</aside>
+          <aside className="inspector"><div className="inspector-header"><div><div className="eyebrow">ASISTENTE DE RAMAS</div><h2>¿Qué quieres saber o hacer?</h2></div><div className="assistant-icon"><Bot size={18} /></div></div><p className="assistant-copy">Pregunta sobre el repositorio o describe una acción de Git. Las acciones se muestran como un plan verificable antes de ejecutarse.</p>{conversation.length === 0 && <div className="suggestion-list"><button onClick={showRecentAuthors}><UserRound size={15} /><span>¿Quién hizo cambios recientemente?</span></button><button onClick={() => setInputDialog({ operation: "merge", title: "Fusionar rama", label: "Rama que quieres fusionar", value: "" })}><GitMerge size={15} /><span>Fusionar otra rama</span></button><button onClick={showChangesAnswer}><FileDiff size={15} /><span>Ver cambios del repositorio</span></button></div>}<div className="conversation-toolbar"><span>{conversation.length ? `${conversation.length} mensaje${conversation.length === 1 ? "" : "s"}` : "Nueva conversación"}</span><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> Limpiar conversación</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: "Plan descartado sin modificar el repositorio." }))} />)}<div ref={conversationEnd} /></div><div className="chat-compose"><textarea aria-label="Solicitud para el asistente" value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder="Ej. ¿quién trabajó en esta rama la última vez?" rows={3} /><button className="send-button" aria-label="Preparar solicitud" onClick={() => void propose(request)} disabled={planning || !request.trim()}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div></aside>
         </main>
         <footer className="statusbar"><div className="status-left"><span className="status-good"><CircleDot size={12} /> {snapshot.isDirty ? `${snapshot.changes.length} cambio${snapshot.changes.length === 1 ? "" : "s"}` : "Sin cambios locales"}</span><span className="status-separator" /><span>{snapshot.branches.length} ramas locales</span></div><div className="status-right"><span><Clock3 size={12} /> Última lectura {formatDate(active.loadedAt)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : "LLM no configurado"}</span></div></footer>
       </>}
@@ -354,6 +405,10 @@ function changeStatus(code: string) {
 function ChangesView({ snapshot, configured, formOpen, message, generating, busy, onOpenForm, onMessageChange, onGenerate, onPrepare }: { snapshot: RepoSnapshot; configured: boolean; formOpen: boolean; message: string; generating: boolean; busy: boolean; onOpenForm: () => void; onMessageChange: (message: string) => void; onGenerate: () => void; onPrepare: () => void }) {
   const hasChanges = snapshot.changes.length > 0;
   return <div className="changes-view"><div className="changes-heading"><div><span className="eyebrow">ÁRBOL DE TRABAJO · {snapshot.currentBranch}</span><h3>{hasChanges ? `${snapshot.changes.length} cambios locales` : "Todo está limpio"}</h3></div><div className="changes-heading-actions"><button className="outline-button small" onClick={onOpenForm} disabled={!hasChanges || busy}><GitCommitHorizontal size={14} /> Commit</button><FileDiff size={19} /></div></div>{hasChanges ? <><div className="change-list">{snapshot.changes.map((change, index) => <div className="change-row" key={`${change.path}-${index}`}><span className={`change-code code-${change.code[0]?.toLowerCase()}`}>{change.code}</span><span className="change-status">{changeStatus(change.code)}</span><span className="change-path" title={change.path}>{change.path}</span></div>)}</div>{formOpen && <div className="commit-form"><div className="commit-form-heading"><div><span className="eyebrow">NUEVO COMMIT</span><h3>Describe estos cambios</h3></div><button className="outline-button" onClick={onGenerate} disabled={!configured || generating || busy}>{generating ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />} Generar descripción</button></div><label htmlFor="commit-description">Mensaje del commit</label><textarea id="commit-description" value={message} onChange={(event) => onMessageChange(event.target.value)} maxLength={120} rows={3} placeholder="Escribe una descripción concisa de los cambios…" /><div className="commit-form-meta"><span>{configured ? "La generación analiza el diff local de esta rama." : "Configura un LLM para generar una descripción. Puedes escribirla manualmente."}</span><span>{message.length}/120</span></div><div className="commit-form-actions"><button className="primary-button" onClick={onPrepare} disabled={!message.trim() || busy}><ShieldCheck size={14} /> Preparar commit</button></div></div>}</> : <div className="graph-empty"><Check size={26} /><strong>No hay cambios sin confirmar</strong><span>El árbol de trabajo coincide con el último commit.</span></div>}</div>;
+}
+
+function ConversationEntry({ turn, busy, onApply, onDismiss }: { turn: ConversationTurn; busy: boolean; onApply: (plan: ActionPlan) => void; onDismiss: () => void }) {
+  return <article className="conversation-turn"><div className="conversation-question"><span>Tú</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><Bot size={13} /></span><div>{turn.status === "loading" && <div className="conversation-loading"><LoaderCircle className="spin" size={14} /> Preparando respuesta…</div>}{turn.answer && <p>{turn.answer}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.outcome && <div className="conversation-outcome"><Check size={13} />{turn.outcome}</div>}{turn.error && <div className="conversation-error"><AlertTriangle size={13} />{turn.error}</div>}</div></div></article>;
 }
 
 function PlanCard({ plan, onApply, onDismiss, busy }: { plan: ActionPlan; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean }) {

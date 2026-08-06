@@ -29,7 +29,7 @@ button:disabled { cursor: default; opacity: .55; }
 ::-webkit-scrollbar { width: 9px; height: 9px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: #273746; border: 3px solid transparent; border-radius: 10px; background-clip: padding-box; } ::-webkit-scrollbar-thumb:hover { background: #3b5063; background-clip: padding-box; }
 
 /* Interactive additions and resilient sizing */
-.inspector { overflow: auto; }
+.inspector { min-height: 0; overflow: hidden; }
 .chat-compose, .plan-card { flex: none; }
 .plan-header strong, .plan-card p { overflow-wrap: anywhere; }
 .plan-actions { flex-wrap: wrap; }
@@ -74,6 +74,23 @@ button:disabled { cursor: default; opacity: .55; }
 .assistant-result > svg { flex: none; color: #6ed8cb; }
 .assistant-result span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
 .assistant-result button { display: grid; place-items: center; flex: none; padding: 2px; color: #729094; background: transparent; }
+.conversation-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 21px 8px; color: #627789; font-size: 9px; }
+.conversation-toolbar button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 7px; color: #7c8fa0; background: transparent; border-radius: 5px; font-size: 9px; }
+.conversation-toolbar button:hover:not(:disabled) { color: #e6eef3; background: #182430; }
+.conversation { flex: 1; min-height: 110px; overflow: auto; padding: 5px 14px 12px; }
+.conversation-turn { display: flex; flex-direction: column; gap: 7px; margin-bottom: 14px; }
+.conversation-question { align-self: flex-end; max-width: 88%; padding: 8px 10px; color: #d9e9ee; background: #20313e; border: 1px solid #304756; border-radius: 9px 9px 3px 9px; }
+.conversation-question > span { display: block; margin-bottom: 3px; color: #77d9cd; font-size: 8px; font-weight: 800; text-transform: uppercase; }
+.conversation-question p, .conversation-response p { margin: 0; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.conversation-response { display: grid; grid-template-columns: 23px minmax(0, 1fr); gap: 7px; align-self: stretch; color: #a9bdc7; }
+.conversation-avatar { width: 23px; height: 23px; display: grid; place-items: center; color: #72ddd0; background: #173633; border: 1px solid #2b5e59; border-radius: 6px; }
+.conversation-response > div { min-width: 0; padding-top: 3px; }
+.conversation-response .plan-card { margin: 0; }
+.conversation-loading, .conversation-outcome, .conversation-error { display: flex; align-items: flex-start; gap: 7px; font-size: 9px; line-height: 1.45; }
+.conversation-loading { color: #7b929f; }
+.conversation-loading svg, .conversation-outcome svg, .conversation-error svg { flex: none; margin-top: 1px; }
+.conversation-outcome { color: #75c8b5; }
+.conversation-error { color: #ed9ea8; }
 .toast.error { color: #f1ced2; background: #3a2027; border-color: #78404b; }
 .toast.error svg { color: #ff98a5; }
 .modal-backdrop { padding: 18px; }
@@ -100,6 +117,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
   .project-path, .sync-pill { display: none; }
   .inspector-header, .suggestion-list { padding-right: 15px; padding-left: 15px; }
   .assistant-copy, .chat-compose, .plan-card, .assistant-result { margin-right: 15px; margin-left: 15px; }
+  .conversation-toolbar { padding-right: 15px; padding-left: 15px; }
 }
 
 @media (max-width: 900px) {
@@ -110,7 +128,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
   .workspace-actions .ghost-button svg { margin: 0; }
   .main-layout { grid-template-columns: 185px minmax(0, 1fr); grid-template-rows: minmax(360px, 1fr) minmax(240px, .65fr); overflow: auto; }
   .sidebar { grid-row: 1 / 3; }
-  .inspector { grid-column: 2; border-top: 1px solid #202c39; border-left: 0; overflow: auto; }
+  .inspector { grid-column: 2; border-top: 1px solid #202c39; border-left: 0; overflow: hidden; }
   .suggestion-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding-top: 10px; padding-bottom: 10px; }
   .suggestion-list button { align-items: flex-start; }
   .chat-compose { margin-top: 4px; }

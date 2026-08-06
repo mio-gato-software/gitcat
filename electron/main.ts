@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { executePlan, generateCommitDescription, getLlmConfig, getSnapshot, loadLlmConfig, planAction, prepareOperation, saveLlmConfig } from "./git-service.js";
-import type { ActionPlan, LlmConfigInput, Operation } from "../shared/types.js";
+import type { ActionPlan, ConversationMessage, LlmConfigInput, Operation } from "../shared/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
@@ -133,10 +133,13 @@ app.whenReady().then(async () => {
     assertTrustedSender(event);
     return getSnapshot(assertOpenedRepository(cwd));
   });
-  ipcMain.handle("action:plan", async (event, cwd: string, request: string) => {
+  ipcMain.handle("action:plan", async (event, cwd: string, request: string, context?: ConversationMessage[]) => {
     assertTrustedSender(event);
     if (typeof request !== "string" || request.length > 1000) throw new Error("La solicitud no es válida.");
-    return rememberPlan(await planAction(assertOpenedRepository(cwd), request));
+    if (context !== undefined && (!Array.isArray(context) || context.length > 20 || context.some((message) =>
+      !message || !["user", "assistant"].includes(message.role) || typeof message.content !== "string" || message.content.length > 2000
+    ))) throw new Error("El contexto de conversación no es válido.");
+    return rememberPlan(await planAction(assertOpenedRepository(cwd), request, context));
   });
   ipcMain.handle("action:prepare", async (event, cwd: string, operation: Operation, args?: Record<string, string>) => {
     assertTrustedSender(event);

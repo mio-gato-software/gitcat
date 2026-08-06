@@ -92,6 +92,11 @@ export type CommitDescriptionResult = {
   stateId: string;
 };
 
+export type ConversationMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
 export type RestoredWorkspace = {
   projects: RepoSnapshot[];
   activePath?: string;
@@ -103,7 +108,7 @@ export type GitlineApi = {
   restoreWorkspace: () => Promise<RestoredWorkspace>;
   saveWorkspace: (paths: string[], activePath?: string) => Promise<void>;
   getSnapshot: (path: string) => Promise<RepoSnapshot>;
-  planAction: (path: string, request: string) => Promise<ActionPlan>;
+  planAction: (path: string, request: string, context?: ConversationMessage[]) => Promise<ActionPlan>;
   prepareOperation: (path: string, operation: Operation, args?: Record<string, string>) => Promise<ActionPlan>;
   generateCommitDescription: (path: string) => Promise<CommitDescriptionResult>;
   executePlan: (path: string, planId: string) => Promise<ExecutionResult>;
