@@ -705,3 +705,15 @@ test("el error crudo de Electron no llega nunca a la interfaz", async () => {
   assert.doesNotMatch(app, /error instanceof Error \? error\.message : "No se pudo preparar la acción\."/);
   assert.doesNotMatch(app, /reason instanceof Error \? reason\.message : "No se pudo leer el historial\."/);
 });
+
+
+test("el texto seleccionado tiene menú y atajos de copiar multiplataforma", async () => {
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
+  assert.match(main, /webContents\.on\("context-menu"/);
+  assert.match(main, /role: "copy"/);
+  assert.match(main, /enabled: Boolean\(params\.selectionText\)/);
+  assert.match(main, /webContents\.on\("before-input-event"/);
+  assert.match(main, /process\.platform === "darwin" \? input\.meta : input\.control/);
+  assert.match(main, /input\.key\.toLowerCase\(\) !== "c"/);
+  assert.match(main, /window\.webContents\.copy\(\)/);
+});
