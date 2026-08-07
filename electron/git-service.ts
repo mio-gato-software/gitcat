@@ -275,16 +275,20 @@ function parseRemoteRefs(raw: string, remotes: string[], commitsByHash: Map<stri
     if (!name || name === "HEAD" || byLocalName.has(name)) continue;
     byLocalName.set(name, {
       ref,
-      lastCommit: shortHash ? (commitsByHash.get(shortHash) ?? { hash: shortHash, shortHash, subject, author, email, date, refs: [] }) : undefined
+      lastCommit: shortHash ? (commitsByHash.get(shortHash) ?? { hash: shortHash, shortHash, subject, author, email, date, refs: [], parents: [] }) : undefined
     });
   }
   return byLocalName;
 }
 
 function parseCommit(raw: string): Commit | undefined {
-  const [hash, shortHash, author, email, date, subject, refs = ""] = raw.split("\x1f");
+  const [hash, shortHash, author, email, date, subject, refs = "", parents = ""] = raw.split("\x1f");
   if (!hash || !shortHash) return undefined;
-  return { hash, shortHash, subject, author, email, date, refs: refs.split(",").map((ref) => ref.trim()).filter(Boolean) };
+  return {
+    hash, shortHash, subject, author, email, date,
+    refs: refs.split(",").map((ref) => ref.trim()).filter(Boolean),
+    parents: parents.split(" ").map((parent) => parent.trim()).filter(Boolean)
+  };
 }
 
 export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
@@ -303,8 +307,10 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     "refs/remotes"
   ]);
   const logRaw = head ? await checkedGit(repoRoot, [
-    "log", "--all", "-n", "80", "--date=iso-strict",
-    "--pretty=format:%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D"
+    // Topological order is what makes the list a graph: every child is listed before its parents, so
+    // the lanes can be assigned in a single pass. "%P" carries the edges that order is describing.
+    "log", "--all", "--topo-order", "-n", "80", "--date=iso-strict",
+    "--pretty=format:%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D%x1f%P"
   ]) : "";
   const commits = logRaw.split("\n").map(parseCommit).filter((commit): commit is Commit => Boolean(commit));
   const commitsByHash = new Map(commits.map((commit) => [commit.shortHash, commit]));
@@ -324,7 +330,7 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
       ...parseTrack(track || ""),
       isCurrent: name === currentBranch,
       lastCommit: shortHash ? (commitsByHash.get(shortHash) ?? {
-        hash: shortHash, shortHash, subject, author, email, date, refs: []
+        hash: shortHash, shortHash, subject, author, email, date, refs: [], parents: []
       }) : undefined
     };
   });

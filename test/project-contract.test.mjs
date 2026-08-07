@@ -190,6 +190,30 @@ test("una rama apilada lo está porque Git lo confirma, no porque el nombre lo s
   assert.match(app, /\.\.\.node\.stacked\.map\(\(branch\) => branchRow\(branch, depth \+ 1, trim\)\)/);
 });
 
+test("el historial es un grafo con carriles, y su color significa algo", async () => {
+  const commitGraph = await readFile(join(root, "shared/commit-graph.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const types = await readFile(join(root, "shared/types.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  const styles = await readFile(join(root, "src/styles.css"), "utf8");
+  // El orden topológico es lo que permite asignar carriles en una sola pasada.
+  assert.match(service, /"log", "--all", "--topo-order", "-n", "80"/);
+  assert.match(service, /%s%x1f%D%x1f%P/);
+  assert.match(types, /parents: string\[\]/);
+  assert.match(commitGraph, /export function buildCommitGraph/);
+  assert.doesNotMatch(commitGraph, /runGit|spawn\(|branchColor/);
+  // El color sale del nombre de la familia, así que es el mismo entre sesiones y entre máquinas.
+  assert.match(commitGraph, /hash = Math\.imul\(hash, 16777619\)/);
+  assert.match(commitGraph, /export const neutralFamilyColour/);
+  assert.doesNotMatch(commitGraph, /Math\.random|Date\.now/);
+  // Y se puede volver al coloreado anterior, que se recuerda por repositorio.
+  assert.match(app, /writeGraphColour\(snapshot\.path, next\)/);
+  assert.match(app, /byFamily \? familyColour\(rows\.get\(commit\.hash\)\?\.family \?\? ""\) : branchColor\(index\)/);
+  // Una lista filtrada no es un grafo: sin continuidad, no se dibujan carriles.
+  assert.match(app, /const lanes = filtering \? 0 :/);
+  assert.match(styles, /\.graph-lanes line, \.graph-lanes path \{[^}]*vector-effect: non-scaling-stroke/);
+});
+
 test("una rama dice si vive en local, en el remoto o en ambos", async () => {
   const types = await readFile(join(root, "shared/types.ts"), "utf8");
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
