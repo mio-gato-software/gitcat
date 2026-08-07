@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,26 @@ test("el proyecto usa Electron como entrada de escritorio", async () => {
   assert.match(packageJson.devDependencies.electron, /43\.3/);
   assert.match(packageJson.scripts["dist:mac"], /CSC_IDENTITY_AUTO_DISCOVERY=false/);
   assert.equal(packageJson.build.productName, "Branchline");
+});
+
+test("el instalador de mac construye el app y lo reemplaza en Applications", async () => {
+  const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+  const scriptPath = join(root, "scripts/install-mac.mjs");
+  const script = await readFile(scriptPath, "utf8");
+  const preview = execFileSync(process.execPath, [scriptPath, "--dry-run"], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, BRANCHLINE_APPLICATIONS_DIR: join(root, ".test-applications") }
+  });
+
+  assert.equal(packageJson.scripts["install:mac"], "node scripts/install-mac.mjs");
+  assert.match(preview, /npm run build/);
+  assert.match(preview, /npm run icons/);
+  assert.match(preview, /npm exec -- electron-builder --mac --dir --(?:arm64|x64)/);
+  assert.match(preview, /release\/mac-(?:arm64|x64)\/Branchline\.app/);
+  assert.match(preview, /\.test-applications\/Branchline\.app/);
+  assert.match(script, /execFileSync\("\/usr\/bin\/ditto"/);
+  assert.match(script, /renameSync\(temporaryDestination, destination\)/);
 });
 
 test("el build tiene un asset de icono reproducible", async () => {

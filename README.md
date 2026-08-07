@@ -27,6 +27,8 @@ npm run package:dir
 
 # macOS: DMG y ZIP arm64/x64 según el host o flags de electron-builder
 npm run dist:mac
+# macOS: construir e instalar el app en /Applications/Branchline.app
+npm run install:mac
 
 # Alternativas por plataforma
 npm run dist:win

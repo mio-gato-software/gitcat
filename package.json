@@ -13,6 +13,7 @@
     "build:electron": "node scripts/prepare-electron-build.mjs && tsc -p electron/tsconfig.json && node scripts/prepare-electron-build.mjs --copy",
     "icons": "node scripts/generate-icons.mjs",
     "package:dir": "npm run build && npm run icons && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir",
+    "install:mac": "node scripts/install-mac.mjs",
     "dist": "npm run build && npm run icons && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder",
     "dist:mac": "npm run build && npm run icons && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac",
     "dist:win": "npm run build && npm run icons && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win",
