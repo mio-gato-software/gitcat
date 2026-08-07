@@ -17,6 +17,12 @@ export type Branch = {
   ahead: number;
   behind: number;
   isCurrent: boolean;
+  /**
+   * The worktree holding this branch, when it is another one. Git refuses to check out the same branch
+   * twice, so this is what explains a switch that cannot happen; the open repository is never named
+   * here, because that branch is already the current one.
+   */
+  checkedOutIn?: string;
   lastCommit?: Commit;
 };
 

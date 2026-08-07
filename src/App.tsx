@@ -1,14 +1,16 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, PointerEvent as ReactPointerEvent } from "react";
 import {
-  AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Bot, Check, ChevronDown, ChevronRight, CircleDot,
-  Clock3, Cloud, Eye, FileDiff, FolderOpen, GitBranch, GitCommitHorizontal, GitFork,
+  AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Bot, Check, ChevronDown, ChevronRight, CircleDot,
+  Clock3, Cloud, Eye, EyeOff, FileDiff, FolderGit2, FolderOpen, GitBranch, GitCommitHorizontal, GitFork,
   GitMerge, Info, Laptop, List, ListTree, LoaderCircle, MessageCircle, Plus, RefreshCcw, Search, Send,
   Settings2, ShieldCheck, Sparkles, TerminalSquare, Trash2, UserRound, X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { buildBranchTree, filterBranchTree, groupPathFor } from "../shared/branch-tree";
 import type { BranchNode } from "../shared/branch-tree";
+import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
+import type { BranchOrder } from "../shared/branch-order";
 import type { ActionPlan, Branch, Commit, ConversationMessage, LlmConfig, Operation, RepoSnapshot } from "../shared/types";
 
 type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string };
@@ -77,7 +79,7 @@ function plural(count: number, singular: string, many: string) { return `${count
  * repository, so it lives in the browser storage of this machine and belongs to one repository.
  */
 type BranchViewMode = "tree" | "flat";
-type BranchView = { mode: BranchViewMode; expanded: string[] };
+type BranchView = { mode: BranchViewMode; expanded: string[]; order: BranchOrder; hideMerged: boolean };
 
 const branchViewStorageKey = (path: string) => `branchline-branch-view:${path}`;
 
@@ -85,9 +87,12 @@ function readBranchView(path: string): BranchView | undefined {
   try {
     const stored = JSON.parse(localStorage.getItem(branchViewStorageKey(path)) ?? "null");
     if (stored?.mode !== "tree" && stored?.mode !== "flat") return undefined;
+    // Preferences saved before an option existed are still valid; the missing ones take their default.
     return {
       mode: stored.mode,
-      expanded: Array.isArray(stored.expanded) ? stored.expanded.filter((key: unknown): key is string => typeof key === "string") : []
+      expanded: Array.isArray(stored.expanded) ? stored.expanded.filter((key: unknown): key is string => typeof key === "string") : [],
+      order: isBranchOrder(stored.order) ? stored.order : defaultBranchOrder,
+      hideMerged: stored.hideMerged === true
     };
   } catch { /* a corrupt entry just means the defaults */ }
   return undefined;
@@ -690,22 +695,35 @@ function BranchPanel({ snapshot, busy, onCreate, onSwitch, onSwitchNow, onDelete
   const rows = useRef(new Map<string, HTMLButtonElement>());
   const pending = useRef<{ scrollTop: number; focused?: string }>(undefined);
 
-  const tree = useMemo(() => buildBranchTree(snapshot.branches), [snapshot.branches]);
+  const order = saved?.order ?? defaultBranchOrder;
+  const hideMerged = saved?.hideMerged ?? false;
+  const merged = useMemo(
+    () => snapshot.branches.filter((branch) => isMergedIntoDefault(branch, snapshot.defaultBranch)).map((branch) => branch.name),
+    [snapshot.branches, snapshot.defaultBranch]
+  );
+  const mergedNames = useMemo(() => new Set(merged), [merged]);
+  // Ordering comes before grouping, so the groups follow the most recent branch each one holds.
+  const listed = useMemo(() => {
+    const kept = hideMerged ? snapshot.branches.filter((branch) => !mergedNames.has(branch.name)) : snapshot.branches;
+    return sortBranches(kept, order, { dirty: snapshot.isDirty });
+  }, [snapshot.branches, snapshot.isDirty, order, hideMerged, mergedNames]);
+
+  const tree = useMemo(() => buildBranchTree(listed), [listed]);
   // Nothing stored yet: the branch you are standing on is the one worth having open.
   const fallbackExpanded = useMemo(() => groupPathFor(tree, snapshot.currentBranch), [tree, snapshot.currentBranch]);
-  const view = saved ?? { mode: "tree" as BranchViewMode, expanded: fallbackExpanded };
+  const view = saved ?? { mode: "tree" as BranchViewMode, expanded: fallbackExpanded, order, hideMerged };
   const update = (next: Partial<BranchView>) => {
-    const merged = { ...view, ...next };
-    setSaved(merged);
-    writeBranchView(snapshot.path, merged);
+    const updated = { ...view, ...next };
+    setSaved(updated);
+    writeBranchView(snapshot.path, updated);
   };
 
   const query = filter.trim();
   const filtering = query.length > 0;
   const visible = useMemo(() => filterBranchTree(tree, query), [tree, query]);
   const matches = useMemo(
-    () => snapshot.branches.filter((branch) => branch.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())),
-    [snapshot.branches, query]
+    () => listed.filter((branch) => branch.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())),
+    [listed, query]
   );
   // The colour belongs to the branch, not to the row, so it does not change with the mode or the filter.
   const colours = useMemo(() => new Map(snapshot.branches.map((branch, index) => [branch.name, branchColor(index)])), [snapshot.branches]);
@@ -743,6 +761,7 @@ function BranchPanel({ snapshot, busy, onCreate, onSwitch, onSwitchNow, onDelete
     branch={branch}
     // The header above already says the prefix; repeating it on every row is the noise this replaces.
     label={trim ? branch.name.slice(trim.length + 1) : branch.name}
+    merged={mergedNames.has(branch.name)}
     defaultBranch={snapshot.defaultBranch}
     colour={colours.get(branch.name) ?? branchColor(0)}
     depth={depth}
@@ -783,9 +802,24 @@ function BranchPanel({ snapshot, busy, onCreate, onSwitch, onSwitchNow, onDelete
       <button className="mini-icon" onClick={onCreate} aria-label="Crear rama"><Plus size={14} /></button>
     </div></div>
     <div className="search-field"><Search size={14} /><input aria-label="Filtrar ramas" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filtrar ramas" /></div>
+    <div className="branch-filters">
+      <label className="order-field"><ArrowDownWideNarrow size={12} /><span className="visually-hidden">Ordenar ramas</span><select value={order} onChange={(event) => update({ order: event.target.value as BranchOrder })}>
+        {(Object.keys(branchOrderLabels) as BranchOrder[]).map((value) => <option value={value} key={value}>{branchOrderLabels[value]}</option>)}
+      </select></label>
+      {/* A repository with nothing integrated has nothing to hide, so the control does not appear at all. */}
+      {merged.length > 0 && <button
+        className={`merged-toggle ${hideMerged ? "active" : ""}`}
+        aria-pressed={hideMerged}
+        onClick={() => update({ hideMerged: !hideMerged })}
+        title={`${plural(merged.length, "rama ya integrada", "ramas ya integradas")} en ${snapshot.defaultBranch}. Ocultarlas no borra nada.`}
+      >{hideMerged ? <EyeOff size={12} /> : <Eye size={12} />}<span>Mergeadas</span><span className="merged-count">{merged.length}</span></button>}
+    </div>
     <div className="branch-list" ref={listRef}>
       {view.mode === "tree" ? renderNodes(topLevel, 0, "") : matches.map((branch) => branchRow(branch, 0, ""))}
-      {!matches.length && <div className="empty-small">No hay ramas que coincidan.</div>}
+      {/* Nada oculto en silencio: si lo que falta lo esconde el filtro de integradas, la fila lo dice. */}
+      {!matches.length && <div className="empty-small">{!filtering && hideMerged && merged.length
+        ? `Todas las demás ramas ya están integradas en ${snapshot.defaultBranch}.`
+        : "No hay ramas que coincidan."}</div>}
     </div>
   </div>;
 }
@@ -815,10 +849,11 @@ function branchTooltip(branch: Branch, defaultBranch?: string) {
   // Integration is what tells you whether deleting the branch would lose anything.
   if (branch.mergedInto.length) parts.push(`ya integrada en ${branch.mergedInto.join(" y ")}`);
   else if (!branch.isCurrent) parts.push("sin integrar en la rama por defecto ni en la actual");
+  if (branch.checkedOutIn) parts.push(`en uso por el worktree ${branch.checkedOutIn}`);
   return parts.join(" · ");
 }
 
-function BranchRow({ branch, label, defaultBranch, colour, depth, busy, register, onSwitch, onSwitchNow, onDelete }: { branch: Branch; label: string; defaultBranch?: string; colour: string; depth: number; busy: boolean; register: (node: HTMLButtonElement | null) => void; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void }) {
+function BranchRow({ branch, label, merged, defaultBranch, colour, depth, busy, register, onSwitch, onSwitchNow, onDelete }: { branch: Branch; label: string; merged: boolean; defaultBranch?: string; colour: string; depth: number; busy: boolean; register: (node: HTMLButtonElement | null) => void; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void }) {
   const isDefault = branch.name === defaultBranch;
   const pendingClick = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(pendingClick.current), []);
@@ -830,7 +865,7 @@ function BranchRow({ branch, label, defaultBranch, colour, depth, busy, register
     window.clearTimeout(pendingClick.current);
     onSwitchNow();
   };
-  return <div className={`branch-row ${branch.isCurrent ? "current" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={click} onDoubleClick={doubleClick} disabled={branch.isCurrent || busy} aria-current={branch.isCurrent} title={branch.isCurrent ? branchTooltip(branch, defaultBranch) : `Doble clic para cambiar a ${branchTooltip(branch, defaultBranch)}`}><span className="branch-color" style={{ background: colour }} /><GitBranch size={14} /><span className="branch-label">{label}</span><PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">actual</span>}{isDefault && <span className="current-pill">principal</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && !isDefault && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`} title={branch.mergedInto.length ? `Eliminar ${branch.name}: ya integrada en ${branch.mergedInto.join(" y ")}, no se pierde trabajo` : `Eliminar ${branch.name}: sin integrar, Git rechazará el borrado si se perdería trabajo`}><Trash2 size={12} /></button>}</div>;
+  return <div className={`branch-row ${branch.isCurrent ? "current" : ""} ${merged ? "merged" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={click} onDoubleClick={doubleClick} disabled={branch.isCurrent || busy} aria-current={branch.isCurrent} title={branch.isCurrent ? branchTooltip(branch, defaultBranch) : `Doble clic para cambiar a ${branchTooltip(branch, defaultBranch)}`}><span className="branch-color" style={{ background: colour }} /><GitBranch size={14} /><span className="branch-label">{label}</span>{merged && <span className="branch-merged" role="img" aria-label={`Ya integrada en ${defaultBranch}`} title={`Ya integrada en ${defaultBranch}: borrarla no perdería trabajo`}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={`En uso por el worktree ${branch.checkedOutIn}`} title={`En uso por el worktree ${branch.checkedOutIn}`}><FolderGit2 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">actual</span>}{isDefault && <span className="current-pill">principal</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && !isDefault && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`} title={branch.mergedInto.length ? `Eliminar ${branch.name}: ya integrada en ${branch.mergedInto.join(" y ")}, no se pierde trabajo` : `Eliminar ${branch.name}: sin integrar, Git rechazará el borrado si se perdería trabajo`}><Trash2 size={12} /></button>}</div>;
 }
 
 function CommitRow({ commit, index, onSelect }: { commit: Commit; index: number; onSelect: () => void }) {

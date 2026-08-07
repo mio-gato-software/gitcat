@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { basename, delimiter, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
 import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
+import { parseWorktrees } from "./worktrees.js";
 import {
   findAccount, isSshAuthenticated, parseGhAccounts, parseSshGreeting, parseSshResolvedHostName, sshConfigHostAliases
 } from "./host-identity.js";
@@ -291,6 +292,8 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     if (localNames.has(name)) continue;
     branches.push({ name, remoteRef: remote.ref, presence: "remote", mergedInto: [], ahead: 0, behind: 0, isCurrent: false, lastCommit: remote.lastCommit });
   }
+  const worktrees = parseWorktrees(await optionalGit(repoRoot, ["worktree", "list", "--porcelain"]), repoRoot);
+  for (const branch of branches) branch.checkedOutIn = worktrees.get(branch.name);
   const defaultBranchResolution = await resolveDefaultBranch(repoRoot, remotes, localNames);
   const defaultBranch = defaultBranchResolution?.name;
   await markIntegration(repoRoot, branches, [defaultBranch, currentBranch]);
@@ -732,6 +735,8 @@ function plannerState(snapshot: RepoSnapshot) {
       presence: branch.presence,
       // Verified containment: these branches already hold this one's work. [] means neither does.
       mergedInto: branch.mergedInto,
+      // Another worktree holds it, so Git will refuse to check it out here until that one lets go.
+      checkedOutIn: branch.checkedOutIn ?? null,
       upstream: branch.upstream ?? null,
       // Against the upstream only. These say nothing about integration into another branch.
       ahead: branch.ahead,
