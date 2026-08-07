@@ -2,7 +2,7 @@ import type { Operation } from "../shared/types.js";
 
 export type PlannerIntent = "git_operation" | "create_repository" | "answer" | "needs_information" | "out_of_scope";
 
-export type PlannedArgs = { name: string; onto: string; message: string };
+export type PlannedArgs = { name: string; onto: string; to: string; message: string };
 
 export type PlannedRepository = {
   localPath: string;
@@ -36,15 +36,15 @@ export const commitMessageLimit = 120;
 export const planStepLimit = 6;
 
 export const executableOperations = new Set<Operation>([
-  "status", "checkout", "create_branch", "delete_branch", "fetch", "pull", "push",
+  "status", "checkout", "create_branch", "delete_branch", "rename_branch", "fetch", "pull", "push",
   "merge", "rebase", "abort_rebase", "continue_rebase", "commit"
 ]);
-const branchOperations = new Set<Operation>(["checkout", "create_branch", "delete_branch", "merge"]);
+const branchOperations = new Set<Operation>(["checkout", "create_branch", "delete_branch", "rename_branch", "merge"]);
 const intents: PlannerIntent[] = ["git_operation", "create_repository", "answer", "needs_information", "out_of_scope"];
 const risks = ["low", "medium", "high"];
 const planKeys = ["intent", "rationale", "reply", "repository", "risk", "steps", "summary"];
 const stepKeys = ["args", "operation"];
-const argsKeys = ["message", "name", "onto"];
+const argsKeys = ["message", "name", "onto", "to"];
 const repositoryKeys = ["host", "localPath", "owner", "protocol", "push", "remote", "replaceRemote", "repository", "sshHost"];
 const branchNamePattern = /^[A-Za-z0-9._/@-]+$/;
 
@@ -76,7 +76,7 @@ export const planResponseFormat = {
               type: "object",
               additionalProperties: false,
               required: argsKeys,
-              properties: { name: { type: "string" }, onto: { type: "string" }, message: { type: "string" } }
+              properties: { name: { type: "string" }, onto: { type: "string" }, to: { type: "string" }, message: { type: "string" } }
             }
           }
         }
@@ -195,6 +195,12 @@ there are no safe candidates. Do not treat two branches pointing at different co
 unintegrated: an older tip that the default branch already contains is integrated. Never fall back to
 comparing "ahead" and "behind" for this, as they only compare a branch with its own upstream.
 
+"rename_branch" takes "name" and "to". It renames a local branch and nothing else: the history is
+untouched and the remote branch keeps its published name, so a branch with an upstream stays
+published under the old one. Only rename when the user asked for it in this conversation. A naming
+convention you notice on your own is never a reason to rename anything, and neither is a suggestion
+the interface may be showing: those are the user's to accept.
+
 A branch whose "checkedOutIn" is not null is held by another worktree at that path. Git refuses to
 check out one branch in two worktrees, so a switch to it will fail until that worktree lets go: say
 so and name the path instead of proposing the switch. It is also a sign the branch is in use, so do
@@ -219,6 +225,7 @@ ${JSON.stringify(issues, null, 2)}`;
 export function operationArgs(step: PlannedStep): Record<string, string> {
   switch (step.operation) {
     case "checkout": case "create_branch": case "delete_branch": case "merge": return { name: step.args.name.trim() };
+    case "rename_branch": return { name: step.args.name.trim(), to: step.args.to.trim() };
     case "rebase": return { onto: step.args.onto.trim() };
     case "commit": return { message: step.args.message.trim() };
     default: return {};
@@ -236,6 +243,11 @@ export function operationIssues(step: PlannedStep, index = 0): PlanIssue[] {
   if (branchOperations.has(step.operation)) {
     if (!args.name) issues.push({ field: `${at}.args.name`, problem: `missing; ${step.operation} needs the branch name the user meant` });
     else if (!isBranchNameSafe(args.name)) issues.push({ field: `${at}.args.name`, problem: `"${args.name}" is not a valid Git branch name` });
+  }
+  if (step.operation === "rename_branch") {
+    if (!args.to) issues.push({ field: `${at}.args.to`, problem: "missing; rename_branch needs the new name" });
+    else if (!isBranchNameSafe(args.to)) issues.push({ field: `${at}.args.to`, problem: `"${args.to}" is not a valid Git branch name` });
+    else if (args.to === args.name) issues.push({ field: `${at}.args.to`, problem: `identical to "${args.name}"; a rename must change the name` });
   }
   if (step.operation === "rebase") {
     if (!args.onto) issues.push({ field: `${at}.args.onto`, problem: "missing; rebase needs the base branch" });

@@ -34,20 +34,29 @@ export type BranchTree = {
   showHeaders: boolean;
 };
 
-export type BranchTreeOptions = { subgroupThreshold?: number };
+export type BranchTreeOptions = {
+  subgroupThreshold?: number;
+  /**
+   * Minority spellings mapped to the prefix the repository mostly uses, so `feat/x` sits under
+   * `feature`. It changes where the row is drawn and nothing else: the branch keeps its real name.
+   */
+  aliases?: Record<string, string>;
+};
 
 /** The first segment of a branch name, when there is something on both sides of the slash. */
-function prefixOf(name: string) {
+export function prefixOf(name: string) {
   const slash = name.indexOf("/");
   return slash > 0 && slash < name.length - 1 ? name.slice(0, slash) : undefined;
 }
 
 /**
- * The token that opens whatever follows the prefix. Repos write this second level without a slash,
- * separated by "-" or "_"; a further "/" delimits at least as strongly, so it counts too.
+ * The token that opens whatever follows the branch's own prefix. Repos write this second level
+ * without a slash, separated by "-" or "_"; a further "/" delimits at least as strongly, so it counts
+ * too. It reads the name itself rather than the group, so an aliased spelling still lands correctly.
  */
-export function subgroupToken(name: string, prefix: string) {
-  return name.slice(prefix.length + 1).match(/^[^\-_/]+/)?.[0] ?? "";
+export function subgroupToken(name: string) {
+  const slash = name.indexOf("/");
+  return slash < 0 ? "" : name.slice(slash + 1).match(/^[^\-_/]+/)?.[0] ?? "";
 }
 
 function countBranches(nodes: BranchNode[]): number {
@@ -61,7 +70,7 @@ function countBranches(nodes: BranchNode[]): number {
 function buildGroup(prefix: string, branches: Branch[], threshold: number): BranchGroup {
   const members = new Map<string, Branch[]>();
   for (const branch of branches) {
-    const token = subgroupToken(branch.name, prefix);
+    const token = subgroupToken(branch.name);
     if (!token) continue;
     members.set(token, [...(members.get(token) ?? []), branch]);
   }
@@ -71,7 +80,7 @@ function buildGroup(prefix: string, branches: Branch[], threshold: number): Bran
   const children: BranchNode[] = [];
   const emitted = new Set<string>();
   for (const branch of branches) {
-    const token = subgroupToken(branch.name, prefix);
+    const token = subgroupToken(branch.name);
     if (!token || !promoted.has(token)) { children.push({ kind: "branch", branch }); continue; }
     if (emitted.has(token)) continue;
     emitted.add(token);
@@ -88,10 +97,12 @@ function buildGroup(prefix: string, branches: Branch[], threshold: number): Bran
 /** Groups the branches by the convention their names already follow, in the order they arrive. */
 export function buildBranchTree(branches: Branch[], options: BranchTreeOptions = {}): BranchTree {
   const threshold = Math.max(2, Math.trunc(options.subgroupThreshold ?? defaultSubgroupThreshold));
+  const aliases = options.aliases ?? {};
   const byPrefix = new Map<string, Branch[]>();
   const rootless: Branch[] = [];
   for (const branch of branches) {
-    const prefix = prefixOf(branch.name);
+    const own = prefixOf(branch.name);
+    const prefix = own ? aliases[own] ?? own : undefined;
     if (prefix) byPrefix.set(prefix, [...(byPrefix.get(prefix) ?? []), branch]);
     else rootless.push(branch);
   }

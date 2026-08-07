@@ -64,6 +64,7 @@ export type Operation =
   | "checkout"
   | "create_branch"
   | "delete_branch"
+  | "rename_branch"
   | "fetch"
   | "pull"
   | "push"

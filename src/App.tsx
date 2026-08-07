@@ -3,12 +3,14 @@ import type { CSSProperties, ReactNode, PointerEvent as ReactPointerEvent } from
 import {
   AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Bot, Check, ChevronDown, ChevronRight, CircleDot,
   Clock3, Cloud, Eye, EyeOff, FileDiff, FolderGit2, FolderOpen, GitBranch, GitCommitHorizontal, GitFork,
-  GitMerge, Info, Laptop, List, ListTree, LoaderCircle, MessageCircle, Plus, RefreshCcw, Search, Send,
+  GitMerge, Info, Laptop, Lightbulb, List, ListTree, LoaderCircle, MessageCircle, Plus, RefreshCcw, Search, Send,
   Settings2, ShieldCheck, Sparkles, TerminalSquare, Trash2, UserRound, X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { buildBranchTree, filterBranchTree, groupPathFor } from "../shared/branch-tree";
+import { buildBranchTree, filterBranchTree, groupPathFor, prefixOf } from "../shared/branch-tree";
 import type { BranchNode } from "../shared/branch-tree";
+import { branchSuggestions, namingCompletions, prefixAliases, variantHint } from "../shared/branch-consistency";
+import type { BranchSuggestion } from "../shared/branch-consistency";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
 import type { ActionPlan, Branch, Commit, ConversationMessage, LlmConfig, Operation, RepoSnapshot } from "../shared/types";
@@ -79,7 +81,10 @@ function plural(count: number, singular: string, many: string) { return `${count
  * repository, so it lives in the browser storage of this machine and belongs to one repository.
  */
 type BranchViewMode = "tree" | "flat";
-type BranchView = { mode: BranchViewMode; expanded: string[]; order: BranchOrder; hideMerged: boolean };
+type BranchView = { mode: BranchViewMode; expanded: string[]; order: BranchOrder; hideMerged: boolean; dismissed: string[] };
+
+/** A stable empty list, so "nothing dismissed yet" does not invalidate a memo on every render. */
+const noDismissals: string[] = [];
 
 const branchViewStorageKey = (path: string) => `branchline-branch-view:${path}`;
 
@@ -92,7 +97,8 @@ function readBranchView(path: string): BranchView | undefined {
       mode: stored.mode,
       expanded: Array.isArray(stored.expanded) ? stored.expanded.filter((key: unknown): key is string => typeof key === "string") : [],
       order: isBranchOrder(stored.order) ? stored.order : defaultBranchOrder,
-      hideMerged: stored.hideMerged === true
+      hideMerged: stored.hideMerged === true,
+      dismissed: Array.isArray(stored.dismissed) ? stored.dismissed.filter((id: unknown): id is string => typeof id === "string") : []
     };
   } catch { /* a corrupt entry just means the defaults */ }
   return undefined;
@@ -453,6 +459,7 @@ export default function App() {
       checkout: `Cambiar a la rama ${args.name}`,
       create_branch: `Crear la rama ${args.name}`,
       delete_branch: `Eliminar la rama ${args.name}`,
+      rename_branch: `Renombrar la rama ${args.name} a ${args.to}`,
       fetch: "Actualizar las referencias remotas",
       push: "Publicar la rama actual",
       merge: `Fusionar la rama ${args.name}`,
@@ -610,6 +617,7 @@ export default function App() {
               onSwitch={(name) => void prepare("checkout", { name })}
               onSwitchNow={(name) => void switchBranch(name)}
               onDelete={(name) => void prepare("delete_branch", { name })}
+              onRename={(name, to) => void prepare("rename_branch", { name, to })}
             />
             <div className="sidebar-section"><div className="section-heading"><span>REMOTOS</span><button className="mini-icon" onClick={() => void prepare("fetch")} aria-label="Actualizar remotos" disabled={planning}><RefreshCcw size={13} /></button></div>{snapshot.remotes.length ? snapshot.remotes.map((remote) => <div className="remote-row" key={remote}><Cloud size={14} /><span>{remote}</span><span className="remote-count">configurado</span></div>) : <div className="empty-small">Sin remotos configurados.</div>}</div>
             <div className="sidebar-bottom"><div className="security-note"><ShieldCheck size={15} /><span>Acciones protegidas<br /><small>Git se ejecuta con una lista segura.</small></span></div><button className="sidebar-settings" onClick={() => setSettingsOpen(true)}><Settings2 size={15} /> Configuración LLM <ChevronDown size={13} /></button></div>
@@ -685,9 +693,10 @@ function PaneDivider({ edge, width, onPointerDown, onNudge, onReset }: {
  * view: nothing is renamed, every group opens with one click, and the flat list with its filter is
  * still one click away for whoever already knows the name they are looking for.
  */
-function BranchPanel({ snapshot, busy, onCreate, onSwitch, onSwitchNow, onDelete }: {
+function BranchPanel({ snapshot, busy, onCreate, onSwitch, onSwitchNow, onDelete, onRename }: {
   snapshot: RepoSnapshot; busy: boolean; onCreate: () => void;
   onSwitch: (name: string) => void; onSwitchNow: (name: string) => void; onDelete: (name: string) => void;
+  onRename: (from: string, to: string) => void;
 }) {
   const [saved, setSaved] = useState<BranchView | undefined>(() => readBranchView(snapshot.path));
   const [filter, setFilter] = useState("");
@@ -708,10 +717,18 @@ function BranchPanel({ snapshot, busy, onCreate, onSwitch, onSwitchNow, onDelete
     return sortBranches(kept, order, { dirty: snapshot.isDirty });
   }, [snapshot.branches, snapshot.isDirty, order, hideMerged, mergedNames]);
 
-  const tree = useMemo(() => buildBranchTree(listed), [listed]);
+  const dismissed = saved?.dismissed ?? noDismissals;
+  const suggestions = useMemo(() => branchSuggestions(snapshot.branches, dismissed), [snapshot.branches, dismissed]);
+  // Both spellings share a header; the rows keep the name Git actually has.
+  const aliases = useMemo(() => prefixAliases(suggestions), [suggestions]);
+  const variants = useMemo(
+    () => new Set(suggestions.flatMap((item) => item.kind === "prefix" ? item.renames.map((rename) => rename.from) : [])),
+    [suggestions]
+  );
+  const tree = useMemo(() => buildBranchTree(listed, { aliases }), [listed, aliases]);
   // Nothing stored yet: the branch you are standing on is the one worth having open.
   const fallbackExpanded = useMemo(() => groupPathFor(tree, snapshot.currentBranch), [tree, snapshot.currentBranch]);
-  const view = saved ?? { mode: "tree" as BranchViewMode, expanded: fallbackExpanded, order, hideMerged };
+  const view = saved ?? { mode: "tree" as BranchViewMode, expanded: fallbackExpanded, order, hideMerged, dismissed };
   const update = (next: Partial<BranchView>) => {
     const updated = { ...view, ...next };
     setSaved(updated);
@@ -759,8 +776,10 @@ function BranchPanel({ snapshot, busy, onCreate, onSwitch, onSwitchNow, onDelete
   const branchRow = (branch: Branch, depth: number, trim: string) => <BranchRow
     key={branch.name}
     branch={branch}
-    // The header above already says the prefix; repeating it on every row is the noise this replaces.
-    label={trim ? branch.name.slice(trim.length + 1) : branch.name}
+    // The header already says the prefix, so the row drops it — unless the row spells it differently,
+    // in which case hiding the difference would be hiding the very thing the mark is pointing at.
+    label={trim && prefixOf(branch.name) === trim ? branch.name.slice(trim.length + 1) : branch.name}
+    variant={variants.has(branch.name)}
     merged={mergedNames.has(branch.name)}
     defaultBranch={snapshot.defaultBranch}
     colour={colours.get(branch.name) ?? branchColor(0)}
@@ -814,6 +833,14 @@ function BranchPanel({ snapshot, busy, onCreate, onSwitch, onSwitchNow, onDelete
         title={`${plural(merged.length, "rama ya integrada", "ramas ya integradas")} en ${snapshot.defaultBranch}. Ocultarlas no borra nada.`}
       >{hideMerged ? <EyeOff size={12} /> : <Eye size={12} />}<span>Mergeadas</span><span className="merged-count">{merged.length}</span></button>}
     </div>
+    {/* Sugerencias, nunca acciones: cada renombrado se confirma por separado y con su comando delante. */}
+    {!filtering && suggestions.map((suggestion) => <NamingSuggestion
+      key={suggestion.id}
+      suggestion={suggestion}
+      busy={busy}
+      onRename={onRename}
+      onDismiss={() => update({ dismissed: [...dismissed, suggestion.id] })}
+    />)}
     <div className="branch-list" ref={listRef}>
       {view.mode === "tree" ? renderNodes(topLevel, 0, "") : matches.map((branch) => branchRow(branch, 0, ""))}
       {/* Nada oculto en silencio: si lo que falta lo esconde el filtro de integradas, la fila lo dice. */}
@@ -821,6 +848,32 @@ function BranchPanel({ snapshot, busy, onCreate, onSwitch, onSwitchNow, onDelete
         ? `Todas las demás ramas ya están integradas en ${snapshot.defaultBranch}.`
         : "No hay ramas que coincidan."}</div>}
     </div>
+  </div>;
+}
+
+/**
+ * A remark about the repository's own naming, with the rename it would take. It never renames on its
+ * own: each branch is a separate plan the user confirms with the Git command in front of them, and
+ * dismissing the card is remembered so the same remark is not made twice.
+ */
+function NamingSuggestion({ suggestion, busy, onRename, onDismiss }: {
+  suggestion: BranchSuggestion; busy: boolean; onRename: (from: string, to: string) => void; onDismiss: () => void;
+}) {
+  const [title, detail] = suggestion.kind === "prefix"
+    ? [`${suggestion.variant}/ frente a ${suggestion.canonical}/`,
+       `${plural(suggestion.variantCount, "rama escribe", "ramas escriben")} ${suggestion.variant}/ y ${plural(suggestion.canonicalCount, "escribe", "escriben")} ${suggestion.canonical}/.`]
+    : [`${suggestion.token}-… frente a ${suggestion.token}/…`,
+       `${plural(suggestion.renames.length, "rama usa", "ramas usan")} “-” donde el resto del repositorio usa “/”.`];
+  return <div className="naming-suggestion">
+    <div className="naming-heading">
+      <Lightbulb size={13} />
+      <div><strong>{title}</strong><span>{detail}</span></div>
+      <button className="mini-icon" onClick={onDismiss} aria-label={`Descartar la sugerencia ${title}`} title="Descartar: no volveré a proponerlo en este repositorio"><X size={13} /></button>
+    </div>
+    <ul>{suggestion.renames.map((rename) => <li key={rename.from}>
+      <code title={`${rename.from} → ${rename.to}`}>{rename.from} → {rename.to}</code>
+      <button className="outline-button small" disabled={busy} onClick={() => onRename(rename.from, rename.to)} title={`Prepara el plan: git branch -m ${rename.from} ${rename.to}`}>Renombrar</button>
+    </li>)}</ul>
   </div>;
 }
 
@@ -853,7 +906,7 @@ function branchTooltip(branch: Branch, defaultBranch?: string) {
   return parts.join(" · ");
 }
 
-function BranchRow({ branch, label, merged, defaultBranch, colour, depth, busy, register, onSwitch, onSwitchNow, onDelete }: { branch: Branch; label: string; merged: boolean; defaultBranch?: string; colour: string; depth: number; busy: boolean; register: (node: HTMLButtonElement | null) => void; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void }) {
+function BranchRow({ branch, label, variant, merged, defaultBranch, colour, depth, busy, register, onSwitch, onSwitchNow, onDelete }: { branch: Branch; label: string; variant: boolean; merged: boolean; defaultBranch?: string; colour: string; depth: number; busy: boolean; register: (node: HTMLButtonElement | null) => void; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void }) {
   const isDefault = branch.name === defaultBranch;
   const pendingClick = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(pendingClick.current), []);
@@ -865,7 +918,7 @@ function BranchRow({ branch, label, merged, defaultBranch, colour, depth, busy, 
     window.clearTimeout(pendingClick.current);
     onSwitchNow();
   };
-  return <div className={`branch-row ${branch.isCurrent ? "current" : ""} ${merged ? "merged" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={click} onDoubleClick={doubleClick} disabled={branch.isCurrent || busy} aria-current={branch.isCurrent} title={branch.isCurrent ? branchTooltip(branch, defaultBranch) : `Doble clic para cambiar a ${branchTooltip(branch, defaultBranch)}`}><span className="branch-color" style={{ background: colour }} /><GitBranch size={14} /><span className="branch-label">{label}</span>{merged && <span className="branch-merged" role="img" aria-label={`Ya integrada en ${defaultBranch}`} title={`Ya integrada en ${defaultBranch}: borrarla no perdería trabajo`}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={`En uso por el worktree ${branch.checkedOutIn}`} title={`En uso por el worktree ${branch.checkedOutIn}`}><FolderGit2 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">actual</span>}{isDefault && <span className="current-pill">principal</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && !isDefault && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`} title={branch.mergedInto.length ? `Eliminar ${branch.name}: ya integrada en ${branch.mergedInto.join(" y ")}, no se pierde trabajo` : `Eliminar ${branch.name}: sin integrar, Git rechazará el borrado si se perdería trabajo`}><Trash2 size={12} /></button>}</div>;
+  return <div className={`branch-row ${branch.isCurrent ? "current" : ""} ${merged ? "merged" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={click} onDoubleClick={doubleClick} disabled={branch.isCurrent || busy} aria-current={branch.isCurrent} title={branch.isCurrent ? branchTooltip(branch, defaultBranch) : `Doble clic para cambiar a ${branchTooltip(branch, defaultBranch)}`}><span className="branch-color" style={{ background: colour }} /><GitBranch size={14} /><span className="branch-label">{label}</span>{variant && <span className="branch-variant" title={`Escribe el prefijo de otra forma que el resto del repositorio. Sigue llamándose ${branch.name}.`}>variante</span>}{merged && <span className="branch-merged" role="img" aria-label={`Ya integrada en ${defaultBranch}`} title={`Ya integrada en ${defaultBranch}: borrarla no perdería trabajo`}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={`En uso por el worktree ${branch.checkedOutIn}`} title={`En uso por el worktree ${branch.checkedOutIn}`}><FolderGit2 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">actual</span>}{isDefault && <span className="current-pill">principal</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && !isDefault && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`} title={branch.mergedInto.length ? `Eliminar ${branch.name}: ya integrada en ${branch.mergedInto.join(" y ")}, no se pierde trabajo` : `Eliminar ${branch.name}: sin integrar, Git rechazará el borrado si se perdería trabajo`}><Trash2 size={12} /></button>}</div>;
 }
 
 function CommitRow({ commit, index, onSelect }: { commit: Commit; index: number; onSelect: () => void }) {
@@ -924,10 +977,20 @@ function SettingsModal({ config, onClose, onSaved }: { config: LlmConfig; onClos
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="modal-heading"><div><div className="eyebrow">PROVEEDOR LLM</div><h2 id="settings-title">Configuración</h2></div><button className="icon-button soft" onClick={onClose} aria-label="Cerrar configuración"><X size={17} /></button></div><div className="provider-card"><div className="provider-logo">AI</div><div><strong>OpenAI</strong><span>Responses API · API key local</span></div><span className={`connected-dot ${config.configured ? "on" : ""}`} /></div><label>API key<input autoFocus type="password" value={apiKey} onChange={(event) => { setApiKey(event.target.value); setClearApiKey(false); }} placeholder={config.configured ? "Guardada de forma segura · escribe para reemplazar" : "sk-…"} autoComplete="off" /></label>{config.configured && <label className="checkbox-label"><input type="checkbox" checked={clearApiKey} onChange={(event) => { setClearApiKey(event.target.checked); if (event.target.checked) setApiKey(""); }} /> Eliminar la API key guardada</label>}<label>Modelo<input value={model} onChange={(event) => setModel(event.target.value)} placeholder="Identificador del modelo" /><small>Usa el identificador de un modelo habilitado en tu proyecto de OpenAI.</small></label><div className="modal-note"><ShieldCheck size={15} /><span>Al guardar se comprueba la key y el modelo contra el proveedor; solo se guardan si responden. La key se cifra con el almacenamiento seguro del sistema y nunca vuelve a la interfaz.</span></div>{error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}<div className="modal-actions"><button className="ghost-button" onClick={onClose}>Cancelar</button><button className="primary-button" onClick={() => void save()} disabled={saving}>{saving ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />} Guardar</button></div></div></div>;
 }
 
+/**
+ * Naming a branch, with what the repository already writes offered as completions. When the name
+ * starts with a prefix this repo spells differently, it says so and stops there: creation is never
+ * blocked, because the convention is the user's to set, not the app's to enforce.
+ */
 function InputModal({ dialog, branches, onChange, onClose, onSubmit }: { dialog: InputDialog; branches: Branch[]; onChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
   useEscape(onClose);
-  const listId = dialog.operation === "merge" ? "branch-options" : undefined;
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal" role="dialog" aria-modal="true" aria-labelledby="input-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><div className="modal-heading"><div><div className="eyebrow">OPERACIÓN GIT</div><h2 id="input-modal-title">{dialog.title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label="Cerrar"><X size={17} /></button></div><label>{dialog.label}<input autoFocus value={dialog.value} onChange={(event) => onChange(event.target.value)} list={listId} maxLength={200} /></label>{listId && <datalist id={listId}>{branches.filter((branch) => !branch.isCurrent).map((branch) => <option value={branch.name} key={branch.name} />)}</datalist>}<div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>Cancelar</button><button className="primary-button" disabled={!dialog.value.trim()}><GitBranch size={14} /> Preparar</button></div></form></div>;
+  const creating = dialog.operation === "create_branch";
+  const options = useMemo(
+    () => creating ? namingCompletions(branches) : branches.filter((branch) => !branch.isCurrent).map((branch) => branch.name),
+    [creating, branches]
+  );
+  const hint = useMemo(() => creating ? variantHint(dialog.value, branches) : undefined, [creating, dialog.value, branches]);
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal" role="dialog" aria-modal="true" aria-labelledby="input-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><div className="modal-heading"><div><div className="eyebrow">OPERACIÓN GIT</div><h2 id="input-modal-title">{dialog.title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label="Cerrar"><X size={17} /></button></div><label>{dialog.label}<input autoFocus value={dialog.value} onChange={(event) => onChange(event.target.value)} list={options.length ? "branch-options" : undefined} maxLength={200} /></label>{options.length > 0 && <datalist id="branch-options">{options.map((option) => <option value={option} key={option} />)}</datalist>}{hint && <p className="naming-hint" role="status"><Lightbulb size={12} /><span>Este repositorio usa <code>{hint.canonical}/</code> ({plural(hint.count, "rama", "ramas")}). ¿Querías <button type="button" onClick={() => onChange(`${hint.canonical}/${dialog.value.trim().slice(hint.typed.length + 1)}`)}><code>{hint.canonical}/…</code></button>?</span></p>}<div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>Cancelar</button><button className="primary-button" disabled={!dialog.value.trim()}><GitBranch size={14} /> Preparar</button></div></form></div>;
 }
 
 function CommitModal({ commit, onClose }: { commit: Commit; onClose: () => void }) {

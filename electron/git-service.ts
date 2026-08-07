@@ -336,6 +336,7 @@ function buildCommand(operation: Operation, args: Record<string, string>) {
     case "checkout": return `git switch ${args.name}`;
     case "create_branch": return `git switch -c ${args.name}`;
     case "delete_branch": return `git branch -d ${args.name}`;
+    case "rename_branch": return `git branch -m ${args.name} ${args.to}`;
     case "fetch": return "git fetch --prune";
     case "pull": return "git pull --ff-only";
     case "push": return "git push";
@@ -794,7 +795,7 @@ async function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot): Promi
   if (proposed.some((step) => !step)) return refused("El plan incluye una operación que no está permitida.", "llm", plan.summary);
   const steps = await writeCommitMessages(proposed as PlanStep[], snapshot);
   if ("blocker" in steps) return asking(steps.blocker, plan.summary);
-  const draft = sequenceDraft(steps, plan.rationale || "");
+  const draft = sequenceDraft(steps, plan.rationale || "", renameEffects(steps, snapshot));
   return {
     ...draft,
     summary: plan.summary || draft.summary,
@@ -885,6 +886,7 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     checkout: [`Cambiar a ${args.name}`, "Cambia la rama activa conservando los cambios locales compatibles.", "medium"],
     create_branch: [`Crear y cambiar a ${args.name}`, "Crea una rama local desde HEAD.", "medium"],
     delete_branch: [`Eliminar la rama ${args.name}`, "Elimina una rama local ya integrada.", "high"],
+    rename_branch: [`Renombrar ${args.name} a ${args.to}`, "Cambia el nombre de una rama local. No toca su historia ni la rama remota.", "medium"],
     fetch: ["Actualizar referencias remotas", "Descarga referencias y elimina remotas obsoletas.", "low"],
     pull: ["Actualizar la rama actual", "Usa pull --ff-only para evitar merges implícitos.", "high"],
     push: ["Publicar la rama actual", "Envía los commits al upstream configurado.", "high"],
@@ -896,18 +898,35 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
   };
   const detail = details[operation];
   if (!detail || operation === "none") return refused("La operación solicitada no está permitida.");
-  return sequenceDraft([{ operation, args, command: buildCommand(operation, args), summary: detail[0], risk: detail[2] }], detail[1]);
+  const steps = [{ operation, args, command: buildCommand(operation, args), summary: detail[0], risk: detail[2] }];
+  return sequenceDraft(steps, detail[1], renameEffects(steps, snapshot));
+}
+
+/**
+ * A local rename leaves the remote alone: the branch keeps its published name and its upstream link
+ * with it. Whoever confirms the plan has to read that beforehand, not discover it on the next push.
+ */
+function renameEffects(steps: PlanStep[], snapshot?: RepoSnapshot): string[] | undefined {
+  const effects = snapshot ? steps.flatMap((step) => {
+    if (step.operation !== "rename_branch") return [];
+    const branch = snapshot.branches.find((item) => item.name === step.args.name);
+    return branch?.upstream
+      ? [`${step.args.name} sigue publicada como ${branch.upstream}: el renombrado es local y no cambia la rama remota.`]
+      : [];
+  }) : [];
+  return effects.length ? effects : undefined;
 }
 
 /**
  * Assembles the steps into the single plan the user approves. The plan speaks for the whole sequence:
  * its risk is the highest of its steps and its command line shows every one of them in order.
  */
-function sequenceDraft(steps: PlanStep[], rationale: string): PlanDraft {
+function sequenceDraft(steps: PlanStep[], rationale: string, effects?: string[]): PlanDraft {
   const risk = steps.reduce<ActionPlan["risk"]>((worst, step) => highestRisk(worst, step.risk), "low");
   return {
     allowed: true,
     steps,
+    ...(effects ? { effects } : {}),
     operation: steps[0].operation,
     args: steps[0].args,
     command: steps.map((step) => step.command).join(" && "),
@@ -977,7 +996,8 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot) {
   if (operation === "none" || !allowedOperations.has(operation)) throw new Error("La acción no está permitida.");
   const branchArg = args.name || args.onto;
   if (branchArg && !isBranchNameSafe(branchArg)) throw new Error("Nombre de rama no válido.");
-  if (["checkout", "create_branch", "delete_branch", "merge"].includes(operation) && !args.name) throw new Error("Falta el nombre de la rama.");
+  if (args.to && !isBranchNameSafe(args.to)) throw new Error("Nombre de rama no válido.");
+  if (["checkout", "create_branch", "delete_branch", "rename_branch", "merge"].includes(operation) && !args.name) throw new Error("Falta el nombre de la rama.");
   if (operation === "rebase" && !args.onto) throw new Error("Falta la rama base.");
   if (operation === "commit" && (!args.message?.trim() || args.message.length > commitMessageLimit)) throw new Error("El mensaje de commit no es válido.");
   if (operation === "commit" && !snapshot.changes.length) throw new Error("No hay cambios locales para confirmar.");
@@ -985,9 +1005,18 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot) {
   if (operation === "create_branch" && snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(`La rama ${args.name} ya existe.`);
   if (operation === "delete_branch" && args.name === snapshot.defaultBranch) throw new Error(`No puedes borrar la rama por defecto (${snapshot.defaultBranch}).`);
   if (operation === "delete_branch" && args.name === snapshot.currentBranch) throw new Error("No puedes borrar la rama activa.");
-  if (["delete_branch", "merge"].includes(operation) && !snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(`La rama ${args.name} no existe localmente.`);
-  // A remote-only branch has no local ref: switching to it creates one, but deleting or merging it cannot work.
-  if (["delete_branch", "merge", "rebase"].includes(operation)) {
+  if (operation === "rename_branch") {
+    // The default branch is what integration is measured against, so its name is not a detail to change here.
+    if (args.name === snapshot.defaultBranch) throw new Error(`No puedes renombrar la rama por defecto (${snapshot.defaultBranch}).`);
+    if (!args.to) throw new Error("Falta el nombre nuevo de la rama.");
+    if (args.to === args.name) throw new Error("El nombre nuevo es el mismo que el actual.");
+    if (snapshot.branches.some((branch) => branch.name === args.to)) throw new Error(`La rama ${args.to} ya existe.`);
+    const target = snapshot.branches.find((branch) => branch.name === args.name);
+    if (target?.checkedOutIn) throw new Error(`La rama ${args.name} está en uso por el worktree ${target.checkedOutIn}.`);
+  }
+  if (["delete_branch", "rename_branch", "merge"].includes(operation) && !snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(`La rama ${args.name} no existe localmente.`);
+  // A remote-only branch has no local ref: switching to it creates one, but deleting, renaming or merging it cannot work.
+  if (["delete_branch", "rename_branch", "merge", "rebase"].includes(operation)) {
     const target = args.name || args.onto;
     const remoteOnly = snapshot.branches.find((branch) => branch.name === target)?.presence === "remote";
     if (remoteOnly) throw new Error(`La rama ${target} solo existe en el remoto. Cámbiate a ella primero para tenerla en local.`);
@@ -1095,6 +1124,8 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan): Promise<s
     case "checkout": return reportedGit(cwd, ["switch", args.name]);
     case "create_branch": return reportedGit(cwd, ["switch", "-c", args.name]);
     case "delete_branch": return reportedGit(cwd, ["branch", "-d", "--", args.name]);
+    // "-m" and never "-M": Git must refuse when the new name is taken, rather than overwrite a branch.
+    case "rename_branch": return reportedGit(cwd, ["branch", "-m", "--", args.name, args.to]);
     case "fetch": return reportedGit(cwd, ["fetch", "--prune"]);
     case "pull": return reportedGit(cwd, ["pull", "--ff-only"]);
     case "push": return reportedGit(cwd, ["push"]);

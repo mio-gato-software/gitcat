@@ -109,7 +109,7 @@ test("el panel ordena por actividad, marca lo ya integrado y dice qué worktree 
   assert.match(branchOrder, /alphabetical: "Alfabético"/);
   // Ordenar antes de agrupar es lo que ordena los grupos por su rama más reciente.
   assert.match(app, /return sortBranches\(kept, order, \{ dirty: snapshot\.isDirty \}\)/);
-  assert.match(app, /const tree = useMemo\(\(\) => buildBranchTree\(listed\)/);
+  assert.match(app, /const tree = useMemo\(\(\) => buildBranchTree\(listed, \{ aliases \}\)/);
   // Integración: visibilidad, nunca borrado. El filtro es reversible y se recuerda.
   assert.match(branchOrder, /export function isMergedIntoDefault/);
   assert.match(app, /update\(\{ hideMerged: !hideMerged \}\)/);
@@ -122,6 +122,33 @@ test("el panel ordena por actividad, marca lo ya integrado y dice qué worktree 
   assert.match(service, /branch\.checkedOutIn = worktrees\.get\(branch\.name\)/);
   assert.match(service, /checkedOutIn: branch\.checkedOutIn \?\? null/);
   assert.match(app, /en uso por el worktree \$\{branch\.checkedOutIn\}/);
+});
+
+test("la consistencia de nombres se sugiere, nunca se aplica sola", async () => {
+  const consistency = await readFile(join(root, "shared/branch-consistency.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  // La detección es lógica pura: no ejecuta comandos ni conoce la capa de Git.
+  assert.doesNotMatch(consistency, /runGit|spawn\(|checkedGit|prepareOperation|executePlan/);
+  assert.match(consistency, /export const reservedNames/);
+  assert.match(consistency, /export const minorityRatio/);
+  // Renombrar es una operación como las demás: tabla determinista, confirmación y comando a la vista.
+  assert.match(service, /case "rename_branch": return `git branch -m \$\{args\.name\} \$\{args\.to\}`/);
+  assert.match(service, /case "rename_branch": return reportedGit\(cwd, \["branch", "-m", "--", args\.name, args\.to\]\)/);
+  assert.doesNotMatch(service, /"branch", "-M"/, "nunca se fuerza un renombrado sobre una rama existente");
+  assert.match(service, /No puedes renombrar la rama por defecto/);
+  assert.match(service, /rename_branch.*medium/);
+  assert.match(service, /function renameEffects/);
+  assert.match(service, /el renombrado es local y no cambia la rama remota/);
+  // Ni el modelo ni la interfaz renombran por su cuenta.
+  assert.match(planner, /A naming\nconvention you notice on your own is never a reason to rename anything/);
+  assert.match(app, /function NamingSuggestion/);
+  assert.match(app, /onRename=\{\(name, to\) => void prepare\("rename_branch", \{ name, to \}\)\}/);
+  // El descarte se recuerda; el aviso al crear rama no bloquea.
+  assert.match(app, /update\(\{ dismissed: \[\.\.\.dismissed, suggestion\.id\] \}\)/);
+  assert.match(app, /disabled=\{!dialog\.value\.trim\(\)\}/);
+  assert.doesNotMatch(app, /disabled=\{.*hint/, "un aviso de convención nunca impide crear la rama");
 });
 
 test("una rama dice si vive en local, en el remoto o en ambos", async () => {
