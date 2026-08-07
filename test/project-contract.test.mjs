@@ -594,3 +594,14 @@ test("solo se recuerdan decisiones confirmadas, nunca estado del entorno", async
   // Nada de persistir lo que se puede volver a medir.
   assert.doesNotMatch(memory, /toolDirectories|isExecutableFile|ghVersion/);
 });
+
+test("una rama que está en local y en el remoto es un chip, no dos", async () => {
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  // Pintar "feature/x" y "origin/feature/x" gastaba todo el ancho diciendo el mismo nombre dos veces,
+  // y truncaba ambos por el camino. Se agrupan por el nombre sin remoto.
+  assert.match(app, /const label = remote \? name\.slice\(remote\.length \+ 1\) : name;/);
+  assert.match(app, /note\(label, remote \? "remote" : "local"\)/);
+  // Lo que solo existe en el remoto conserva su marca: eso no lo tienes aquí.
+  assert.match(app, /chip\.kind === "remote" \? `\$\{chip\.label\} · solo en el remoto`/);
+  assert.match(app, /origin\/HEAD/, "el puntero simbólico se sigue descartando");
+});

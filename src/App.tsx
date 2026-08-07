@@ -1119,20 +1119,38 @@ function GraphLanes({ row, lanes, colour, byFamily }: { row: GraphRow; lanes: nu
 type RefChip = { label: string; kind: "head" | "local" | "remote" | "tag" };
 
 /**
- * The refs worth showing. "origin/HEAD" is a symbolic pointer rather than a branch anyone can visit,
- * and the "HEAD -> " decoration is a statement about the checkout, not part of any name.
+ * The refs worth showing, once each. `feature/x` and `origin/feature/x` are one branch that happens to
+ * exist in two places, so drawing both spent the whole width saying the same name twice and truncated
+ * it in the process. A remote-only ref keeps its own mark, because that one you do not have here.
+ *
+ * "origin/HEAD" is a symbolic pointer rather than a branch anyone can visit, and the "HEAD -> "
+ * decoration is a statement about the checkout, not part of any name.
  */
 function refChips(refs: string[], remotes: string[]): RefChip[] {
-  const chips: RefChip[] = [];
+  const order: string[] = [];
+  const found = new Map<string, { head: boolean; local: boolean; remote: boolean; tag: boolean }>();
+  const note = (label: string, key: "head" | "local" | "remote" | "tag") => {
+    if (!found.has(label)) { found.set(label, { head: false, local: false, remote: false, tag: false }); order.push(label); }
+    found.get(label)![key] = true;
+  };
   for (const raw of refs) {
     const head = /^HEAD ->/.test(raw);
     const name = raw.replace(/^HEAD ->\s*/, "").trim();
     if (!name || name === "HEAD") continue;
-    if (name.startsWith("tag:")) { chips.push({ label: name.slice(4).trim(), kind: "tag" }); continue; }
+    if (name.startsWith("tag:")) { note(name.slice(4).trim(), "tag"); continue; }
     if (remotes.some((remote) => name === `${remote}/HEAD`)) continue;
-    chips.push({ label: name, kind: head ? "head" : remotes.some((remote) => name.startsWith(`${remote}/`)) ? "remote" : "local" });
+    const remote = remotes.find((candidate) => name.startsWith(`${candidate}/`));
+    const label = remote ? name.slice(remote.length + 1) : name;
+    note(label, remote ? "remote" : "local");
+    if (head) note(label, "head");
   }
-  return chips;
+  return order.map((label) => {
+    const flags = found.get(label)!;
+    return {
+      label,
+      kind: flags.tag ? "tag" : flags.head ? "head" : flags.local ? "local" : "remote"
+    };
+  });
 }
 
 function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, onSelect }: { commit: Commit; row?: GraphRow; lanes: number; trackWidth: number; remotes: string[]; colour: string; byFamily: boolean; onSelect: () => void }) {
@@ -1155,8 +1173,8 @@ function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, 
       </div>
     </div>
     <div className="commit-refs">
-      {shown.map((chip) => <span className={`ref-tag ${chip.kind}`} key={chip.label} title={chip.label}>
-        {chip.kind === "tag" ? <Tag size={11} /> : <GitBranch size={11} />}{chip.label}
+      {shown.map((chip) => <span className={`ref-tag ${chip.kind}`} key={chip.label} title={chip.kind === "remote" ? `${chip.label} · solo en el remoto` : chip.label}>
+        {chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <GitBranch size={11} />}{chip.label}
       </span>)}
       {rest.length > 0 && <span className="ref-tag more" title={rest.map((chip) => chip.label).join("\n")}>+{rest.length}</span>}
     </div>

@@ -261,12 +261,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 /* Era un botón propio y ahora es solo el icono de la fila, así que suelta el tamaño que tenía de botón. */
 .commit-more { width: auto; height: auto; flex: none; color: #62778b; }
 .commit-row:hover .commit-more { color: #cfe0ec; }
-.ref-tag { max-width: 150px; }
+/* Un solo chip por rama deja sitio para leer el nombre entero, que era el problema. */
+.ref-tag { max-width: 210px; }
 .ref-tag.head { color: #c9a3ff; background: #29233c; border-color: #4a3d69; }
 .ref-tag.remote { color: #8ea8d8; background: #1a2436; border-color: #2f4160; }
 .ref-tag.tag { color: #e0b264; background: #2c2418; border-color: #5a482a; }
 .ref-tag.more { color: #8296a8; background: #182430; border-color: #2b3b4b; }
-.commit-refs { max-width: 230px; }
+.commit-refs { max-width: 280px; }
 
 /* El diff: sin resaltado de sintaxis, solo qué hace cada línea. */
 .commit-modal.wide { width: min(880px, 100%); }
