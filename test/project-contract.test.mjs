@@ -75,6 +75,29 @@ test("doble clic cambia de rama y los impedimentos se explican en la columna del
   assert.match(app, /error: message, status: "error"/);
 });
 
+test("el panel de ramas agrupa por convención sin renombrar nada, y la lista plana sigue estando", async () => {
+  const branchTree = await readFile(join(root, "shared/branch-tree.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  // La agrupación es una capa de vista: vive fuera de la capa de comandos y no toca ninguna operación Git.
+  assert.doesNotMatch(branchTree, /runGit|spawn\(|checkedGit|renameSync|window\.branchline/);
+  assert.doesNotMatch(service, /branch-tree/);
+  assert.match(branchTree, /export const defaultSubgroupThreshold = 3/);
+  assert.match(branchTree, /export function buildBranchTree/);
+  assert.match(branchTree, /export function filterBranchTree/);
+  // El árbol es el modo por defecto, no el único: la lista plana con filtro sigue a un clic.
+  assert.match(app, /function BranchPanel/);
+  assert.match(app, /view\.mode === "tree" \? renderNodes\(topLevel, 0, ""\) : matches\.map/);
+  assert.match(app, /aria-label="Modo de la lista de ramas"/);
+  assert.match(app, /aria-label="Filtrar ramas"/);
+  // El modo y los grupos abiertos se recuerdan por repositorio.
+  assert.match(app, /const branchViewStorageKey = \(path: string\) => `branchline-branch-view:\$\{path\}`/);
+  assert.match(app, /writeBranchView\(snapshot\.path, merged\)/);
+  // Cambiar de modo no pierde ni el scroll ni la rama que tenía el foco.
+  assert.match(app, /pending\.current = \{ scrollTop: listRef\.current\?\.scrollTop \?\? 0, focused \}/);
+  assert.match(app, /node\.focus\(\); node\.scrollIntoView/);
+});
+
 test("una rama dice si vive en local, en el remoto o en ambos", async () => {
   const types = await readFile(join(root, "shared/types.ts"), "utf8");
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
