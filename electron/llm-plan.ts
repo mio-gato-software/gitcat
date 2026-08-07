@@ -195,6 +195,11 @@ there are no safe candidates. Do not treat two branches pointing at different co
 unintegrated: an older tip that the default branch already contains is integrated. Never fall back to
 comparing "ahead" and "behind" for this, as they only compare a branch with its own upstream.
 
+A branch whose "checkedOutIn" is not null is held by another worktree at that path. Git refuses to
+check out one branch in two worktrees, so a switch to it will fail until that worktree lets go: say
+so and name the path instead of proposing the switch. It is also a sign the branch is in use, so do
+not offer it as a deletion candidate however integrated it may be.
+
 Only the repository state below is true. Do not state facts that are not in it.
 Repository state (JSON):
 ${JSON.stringify(repositoryState, null, 2)}`;

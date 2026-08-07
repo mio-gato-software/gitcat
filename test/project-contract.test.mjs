@@ -92,10 +92,36 @@ test("el panel de ramas agrupa por convención sin renombrar nada, y la lista pl
   assert.match(app, /aria-label="Filtrar ramas"/);
   // El modo y los grupos abiertos se recuerdan por repositorio.
   assert.match(app, /const branchViewStorageKey = \(path: string\) => `branchline-branch-view:\$\{path\}`/);
-  assert.match(app, /writeBranchView\(snapshot\.path, merged\)/);
+  assert.match(app, /writeBranchView\(snapshot\.path, updated\)/);
   // Cambiar de modo no pierde ni el scroll ni la rama que tenía el foco.
   assert.match(app, /pending\.current = \{ scrollTop: listRef\.current\?\.scrollTop \?\? 0, focused \}/);
   assert.match(app, /node\.focus\(\); node\.scrollIntoView/);
+});
+
+test("el panel ordena por actividad, marca lo ya integrado y dice qué worktree usa cada rama", async () => {
+  const branchOrder = await readFile(join(root, "shared/branch-order.ts"), "utf8");
+  const types = await readFile(join(root, "shared/types.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  const styles = await readFile(join(root, "src/styles.css"), "utf8");
+  // El alfabético deja de ser el default, pero se conserva como opción.
+  assert.match(branchOrder, /export const defaultBranchOrder: BranchOrder = "activity"/);
+  assert.match(branchOrder, /alphabetical: "Alfabético"/);
+  // Ordenar antes de agrupar es lo que ordena los grupos por su rama más reciente.
+  assert.match(app, /return sortBranches\(kept, order, \{ dirty: snapshot\.isDirty \}\)/);
+  assert.match(app, /const tree = useMemo\(\(\) => buildBranchTree\(listed\)/);
+  // Integración: visibilidad, nunca borrado. El filtro es reversible y se recuerda.
+  assert.match(branchOrder, /export function isMergedIntoDefault/);
+  assert.match(app, /update\(\{ hideMerged: !hideMerged \}\)/);
+  assert.match(app, /Ocultarlas no borra nada/);
+  assert.doesNotMatch(branchOrder, /delete|prune|borrar/i);
+  assert.match(styles, /\.branch-row\.merged \.branch-main \{ opacity/);
+  // Los worktrees salen del porcelain de Git y llegan a la fila, al tooltip y al modelo.
+  assert.match(types, /checkedOutIn\?: string/);
+  assert.match(service, /\["worktree", "list", "--porcelain"\]/);
+  assert.match(service, /branch\.checkedOutIn = worktrees\.get\(branch\.name\)/);
+  assert.match(service, /checkedOutIn: branch\.checkedOutIn \?\? null/);
+  assert.match(app, /en uso por el worktree \$\{branch\.checkedOutIn\}/);
 });
 
 test("una rama dice si vive en local, en el remoto o en ambos", async () => {

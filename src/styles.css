@@ -206,6 +206,25 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .branch-chevron.open { transform: rotate(90deg); }
 .branch-group:hover .branch-chevron { color: #9fb4c5; }
 
+/* Order and noise: what to bring forward, and what has already been integrated. */
+.branch-filters { display: flex; align-items: center; gap: 6px; margin-top: 7px; }
+.order-field { min-width: 0; flex: 1; height: 26px; display: flex; align-items: center; gap: 5px; padding: 0 6px 0 8px; color: #5f7489; background: #121c27; border: 1px solid #223140; border-radius: 6px; }
+.order-field:focus-within { border-color: #4e7c7d; color: #7bd7cc; }
+.order-field svg { flex: none; }
+.order-field select { min-width: 0; width: 100%; padding: 0; border: 0; outline: 0; color: #c3d4e2; background: transparent; font-size: 10px; appearance: none; cursor: pointer; }
+.order-field option { color: #dbe8f3; background: #121c27; }
+.merged-toggle { height: 26px; flex: none; display: flex; align-items: center; gap: 5px; padding: 0 7px; color: #728699; background: #121c27; border: 1px solid #223140; border-radius: 6px; font-size: 10px; }
+.merged-toggle:hover { color: #d7e5f0; border-color: #33475a; }
+.merged-toggle.active { color: #7bd7cc; background: #142a2a; border-color: #2f5d59; }
+.merged-count { color: #66798c; font-family: 'DM Mono', monospace; font-size: 9px; }
+.merged-toggle.active .merged-count { color: #63a9a2; }
+/* Already integrated: still there, still switchable, just no longer competing for attention. */
+.branch-row.merged .branch-main { opacity: .58; }
+.branch-row.merged:hover .branch-main, .branch-row.merged .branch-main:focus-visible { opacity: 1; }
+.branch-merged { flex: none; display: inline-flex; color: #6f8698; }
+.branch-worktree { flex: none; display: inline-flex; color: #c0a0e8; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
 .provider-banner { display: flex; align-items: center; gap: 10px; padding: 9px 27px; color: #d8c79a; background: #241f16; border-bottom: 1px solid #4b3f26; font-size: 10px; line-height: 1.45; }
 .provider-banner > svg { flex: none; color: #e0b264; }
 .provider-banner span { flex: 1; min-width: 0; }
