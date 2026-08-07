@@ -341,7 +341,31 @@ test("la rama por defecto sale del HEAD que publica el remoto, no de un nombre a
 
   const snapshot = await service.getSnapshot(work);
   assert.equal(snapshot.defaultBranch, "produccion");
+  assert.equal(snapshot.defaultBranchSource, "remote_head");
   assert.equal(snapshot.branches.some((branch) => branch.name === "HEAD"), false);
+});
+
+test("la rama principal se marca para el modelo y no se puede borrar", async () => {
+  const work = mkdtempSync(join(tmpdir(), "branchline-default-protected-"));
+  const run = (...args) => execFileSync("git", args, { cwd: work, encoding: "utf8" });
+  run("init", "-b", "main");
+  run("config", "user.email", "prueba@example.com");
+  run("config", "user.name", "Prueba Uno");
+  writeFileSync(join(work, "README.md"), "hola\n");
+  run("add", "-A");
+  run("commit", "-m", "primer commit");
+  run("switch", "-c", "feature/demo");
+
+  const snapshot = await service.getSnapshot(work);
+  assert.equal(snapshot.defaultBranch, "main");
+  assert.equal(snapshot.defaultBranchSource, "conventional_name");
+  reply(plan({ intent: "answer", summary: "Rama principal", reply: "main", rationale: "Del estado del repositorio." }));
+  await service.planAction(work, "¿cuál es la rama principal?");
+  const state = JSON.parse(requests[0].instructions.slice(requests[0].instructions.indexOf("{")));
+  assert.equal(state.defaultBranch, "main");
+  assert.equal(state.defaultBranchSource, "conventional_name");
+  assert.equal(state.branches.find((branch) => branch.name === "main").isDefault, true);
+  await assert.rejects(() => service.prepareOperation(work, "delete_branch", { name: "main" }), /rama por defecto/);
 });
 
 test("una key que el proveedor rechaza no se guarda", async () => {

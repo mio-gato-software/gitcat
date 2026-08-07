@@ -1,5 +1,6 @@
 /** Where the branch actually exists: only here, only on a remote, or on both. */
 export type BranchPresence = "local" | "remote" | "both";
+export type DefaultBranchSource = "remote_head" | "conventional_name";
 
 export type Branch = {
   name: string;
@@ -42,6 +43,8 @@ export type RepoSnapshot = {
   currentBranch: string;
   /** The branch integration is measured against, resolved from the remote HEAD or a conventional name. */
   defaultBranch?: string;
+  /** How the default branch was identified; absent means the repository did not expose one. */
+  defaultBranchSource?: DefaultBranchSource;
   isRebasing: boolean;
   isDirty: boolean;
   changes: FileChange[];

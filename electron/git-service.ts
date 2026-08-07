@@ -13,7 +13,7 @@ import {
   sanitizeMemory, type Memory
 } from "./memory.js";
 import type {
-  ActionPlan, Branch, Commit, ConversationMessage, GitProtocol, LlmConfig, LlmConfigInput, Operation,
+  ActionPlan, Branch, Commit, ConversationMessage, DefaultBranchSource, GitProtocol, LlmConfig, LlmConfigInput, Operation,
   PlanStep, RepoSnapshot, StepOutcome
 } from "../shared/types.js";
 import {
@@ -183,18 +183,20 @@ function parseTrack(track: string) {
 }
 
 const conventionalDefaults = ["main", "master", "develop", "trunk"];
+type DefaultBranchResolution = { name: string; source: DefaultBranchSource };
 
 /**
  * The branch integration is measured against. A remote's own HEAD is the repository's own answer, so
  * it is asked first; only when no remote publishes one does a conventional name decide.
  */
-async function resolveDefaultBranch(repoRoot: string, remotes: string[], localNames: Set<string>) {
+async function resolveDefaultBranch(repoRoot: string, remotes: string[], localNames: Set<string>): Promise<DefaultBranchResolution | undefined> {
   for (const remote of remotes) {
     const head = await optionalGit(repoRoot, ["symbolic-ref", "--short", `refs/remotes/${remote}/HEAD`]);
     const name = head.startsWith(`${remote}/`) ? head.slice(remote.length + 1) : "";
-    if (name && name !== "HEAD") return name;
+    if (name && name !== "HEAD") return { name, source: "remote_head" };
   }
-  return conventionalDefaults.find((name) => localNames.has(name));
+  const name = conventionalDefaults.find((candidate) => localNames.has(candidate));
+  return name ? { name, source: "conventional_name" } : undefined;
 }
 
 /**
@@ -289,7 +291,8 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     if (localNames.has(name)) continue;
     branches.push({ name, remoteRef: remote.ref, presence: "remote", mergedInto: [], ahead: 0, behind: 0, isCurrent: false, lastCommit: remote.lastCommit });
   }
-  const defaultBranch = await resolveDefaultBranch(repoRoot, remotes, localNames);
+  const defaultBranchResolution = await resolveDefaultBranch(repoRoot, remotes, localNames);
+  const defaultBranch = defaultBranchResolution?.name;
   await markIntegration(repoRoot, branches, [defaultBranch, currentBranch]);
   const gitDir = await optionalGit(repoRoot, ["rev-parse", "--git-dir"]);
   const rebaseMerge = await optionalGit(repoRoot, ["rev-parse", "--git-path", "rebase-merge"]);
@@ -303,6 +306,7 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     stateId: createHash("sha256").update(`${head}\0${statusRaw}`).digest("hex"),
     currentBranch,
     defaultBranch,
+    defaultBranchSource: defaultBranchResolution?.source,
     isRebasing,
     isDirty: Boolean(statusRaw.trim()),
     changes: parseStatus(statusRaw),
@@ -714,6 +718,7 @@ function plannerState(snapshot: RepoSnapshot) {
     openRepositoryName: snapshot.name,
     currentBranch: snapshot.currentBranch,
     defaultBranch: snapshot.defaultBranch ?? null,
+    defaultBranchSource: snapshot.defaultBranchSource ?? null,
     detachedHead: snapshot.currentBranch === "HEAD",
     isRebasing: snapshot.isRebasing,
     hasLocalChanges: snapshot.isDirty,
@@ -722,6 +727,7 @@ function plannerState(snapshot: RepoSnapshot) {
     branches: snapshot.branches.map((branch) => ({
       name: branch.name,
       isCurrent: branch.isCurrent,
+      isDefault: branch.name === snapshot.defaultBranch,
       // "remote": it exists only on a remote, so switching to it creates the local branch.
       presence: branch.presence,
       // Verified containment: these branches already hold this one's work. [] means neither does.
@@ -793,6 +799,16 @@ async function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot): Promi
   };
 }
 
+function defaultBranchIssues(plan: ModelPlan, snapshot: RepoSnapshot): PlanIssue[] {
+  if (!snapshot.defaultBranch) return [];
+  return plan.steps.flatMap((step, index) => {
+    const name = operationArgs(step).name;
+    return step.operation === "delete_branch" && name === snapshot.defaultBranch
+      ? [{ field: `steps[${index}].args.name`, problem: `"${name}" is the repository's default branch and is protected; choose a non-default branch` }]
+      : [];
+  });
+}
+
 function repositoryFieldsFromPlan(plan: ModelPlan): RepositoryFields {
   const { localPath, repository, owner, host, protocol, remote, push, replaceRemote } = plan.repository;
   return {
@@ -828,7 +844,7 @@ async function draftFromPlan(
   };
 
   if (plan.intent === "git_operation") {
-    const issues = planIssues(plan);
+    const issues = [...planIssues(plan), ...defaultBranchIssues(plan, snapshot)];
     return issues.length ? retry(issues) : gitOperationDraft(plan, snapshot);
   }
 
@@ -962,6 +978,7 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot) {
   if (operation === "commit" && !snapshot.changes.length) throw new Error("No hay cambios locales para confirmar.");
   if (operation === "checkout" && !snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(`La rama ${args.name} no existe localmente.`);
   if (operation === "create_branch" && snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(`La rama ${args.name} ya existe.`);
+  if (operation === "delete_branch" && args.name === snapshot.defaultBranch) throw new Error(`No puedes borrar la rama por defecto (${snapshot.defaultBranch}).`);
   if (operation === "delete_branch" && args.name === snapshot.currentBranch) throw new Error("No puedes borrar la rama activa.");
   if (["delete_branch", "merge"].includes(operation) && !snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(`La rama ${args.name} no existe localmente.`);
   // A remote-only branch has no local ref: switching to it creates one, but deleting or merging it cannot work.

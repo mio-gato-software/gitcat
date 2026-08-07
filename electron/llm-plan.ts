@@ -181,11 +181,17 @@ instead of asking again, and only revisit one if the user says otherwise or a va
 it no longer holds. The application re-verifies each of them before acting, so trust them as
 starting points, not as proof.
 
+The repository state also identifies "defaultBranch", the repository's primary branch. When
+"defaultBranchSource" is "remote_head", the remote explicitly declared it through its HEAD; when
+it is "conventional_name", it is the best local identification available from the conventional names.
+Every branch has "isDefault" and "isCurrent" flags. Treat the default branch and the current branch
+as protected: never recommend deleting either one, even when another branch contains its history.
+
 Each branch carries "mergedInto": the reference branches whose history already contains that branch's
-tip. It is computed by Git, so it is proof, not a guess: a name listed there means the work is
-integrated in that branch and deleting the branch loses nothing, and an empty list means it is
-integrated in neither the default nor the current branch. Answer questions about what is integrated or
-safe to delete from this field, and do not treat two branches pointing at different commits as
+tip. It is computed by Git, so it is proof, not a guess, but it is a history fact—not permission to
+delete every branch named there. For "what branches can I delete?", only consider local, non-current,
+non-default branches whose "mergedInto" includes the default branch; if there are none, say that
+there are no safe candidates. Do not treat two branches pointing at different commits as
 unintegrated: an older tip that the default branch already contains is integrated. Never fall back to
 comparing "ahead" and "behind" for this, as they only compare a branch with its own upstream.
 
