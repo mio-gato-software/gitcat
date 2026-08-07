@@ -28,6 +28,20 @@ test("la capa de Git evita ejecutar comandos libres", async () => {
   assert.doesNotMatch(service, /exec\(.*command/);
 });
 
+test("git_command da libertad al modelo sin shell, sin desatender y sin saltarse protecciones", async () => {
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
+  // El comando libre se ejecuta como lista de argumentos: nunca se interpreta por un shell.
+  assert.match(service, /case "git_command": return reportedGit\(cwd, step\.argv \?\? \[\]\)/);
+  assert.doesNotMatch(service, /exec\(.*command/);
+  assert.match(planner, /there is no shell/);
+  // Nunca entra en las operaciones desatendidas: un comando libre siempre pasa por la tarjeta.
+  assert.match(service, /const unattendedOperations = new Set<Operation>\(\["status", "fetch"\]\)/);
+  // La protección de ramas también cubre los borrados por comando libre.
+  assert.match(service, /gitBranchDeletions/);
+  assert.match(planner, /only git_command takes an argument list/);
+});
+
 test("un plan es una secuencia que el modelo compone y la app ejecuta de principio a fin", async () => {
   const types = await readFile(join(root, "shared/types.ts"), "utf8");
   const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");

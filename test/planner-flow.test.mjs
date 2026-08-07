@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -40,7 +40,7 @@ globalThis.fetch = async (_url, init) => {
   };
 };
 const reply = (value) => queue.push({ payload: { status: "completed", output_text: typeof value === "string" ? value : JSON.stringify(value) } });
-const step = (operation, args = {}) => ({ operation, args: { name: "", onto: "", to: "", path: "", side: "", message: "", ...args } });
+const step = (operation, args = {}, argv = []) => ({ operation, argv, args: { name: "", onto: "", to: "", path: "", side: "", message: "", noVerify: "", ...args } });
 const plan = (overrides) => ({
   intent: "git_operation",
   steps: [],
@@ -137,6 +137,95 @@ test("el riesgo y la confirmación deterministas prevalecen sobre los del modelo
   const result = await service.planAction(repo, "push it");
   assert.equal(result.risk, "high");
   assert.equal(result.requiresConfirmation, true);
+});
+
+test("push con --no-verify llega al comando cuando el usuario lo autorizó", async () => {
+  const origin = mkdtempSync(join(tmpdir(), "branchline-origin-"));
+  execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: origin, encoding: "utf8" });
+  const clone = mkdtempSync(join(tmpdir(), "branchline-clone-"));
+  const local = (...args) => execFileSync("git", args, { cwd: clone, encoding: "utf8" });
+  local("init", "-b", "main");
+  local("config", "user.email", "prueba@example.com");
+  local("config", "user.name", "Prueba Uno");
+  writeFileSync(join(clone, "README.md"), "hola\n");
+  local("add", "-A");
+  local("commit", "-m", "primer commit");
+  local("remote", "add", "origin", origin);
+  local("push", "-u", "origin", "main");
+  // Un hook pre-push que siempre falla: sin --no-verify el push no puede pasar.
+  const hook = join(clone, ".git", "hooks", "pre-push");
+  writeFileSync(hook, "#!/bin/sh\nexit 1\n");
+  chmodSync(hook, 0o755);
+  writeFileSync(join(clone, "cambio.txt"), "algo que subir\n");
+  local("add", "-A");
+  local("commit", "-m", "segundo commit");
+
+  const plain = await service.prepareOperation(clone, "push");
+  assert.equal(plain.command, "git push");
+  const blocked = await service.executePlan(clone, plain);
+  assert.match(blocked.error ?? "", /pre-push hook declined|error: failed to push/);
+
+  reply(plan({
+    intent: "git_operation", steps: [step("push", { noVerify: "true" })],
+    summary: "Push sin verificaciones", rationale: "El usuario autorizó omitir el hook.", risk: "high"
+  }));
+  const result = await service.planAction(clone, "push it with --no-verify");
+  assert.equal(result.allowed, true, result.rationale);
+  assert.equal(result.steps[0].command, "git push --no-verify");
+  assert.equal(result.command, "git push --no-verify");
+  assert.equal(result.requiresConfirmation, true, "saltarse los hooks siempre pasa por la tarjeta de confirmación");
+  assert.match(result.steps[0].summary, /omitiendo las verificaciones/);
+
+  const execution = await service.executePlan(clone, result);
+  assert.equal(execution.error, undefined, execution.error);
+  assert.deepEqual(execution.outcomes.map((item) => item.status), ["completed"]);
+  assert.equal(local("rev-parse", "origin/main").trim(), local("rev-parse", "main").trim(), "el push llegó al remoto");
+});
+
+test("git_command ejecuta el comando completo que propone el modelo, sin shell", async () => {
+  reply(plan({
+    intent: "git_operation",
+    steps: [step("git_command", {}, ["switch", "-c", "libre"])],
+    summary: "Crear la rama libre", rationale: "El usuario pidió un switch -c.", risk: "high"
+  }));
+  const result = await service.planAction(repo, "crea la rama libre con git switch -c");
+  assert.equal(result.allowed, true, result.rationale);
+  assert.equal(result.steps[0].command, "git switch -c libre");
+  assert.equal(result.steps[0].risk, "high");
+  assert.equal(result.requiresConfirmation, true, "un comando libre siempre pasa por la tarjeta");
+
+  const execution = await service.executePlan(repo, result);
+  assert.equal(execution.error, undefined, execution.error);
+  assert.equal(execution.snapshot.currentBranch, "libre");
+  git("switch", "main");
+  git("branch", "-d", "libre");
+});
+
+test("git_command no cuela el borrado de una rama protegida", async () => {
+  reply(plan({
+    intent: "git_operation",
+    steps: [step("git_command", {}, ["branch", "-D", "main"])],
+    summary: "Borrar main", rationale: "…", risk: "high"
+  }));
+  reply(plan({ intent: "needs_information", summary: "Rama protegida", reply: "main es la rama por defecto y está protegida; no puedo borrarla." }));
+  const result = await service.planAction(repo, "borra main a la fuerza");
+  assert.equal(requests.length, 2, "la protección vuelve al modelo como incidencia");
+  assert.match(requests[1].instructions, /default branch and is protected/);
+  assert.equal(result.allowed, false);
+  assert.match(result.rationale, /protegida/);
+});
+
+test("git_command sin argv vuelve al modelo como incidencia estructurada", async () => {
+  reply(plan({
+    intent: "git_operation",
+    steps: [step("git_command")],
+    summary: "…", rationale: "…", risk: "high"
+  }));
+  reply(plan({ intent: "out_of_scope", summary: "Sin comando", reply: "No puedo planificar eso sin el comando." }));
+  const result = await service.planAction(repo, "haz algo raro");
+  assert.equal(requests.length, 2);
+  assert.match(requests[1].instructions, /git_command needs the full command/);
+  assert.equal(result.allowed, false);
 });
 
 test("“merge this branch to main” se planifica y se ejecuta de principio a fin", async () => {

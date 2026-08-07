@@ -2,7 +2,7 @@ import type { Operation } from "../shared/types.js";
 
 export type PlannerIntent = "git_operation" | "create_repository" | "answer" | "needs_information" | "out_of_scope";
 
-export type PlannedArgs = { name: string; onto: string; to: string; path: string; side: string; message: string };
+export type PlannedArgs = { name: string; onto: string; to: string; path: string; side: string; message: string; noVerify: string };
 
 export type PlannedRepository = {
   localPath: string;
@@ -16,7 +16,7 @@ export type PlannedRepository = {
   replaceRemote: boolean;
 };
 
-export type PlannedStep = { operation: Operation; args: PlannedArgs };
+export type PlannedStep = { operation: Operation; args: PlannedArgs; argv: string[] };
 
 export type ModelPlan = {
   intent: PlannerIntent;
@@ -37,14 +37,15 @@ export const planStepLimit = 6;
 
 export const executableOperations = new Set<Operation>([
   "status", "checkout", "create_branch", "delete_branch", "rename_branch", "fetch", "pull", "push",
-  "merge", "rebase", "abort_operation", "continue_operation", "skip_operation", "resolve_conflict", "commit"
+  "merge", "rebase", "abort_operation", "continue_operation", "skip_operation", "resolve_conflict", "commit",
+  "git_command"
 ]);
 const branchOperations = new Set<Operation>(["checkout", "create_branch", "delete_branch", "rename_branch", "merge"]);
 const intents: PlannerIntent[] = ["git_operation", "create_repository", "answer", "needs_information", "out_of_scope"];
 const risks = ["low", "medium", "high"];
 const planKeys = ["intent", "rationale", "reply", "repository", "risk", "steps", "summary"];
-const stepKeys = ["args", "operation"];
-const argsKeys = ["message", "name", "onto", "path", "side", "to"];
+const stepKeys = ["args", "argv", "operation"];
+const argsKeys = ["message", "name", "noVerify", "onto", "path", "side", "to"];
 const repositoryKeys = ["host", "localPath", "owner", "protocol", "push", "remote", "replaceRemote", "repository", "sshHost"];
 const branchNamePattern = /^[A-Za-z0-9._/@-]+$/;
 
@@ -72,11 +73,12 @@ export const planResponseFormat = {
           required: stepKeys,
           properties: {
             operation: { type: "string", enum: [...executableOperations, "none"] },
+            argv: { type: "array", items: { type: "string" } },
             args: {
               type: "object",
               additionalProperties: false,
               required: argsKeys,
-              properties: { name: { type: "string" }, onto: { type: "string" }, to: { type: "string" }, path: { type: "string" }, side: { type: "string" }, message: { type: "string" } }
+              properties: { name: { type: "string" }, onto: { type: "string" }, to: { type: "string" }, path: { type: "string" }, side: { type: "string" }, message: { type: "string" }, noVerify: { type: "string" } }
             }
           }
         }
@@ -149,6 +151,20 @@ rebase, abort_operation, continue_operation, skip_operation, resolve_conflict, c
 for checkout, create_branch,
 delete_branch and merge. args.onto is the base branch for rebase. Leave every arg a step does not
 need as "".
+
+args.noVerify applies to push only. Set it to "true" when — and only when — the user explicitly
+asked to skip the Git hooks ("--no-verify", "skip the hooks", "sin verificaciones"), for example
+because a hook failed and they authorized bypassing it. Otherwise leave it "". The exact command,
+including the flag, is shown on the confirmation card before anything runs.
+
+"git_command" is the escape hatch for everything the structured operations cannot express. It runs
+any git command line, given in "argv" as the argument list without the leading "git" — for example
+["push", "--no-verify"] or ["log", "--graph", "--oneline"]. Every element of "argv" reaches Git
+exactly as written: there is no shell, so pipes, redirects, "&&" and glob expansion do not work —
+use several steps instead. Use a structured operation whenever one fits the request, because those
+carry checks a free command skips; reserve "git_command" for flags, subcommands or options the list
+above does not cover. The exact command is shown on the confirmation card and always waits for
+approval. Leave "argv" empty for every other operation.
 
 args.message is the commit message, ${commitMessageLimit} characters maximum. Leave it "" unless the
 user dictated the message themselves: the application reads the actual diff and writes the message
@@ -259,6 +275,7 @@ export function operationArgs(step: PlannedStep): Record<string, string> {
     case "rebase": return { onto: step.args.onto.trim() };
     case "resolve_conflict": return { path: step.args.path.trim(), side: step.args.side.trim() };
     case "commit": return { message: step.args.message.trim() };
+    case "push": return step.args.noVerify.trim() === "true" ? { noVerify: "true" } : {};
     default: return {};
   }
 }
@@ -293,6 +310,19 @@ export function operationIssues(step: PlannedStep, index = 0): PlanIssue[] {
   // An empty commit message is not a defect: the application writes one from the real diff.
   if (step.operation === "commit" && args.message.length > commitMessageLimit) {
     issues.push({ field: `${at}.args.message`, problem: `${args.message.length} characters; the limit is ${commitMessageLimit}` });
+  }
+  if (step.operation === "push" && step.args.noVerify.trim() && step.args.noVerify.trim() !== "true") {
+    issues.push({ field: `${at}.args.noVerify`, problem: `"${step.args.noVerify}" is not a value; use "true" to skip the hooks or "" to run them` });
+  }
+  if (step.operation === "git_command") {
+    if (!step.argv.length) {
+      issues.push({ field: `${at}.argv`, problem: `missing; git_command needs the full command as an argument list, without the leading "git"` });
+    } else if (step.argv.some((token) => !token.trim())) {
+      issues.push({ field: `${at}.argv`, problem: "contains an empty argument; every element must be a non-empty token" });
+    }
+  }
+  if (step.operation !== "git_command" && step.argv.length) {
+    issues.push({ field: `${at}.argv`, problem: `only git_command takes an argument list; leave it empty for ${step.operation}` });
   }
   return issues;
 }
@@ -363,6 +393,7 @@ function validate(value: unknown): ModelPlan | undefined {
     if (!hasExactKeys(step, stepKeys)) return undefined;
     const entry = step as Record<string, unknown>;
     if (typeof entry.operation !== "string" || !(executableOperations.has(entry.operation as Operation) || entry.operation === "none")) return undefined;
+    if (!Array.isArray(entry.argv) || !entry.argv.every((item) => typeof item === "string")) return undefined;
     if (!hasExactKeys(entry.args, argsKeys) || !Object.values(entry.args as object).every((item) => typeof item === "string")) return undefined;
   }
   if (!hasExactKeys(record.repository, repositoryKeys)) return undefined;

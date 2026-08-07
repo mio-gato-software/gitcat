@@ -7,8 +7,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = await import(pathToFileURL(join(root, "dist-electron/electron/repository-plan.js")));
 const llm = await import(pathToFileURL(join(root, "dist-electron/electron/llm-plan.js")));
 
-const noArgs = { name: "", onto: "", to: "", path: "", side: "", message: "" };
-const step = (operation, args = {}) => ({ operation, args: { ...noArgs, ...args } });
+const noArgs = { name: "", onto: "", to: "", path: "", side: "", message: "", noVerify: "" };
+const step = (operation, args = {}) => ({ operation, argv: [], args: { ...noArgs, ...args } });
 const basePlan = {
   intent: "git_operation",
   steps: [step("status")],

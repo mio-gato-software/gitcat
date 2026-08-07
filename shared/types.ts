@@ -166,6 +166,7 @@ export type Operation =
   | "skip_operation"
   | "resolve_conflict"
   | "commit"
+  | "git_command"
   | "github_create_repo"
   | "none";
 
@@ -188,6 +189,8 @@ export type RepositoryPlan = {
 export type PlanStep = {
   operation: Operation;
   args: Record<string, string>;
+  /** Free-form git_command steps: the argument list handed to git verbatim, without the leading "git". */
+  argv?: string[];
   command: string;
   summary: string;
   risk: "low" | "medium" | "high";

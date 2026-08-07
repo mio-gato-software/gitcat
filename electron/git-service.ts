@@ -535,7 +535,12 @@ function asking(reason: string, summary: string): PlanDraft {
   return refused(reason, "llm", summary || "Necesito un dato más", "question");
 }
 
-function buildCommand(operation: Operation, args: Record<string, string>) {
+/** Display-only quoting: execution never goes through a shell, this is so the card reads like what runs. */
+function quoteToken(token: string) {
+  return /^[A-Za-z0-9._/@:=+~-]+$/.test(token) ? token : JSON.stringify(token);
+}
+
+function buildCommand(operation: Operation, args: Record<string, string>, argv: string[] = []) {
   switch (operation) {
     case "checkout": return `git switch ${args.name}`;
     case "create_branch": return `git switch -c ${args.name}`;
@@ -543,7 +548,7 @@ function buildCommand(operation: Operation, args: Record<string, string>) {
     case "rename_branch": return `git branch -m ${args.name} ${args.to}`;
     case "fetch": return "git fetch --prune";
     case "pull": return "git pull --ff-only";
-    case "push": return "git push";
+    case "push": return `git push${args.noVerify === "true" ? " --no-verify" : ""}`;
     case "merge": return `git merge --no-edit ${args.name}`;
     case "rebase": return `git rebase ${args.onto}`;
     case "abort_operation": return `git ${args.pending ?? "rebase"} --abort`;
@@ -551,6 +556,7 @@ function buildCommand(operation: Operation, args: Record<string, string>) {
     case "skip_operation": return `git ${args.pending ?? "rebase"} --skip`;
     case "resolve_conflict": return resolveConflictCommand(args);
     case "commit": return `git add -A && git commit -m "${args.message ?? ""}"`;
+    case "git_command": return ["git", ...argv].map(quoteToken).join(" ");
     case "github_create_repo": {
       const steps = [];
       if (args.account && args.account !== args.activeAccount) steps.push(`gh auth switch --hostname ${args.host} --user ${args.account}`);
@@ -1032,7 +1038,7 @@ function highestRisk(a: ActionPlan["risk"], b: ActionPlan["risk"]): ActionPlan["
  * cannot reach Git, so an unknown operation collapses the whole plan into a refusal.
  */
 async function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot): Promise<PlanDraft> {
-  const proposed = plan.steps.map((step) => stepFrom(step.operation, operationArgs(step)));
+  const proposed = plan.steps.map((step) => stepFrom(step.operation, operationArgs(step), step.argv));
   if (proposed.some((step) => !step)) return refused("El plan incluye una operación que no está permitida.", "llm", plan.summary);
   const steps = await writeCommitMessages(proposed as PlanStep[], snapshot);
   if ("blocker" in steps) return asking(steps.blocker, plan.summary);
@@ -1047,21 +1053,35 @@ async function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot): Promi
 }
 
 /**
+ * Branch names a free-form "git branch -d/-D" would delete. Those flags take no value, so every
+ * non-flag token after the subcommand is a branch name.
+ */
+function gitBranchDeletions(argv: string[]): string[] {
+  if (argv[0] !== "branch") return [];
+  const tokens = argv.slice(1).filter((token) => token !== "--");
+  if (!tokens.some((token) => token === "-d" || token === "-D" || token === "--delete")) return [];
+  return tokens.filter((token) => !token.startsWith("-"));
+}
+
+/**
  * Deletions the repository protects, handed back as structured defects so the model corrects itself
  * and explains why in the user's own language, instead of running into the guardrail as a raw error.
  */
 function protectedBranchIssues(plan: ModelPlan, snapshot: RepoSnapshot): PlanIssue[] {
   return plan.steps.flatMap((step, index) => {
-    if (step.operation !== "delete_branch") return [];
-    const name = operationArgs(step).name;
-    const field = `steps[${index}].args.name`;
-    if (snapshot.defaultBranch && name === snapshot.defaultBranch) {
-      return [{ field, problem: `"${name}" is the repository's default branch and is protected; choose a non-default branch` }];
-    }
-    if (isProtectedBranch(name)) {
-      return [{ field, problem: `"${name}" has a prefix whose branches are kept permanently; they exist to survive cleanups and are never deletion candidates` }];
-    }
-    return [];
+    const names = step.operation === "delete_branch" ? [operationArgs(step).name]
+      : step.operation === "git_command" ? gitBranchDeletions(step.argv)
+      : [];
+    const field = step.operation === "git_command" ? `steps[${index}].argv` : `steps[${index}].args.name`;
+    return names.flatMap((name) => {
+      if (snapshot.defaultBranch && name === snapshot.defaultBranch) {
+        return [{ field, problem: `"${name}" is the repository's default branch and is protected; choose a non-default branch` }];
+      }
+      if (isProtectedBranch(name)) {
+        return [{ field, problem: `"${name}" has a prefix whose branches are kept permanently; they exist to survive cleanups and are never deletion candidates` }];
+      }
+      return [];
+    });
   });
 }
 
@@ -1228,7 +1248,12 @@ export async function planAction(cwd: string, request: string, context: Conversa
   }
 }
 
-function operationDraft(operation: Operation, args: Record<string, string>, snapshot?: RepoSnapshot): PlanDraft {
+/** What a free-form command costs: read-only subcommands stay low; anything else is high, on the app's word. */
+const readOnlyGitSubcommands = new Set([
+  "blame", "describe", "diff", "grep", "log", "ls-files", "ls-remote", "reflog", "rev-list", "rev-parse", "shortlog", "show", "status"
+]);
+
+function operationDraft(operation: Operation, args: Record<string, string>, snapshot?: RepoSnapshot, argv: string[] = []): PlanDraft {
   const details: Partial<Record<Operation, [string, string, ActionPlan["risk"]]>> = {
     status: ["Actualizar la vista del repositorio", "Lee el estado actual sin modificar archivos.", "low"],
     checkout: [`Cambiar a ${args.name}`, "Cambia la rama activa conservando los cambios locales compatibles.", "medium"],
@@ -1237,18 +1262,25 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     rename_branch: [`Renombrar ${args.name} a ${args.to}`, "Cambia el nombre de una rama local. No toca su historia ni la rama remota.", "medium"],
     fetch: ["Actualizar referencias remotas", "Descarga referencias y elimina remotas obsoletas.", "low"],
     pull: ["Actualizar la rama actual", "Usa pull --ff-only para evitar merges implícitos.", "high"],
-    push: ["Publicar la rama actual", "Envía los commits al upstream configurado.", "high"],
+    push: args.noVerify === "true"
+      ? ["Publicar la rama actual omitiendo las verificaciones", "Envía los commits al upstream configurado con --no-verify: los hooks pre-push no se ejecutan.", "high"]
+      : ["Publicar la rama actual", "Envía los commits al upstream configurado.", "high"],
     merge: [`Fusionar ${args.name}`, "Integra la rama seleccionada en la rama actual.", "high"],
     rebase: [`Rebase sobre ${args.onto}`, "Reescribe la base de la rama actual.", "high"],
     abort_operation: [`Abortar ${args.pendingLabel ?? "la operación"}`, "Deshace el trabajo a medias y devuelve el repositorio a como estaba antes de empezar.", "high"],
     continue_operation: [`Continuar ${args.pendingLabel ?? "la operación"}`, "Sigue desde donde se detuvo, una vez resueltos los conflictos.", "high"],
     skip_operation: [`Saltar el commit atascado de ${args.pendingLabel ?? "la operación"}`, "Descarta el commit en el que se atascó y sigue con el resto.", "high"],
     resolve_conflict: [`Resolver ${args.path} quedándose con ${args.side === "theirs" ? "el otro lado" : args.side === "ours" ? "nuestro lado" : "el archivo tal cual está"}`, "Marca el conflicto de un archivo como resuelto. No modifica el contenido de ningún archivo.", "medium"],
-    commit: [`Crear commit “${args.message ?? ""}”`, "Añade todos los cambios y crea un commit.", "high"]
+    commit: [`Crear commit “${args.message ?? ""}”`, "Añade todos los cambios y crea un commit.", "high"],
+    git_command: [
+      `Ejecutar ${buildCommand("git_command", {}, argv)}`,
+      "Comando Git propuesto por el asistente: se ejecuta tal cual, sin shell, y solo tras tu confirmación.",
+      argv.length && readOnlyGitSubcommands.has(argv[0]) ? "low" : "high"
+    ]
   };
   const detail = details[operation];
   if (!detail || operation === "none") return refused("La operación solicitada no está permitida.");
-  const steps = [{ operation, args, command: buildCommand(operation, args), summary: detail[0], risk: detail[2] }];
+  const steps: PlanStep[] = [{ operation, args, ...(argv.length ? { argv } : {}), command: buildCommand(operation, args, argv), summary: detail[0], risk: detail[2] }];
   return sequenceDraft(steps, detail[1], renameEffects(steps, snapshot));
 }
 
@@ -1290,8 +1322,8 @@ function sequenceDraft(steps: PlanStep[], rationale: string, effects?: string[])
 }
 
 /** A step the model asked for, described and priced by the deterministic table above. */
-function stepFrom(operation: Operation, args: Record<string, string>): PlanStep | undefined {
-  const draft = operationDraft(operation, args);
+function stepFrom(operation: Operation, args: Record<string, string>, argv: string[] = []): PlanStep | undefined {
+  const draft = operationDraft(operation, args, undefined, argv);
   return draft.allowed ? draft.steps[0] : undefined;
 }
 
@@ -1390,6 +1422,19 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot) {
   if (operation === "resolve_conflict") {
     if (!snapshot.conflicts.some((conflict) => conflict.path === args.path)) throw new Error(`${args.path} no está en conflicto.`);
     if (!["ours", "theirs", "resolved"].includes(args.side)) throw new Error("Hay que decir con qué lado quedarse.");
+  }
+  if (operation === "git_command") {
+    const argv = step.argv ?? [];
+    if (!argv.length || argv.some((token) => !token.trim())) throw new Error("El comando Git propuesto no es válido.");
+    // A free command must not sneak past the protections the structured delete carries.
+    for (const name of gitBranchDeletions(argv)) {
+      if (!isBranchNameSafe(name)) throw new Error("Nombre de rama no válido.");
+      if (name === snapshot.defaultBranch) throw new Error(`No puedes borrar la rama por defecto (${snapshot.defaultBranch}).`);
+      if (name === snapshot.currentBranch) throw new Error("No puedes borrar la rama activa.");
+      if (isProtectedBranch(name)) {
+        throw new Error(`La rama ${name} está protegida por su prefijo: las ramas de ese tipo existen para conservarse.`);
+      }
+    }
   }
 }
 
@@ -1495,7 +1540,7 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     case "rename_branch": return reportedGit(cwd, ["branch", "-m", "--", args.name, args.to]);
     case "fetch": return reportedGit(cwd, ["fetch", "--prune"]);
     case "pull": return reportedGit(cwd, ["pull", "--ff-only"]);
-    case "push": return reportedGit(cwd, ["push"]);
+    case "push": return reportedGit(cwd, args.noVerify === "true" ? ["push", "--no-verify"] : ["push"]);
     case "merge": return reportedGit(cwd, ["merge", "--no-edit", "--", args.name]);
     case "rebase": return reportedGit(cwd, ["rebase", args.onto]);
     case "abort_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--abort"]);
@@ -1505,6 +1550,7 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     case "commit":
       await checkedGit(cwd, ["add", "-A"]);
       return reportedGit(cwd, ["commit", "-m", args.message]);
+    case "git_command": return reportedGit(cwd, step.argv ?? []);
     case "github_create_repo": return executeGithubRepositoryPlan(plan);
     default: throw new Error("La acción no está permitida.");
   }
