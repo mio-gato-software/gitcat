@@ -39,6 +39,8 @@ export type Commit = {
   email: string;
   date: string;
   refs: string[];
+  /** Parent hashes in Git's own order, so the first is the one the branch continues. The edges of the graph. */
+  parents: string[];
 };
 
 export type FileChange = {
