@@ -1,12 +1,14 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import type { CSSProperties, ReactNode, PointerEvent as ReactPointerEvent } from "react";
 import {
-  AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Bot, Check, ChevronDown, CircleDot,
+  AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Bot, Check, ChevronDown, ChevronRight, CircleDot,
   Clock3, Cloud, Eye, FileDiff, FolderOpen, GitBranch, GitCommitHorizontal, GitFork,
-  GitMerge, Info, Laptop, LoaderCircle, MessageCircle, Plus, RefreshCcw, Search, Send,
+  GitMerge, Info, Laptop, List, ListTree, LoaderCircle, MessageCircle, Plus, RefreshCcw, Search, Send,
   Settings2, ShieldCheck, Sparkles, TerminalSquare, Trash2, UserRound, X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { buildBranchTree, filterBranchTree, groupPathFor } from "../shared/branch-tree";
+import type { BranchNode } from "../shared/branch-tree";
 import type { ActionPlan, Branch, Commit, ConversationMessage, LlmConfig, Operation, RepoSnapshot } from "../shared/types";
 
 type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string };
@@ -69,6 +71,32 @@ function clampPanes({ sidebar, inspector }: PaneWidths, total: number): PaneWidt
 }
 
 function plural(count: number, singular: string, many: string) { return `${count} ${count === 1 ? singular : many}`; }
+
+/**
+ * How the branch panel is being read right now. It is a view preference, never a change to the
+ * repository, so it lives in the browser storage of this machine and belongs to one repository.
+ */
+type BranchViewMode = "tree" | "flat";
+type BranchView = { mode: BranchViewMode; expanded: string[] };
+
+const branchViewStorageKey = (path: string) => `branchline-branch-view:${path}`;
+
+function readBranchView(path: string): BranchView | undefined {
+  try {
+    const stored = JSON.parse(localStorage.getItem(branchViewStorageKey(path)) ?? "null");
+    if (stored?.mode !== "tree" && stored?.mode !== "flat") return undefined;
+    return {
+      mode: stored.mode,
+      expanded: Array.isArray(stored.expanded) ? stored.expanded.filter((key: unknown): key is string => typeof key === "string") : []
+    };
+  } catch { /* a corrupt entry just means the defaults */ }
+  return undefined;
+}
+
+function writeBranchView(path: string, view: BranchView) {
+  try { localStorage.setItem(branchViewStorageKey(path), JSON.stringify(view)); }
+  catch { /* a full quota must not break the panel */ }
+}
 
 const baseBranchNames = ["main", "master", "develop", "trunk"];
 
@@ -157,7 +185,6 @@ function suggestionsFor(snapshot: RepoSnapshot): Suggestion[] {
 export default function App() {
   const [projects, setProjects] = useState<ProjectTab[]>([]);
   const [activeId, setActiveId] = useState<string>();
-  const [branchFilter, setBranchFilter] = useState("");
   const [commitFilter, setCommitFilter] = useState("");
   const [request, setRequest] = useState("");
   const [conversations, setConversations] = useState<Record<string, ConversationTurn[]>>({});
@@ -290,7 +317,6 @@ export default function App() {
   useEffect(() => {
     requestSequence.current += 1;
     setRequest("");
-    setBranchFilter("");
     setCommitFilter("");
     setView("history");
     setCommitFormOpen(false);
@@ -541,7 +567,6 @@ export default function App() {
     local: snapshot?.branches.filter((branch) => branch.presence !== "remote").length ?? 0,
     remoteOnly: snapshot?.branches.filter((branch) => branch.presence === "remote").length ?? 0
   }), [snapshot]);
-  const filteredBranches = useMemo(() => snapshot?.branches.filter((branch) => branch.name.toLocaleLowerCase().includes(branchFilter.toLocaleLowerCase())) ?? [], [snapshot, branchFilter]);
   const filteredCommits = useMemo(() => snapshot?.commits.filter((commit) => {
     const query = commitFilter.toLocaleLowerCase();
     return !query || commit.subject.toLocaleLowerCase().includes(query) || commit.author.toLocaleLowerCase().includes(query) || commit.shortHash.toLocaleLowerCase().includes(query);
@@ -572,10 +597,15 @@ export default function App() {
           {panes && <PaneDivider edge="sidebar" width={panes.sidebar} onPointerDown={startResize("sidebar")} onNudge={(delta) => nudgePane("sidebar", delta)} onReset={() => resetPane("sidebar")} />}
           {panes && <PaneDivider edge="inspector" width={panes.inspector} onPointerDown={startResize("inspector")} onNudge={(delta) => nudgePane("inspector", delta)} onReset={() => resetPane("inspector")} />}
           <aside className="sidebar">
-            <div className="sidebar-section branch-section"><div className="section-heading"><span>RAMAS</span><button className="mini-icon" onClick={() => setInputDialog({ operation: "create_branch", title: "Nueva rama", label: "Nombre de la rama", value: "" })} aria-label="Crear rama"><Plus size={14} /></button></div><div className="search-field"><Search size={14} /><input aria-label="Filtrar ramas" value={branchFilter} onChange={(event) => setBranchFilter(event.target.value)} placeholder="Filtrar ramas" /></div><div className="branch-list">
-              {filteredBranches.map((branch, index) => <BranchRow branch={branch} defaultBranch={snapshot.defaultBranch} index={index} key={branch.name} busy={planning} onSwitch={() => void prepare("checkout", { name: branch.name })} onSwitchNow={() => void switchBranch(branch.name)} onDelete={() => void prepare("delete_branch", { name: branch.name })} />)}
-              {!filteredBranches.length && <div className="empty-small">No hay ramas que coincidan.</div>}
-            </div></div>
+            <BranchPanel
+              key={snapshot.path}
+              snapshot={snapshot}
+              busy={planning}
+              onCreate={() => setInputDialog({ operation: "create_branch", title: "Nueva rama", label: "Nombre de la rama", value: "" })}
+              onSwitch={(name) => void prepare("checkout", { name })}
+              onSwitchNow={(name) => void switchBranch(name)}
+              onDelete={(name) => void prepare("delete_branch", { name })}
+            />
             <div className="sidebar-section"><div className="section-heading"><span>REMOTOS</span><button className="mini-icon" onClick={() => void prepare("fetch")} aria-label="Actualizar remotos" disabled={planning}><RefreshCcw size={13} /></button></div>{snapshot.remotes.length ? snapshot.remotes.map((remote) => <div className="remote-row" key={remote}><Cloud size={14} /><span>{remote}</span><span className="remote-count">configurado</span></div>) : <div className="empty-small">Sin remotos configurados.</div>}</div>
             <div className="sidebar-bottom"><div className="security-note"><ShieldCheck size={15} /><span>Acciones protegidas<br /><small>Git se ejecuta con una lista segura.</small></span></div><button className="sidebar-settings" onClick={() => setSettingsOpen(true)}><Settings2 size={15} /> Configuración LLM <ChevronDown size={13} /></button></div>
           </aside>
@@ -645,6 +675,121 @@ function PaneDivider({ edge, width, onPointerDown, onNudge, onReset }: {
   ><span /></div>;
 }
 
+/**
+ * The branch list, read through whatever convention the repository already follows. Grouping is a
+ * view: nothing is renamed, every group opens with one click, and the flat list with its filter is
+ * still one click away for whoever already knows the name they are looking for.
+ */
+function BranchPanel({ snapshot, busy, onCreate, onSwitch, onSwitchNow, onDelete }: {
+  snapshot: RepoSnapshot; busy: boolean; onCreate: () => void;
+  onSwitch: (name: string) => void; onSwitchNow: (name: string) => void; onDelete: (name: string) => void;
+}) {
+  const [saved, setSaved] = useState<BranchView | undefined>(() => readBranchView(snapshot.path));
+  const [filter, setFilter] = useState("");
+  const listRef = useRef<HTMLDivElement>(null);
+  const rows = useRef(new Map<string, HTMLButtonElement>());
+  const pending = useRef<{ scrollTop: number; focused?: string }>(undefined);
+
+  const tree = useMemo(() => buildBranchTree(snapshot.branches), [snapshot.branches]);
+  // Nothing stored yet: the branch you are standing on is the one worth having open.
+  const fallbackExpanded = useMemo(() => groupPathFor(tree, snapshot.currentBranch), [tree, snapshot.currentBranch]);
+  const view = saved ?? { mode: "tree" as BranchViewMode, expanded: fallbackExpanded };
+  const update = (next: Partial<BranchView>) => {
+    const merged = { ...view, ...next };
+    setSaved(merged);
+    writeBranchView(snapshot.path, merged);
+  };
+
+  const query = filter.trim();
+  const filtering = query.length > 0;
+  const visible = useMemo(() => filterBranchTree(tree, query), [tree, query]);
+  const matches = useMemo(
+    () => snapshot.branches.filter((branch) => branch.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())),
+    [snapshot.branches, query]
+  );
+  // The colour belongs to the branch, not to the row, so it does not change with the mode or the filter.
+  const colours = useMemo(() => new Map(snapshot.branches.map((branch, index) => [branch.name, branchColor(index)])), [snapshot.branches]);
+
+  /**
+   * Changing mode redraws the whole list, so where the user was is captured first and put back after:
+   * the same branch keeps the focus and the list stays where it was left.
+   */
+  const setMode = (mode: BranchViewMode) => {
+    if (mode === view.mode) return;
+    const focused = [...rows.current].find(([, node]) => node === document.activeElement)?.[0];
+    pending.current = { scrollTop: listRef.current?.scrollTop ?? 0, focused };
+    update({ mode, expanded: mode === "tree" && focused ? [...new Set([...view.expanded, ...groupPathFor(tree, focused)])] : view.expanded });
+  };
+
+  useLayoutEffect(() => {
+    const restore = pending.current;
+    if (!restore) return;
+    pending.current = undefined;
+    if (listRef.current) listRef.current.scrollTop = restore.scrollTop;
+    const node = restore.focused ? rows.current.get(restore.focused) : undefined;
+    if (node) { node.focus(); node.scrollIntoView({ block: "nearest" }); }
+  }, [view.mode]);
+
+  const toggle = (key: string) => update({
+    expanded: view.expanded.includes(key) ? view.expanded.filter((item) => item !== key) : [...view.expanded, key]
+  });
+
+  const register = (name: string) => (node: HTMLButtonElement | null) => {
+    if (node) rows.current.set(name, node); else rows.current.delete(name);
+  };
+
+  const branchRow = (branch: Branch, depth: number, trim: string) => <BranchRow
+    key={branch.name}
+    branch={branch}
+    // The header above already says the prefix; repeating it on every row is the noise this replaces.
+    label={trim ? branch.name.slice(trim.length + 1) : branch.name}
+    defaultBranch={snapshot.defaultBranch}
+    colour={colours.get(branch.name) ?? branchColor(0)}
+    depth={depth}
+    busy={busy}
+    register={register(branch.name)}
+    onSwitch={() => onSwitch(branch.name)}
+    onSwitchNow={() => onSwitchNow(branch.name)}
+    onDelete={() => onDelete(branch.name)}
+  />;
+
+  const renderNodes = (nodes: BranchNode[], depth: number, trim: string): ReactNode[] => nodes.flatMap((node) => {
+    if (node.kind === "branch") return [branchRow(node.branch, depth, trim)];
+    // A filter is a search: it opens whatever it had to look inside, without touching the stored state.
+    const open = filtering || view.expanded.includes(node.group.key);
+    return [
+      <button
+        key={`group:${node.group.key}`}
+        className="branch-group"
+        style={{ paddingLeft: 8 + depth * 13 }}
+        aria-expanded={open}
+        onClick={() => toggle(node.group.key)}
+        title={`${node.group.label}/ · ${plural(node.group.count, "rama", "ramas")}`}
+      ><ChevronRight className={`branch-chevron ${open ? "open" : ""}`} size={12} /><span className="branch-group-label">{node.group.label}</span><span className="branch-group-count">{node.group.count}</span></button>,
+      ...(open ? renderNodes(node.group.children, depth + 1, trim || node.group.label) : [])
+    ];
+  });
+
+  // A lone group, and the group of branches with no prefix at all, are headings over nothing.
+  const topLevel: BranchNode[] = visible.groups.flatMap((group) =>
+    visible.showHeaders && group.kind === "prefix" ? [{ kind: "group" as const, group }] : group.children);
+
+  return <div className="sidebar-section branch-section">
+    <div className="section-heading"><span>RAMAS</span><div className="branch-tools">
+      <div className="mode-toggle" role="group" aria-label="Modo de la lista de ramas">
+        <button className={view.mode === "tree" ? "active" : ""} aria-pressed={view.mode === "tree"} onClick={() => setMode("tree")} title="Agrupar por el prefijo del nombre"><ListTree size={13} /></button>
+        <button className={view.mode === "flat" ? "active" : ""} aria-pressed={view.mode === "flat"} onClick={() => setMode("flat")} title="Lista plana"><List size={13} /></button>
+      </div>
+      <button className="mini-icon" onClick={onCreate} aria-label="Crear rama"><Plus size={14} /></button>
+    </div></div>
+    <div className="search-field"><Search size={14} /><input aria-label="Filtrar ramas" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filtrar ramas" /></div>
+    <div className="branch-list" ref={listRef}>
+      {view.mode === "tree" ? renderNodes(topLevel, 0, "") : matches.map((branch) => branchRow(branch, 0, ""))}
+      {!matches.length && <div className="empty-small">No hay ramas que coincidan.</div>}
+    </div>
+  </div>;
+}
+
 const presenceLabel: Record<Branch["presence"], string> = {
   local: "Solo en local",
   remote: "Solo en el remoto",
@@ -673,7 +818,7 @@ function branchTooltip(branch: Branch, defaultBranch?: string) {
   return parts.join(" · ");
 }
 
-function BranchRow({ branch, defaultBranch, index, busy, onSwitch, onSwitchNow, onDelete }: { branch: Branch; defaultBranch?: string; index: number; busy: boolean; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void }) {
+function BranchRow({ branch, label, defaultBranch, colour, depth, busy, register, onSwitch, onSwitchNow, onDelete }: { branch: Branch; label: string; defaultBranch?: string; colour: string; depth: number; busy: boolean; register: (node: HTMLButtonElement | null) => void; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void }) {
   const isDefault = branch.name === defaultBranch;
   const pendingClick = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(pendingClick.current), []);
@@ -685,7 +830,7 @@ function BranchRow({ branch, defaultBranch, index, busy, onSwitch, onSwitchNow, 
     window.clearTimeout(pendingClick.current);
     onSwitchNow();
   };
-  return <div className={`branch-row ${branch.isCurrent ? "current" : ""} ${branch.presence}`}><button className="branch-main" onClick={click} onDoubleClick={doubleClick} disabled={branch.isCurrent || busy} aria-current={branch.isCurrent} title={branch.isCurrent ? branchTooltip(branch, defaultBranch) : `Doble clic para cambiar a ${branchTooltip(branch, defaultBranch)}`}><span className="branch-color" style={{ background: branchColor(index) }} /><GitBranch size={14} /><span className="branch-label">{branch.name}</span><PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">actual</span>}{isDefault && <span className="current-pill">principal</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && !isDefault && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`} title={branch.mergedInto.length ? `Eliminar ${branch.name}: ya integrada en ${branch.mergedInto.join(" y ")}, no se pierde trabajo` : `Eliminar ${branch.name}: sin integrar, Git rechazará el borrado si se perdería trabajo`}><Trash2 size={12} /></button>}</div>;
+  return <div className={`branch-row ${branch.isCurrent ? "current" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={click} onDoubleClick={doubleClick} disabled={branch.isCurrent || busy} aria-current={branch.isCurrent} title={branch.isCurrent ? branchTooltip(branch, defaultBranch) : `Doble clic para cambiar a ${branchTooltip(branch, defaultBranch)}`}><span className="branch-color" style={{ background: colour }} /><GitBranch size={14} /><span className="branch-label">{label}</span><PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">actual</span>}{isDefault && <span className="current-pill">principal</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && !isDefault && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`} title={branch.mergedInto.length ? `Eliminar ${branch.name}: ya integrada en ${branch.mergedInto.join(" y ")}, no se pierde trabajo` : `Eliminar ${branch.name}: sin integrar, Git rechazará el borrado si se perdería trabajo`}><Trash2 size={12} /></button>}</div>;
 }
 
 function CommitRow({ commit, index, onSelect }: { commit: Commit; index: number; onSelect: () => void }) {
