@@ -46,6 +46,8 @@ export type Commit = {
 export type FileChange = {
   code: string;
   path: string;
+  /** Where a renamed or copied file used to be. Absent for every other kind of change. */
+  from?: string;
 };
 
 export type RepoSnapshot = {
@@ -64,6 +66,39 @@ export type RepoSnapshot = {
   branches: Branch[];
   commits: Commit[];
   remotes: string[];
+};
+
+/**
+ * What slice of the history the middle column is showing. Until now it was always every ref at once,
+ * which meant the list never had anything to do with the branch anyone was looking at.
+ */
+export type HistoryScope = "all" | "branch" | "branch-only";
+
+export type HistoryRequest = {
+  scope: HistoryScope;
+  /** Required by every scope but "all". Validated against the repository before it reaches Git. */
+  branch?: string;
+  limit?: number;
+  skip?: number;
+};
+
+export type HistoryPage = {
+  commits: Commit[];
+  /** Git had more behind this page, so the list can say so instead of implying it is complete. */
+  hasMore: boolean;
+  scope: HistoryScope;
+  branch?: string;
+  /** What "branch-only" measured against; absent when the repository exposes no default branch. */
+  comparedTo?: string;
+};
+
+export type CommitDetail = {
+  hash: string;
+  /** Against the first parent, which is what a merge commit actually brought in. */
+  files: FileChange[];
+  diff: string;
+  /** A diff too large to hand over whole was cut, and says so rather than looking complete. */
+  truncated: boolean;
 };
 
 export type Operation =
@@ -185,6 +220,9 @@ export type GitlineApi = {
   restoreWorkspace: () => Promise<RestoredWorkspace>;
   saveWorkspace: (paths: string[], activePath?: string) => Promise<void>;
   getSnapshot: (path: string) => Promise<RepoSnapshot>;
+  loadHistory: (path: string, request: HistoryRequest) => Promise<HistoryPage>;
+  getCommitDetail: (path: string, hash: string) => Promise<CommitDetail>;
+  getWorkingFileDiff: (path: string, file: string) => Promise<CommitDetail>;
   planAction: (path: string, request: string, context?: ConversationMessage[]) => Promise<ActionPlan>;
   prepareOperation: (path: string, operation: Operation, args?: Record<string, string>) => Promise<ActionPlan>;
   generateCommitDescription: (path: string) => Promise<CommitDescriptionResult>;

@@ -230,12 +230,71 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .graph-track { flex: none; }
 .graph-lanes { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
 .graph-lanes line, .graph-lanes path { stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linecap: round; }
-.commit-node { left: auto; }
+/* El SVG empalma al 50% de la fila, así que el nodo se ancla al mismo sitio en vez de a un top fijo:
+   con filas de altura variable, cualquier número absoluto deja las líneas sin llegar al círculo. */
+.commit-node { top: 50%; left: auto; transform: translateY(-50%); }
+/* La cabecera se alinea con la anchura real del carril, que crece con el número de columnas. */
+.graph-header { padding-left: var(--track-w, 43px); }
+.graph-note { margin-left: var(--track-w, 43px); }
+.graph-scope { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.scope-field { display: flex; align-items: center; gap: 5px; padding: 3px 6px 3px 8px; color: #7bd7cc; background: #121c27; border: 1px solid #223140; border-radius: 5px; }
+.scope-field:focus-within { border-color: #4e7c7d; }
+.scope-field select { max-width: 220px; padding: 0; border: 0; outline: 0; color: #cfe0ec; background: transparent; font-size: 9px; font-weight: 700; letter-spacing: 0; appearance: none; cursor: pointer; }
+.scope-field option { color: #dbe8f3; background: #121c27; }
+.scope-note { min-width: 0; overflow: hidden; color: #66798c; font-size: 9px; font-weight: 400; letter-spacing: 0; text-overflow: ellipsis; white-space: nowrap; }
+.graph-count { color: #566a7f; font-family: 'DM Mono', monospace; font-weight: 400; letter-spacing: 0; }
+.graph-loading { display: flex; align-items: center; gap: 8px; padding: 18px 5px 18px var(--track-w, 43px); color: #74899c; font-size: 10px; }
+.graph-loading svg { color: #6bd8cb; }
+.load-more { display: block; width: calc(100% - var(--track-w, 43px)); margin-left: var(--track-w, 43px); margin-top: 12px; padding: 9px; color: #9db0c2; background: #121c27; border: 1px solid #223140; border-radius: 7px; font-size: 10px; font-weight: 700; }
+.load-more:hover { color: #e6eff7; border-color: #33475a; background: #16222f; }
+.graph-note.error { color: #efadb5; background: #351f26; border-color: #6a3944; }
 .graph-header-right { display: flex; align-items: center; gap: 10px; }
 .graph-colour-toggle { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; color: #76899d; background: #121c27; border: 1px solid #223140; border-radius: 5px; font-size: 9px; font-weight: 700; letter-spacing: 0; }
 .graph-colour-toggle:hover { color: #d7e5f0; border-color: #33475a; }
 .graph-colour-toggle[aria-pressed="true"] { color: #7bd7cc; background: #142a2a; border-color: #2f5d59; }
 .graph-note { margin: 0 5px 10px 40px; padding: 7px 9px; color: #7b8ea3; background: #101b26; border: 1px solid #1e2d3b; border-radius: 6px; font-size: 9px; line-height: 1.45; }
+
+/* La fila del commit entera es el botón: abrir el cambio es lo que se quiere de ella. */
+.commit-content { width: 100%; color: inherit; background: transparent; text-align: left; border-radius: 0; }
+.commit-row:hover .commit-content, .commit-content:focus-visible { background: #131f2c; }
+.commit-author { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Era un botón propio y ahora es solo el icono de la fila, así que suelta el tamaño que tenía de botón. */
+.commit-more { width: auto; height: auto; flex: none; color: #62778b; }
+.commit-row:hover .commit-more { color: #cfe0ec; }
+.ref-tag { max-width: 150px; }
+.ref-tag.head { color: #c9a3ff; background: #29233c; border-color: #4a3d69; }
+.ref-tag.remote { color: #8ea8d8; background: #1a2436; border-color: #2f4160; }
+.ref-tag.tag { color: #e0b264; background: #2c2418; border-color: #5a482a; }
+.ref-tag.more { color: #8296a8; background: #182430; border-color: #2b3b4b; }
+.commit-refs { max-width: 230px; }
+
+/* El diff: sin resaltado de sintaxis, solo qué hace cada línea. */
+.commit-modal.wide { width: min(880px, 100%); }
+.detail-files { margin-top: 4px; }
+.detail-files .eyebrow { display: block; margin-bottom: 8px; }
+.detail-files .change-row { border: 1px solid #1c2b37; border-bottom: 0; }
+.detail-files .change-row:last-child { border-bottom: 1px solid #1c2b37; }
+.diff-view { margin-top: 14px; border: 1px solid #223442; border-radius: 8px; overflow: hidden; }
+.diff-view pre { display: flex; flex-direction: column; max-height: 46vh; margin: 0; overflow: auto; padding: 10px 0; background: #0c141d; }
+.diff-line { padding: 0 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.6; white-space: pre; }
+.diff-line.add { color: #86e2b4; background: #12281f; }
+.diff-line.remove { color: #f0a3ac; background: #2a171c; }
+.diff-line.hunk { color: #9b8fc3; background: #171a2b; }
+.diff-line.meta { color: #5f7385; }
+.diff-line.context { color: #94a7b8; }
+.diff-empty, .diff-note { padding: 12px; color: #7b8ea3; font-size: 10px; line-height: 1.5; }
+.diff-note { border-top: 1px solid #223442; color: #d5a969; }
+.change-row { width: 100%; text-align: left; }
+.change-more { flex: none; margin-left: auto; color: #4e687c; }
+.change-row:hover { background: #16222f; }
+.change-row:hover .change-more { color: #cfe0ec; }
+
+/* Seleccionar no es cambiar de rama: un clic elige de qué habla la ventana, el doble clic se mueve. */
+.branch-row.selected { background: #1b2a3a; box-shadow: inset 2px 0 #6bd8cb; }
+.branch-row.selected .branch-label { color: #eaf4fa; }
+.branch-switch { width: 25px; height: 25px; flex: none; display: grid; place-items: center; color: #66798c; background: transparent; border-radius: 5px; opacity: 0; }
+.branch-row:hover .branch-switch, .branch-switch:focus-visible { opacity: 1; }
+.branch-switch:hover { color: #7bd7cc; background: #1b3634; }
 
 /* Apilada sobre otra: la sangría es el orden de rebase implícito. */
 .branch-row.stacked .branch-stack-icon { color: #8fb0c9; transform: rotate(180deg); }

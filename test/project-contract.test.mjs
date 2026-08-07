@@ -65,14 +65,18 @@ test("las columnas se redimensionan con el ratón y el ancho sobrevive al reinic
   assert.match(styles, /\.pane-divider \{[^}]*cursor: col-resize/);
 });
 
-test("doble clic cambia de rama y los impedimentos se explican en la columna del asistente", async () => {
+test("un clic selecciona la rama, un doble clic cambia a ella, y los impedimentos se explican", async () => {
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
   assert.match(app, /const switchBranch = async \(name: string\)/);
-  assert.match(app, /onDoubleClick=\{doubleClick\}/);
-  // El clic simple espera la ventana del doble clic para que un gesto no dispare las dos cosas.
-  assert.match(app, /pendingClick\.current = window\.setTimeout\(onSwitch, 230\)/);
+  // Seleccionar no es una operación de Git: decide de qué rama habla la ventana y nada más.
+  assert.match(app, /onClick=\{onSelect\} onDoubleClick=\{onSwitchNow\}/);
+  assert.doesNotMatch(app, /window\.setTimeout\(onSwitch/, "el clic ya no prepara un checkout con retardo");
+  // Cambiar de rama sigue siendo explícito: el doble clic, o el botón de la fila.
+  assert.match(app, /className="branch-switch"/);
   assert.match(app, /addTurn\(path, `Cambiar a la rama \$\{name\}`\)/);
   assert.match(app, /error: message, status: "error"/);
+  // Una rama que deja de existir no puede dejar el historial apuntando a un nombre que Git no conoce.
+  assert.match(app, /snapshot\.branches\.some\(\(branch\) => branch\.name === selectedBranch\) \? selectedBranch : snapshot\.currentBranch/);
 });
 
 test("el panel de ramas agrupa por convención sin renombrar nada, y la lista plana sigue estando", async () => {
@@ -207,11 +211,47 @@ test("el historial es un grafo con carriles, y su color significa algo", async (
   assert.match(commitGraph, /export const neutralFamilyColour/);
   assert.doesNotMatch(commitGraph, /Math\.random|Date\.now/);
   // Y se puede volver al coloreado anterior, que se recuerda por repositorio.
-  assert.match(app, /writeGraphColour\(snapshot\.path, next\)/);
+  assert.match(app, /writeHistoryPrefs\(snapshot\.path, merged\)/);
   assert.match(app, /byFamily \? familyColour\(rows\.get\(commit\.hash\)\?\.family \?\? ""\) : branchColor\(index\)/);
   // Una lista filtrada no es un grafo: sin continuidad, no se dibujan carriles.
-  assert.match(app, /const lanes = filtering \? 0 :/);
+  assert.match(app, /const lanes = needle \? 0 :/);
   assert.match(styles, /\.graph-lanes line, \.graph-lanes path \{[^}]*vector-effect: non-scaling-stroke/);
+});
+
+test("el historial habla de una rama, se puede paginar y enseña qué cambió cada commit", async () => {
+  const types = await readFile(join(root, "shared/types.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
+  const preload = await readFile(join(root, "electron/preload.cjs"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  const styles = await readFile(join(root, "src/styles.css"), "utf8");
+  // El alcance por defecto es la rama, no todas las refs a la vez.
+  assert.match(types, /export type HistoryScope = "all" \| "branch" \| "branch-only"/);
+  assert.match(app, /scope: \["all", "branch", "branch-only"\]\.includes\(stored\?\.scope\) \? stored\.scope : "branch"/);
+  // Una rama acaba en los argumentos de git, así que se comprueba la forma y luego se resuelve la ref.
+  assert.match(service, /async function verifiedRevision/);
+  assert.match(service, /if \(!isBranchNameSafe\(name\)\) throw new Error/);
+  assert.match(service, /\["rev-parse", "--verify", "--quiet", `\$\{name\}\^\{commit\}`\]/);
+  assert.match(service, /args\.push\("--"\)/);
+  // Los canales nuevos pasan por los mismos guardas que el resto.
+  for (const channel of ["history:load", "commit:detail", "commit:file-diff"]) {
+    assert.match(main, new RegExp(`ipcMain\\.handle\\("${channel}"`));
+  }
+  assert.equal((main.match(/assertOpenedRepository\(cwd\)/g) ?? []).length >= 6, true);
+  assert.match(preload, /loadHistory: \(path, request\)/);
+  // Paginación honesta: se pide uno de más para saber si hay algo detrás en vez de suponerlo.
+  assert.match(service, /"-n", String\(limit \+ 1\)/);
+  assert.match(service, /hasMore: parsed\.length > limit/);
+  assert.match(app, /className="load-more"/);
+  // Un merge se lee contra su primer padre; "git show" a secas contestaría que no cambió nada.
+  assert.match(service, /const base = lineage\[1\]/);
+  assert.match(service, /export async function getCommitDetail/);
+  assert.match(app, /function DiffView/);
+  // Una ruta que llega de la interfaz sigue siendo una ruta: tiene que caer dentro del repositorio.
+  assert.match(service, /La ruta no pertenece a este repositorio/);
+  // Y los dos desajustes del grafo: el nodo se ancla donde empalma el SVG, y la cabecera al carril real.
+  assert.match(styles, /\.commit-node \{ top: 50%; left: auto; transform: translateY\(-50%\); \}/);
+  assert.match(styles, /\.graph-header \{ padding-left: var\(--track-w, 43px\); \}/);
 });
 
 test("una rama dice si vive en local, en el remoto o en ambos", async () => {

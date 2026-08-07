@@ -7,6 +7,7 @@ import { safeStorage, app } from "electron";
 import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
 import { parseWorktrees } from "./worktrees.js";
 import { stackCandidates } from "./stacked-branches.js";
+import { parseNameStatus } from "./diff-status.js";
 import { isProtectedBranch, lifecycleOf, staleAfterDays } from "../shared/branch-lifecycle.js";
 import {
   findAccount, isSshAuthenticated, parseGhAccounts, parseSshGreeting, parseSshResolvedHostName, sshConfigHostAliases
@@ -16,8 +17,8 @@ import {
   sanitizeMemory, type Memory
 } from "./memory.js";
 import type {
-  ActionPlan, Branch, Commit, ConversationMessage, DefaultBranchSource, GitProtocol, LlmConfig, LlmConfigInput, Operation,
-  PlanStep, RepoSnapshot, StepOutcome
+  ActionPlan, Branch, Commit, CommitDetail, ConversationMessage, DefaultBranchSource, FileChange, GitProtocol, HistoryPage,
+  HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput, Operation, PlanStep, RepoSnapshot, StepOutcome
 } from "../shared/types.js";
 import {
   buildPlannerInstructions, commitMessageLimit, executableOperations, isBranchNameSafe, operationArgs,
@@ -365,6 +366,110 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     commits,
     remotes
   };
+}
+
+const historyFormat = "--pretty=format:%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D%x1f%P";
+export const historyPageSize = 80;
+/** A diff nobody is going to read in one sitting, and that would only stall the window. */
+const diffLimit = 400_000;
+
+/**
+ * A revision that reaches Git's argument list has to be one this repository actually has. The name
+ * shape is checked first so nothing that could pass for an option ever gets that far, and the ref is
+ * then resolved, because "exists" is Git's answer to give rather than the interface's to claim.
+ */
+async function verifiedRevision(repoRoot: string, name: string) {
+  if (!isBranchNameSafe(name)) throw new Error("Nombre de rama no válido.");
+  const resolved = await optionalGit(repoRoot, ["rev-parse", "--verify", "--quiet", `${name}^{commit}`]);
+  if (!resolved) throw new Error(`La rama ${name} ya no existe en este repositorio.`);
+  return name;
+}
+
+function cutDiff(diff: string) {
+  return diff.length > diffLimit
+    ? { diff: `${diff.slice(0, diffLimit)}\n\n[diff recortado: ${diff.length} caracteres en total]`, truncated: true }
+    : { diff, truncated: false };
+}
+
+/**
+ * The slice of history the middle column asked for. Scoping it to a branch is the whole point: a list
+ * of every ref at once could never answer "what is on this branch", which is the question being asked.
+ */
+export async function loadHistory(cwd: string, request: HistoryRequest): Promise<HistoryPage> {
+  const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
+  const scope: HistoryScope = ["all", "branch", "branch-only"].includes(request.scope) ? request.scope : "all";
+  const limit = Math.min(Math.max(Math.trunc(request.limit ?? historyPageSize), 1), 500);
+  const skip = Math.min(Math.max(Math.trunc(request.skip ?? 0), 0), 100_000);
+  const empty = { commits: [], hasMore: false, scope, branch: request.branch };
+  if (!(await optionalGit(repoRoot, ["rev-parse", "HEAD"]))) return empty;
+
+  // One more than asked for, so "is there more behind this" is answered rather than guessed.
+  const args = ["log", "--topo-order", "-n", String(limit + 1), "--skip", String(skip), "--date=iso-strict", historyFormat];
+  let comparedTo: string | undefined;
+  if (scope === "all") args.splice(1, 0, "--all");
+  else {
+    if (!request.branch) throw new Error("Falta la rama de la que mostrar el historial.");
+    const branch = await verifiedRevision(repoRoot, request.branch);
+    args.push(branch);
+    if (scope === "branch-only") {
+      const remotes = (await checkedGit(repoRoot, ["remote"])).split("\n").filter(Boolean);
+      const localNames = new Set((await checkedGit(repoRoot, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])).split("\n").filter(Boolean));
+      const base = (await resolveDefaultBranch(repoRoot, remotes, localNames))?.name;
+      // Excluding the branch from itself would leave nothing, which is not what "only this" means.
+      if (base && base !== branch) { args.push("--not", await verifiedRevision(repoRoot, base)); comparedTo = base; }
+    }
+  }
+  args.push("--");
+
+  const raw = await checkedGit(repoRoot, args);
+  const parsed = raw.split("\n").map(parseCommit).filter((commit): commit is Commit => Boolean(commit));
+  return { commits: parsed.slice(0, limit), hasMore: parsed.length > limit, scope, branch: request.branch, comparedTo };
+}
+
+/**
+ * What a commit changed, read against its first parent. For a merge that is what it actually brought
+ * in; asking `git show` about a merge answers with nothing at all, which reads as "no changes".
+ */
+export async function getCommitDetail(cwd: string, hash: string): Promise<CommitDetail> {
+  const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
+  if (!/^[0-9a-f]{4,40}$/i.test(hash)) throw new Error("Hash de commit no válido.");
+  const commit = await optionalGit(repoRoot, ["rev-parse", "--verify", "--quiet", `${hash}^{commit}`]);
+  if (!commit) throw new Error("Ese commit no existe en este repositorio.");
+  const lineage = (await checkedGit(repoRoot, ["rev-list", "--parents", "-n", "1", commit])).split(" ").filter(Boolean);
+  const base = lineage[1];
+  const statusRaw = base
+    ? await checkedGit(repoRoot, ["diff", "--no-color", "--name-status", "-z", base, commit, "--"])
+    : await checkedGit(repoRoot, ["show", "--no-color", "--name-status", "-z", "--format=", commit, "--"]);
+  const diffRaw = base
+    ? await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", base, commit, "--"])
+    : await checkedGit(repoRoot, ["show", "--no-color", "--no-ext-diff", "--unified=3", "--format=", commit, "--"]);
+  return { hash: commit, files: parseNameStatus(statusRaw), ...cutDiff(diffRaw) };
+}
+
+/** One uncommitted file, so the changes tab can show what changed rather than only that it did. */
+export async function getWorkingFileDiff(cwd: string, file: string): Promise<CommitDetail> {
+  const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
+  const absolute = resolve(repoRoot, file);
+  // A path from the interface is still a path: it has to land inside the repository that asked.
+  if (absolute !== repoRoot && !absolute.startsWith(`${repoRoot}${sep}`)) throw new Error("La ruta no pertenece a este repositorio.");
+  const relative = absolute.slice(repoRoot.length + 1);
+  const head = await optionalGit(repoRoot, ["rev-parse", "HEAD"]);
+  const tracked = head
+    ? await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", "HEAD", "--", relative])
+    : await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", "--", relative]);
+  if (tracked.trim()) return { hash: "", files: [], ...cutDiff(tracked) };
+
+  // Untracked files have nothing to diff against, so the file itself is the change.
+  const untracked = await checkedGit(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z", "--", relative]);
+  if (!untracked.split("\0").filter(Boolean).length) return { hash: "", files: [], diff: "", truncated: false };
+  try {
+    const content = readFileSync(absolute);
+    if (content.includes(0)) return { hash: "", files: [], diff: `--- /dev/null\n+++ b/${relative}\n[archivo binario]`, truncated: false };
+    const body = content.toString("utf8").split("\n").map((line) => `+${line}`).join("\n");
+    return { hash: "", files: [], ...cutDiff(`--- /dev/null\n+++ b/${relative}\n@@ archivo nuevo @@\n${body}`) };
+  } catch (error) {
+    return { hash: "", files: [], diff: `[no se pudo leer: ${error instanceof Error ? error.message : "error desconocido"}]`, truncated: false };
+  }
 }
 
 function refused(reason: string, source: ActionPlan["source"] = "guardrail", summary = "Solicitud rechazada", kind: ActionPlan["kind"] = "refusal"): PlanDraft {

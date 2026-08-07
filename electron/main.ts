@@ -2,8 +2,11 @@ import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { executePlan, generateCommitDescription, getLlmConfig, getSnapshot, loadLlmConfig, loadMemory, planAction, prepareOperation, saveLlmConfig } from "./git-service.js";
-import type { ActionPlan, ConversationMessage, LlmConfigInput, Operation } from "../shared/types.js";
+import {
+  executePlan, generateCommitDescription, getCommitDetail, getLlmConfig, getSnapshot, getWorkingFileDiff, loadHistory,
+  loadLlmConfig, loadMemory, planAction, prepareOperation, saveLlmConfig
+} from "./git-service.js";
+import type { ActionPlan, ConversationMessage, HistoryRequest, LlmConfigInput, Operation } from "../shared/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
@@ -133,6 +136,23 @@ app.whenReady().then(async () => {
   ipcMain.handle("repo:snapshot", (event, cwd: string) => {
     assertTrustedSender(event);
     return getSnapshot(assertOpenedRepository(cwd));
+  });
+  ipcMain.handle("history:load", (event, cwd: string, request: HistoryRequest) => {
+    assertTrustedSender(event);
+    if (!request || typeof request !== "object") throw new Error("La petición de historial no es válida.");
+    // Shape only: which branch is real, and whether the scope is one of the three, is Git's answer.
+    if (request.branch !== undefined && typeof request.branch !== "string") throw new Error("La rama del historial no es válida.");
+    return loadHistory(assertOpenedRepository(cwd), request);
+  });
+  ipcMain.handle("commit:detail", (event, cwd: string, hash: string) => {
+    assertTrustedSender(event);
+    if (typeof hash !== "string") throw new Error("El commit solicitado no es válido.");
+    return getCommitDetail(assertOpenedRepository(cwd), hash);
+  });
+  ipcMain.handle("commit:file-diff", (event, cwd: string, file: string) => {
+    assertTrustedSender(event);
+    if (typeof file !== "string" || !file) throw new Error("El archivo solicitado no es válido.");
+    return getWorkingFileDiff(assertOpenedRepository(cwd), file);
   });
   ipcMain.handle("action:plan", async (event, cwd: string, request: string, context?: ConversationMessage[]) => {
     assertTrustedSender(event);
