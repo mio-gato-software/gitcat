@@ -40,7 +40,7 @@ globalThis.fetch = async (_url, init) => {
   };
 };
 const reply = (value) => queue.push({ payload: { status: "completed", output_text: typeof value === "string" ? value : JSON.stringify(value) } });
-const step = (operation, args = {}) => ({ operation, args: { name: "", onto: "", to: "", message: "", ...args } });
+const step = (operation, args = {}) => ({ operation, args: { name: "", onto: "", to: "", path: "", side: "", message: "", ...args } });
 const plan = (overrides) => ({
   intent: "git_operation",
   steps: [],

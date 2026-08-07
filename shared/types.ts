@@ -50,6 +50,32 @@ export type FileChange = {
   from?: string;
 };
 
+/**
+ * A Git job that stopped part-way. It is a state the repository is in, not a failure that happened:
+ * rebase, merge, cherry-pick and revert all leave one behind, and knowing which one — and how far it
+ * got — is what makes it possible to say how to continue instead of only that something broke.
+ */
+export type PendingOperationKind = "rebase" | "merge" | "cherry_pick" | "revert";
+
+export type PendingOperation = {
+  kind: PendingOperationKind;
+  /** Which commit of how many, when the operation replays a sequence. */
+  step?: number;
+  total?: number;
+  /** The branch being replayed, and what it is being replayed onto. */
+  branch?: string;
+  onto?: string;
+};
+
+export type ConflictKind =
+  | "both-modified" | "both-added" | "both-deleted"
+  | "added-by-us" | "added-by-them" | "deleted-by-us" | "deleted-by-them";
+
+export type Conflict = {
+  path: string;
+  kind: ConflictKind;
+};
+
 export type RepoSnapshot = {
   path: string;
   name: string;
@@ -60,7 +86,12 @@ export type RepoSnapshot = {
   defaultBranch?: string;
   /** How the default branch was identified; absent means the repository did not expose one. */
   defaultBranchSource?: DefaultBranchSource;
+  /** Kept as the plain question it always answered; `pending` is the detail behind it. */
   isRebasing: boolean;
+  /** The half-finished job the repository is holding, when it is holding one. */
+  pending?: PendingOperation;
+  /** Paths both sides changed. Nothing can continue until these are settled. */
+  conflicts: Conflict[];
   isDirty: boolean;
   changes: FileChange[];
   branches: Branch[];
@@ -103,6 +134,22 @@ export type CommitDetail = {
   truncated: boolean;
 };
 
+export type ConflictResolution = {
+  path: string;
+  /** The whole file as the model proposes it should end up. Nothing is written until a person says so. */
+  content: string;
+  rationale: string;
+  confidence: "high" | "low";
+};
+
+export type ConflictProposal = {
+  resolutions: ConflictResolution[];
+  /** Files the model would not settle, each with its reason. Leaving one alone is a valid answer. */
+  skipped: { path: string; reason: string }[];
+  /** What each file looks like right now, so the interface can show the change rather than assert it. */
+  current: Record<string, string>;
+};
+
 export type Operation =
   | "status"
   | "checkout"
@@ -114,8 +161,10 @@ export type Operation =
   | "push"
   | "merge"
   | "rebase"
-  | "abort_rebase"
-  | "continue_rebase"
+  | "abort_operation"
+  | "continue_operation"
+  | "skip_operation"
+  | "resolve_conflict"
   | "commit"
   | "github_create_repo"
   | "none";
@@ -193,6 +242,15 @@ export type LlmConfigInput = {
   clearApiKey?: boolean;
 };
 
+/** What the interface hands back to the model after a plan stopped part-way. */
+export type ExecutionFailure = {
+  command: string;
+  summary: string;
+  error: string;
+  /** The steps that never ran, so the model plans from where the repository actually is. */
+  skipped: string[];
+};
+
 export type ExecutionResult = {
   snapshot: RepoSnapshot;
   output: string;
@@ -224,6 +282,9 @@ export type GitlineApi = {
   getSnapshot: (path: string) => Promise<RepoSnapshot>;
   loadHistory: (path: string, request: HistoryRequest) => Promise<HistoryPage>;
   getCommitDetail: (path: string, hash: string) => Promise<CommitDetail>;
+  proposeConflictResolution: (path: string) => Promise<ConflictProposal>;
+  applyConflictResolution: (path: string, resolutions: ConflictResolution[]) => Promise<RepoSnapshot>;
+  planRecovery: (path: string, failure: ExecutionFailure, context?: ConversationMessage[]) => Promise<ActionPlan>;
   getWorkingFileDiff: (path: string, file: string) => Promise<CommitDetail>;
   planAction: (path: string, request: string, context?: ConversationMessage[]) => Promise<ActionPlan>;
   prepareOperation: (path: string, operation: Operation, args?: Record<string, string>) => Promise<ActionPlan>;

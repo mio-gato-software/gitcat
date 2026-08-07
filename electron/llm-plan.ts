@@ -2,7 +2,7 @@ import type { Operation } from "../shared/types.js";
 
 export type PlannerIntent = "git_operation" | "create_repository" | "answer" | "needs_information" | "out_of_scope";
 
-export type PlannedArgs = { name: string; onto: string; to: string; message: string };
+export type PlannedArgs = { name: string; onto: string; to: string; path: string; side: string; message: string };
 
 export type PlannedRepository = {
   localPath: string;
@@ -37,14 +37,14 @@ export const planStepLimit = 6;
 
 export const executableOperations = new Set<Operation>([
   "status", "checkout", "create_branch", "delete_branch", "rename_branch", "fetch", "pull", "push",
-  "merge", "rebase", "abort_rebase", "continue_rebase", "commit"
+  "merge", "rebase", "abort_operation", "continue_operation", "skip_operation", "resolve_conflict", "commit"
 ]);
 const branchOperations = new Set<Operation>(["checkout", "create_branch", "delete_branch", "rename_branch", "merge"]);
 const intents: PlannerIntent[] = ["git_operation", "create_repository", "answer", "needs_information", "out_of_scope"];
 const risks = ["low", "medium", "high"];
 const planKeys = ["intent", "rationale", "reply", "repository", "risk", "steps", "summary"];
 const stepKeys = ["args", "operation"];
-const argsKeys = ["message", "name", "onto", "to"];
+const argsKeys = ["message", "name", "onto", "path", "side", "to"];
 const repositoryKeys = ["host", "localPath", "owner", "protocol", "push", "remote", "replaceRemote", "repository", "sshHost"];
 const branchNamePattern = /^[A-Za-z0-9._/@-]+$/;
 
@@ -76,7 +76,7 @@ export const planResponseFormat = {
               type: "object",
               additionalProperties: false,
               required: argsKeys,
-              properties: { name: { type: "string" }, onto: { type: "string" }, to: { type: "string" }, message: { type: "string" } }
+              properties: { name: { type: "string" }, onto: { type: "string" }, to: { type: "string" }, path: { type: "string" }, side: { type: "string" }, message: { type: "string" } }
             }
           }
         }
@@ -145,7 +145,8 @@ create in step 1 is available in step 2. Use as few steps as the request truly n
 ${planStepLimit}, and leave "steps" empty for every intent other than "git_operation".
 
 Operations for each step: status, checkout, create_branch, delete_branch, fetch, pull, push, merge,
-rebase, abort_rebase, continue_rebase, commit. args.name is the branch for checkout, create_branch,
+rebase, abort_operation, continue_operation, skip_operation, resolve_conflict, commit. args.name is the branch
+for checkout, create_branch,
 delete_branch and merge. args.onto is the base branch for rebase. Leave every arg a step does not
 need as "".
 
@@ -218,6 +219,23 @@ check out one branch in two worktrees, so a switch to it will fail until that wo
 so and name the path instead of proposing the switch. It is also a sign the branch is in use, so do
 not offer it as a deletion candidate however integrated it may be.
 
+"pendingOperation" is a Git job the repository is holding half-finished — a rebase, a merge, a
+cherry-pick or a revert. While one exists, almost nothing else can happen: it has to be continued,
+skipped or aborted first, and saying so is more useful than proposing something Git will refuse.
+"continue_operation", "skip_operation" and "abort_operation" work on whichever job it is, so never
+name the subcommand yourself. Aborting throws away the half-finished work and returns the repository
+to where it started; it does not touch anything already committed. A rebase and a cherry-pick can
+also skip the commit they are stuck on, which drops that commit. Say which of those a choice is
+before proposing it.
+
+"conflicts" lists the paths both sides changed. Nothing continues until every one is settled.
+"resolve_conflict" takes "path" and "side": "ours" keeps the version already in the branch underneath,
+"theirs" keeps the version being brought in, "resolved" means the file on disk is already correct.
+Careful with a rebase: your commits are the ones being replayed, so they are "theirs", which is the
+opposite of what most people expect. Only use it when the whole file plainly belongs to one side —
+when the two sides have to be combined, say so and tell the user the assistant can draft the merged
+file for them to review, rather than picking a side that quietly drops work.
+
 Only the repository state below is true. Do not state facts that are not in it.
 Repository state (JSON):
 ${JSON.stringify(repositoryState, null, 2)}`;
@@ -239,6 +257,7 @@ export function operationArgs(step: PlannedStep): Record<string, string> {
     case "checkout": case "create_branch": case "delete_branch": case "merge": return { name: step.args.name.trim() };
     case "rename_branch": return { name: step.args.name.trim(), to: step.args.to.trim() };
     case "rebase": return { onto: step.args.onto.trim() };
+    case "resolve_conflict": return { path: step.args.path.trim(), side: step.args.side.trim() };
     case "commit": return { message: step.args.message.trim() };
     default: return {};
   }
@@ -261,6 +280,12 @@ export function operationIssues(step: PlannedStep, index = 0): PlanIssue[] {
     else if (!isBranchNameSafe(args.to)) issues.push({ field: `${at}.args.to`, problem: `"${args.to}" is not a valid Git branch name` });
     else if (args.to === args.name) issues.push({ field: `${at}.args.to`, problem: `identical to "${args.name}"; a rename must change the name` });
   }
+  if (step.operation === "resolve_conflict") {
+    if (!args.path) issues.push({ field: `${at}.args.path`, problem: "missing; resolve_conflict needs the conflicted path" });
+    if (!["ours", "theirs", "resolved"].includes(args.side)) {
+      issues.push({ field: `${at}.args.side`, problem: `"${args.side}" is not a side; use "ours", "theirs" or "resolved"` });
+    }
+  }
   if (step.operation === "rebase") {
     if (!args.onto) issues.push({ field: `${at}.args.onto`, problem: "missing; rebase needs the base branch" });
     else if (!isBranchNameSafe(args.onto)) issues.push({ field: `${at}.args.onto`, problem: `"${args.onto}" is not a valid Git branch name` });
@@ -281,7 +306,12 @@ export function planIssues(plan: ModelPlan): PlanIssue[] {
   return plan.steps.flatMap((step, index) => operationIssues(step, index));
 }
 
-function candidates(text: string) {
+/**
+ * Every JSON object the text could contain, with a best effort at closing one that was cut off.
+ * Shared by every reply the app parses: a provider that wraps its answer in prose or a fence is a
+ * provider problem, not a reason for each caller to invent its own parser.
+ */
+export function jsonCandidates(text: string) {
   const result: string[] = [];
   for (let start = 0; start < text.length; start += 1) {
     if (text[start] !== "{") continue;
@@ -344,7 +374,7 @@ function validate(value: unknown): ModelPlan | undefined {
 }
 
 export function parseModelPlan(text: string): ModelPlan | undefined {
-  for (const candidate of candidates(text.trim())) {
+  for (const candidate of jsonCandidates(text.trim())) {
     for (const json of [candidate, candidate.replace(/,\s*([}\]])/g, "$1")]) {
       try {
         const plan = validate(JSON.parse(json));

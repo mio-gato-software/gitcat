@@ -605,3 +605,62 @@ test("una rama que está en local y en el remoto es un chip, no dos", async () =
   assert.match(app, /chip\.kind === "remote" \? `\$\{chip\.label\} · solo en el remoto`/);
   assert.match(app, /origin\/HEAD/, "el puntero simbólico se sigue descartando");
 });
+
+test("una operación a medias es un estado del que se puede salir, no un callejón", async () => {
+  const types = await readFile(join(root, "shared/types.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  // El trabajo a medias existe en los datos: qué operación, por qué commit y qué lo bloquea.
+  assert.match(types, /export type PendingOperationKind = "rebase" \| "merge" \| "cherry_pick" \| "revert"/);
+  assert.match(types, /conflicts: Conflict\[\]/);
+  assert.match(service, /async function readPendingOperation/);
+  assert.match(service, /conflicts: conflictsFrom\(changes\)/);
+  // Las operaciones valen para cualquier trabajo a medias; el subcomando lo pone el estado, no el modelo.
+  assert.match(service, /case "continue_operation": return reportedGit\(cwd, \[pendingCommands\[snapshot\.pending!\.kind\], "--continue"\]\)/);
+  assert.match(service, /No hay ninguna operación de Git a medias/);
+  assert.match(service, /Todavía quedan \$\{snapshot\.conflicts\.length\} archivos en conflicto/);
+  // El fallo vuelve al modelo en vez de morir en la conversación, y lo que propone se confirma.
+  assert.match(service, /export async function planRecovery/);
+  assert.match(app, /await recoverFrom\(plan\.repoPath, \{/);
+  assert.match(app, /if \(failed && result\.snapshot\.pending && config\.configured\)/);
+  // La salida de un lío se propone, nunca se ejecuta sola: recoverFrom deja el plan esperando.
+  assert.match(app, /updateTurn\(path, turnId, \(turn\) => \(\{ \.\.\.turn, plan, status: plan\.allowed \? "ready" : "completed" \}\)\)/);
+  assert.doesNotMatch(app, /recoverFrom[\s\S]{0,600}?await runPlan/, "recoverFrom no ejecuta nada por su cuenta");
+  // Y el modelo sabe qué cuesta cada salida.
+  assert.match(planner, /Aborting throws away the half-finished work/);
+  assert.match(planner, /so they are "theirs", which is the\nopposite of what most people expect/);
+});
+
+test("resolver un conflicto con el modelo se propone, se revisa y solo entonces se escribe", async () => {
+  const resolution = await readFile(join(root, "electron/conflict-resolution.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  // El módulo que habla con el modelo no escribe nada: produce una propuesta.
+  assert.doesNotMatch(resolution, /writeFileSync|runGit|checkedGit/);
+  assert.match(resolution, /export function validateProposal/);
+  assert.match(resolution, /strict: true/);
+  // Escribir es un paso aparte, y cada ruta se comprueba contra los conflictos que Git reporta ahora.
+  assert.match(service, /export async function applyConflictResolution/);
+  assert.match(service, /if \(!open\.has\(resolution\.path\)\) throw new Error\(`\$\{resolution\.path\} ya no está en conflicto\.`\)/);
+  assert.match(service, /todavía contiene marcas de conflicto/);
+  assert.match(service, /if \(!absolute\.startsWith\(`\$\{snapshot\.path\}\$\{sep\}`\)\) throw new Error\("La ruta no pertenece a este repositorio\."\)/);
+  // Nunca en automático: hay un botón, y la propuesta se revisa archivo a archivo antes de aceptarla.
+  assert.match(main, /ipcMain\.handle\("conflicts:propose"/);
+  assert.match(app, /function ConflictProposalModal/);
+  assert.match(app, /Nada se ha escrito todavía/);
+  assert.match(app, /onApply=\{\(resolutions\) => void applyResolutions\(resolutions\)\}/);
+  // La duda del propio modelo se enseña en vez de enterrarse.
+  assert.match(app, /resolution\.confidence === "low" && <span className="resolution-doubt"/);
+  assert.match(app, /proposal\.resolutions\.filter\(\(item\) => item\.confidence === "high"\)\.map/);
+});
+
+test("el error crudo de Electron no llega nunca a la interfaz", async () => {
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.match(app, /function cleanError/);
+  assert.match(app, /Error invoking remote method/);
+  // Ningún sitio vuelve a enseñar el mensaje tal cual llega del canal.
+  assert.doesNotMatch(app, /error instanceof Error \? error\.message : "No se pudo preparar la acción\."/);
+  assert.doesNotMatch(app, /reason instanceof Error \? reason\.message : "No se pudo leer el historial\."/);
+});

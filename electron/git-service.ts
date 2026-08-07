@@ -9,6 +9,12 @@ import { parseWorktrees } from "./worktrees.js";
 import { stackCandidates } from "./stacked-branches.js";
 import { parseNameStatus } from "./diff-status.js";
 import { parseRemoteUrls } from "./remotes.js";
+import {
+  canSkip, conflictLabels, conflictsFrom, parseRebaseProgress, pendingCommands, pendingLabels, resolutionFor
+} from "./pending-operation.js";
+import {
+  buildResolutionInstructions, conflictFileLimit, parseConflictProposal, resolutionResponseFormat, validateProposal
+} from "./conflict-resolution.js";
 import { isProtectedBranch, lifecycleOf, staleAfterDays } from "../shared/branch-lifecycle.js";
 import {
   findAccount, isSshAuthenticated, parseGhAccounts, parseSshGreeting, parseSshResolvedHostName, sshConfigHostAliases
@@ -18,8 +24,9 @@ import {
   sanitizeMemory, type Memory
 } from "./memory.js";
 import type {
-  ActionPlan, Branch, Commit, CommitDetail, ConversationMessage, DefaultBranchSource, FileChange, GitProtocol, HistoryPage,
-  HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput, Operation, PlanStep, RepoSnapshot, StepOutcome
+  ActionPlan, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource, FileChange, GitProtocol,
+  ConflictProposal, ConflictResolution, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput,
+  Operation, PendingOperation, PlanStep, RepoSnapshot, StepOutcome
 } from "../shared/types.js";
 import {
   buildPlannerInstructions, commitMessageLimit, executableOperations, isBranchNameSafe, operationArgs,
@@ -283,6 +290,48 @@ function parseRemoteRefs(raw: string, remotes: string[], commitsByHash: Map<stri
   return byLocalName;
 }
 
+/** A file inside the Git directory, resolved through Git so a worktree or a submodule still works. */
+async function readGitFile(repoRoot: string, relative: string) {
+  const path = await optionalGit(repoRoot, ["rev-parse", "--git-path", relative]);
+  if (!path) return undefined;
+  try {
+    return readFileSync(resolve(repoRoot, path), "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+async function gitPathExists(repoRoot: string, relative: string) {
+  const path = await optionalGit(repoRoot, ["rev-parse", "--git-path", relative]);
+  return Boolean(path) && existsSync(resolve(repoRoot, path));
+}
+
+/**
+ * The half-finished job the repository is holding, if any. Git records each one differently, so each
+ * is asked in its own terms rather than inferred from whatever happens to be lying around.
+ */
+async function readPendingOperation(repoRoot: string): Promise<PendingOperation | undefined> {
+  const [rebaseMerge, rebaseApply] = await Promise.all([
+    gitPathExists(repoRoot, "rebase-merge"),
+    gitPathExists(repoRoot, "rebase-apply")
+  ]);
+  if (rebaseMerge || rebaseApply) {
+    const directory = rebaseMerge ? "rebase-merge" : "rebase-apply";
+    const names = ["msgnum", "end", "next", "last", "head-name", "onto", "onto-name"];
+    const files: Record<string, string | undefined> = {};
+    for (const name of names) files[name] = await readGitFile(repoRoot, `${directory}/${name}`);
+    return { kind: "rebase", ...parseRebaseProgress(files) };
+  }
+  if (await gitPathExists(repoRoot, "MERGE_HEAD")) {
+    // The branch a merge is bringing in is not recorded by name, so its message is the best label.
+    const message = (await readGitFile(repoRoot, "MERGE_MSG"))?.split("\n")[0]?.trim();
+    return { kind: "merge", onto: message?.replace(/^Merge (branch|remote-tracking branch|commit) /, "").replace(/^'|'$/g, "") || undefined };
+  }
+  if (await gitPathExists(repoRoot, "CHERRY_PICK_HEAD")) return { kind: "cherry_pick" };
+  if (await gitPathExists(repoRoot, "REVERT_HEAD")) return { kind: "revert" };
+  return undefined;
+}
+
 function parseCommit(raw: string): Commit | undefined {
   const [hash, shortHash, author, email, date, subject, refs = "", parents = ""] = raw.split("\x1f");
   if (!hash || !shortHash) return undefined;
@@ -347,10 +396,8 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   const defaultBranchResolution = await resolveDefaultBranch(repoRoot, remotes, localNames);
   const defaultBranch = defaultBranchResolution?.name;
   await markIntegration(repoRoot, branches, [defaultBranch, currentBranch]);
-  const gitDir = await optionalGit(repoRoot, ["rev-parse", "--git-dir"]);
-  const rebaseMerge = await optionalGit(repoRoot, ["rev-parse", "--git-path", "rebase-merge"]);
-  const rebaseApply = await optionalGit(repoRoot, ["rev-parse", "--git-path", "rebase-apply"]);
-  const isRebasing = Boolean(gitDir && ((rebaseMerge && existsSync(resolve(repoRoot, rebaseMerge))) || (rebaseApply && existsSync(resolve(repoRoot, rebaseApply)))));
+  const pending = await readPendingOperation(repoRoot);
+  const changes = parseStatus(statusRaw);
 
   return {
     path: repoRoot,
@@ -360,9 +407,11 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     currentBranch,
     defaultBranch,
     defaultBranchSource: defaultBranchResolution?.source,
-    isRebasing,
+    isRebasing: pending?.kind === "rebase",
+    pending,
+    conflicts: conflictsFrom(changes),
     isDirty: Boolean(statusRaw.trim()),
-    changes: parseStatus(statusRaw),
+    changes,
     branches,
     commits,
     remotes,
@@ -497,8 +546,10 @@ function buildCommand(operation: Operation, args: Record<string, string>) {
     case "push": return "git push";
     case "merge": return `git merge --no-edit ${args.name}`;
     case "rebase": return `git rebase ${args.onto}`;
-    case "abort_rebase": return "git rebase --abort";
-    case "continue_rebase": return "git rebase --continue";
+    case "abort_operation": return `git ${args.pending ?? "rebase"} --abort`;
+    case "continue_operation": return `git ${args.pending ?? "rebase"} --continue`;
+    case "skip_operation": return `git ${args.pending ?? "rebase"} --skip`;
+    case "resolve_conflict": return resolveConflictCommand(args);
     case "commit": return `git add -A && git commit -m "${args.message ?? ""}"`;
     case "github_create_repo": {
       const steps = [];
@@ -512,6 +563,33 @@ function buildCommand(operation: Operation, args: Record<string, string>) {
     case "status": return "git status";
     default: return "—";
   }
+}
+
+/**
+ * What resolving one conflict actually runs. The side a person picks is not always a checkout: a path
+ * their side deleted has no version to check out, so keeping "ours" there means removing the file.
+ * The conflict's own shape decides, which is why this reads the snapshot rather than trusting args.
+ */
+function conflictPlan(args: Record<string, string>, snapshot?: RepoSnapshot) {
+  const conflict = snapshot?.conflicts.find((item) => item.path === args.path);
+  if (args.side === "resolved" || !conflict) return { action: "add" as const, conflict };
+  return { action: resolutionFor(conflict.kind, args.side === "theirs" ? "theirs" : "ours"), conflict };
+}
+
+function resolveConflictCommand(args: Record<string, string>, snapshot?: RepoSnapshot) {
+  const { action } = conflictPlan(args, snapshot);
+  const path = JSON.stringify(args.path ?? "");
+  if (action === "remove") return `git rm -- ${path}`;
+  if (action === "checkout") return `git checkout --${args.side} -- ${path} && git add -- ${path}`;
+  return `git add -- ${path}`;
+}
+
+async function runResolveConflict(cwd: string, args: Record<string, string>, snapshot: RepoSnapshot) {
+  const { action } = conflictPlan(args, snapshot);
+  if (action === "remove") return reportedGit(cwd, ["rm", "-q", "--", args.path]);
+  if (action === "checkout") await checkedGit(cwd, ["checkout", `--${args.side}`, "--", args.path]);
+  await checkedGit(cwd, ["add", "--", args.path]);
+  return `${args.path} resuelto.`;
 }
 
 /**
@@ -880,6 +958,9 @@ function plannerState(snapshot: RepoSnapshot) {
     defaultBranchSource: snapshot.defaultBranchSource ?? null,
     detachedHead: snapshot.currentBranch === "HEAD",
     isRebasing: snapshot.isRebasing,
+    // A half-finished job blocks almost everything else, so it is stated rather than left to be inferred.
+    pendingOperation: snapshot.pending ?? null,
+    conflicts: snapshot.conflicts.map((conflict) => ({ path: conflict.path, kind: conflict.kind, meaning: conflictLabels[conflict.kind] })),
     hasLocalChanges: snapshot.isDirty,
     localChanges: snapshot.changes.slice(0, 60),
     remotes: snapshot.remotes,
@@ -1036,6 +1117,104 @@ function bindPlan(snapshot: RepoSnapshot, draft: PlanDraft): ActionPlan {
   return { ...draft, id: randomUUID(), repoPath: snapshot.path, head: snapshot.head, stateId: snapshot.stateId };
 }
 
+/**
+ * The model's reading of every open conflict, as a proposal and nothing else. The file contents do
+ * leave the machine here — that is unavoidable, since settling a conflict means understanding both
+ * sides — so it only ever happens because someone pressed the button, never on its own.
+ */
+export async function proposeConflictResolution(cwd: string): Promise<ConflictProposal> {
+  if (!isLlmConfigured()) throw new Error(LLM_REQUIRED);
+  const snapshot = await getSnapshot(cwd);
+  if (!snapshot.conflicts.length) throw new Error("No hay conflictos que resolver.");
+  const current: Record<string, string> = {};
+  const readable: Conflict[] = [];
+  for (const conflict of snapshot.conflicts) {
+    const absolute = resolve(snapshot.path, conflict.path);
+    if (!absolute.startsWith(`${snapshot.path}${sep}`)) continue;
+    try {
+      const raw = readFileSync(absolute);
+      // A binary file has no sides to read, and a huge one nobody is going to review properly.
+      if (raw.includes(0) || raw.length > conflictFileLimit) continue;
+      current[conflict.path] = raw.toString("utf8");
+      readable.push(conflict);
+    } catch { /* deleted on one side: there is no content to reason about */ }
+  }
+  if (!readable.length) {
+    return {
+      resolutions: [],
+      skipped: snapshot.conflicts.map((conflict) => ({
+        path: conflict.path,
+        reason: "Es binario, demasiado grande, o uno de los lados lo borró: eso se decide con «quedarse con un lado»."
+      })),
+      current: {}
+    };
+  }
+
+  // A rebase replays your commits on top of the other branch, so "ours" is the branch underneath.
+  const rebasing = snapshot.pending?.kind === "rebase";
+  const instructions = buildResolutionInstructions({
+    operation: snapshot.pending ? pendingCommands[snapshot.pending.kind] : "merge",
+    branch: snapshot.pending?.branch,
+    onto: snapshot.pending?.onto,
+    ours: rebasing ? `the branch being replayed onto (${snapshot.pending?.onto ?? "the base"})` : `the current branch (${snapshot.currentBranch})`,
+    theirs: rebasing ? `the commits being replayed (${snapshot.pending?.branch ?? "your work"})` : "the branch being brought in"
+  });
+  const input = readable.map((conflict) => [
+    `Path: ${conflict.path}`,
+    `Conflict: ${conflictLabels[conflict.kind]}`,
+    `Content:\n${current[conflict.path]}`
+  ].join("\n")).join("\n\n---\n\n");
+
+  const text = await askProvider({ instructions, input, text: { format: resolutionResponseFormat } }, 240_000);
+  const parsed = parseConflictProposal(text);
+  if (!parsed) throw new Error("El proveedor devolvió una respuesta que no cumple el esquema de resolución.");
+  return { ...validateProposal(parsed, readable.map((conflict) => conflict.path)), current };
+}
+
+/**
+ * Writes what the person accepted, and only that. Every path is checked against the conflicts Git
+ * reports right now rather than against the list the proposal was made from, because the repository
+ * may have moved while it was being read.
+ */
+export async function applyConflictResolution(cwd: string, resolutions: ConflictResolution[]): Promise<RepoSnapshot> {
+  const snapshot = await getSnapshot(cwd);
+  if (!Array.isArray(resolutions) || !resolutions.length) throw new Error("No hay ninguna resolución que aplicar.");
+  const open = new Set(snapshot.conflicts.map((conflict) => conflict.path));
+  for (const resolution of resolutions) {
+    if (typeof resolution?.path !== "string" || typeof resolution?.content !== "string") throw new Error("La resolución no es válida.");
+    if (!open.has(resolution.path)) throw new Error(`${resolution.path} ya no está en conflicto.`);
+    if (/^(<{7}|={7}|>{7})/m.test(resolution.content)) throw new Error(`${resolution.path} todavía contiene marcas de conflicto.`);
+    const absolute = resolve(snapshot.path, resolution.path);
+    if (!absolute.startsWith(`${snapshot.path}${sep}`)) throw new Error("La ruta no pertenece a este repositorio.");
+    writeFileSync(absolute, resolution.content, "utf8");
+    await checkedGit(snapshot.path, ["add", "--", resolution.path]);
+  }
+  return getSnapshot(cwd);
+}
+
+/**
+ * A plan that stopped part-way used to be the end of the conversation: the repository was left holding
+ * a half-finished job and the model never heard about it. Now the failure goes back as structured
+ * detail so it can plan from where the repository actually is.
+ */
+export async function planRecovery(cwd: string, failure: ExecutionFailure, context: ConversationMessage[] = []): Promise<ActionPlan> {
+  const snapshot = await getSnapshot(cwd);
+  if (!isLlmConfigured()) return bindPlan(snapshot, refused(LLM_REQUIRED));
+  const issues: PlanIssue[] = [
+    { field: "execution.command", problem: `"${failure.command}" failed: ${failure.error}` },
+    ...(failure.skipped.length ? [{ field: "execution.skipped", problem: `these steps never ran: ${failure.skipped.join("; ")}` }] : [])
+  ];
+  try {
+    const plan = await requestPlan(RECOVERY_REQUEST, snapshot, context, issues);
+    return bindPlan(snapshot, await draftFromPlan(plan, snapshot, RECOVERY_REQUEST, context));
+  } catch (error) {
+    return bindPlan(snapshot, refused(`No pude consultar el proveedor LLM: ${error instanceof Error ? error.message : "error desconocido"}`, "llm"));
+  }
+}
+
+const RECOVERY_REQUEST =
+  "The plan just stopped part-way and left the repository as the state below describes. Work out how to continue from exactly there and propose the next step, or explain what the user has to decide first. Answer in the language of their last message.";
+
 /** Every interpretation of what the user wrote happens in the model; this layer only validates. */
 export async function planAction(cwd: string, request: string, context: ConversationMessage[] = []): Promise<ActionPlan> {
   const snapshot = await getSnapshot(cwd);
@@ -1061,8 +1240,10 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     push: ["Publicar la rama actual", "Envía los commits al upstream configurado.", "high"],
     merge: [`Fusionar ${args.name}`, "Integra la rama seleccionada en la rama actual.", "high"],
     rebase: [`Rebase sobre ${args.onto}`, "Reescribe la base de la rama actual.", "high"],
-    abort_rebase: ["Abortar el rebase", "Restaura el estado anterior al rebase.", "high"],
-    continue_rebase: ["Continuar el rebase", "Continúa después de resolver los conflictos.", "high"],
+    abort_operation: [`Abortar ${args.pendingLabel ?? "la operación"}`, "Deshace el trabajo a medias y devuelve el repositorio a como estaba antes de empezar.", "high"],
+    continue_operation: [`Continuar ${args.pendingLabel ?? "la operación"}`, "Sigue desde donde se detuvo, una vez resueltos los conflictos.", "high"],
+    skip_operation: [`Saltar el commit atascado de ${args.pendingLabel ?? "la operación"}`, "Descarta el commit en el que se atascó y sigue con el resto.", "high"],
+    resolve_conflict: [`Resolver ${args.path} quedándose con ${args.side === "theirs" ? "el otro lado" : args.side === "ours" ? "nuestro lado" : "el archivo tal cual está"}`, "Marca el conflicto de un archivo como resuelto. No modifica el contenido de ningún archivo.", "medium"],
     commit: [`Crear commit “${args.message ?? ""}”`, "Añade todos los cambios y crea un commit.", "high"]
   };
   const detail = details[operation];
@@ -1196,7 +1377,20 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot) {
   }
   if (operation === "merge" && args.name === snapshot.currentBranch) throw new Error(`No puedes fusionar ${args.name} consigo misma.`);
   if (operation === "rebase" && !snapshot.branches.some((branch) => branch.name === args.onto)) throw new Error(`La rama base ${args.onto} no existe localmente.`);
-  if (["abort_rebase", "continue_rebase"].includes(operation) && !snapshot.isRebasing) throw new Error("No hay un rebase en curso.");
+  if (["abort_operation", "continue_operation", "skip_operation"].includes(operation)) {
+    if (!snapshot.pending) throw new Error("No hay ninguna operación de Git a medias.");
+    if (operation === "skip_operation" && !canSkip(snapshot.pending.kind)) {
+      throw new Error(`Un ${pendingCommands[snapshot.pending.kind]} no puede saltarse un commit; solo continuar o abortar.`);
+    }
+    // Continuing with a conflict still open is what Git refuses anyway, said earlier and in plain words.
+    if (operation === "continue_operation" && snapshot.conflicts.length) {
+      throw new Error(`Todavía quedan ${snapshot.conflicts.length} archivos en conflicto: resuélvelos antes de continuar.`);
+    }
+  }
+  if (operation === "resolve_conflict") {
+    if (!snapshot.conflicts.some((conflict) => conflict.path === args.path)) throw new Error(`${args.path} no está en conflicto.`);
+    if (!["ours", "theirs", "resolved"].includes(args.side)) throw new Error("Hay que decir con qué lado quedarse.");
+  }
 }
 
 /** The plan as issued: it must belong to this repository, and the repository must not have moved under it. */
@@ -1290,7 +1484,7 @@ async function executeGithubRepositoryPlan(plan: ActionPlan) {
   }
 }
 
-async function runStep(cwd: string, step: PlanStep, plan: ActionPlan): Promise<string> {
+async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: RepoSnapshot): Promise<string> {
   const { args } = step;
   switch (step.operation) {
     case "status": return "";
@@ -1304,8 +1498,10 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan): Promise<s
     case "push": return reportedGit(cwd, ["push"]);
     case "merge": return reportedGit(cwd, ["merge", "--no-edit", "--", args.name]);
     case "rebase": return reportedGit(cwd, ["rebase", args.onto]);
-    case "abort_rebase": return reportedGit(cwd, ["rebase", "--abort"]);
-    case "continue_rebase": return reportedGit(cwd, ["rebase", "--continue"]);
+    case "abort_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--abort"]);
+    case "continue_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--continue"]);
+    case "skip_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--skip"]);
+    case "resolve_conflict": return runResolveConflict(cwd, args, snapshot);
     case "commit":
       await checkedGit(cwd, ["add", "-A"]);
       return reportedGit(cwd, ["commit", "-m", args.message]);
@@ -1352,7 +1548,7 @@ export async function executePlan(cwd: string, plan: ActionPlan): Promise<{ snap
         snapshot = await getSnapshot(cwd);
         validateStep(step, snapshot);
       }
-      outcomes[index] = { ...outcomes[index], status: "completed", output: await runStep(cwd, step, plan) };
+      outcomes[index] = { ...outcomes[index], status: "completed", output: await runStep(cwd, step, plan, snapshot) };
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Git no pudo completar la acción.";
       outcomes[index] = { ...outcomes[index], status: "failed", output: detail };
