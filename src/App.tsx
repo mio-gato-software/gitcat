@@ -573,7 +573,7 @@ export default function App() {
           {panes && <PaneDivider edge="inspector" width={panes.inspector} onPointerDown={startResize("inspector")} onNudge={(delta) => nudgePane("inspector", delta)} onReset={() => resetPane("inspector")} />}
           <aside className="sidebar">
             <div className="sidebar-section branch-section"><div className="section-heading"><span>RAMAS</span><button className="mini-icon" onClick={() => setInputDialog({ operation: "create_branch", title: "Nueva rama", label: "Nombre de la rama", value: "" })} aria-label="Crear rama"><Plus size={14} /></button></div><div className="search-field"><Search size={14} /><input aria-label="Filtrar ramas" value={branchFilter} onChange={(event) => setBranchFilter(event.target.value)} placeholder="Filtrar ramas" /></div><div className="branch-list">
-              {filteredBranches.map((branch, index) => <BranchRow branch={branch} index={index} key={branch.name} busy={planning} onSwitch={() => void prepare("checkout", { name: branch.name })} onSwitchNow={() => void switchBranch(branch.name)} onDelete={() => void prepare("delete_branch", { name: branch.name })} />)}
+              {filteredBranches.map((branch, index) => <BranchRow branch={branch} defaultBranch={snapshot.defaultBranch} index={index} key={branch.name} busy={planning} onSwitch={() => void prepare("checkout", { name: branch.name })} onSwitchNow={() => void switchBranch(branch.name)} onDelete={() => void prepare("delete_branch", { name: branch.name })} />)}
               {!filteredBranches.length && <div className="empty-small">No hay ramas que coincidan.</div>}
             </div></div>
             <div className="sidebar-section"><div className="section-heading"><span>REMOTOS</span><button className="mini-icon" onClick={() => void prepare("fetch")} aria-label="Actualizar remotos" disabled={planning}><RefreshCcw size={13} /></button></div>{snapshot.remotes.length ? snapshot.remotes.map((remote) => <div className="remote-row" key={remote}><Cloud size={14} /><span>{remote}</span><span className="remote-count">configurado</span></div>) : <div className="empty-small">Sin remotos configurados.</div>}</div>
@@ -664,15 +664,17 @@ function PresenceBadge({ branch }: { branch: Branch }) {
  * One click prepares the switch as a plan; a double click just does it. The single-click action waits
  * out the double-click window so the same gesture never produces both.
  */
-function branchTooltip(branch: Branch) {
+function branchTooltip(branch: Branch, defaultBranch?: string) {
   const parts = [branch.name, presenceLabel[branch.presence]];
+  if (branch.name === defaultBranch) parts.push("rama principal");
   // Integration is what tells you whether deleting the branch would lose anything.
   if (branch.mergedInto.length) parts.push(`ya integrada en ${branch.mergedInto.join(" y ")}`);
   else if (!branch.isCurrent) parts.push("sin integrar en la rama por defecto ni en la actual");
   return parts.join(" · ");
 }
 
-function BranchRow({ branch, index, busy, onSwitch, onSwitchNow, onDelete }: { branch: Branch; index: number; busy: boolean; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void }) {
+function BranchRow({ branch, defaultBranch, index, busy, onSwitch, onSwitchNow, onDelete }: { branch: Branch; defaultBranch?: string; index: number; busy: boolean; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void }) {
+  const isDefault = branch.name === defaultBranch;
   const pendingClick = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(pendingClick.current), []);
   const click = () => {
@@ -683,7 +685,7 @@ function BranchRow({ branch, index, busy, onSwitch, onSwitchNow, onDelete }: { b
     window.clearTimeout(pendingClick.current);
     onSwitchNow();
   };
-  return <div className={`branch-row ${branch.isCurrent ? "current" : ""} ${branch.presence}`}><button className="branch-main" onClick={click} onDoubleClick={doubleClick} disabled={branch.isCurrent || busy} aria-current={branch.isCurrent} title={branch.isCurrent ? branchTooltip(branch) : `Doble clic para cambiar a ${branchTooltip(branch)}`}><span className="branch-color" style={{ background: branchColor(index) }} /><GitBranch size={14} /><span className="branch-label">{branch.name}</span><PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">actual</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`} title={branch.mergedInto.length ? `Eliminar ${branch.name}: ya integrada en ${branch.mergedInto.join(" y ")}, no se pierde trabajo` : `Eliminar ${branch.name}: sin integrar, Git rechazará el borrado si se perdería trabajo`}><Trash2 size={12} /></button>}</div>;
+  return <div className={`branch-row ${branch.isCurrent ? "current" : ""} ${branch.presence}`}><button className="branch-main" onClick={click} onDoubleClick={doubleClick} disabled={branch.isCurrent || busy} aria-current={branch.isCurrent} title={branch.isCurrent ? branchTooltip(branch, defaultBranch) : `Doble clic para cambiar a ${branchTooltip(branch, defaultBranch)}`}><span className="branch-color" style={{ background: branchColor(index) }} /><GitBranch size={14} /><span className="branch-label">{branch.name}</span><PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">actual</span>}{isDefault && <span className="current-pill">principal</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && !isDefault && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`} title={branch.mergedInto.length ? `Eliminar ${branch.name}: ya integrada en ${branch.mergedInto.join(" y ")}, no se pierde trabajo` : `Eliminar ${branch.name}: sin integrar, Git rechazará el borrado si se perdería trabajo`}><Trash2 size={12} /></button>}</div>;
 }
 
 function CommitRow({ commit, index, onSelect }: { commit: Commit; index: number; onSelect: () => void }) {

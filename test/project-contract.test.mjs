@@ -104,13 +104,17 @@ test("la integración de una rama es un hecho de Git en el estado, no algo que e
   const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
   assert.match(types, /mergedInto: string\[\]/);
+  assert.match(types, /defaultBranchSource\?: DefaultBranchSource/);
   assert.match(service, /async function markIntegration/);
   assert.match(service, /"--merged", target, "refs\/heads", "refs\/remotes"/);
   assert.match(service, /async function resolveDefaultBranch/);
   // El HEAD que publica el remoto manda sobre cualquier nombre convencional.
   assert.match(service, /symbolic-ref", "--short", `refs\/remotes\/\$\{remote\}\/HEAD/);
   assert.match(service, /mergedInto: branch\.mergedInto/);
+  assert.match(service, /isDefault: branch\.name === snapshot\.defaultBranch/);
+  assert.match(service, /No puedes borrar la rama por defecto/);
   // El modelo tiene que saber que ahead\/behind no responden esta pregunta.
+  assert.match(planner, /Treat the default branch and the current branch\n+as protected/);
   assert.match(planner, /Never fall back to\ncomparing "ahead" and "behind" for this/);
   assert.match(app, /mergedInto\.length/);
 });
