@@ -28,7 +28,7 @@ import {
 type CommandResult = { stdout: string; stderr: string; code: number };
 type PlanDraft = Omit<ActionPlan, "id" | "repoPath" | "head" | "stateId">;
 
-const MODEL_FALLBACK = "luna";
+const MODEL_FALLBACK = "gpt-5.6-luna";
 const RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses";
 const LLM_REQUIRED =
   "Branchline necesita un proveedor LLM configurado: toda interpretación de tus mensajes la hace el modelo, no reglas locales. Añade tu API key y tu modelo en Configuración.";

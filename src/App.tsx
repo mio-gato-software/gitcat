@@ -164,7 +164,7 @@ export default function App() {
   const [refreshingPath, setRefreshingPath] = useState<string>();
   const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [config, setConfig] = useState<LlmConfig>({ provider: "openai", model: "luna", configured: false });
+  const [config, setConfig] = useState<LlmConfig>({ provider: "openai", model: "gpt-5.6-luna", configured: false });
   const [toast, setToast] = useState<Toast>();
   const [view, setView] = useState<"history" | "changes">("history");
   const [selectedCommit, setSelectedCommit] = useState<Commit>();
@@ -727,7 +727,7 @@ function PlanCard({ plan, onApply, onDismiss, busy }: { plan: ActionPlan; onAppl
 
 function SettingsModal({ config, onClose, onSaved }: { config: LlmConfig; onClose: () => void; onSaved: (config: LlmConfig) => void }) {
   const [apiKey, setApiKey] = useState("");
-  const [model, setModel] = useState(config.model || "luna");
+  const [model, setModel] = useState(config.model || "gpt-5.6-luna");
   const [clearApiKey, setClearApiKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
