@@ -11,6 +11,7 @@ import { buildBranchTree, filterBranchTree, groupPathFor, prefixOf } from "../sh
 import type { BranchNode } from "../shared/branch-tree";
 import { branchSuggestions, namingCompletions, prefixAliases, variantHint } from "../shared/branch-consistency";
 import type { BranchSuggestion } from "../shared/branch-consistency";
+import { isProtectedBranch, lifecycleLabels, lifecycleOf, staleDays } from "../shared/branch-lifecycle";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
 import type { ActionPlan, Branch, Commit, ConversationMessage, LlmConfig, Operation, RepoSnapshot } from "../shared/types";
@@ -620,7 +621,7 @@ export default function App() {
               onRename={(name, to) => void prepare("rename_branch", { name, to })}
             />
             <div className="sidebar-section"><div className="section-heading"><span>REMOTOS</span><button className="mini-icon" onClick={() => void prepare("fetch")} aria-label="Actualizar remotos" disabled={planning}><RefreshCcw size={13} /></button></div>{snapshot.remotes.length ? snapshot.remotes.map((remote) => <div className="remote-row" key={remote}><Cloud size={14} /><span>{remote}</span><span className="remote-count">configurado</span></div>) : <div className="empty-small">Sin remotos configurados.</div>}</div>
-            <div className="sidebar-bottom"><div className="security-note"><ShieldCheck size={15} /><span>Acciones protegidas<br /><small>Git se ejecuta con una lista segura.</small></span></div><button className="sidebar-settings" onClick={() => setSettingsOpen(true)}><Settings2 size={15} /> Configuración LLM <ChevronDown size={13} /></button></div>
+            <div className="sidebar-bottom"><div className="security-note"><ShieldCheck size={15} /><span>Acciones protegidas<br /><small>Git se ejecuta con una lista segura. La rama por defecto y las que su prefijo conserva no se borran.</small></span></div><button className="sidebar-settings" onClick={() => setSettingsOpen(true)}><Settings2 size={15} /> Configuración LLM <ChevronDown size={13} /></button></div>
           </aside>
 
           <section className="graph-area">
@@ -903,11 +904,16 @@ function branchTooltip(branch: Branch, defaultBranch?: string) {
   if (branch.mergedInto.length) parts.push(`ya integrada en ${branch.mergedInto.join(" y ")}`);
   else if (!branch.isCurrent) parts.push("sin integrar en la rama por defecto ni en la actual");
   if (branch.checkedOutIn) parts.push(`en uso por el worktree ${branch.checkedOutIn}`);
+  const lifecycle = lifecycleOf(branch.name);
+  if (lifecycle !== "unknown") parts.push(`rama ${lifecycleLabels[lifecycle]} por su prefijo`);
   return parts.join(" · ");
 }
 
 function BranchRow({ branch, label, variant, merged, defaultBranch, colour, depth, busy, register, onSwitch, onSwitchNow, onDelete }: { branch: Branch; label: string; variant: boolean; merged: boolean; defaultBranch?: string; colour: string; depth: number; busy: boolean; register: (node: HTMLButtonElement | null) => void; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void }) {
   const isDefault = branch.name === defaultBranch;
+  const protectedByPrefix = isProtectedBranch(branch.name);
+  // Read once per render rather than per row: the panel redraws on every snapshot anyway.
+  const stale = staleDays(branch, Date.now());
   const pendingClick = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(pendingClick.current), []);
   const click = () => {
@@ -918,7 +924,7 @@ function BranchRow({ branch, label, variant, merged, defaultBranch, colour, dept
     window.clearTimeout(pendingClick.current);
     onSwitchNow();
   };
-  return <div className={`branch-row ${branch.isCurrent ? "current" : ""} ${merged ? "merged" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={click} onDoubleClick={doubleClick} disabled={branch.isCurrent || busy} aria-current={branch.isCurrent} title={branch.isCurrent ? branchTooltip(branch, defaultBranch) : `Doble clic para cambiar a ${branchTooltip(branch, defaultBranch)}`}><span className="branch-color" style={{ background: colour }} /><GitBranch size={14} /><span className="branch-label">{label}</span>{variant && <span className="branch-variant" title={`Escribe el prefijo de otra forma que el resto del repositorio. Sigue llamándose ${branch.name}.`}>variante</span>}{merged && <span className="branch-merged" role="img" aria-label={`Ya integrada en ${defaultBranch}`} title={`Ya integrada en ${defaultBranch}: borrarla no perdería trabajo`}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={`En uso por el worktree ${branch.checkedOutIn}`} title={`En uso por el worktree ${branch.checkedOutIn}`}><FolderGit2 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">actual</span>}{isDefault && <span className="current-pill">principal</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && !isDefault && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`} title={branch.mergedInto.length ? `Eliminar ${branch.name}: ya integrada en ${branch.mergedInto.join(" y ")}, no se pierde trabajo` : `Eliminar ${branch.name}: sin integrar, Git rechazará el borrado si se perdería trabajo`}><Trash2 size={12} /></button>}</div>;
+  return <div className={`branch-row ${branch.isCurrent ? "current" : ""} ${merged ? "merged" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={click} onDoubleClick={doubleClick} disabled={branch.isCurrent || busy} aria-current={branch.isCurrent} title={branch.isCurrent ? branchTooltip(branch, defaultBranch) : `Doble clic para cambiar a ${branchTooltip(branch, defaultBranch)}`}><span className="branch-color" style={{ background: colour }} /><GitBranch size={14} /><span className="branch-label">{label}</span>{variant && <span className="branch-variant" title={`Escribe el prefijo de otra forma que el resto del repositorio. Sigue llamándose ${branch.name}.`}>variante</span>}{merged && <span className="branch-merged" role="img" aria-label={`Ya integrada en ${defaultBranch}`} title={`Ya integrada en ${defaultBranch}: borrarla no perdería trabajo`}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={`En uso por el worktree ${branch.checkedOutIn}`} title={`En uso por el worktree ${branch.checkedOutIn}`}><FolderGit2 size={12} /></span>}{protectedByPrefix && <span className="branch-protected" role="img" aria-label="Protegida por su prefijo" title="Protegida por su prefijo: las ramas de este tipo existen para conservarse, así que Branchline no las borra ni las propone para limpieza."><ShieldCheck size={12} /></span>}{stale > 0 && <span className="branch-stale" role="img" aria-label={`Sin actividad desde hace ${stale} días`} title={`Rama de vida corta sin actividad desde hace ${stale} días. Es una observación, no una propuesta de borrado.`}><Clock3 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">actual</span>}{isDefault && <span className="current-pill">principal</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && !isDefault && !protectedByPrefix && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`} title={branch.mergedInto.length ? `Eliminar ${branch.name}: ya integrada en ${branch.mergedInto.join(" y ")}, no se pierde trabajo` : `Eliminar ${branch.name}: sin integrar, Git rechazará el borrado si se perdería trabajo`}><Trash2 size={12} /></button>}</div>;
 }
 
 function CommitRow({ commit, index, onSelect }: { commit: Commit; index: number; onSelect: () => void }) {

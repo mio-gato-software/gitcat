@@ -6,6 +6,7 @@ import { basename, delimiter, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
 import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
 import { parseWorktrees } from "./worktrees.js";
+import { isProtectedBranch, lifecycleOf, staleAfterDays } from "../shared/branch-lifecycle.js";
 import {
   findAccount, isSshAuthenticated, parseGhAccounts, parseSshGreeting, parseSshResolvedHostName, sshConfigHostAliases
 } from "./host-identity.js";
@@ -738,6 +739,8 @@ function plannerState(snapshot: RepoSnapshot) {
       mergedInto: branch.mergedInto,
       // Another worktree holds it, so Git will refuse to check it out here until that one lets go.
       checkedOutIn: branch.checkedOutIn ?? null,
+      // What the prefix says this branch is for. "permanent" is protected from deletion, full stop.
+      lifecycle: lifecycleOf(branch.name),
       upstream: branch.upstream ?? null,
       // Against the upstream only. These say nothing about integration into another branch.
       ahead: branch.ahead,
@@ -749,6 +752,7 @@ function plannerState(snapshot: RepoSnapshot) {
     recentCommits: snapshot.commits.slice(0, 30).map((commit) => ({
       shortHash: commit.shortHash, subject: commit.subject, author: commit.author, date: commit.date, refs: commit.refs
     })),
+    staleAfterDays,
     remembered: {
       thisRepository: recallRepository(memory, snapshot.path) ?? null,
       identities: Object.entries(memory.identities).map(([hostAndOwner, entry]) => ({
@@ -805,13 +809,22 @@ async function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot): Promi
   };
 }
 
-function defaultBranchIssues(plan: ModelPlan, snapshot: RepoSnapshot): PlanIssue[] {
-  if (!snapshot.defaultBranch) return [];
+/**
+ * Deletions the repository protects, handed back as structured defects so the model corrects itself
+ * and explains why in the user's own language, instead of running into the guardrail as a raw error.
+ */
+function protectedBranchIssues(plan: ModelPlan, snapshot: RepoSnapshot): PlanIssue[] {
   return plan.steps.flatMap((step, index) => {
+    if (step.operation !== "delete_branch") return [];
     const name = operationArgs(step).name;
-    return step.operation === "delete_branch" && name === snapshot.defaultBranch
-      ? [{ field: `steps[${index}].args.name`, problem: `"${name}" is the repository's default branch and is protected; choose a non-default branch` }]
-      : [];
+    const field = `steps[${index}].args.name`;
+    if (snapshot.defaultBranch && name === snapshot.defaultBranch) {
+      return [{ field, problem: `"${name}" is the repository's default branch and is protected; choose a non-default branch` }];
+    }
+    if (isProtectedBranch(name)) {
+      return [{ field, problem: `"${name}" has a prefix whose branches are kept permanently; they exist to survive cleanups and are never deletion candidates` }];
+    }
+    return [];
   });
 }
 
@@ -850,7 +863,7 @@ async function draftFromPlan(
   };
 
   if (plan.intent === "git_operation") {
-    const issues = [...planIssues(plan), ...defaultBranchIssues(plan, snapshot)];
+    const issues = [...planIssues(plan), ...protectedBranchIssues(plan, snapshot)];
     return issues.length ? retry(issues) : gitOperationDraft(plan, snapshot);
   }
 
@@ -1005,6 +1018,10 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot) {
   if (operation === "create_branch" && snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(`La rama ${args.name} ya existe.`);
   if (operation === "delete_branch" && args.name === snapshot.defaultBranch) throw new Error(`No puedes borrar la rama por defecto (${snapshot.defaultBranch}).`);
   if (operation === "delete_branch" && args.name === snapshot.currentBranch) throw new Error("No puedes borrar la rama activa.");
+  // The prefix states the policy: a permanent branch exists to survive exactly this kind of cleanup.
+  if (operation === "delete_branch" && isProtectedBranch(args.name)) {
+    throw new Error(`La rama ${args.name} está protegida por su prefijo: las ramas de ese tipo existen para conservarse.`);
+  }
   if (operation === "rename_branch") {
     // The default branch is what integration is measured against, so its name is not a detail to change here.
     if (args.name === snapshot.defaultBranch) throw new Error(`No puedes renombrar la rama por defecto (${snapshot.defaultBranch}).`);

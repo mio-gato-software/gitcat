@@ -195,6 +195,13 @@ there are no safe candidates. Do not treat two branches pointing at different co
 unintegrated: an older tip that the default branch already contains is integrated. Never fall back to
 comparing "ahead" and "behind" for this, as they only compare a branch with its own upstream.
 
+Each branch carries a "lifecycle" derived from its prefix, which is policy rather than description.
+"permanent": kept on purpose — these branches exist to survive cleanups, so they are never deletion
+candidates, never described as safe to remove and never counted as integrated, whatever their history
+says. Deleting one is refused outright. "ephemeral": the ones a cleanup is actually about.
+"short": worth remarking on when it has not moved for "staleAfterDays" days or more, but ageing is
+never by itself a reason to delete anything. "medium" and "unknown" get no special treatment.
+
 "rename_branch" takes "name" and "to". It renames a local branch and nothing else: the history is
 untouched and the remote branch keeps its published name, so a branch with an upstream stays
 published under the old one. Only rename when the user asked for it in this conversation. A naming

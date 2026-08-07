@@ -1,4 +1,6 @@
 import type { Branch } from "./types.js";
+import { isProtectedBranch } from "./branch-lifecycle.js";
+import type { LifecycleRule } from "./branch-lifecycle.js";
 
 /**
  * How the branch list is ordered before it is grouped. Ordering happens first on purpose: the tree
@@ -49,8 +51,11 @@ export function sortBranches(branches: Branch[], order: BranchOrder, context: Br
 /**
  * A branch whose tip the default branch already contains: its work is there, so the row is noise
  * rather than a pending task. The current branch is never counted, because hiding what you are
- * standing on would be a way to lose the panel rather than to clean it.
+ * standing on would be a way to lose the panel rather than to clean it. Neither is a branch its
+ * prefix keeps permanently: `backup/pre-trailer-rewrite` is integrated by definition and exists
+ * anyway, so dimming it would say the opposite of what it is for.
  */
-export function isMergedIntoDefault(branch: Branch, defaultBranch?: string) {
-  return Boolean(defaultBranch) && !branch.isCurrent && branch.name !== defaultBranch && branch.mergedInto.includes(defaultBranch!);
+export function isMergedIntoDefault(branch: Branch, defaultBranch?: string, rules?: LifecycleRule[]) {
+  return Boolean(defaultBranch) && !branch.isCurrent && branch.name !== defaultBranch &&
+    !isProtectedBranch(branch.name, rules) && branch.mergedInto.includes(defaultBranch!);
 }

@@ -151,6 +151,26 @@ test("la consistencia de nombres se sugiere, nunca se aplica sola", async () => 
   assert.doesNotMatch(app, /disabled=\{.*hint/, "un aviso de convención nunca impide crear la rama");
 });
 
+test("el prefijo declara una política y las acciones protegidas la aplican", async () => {
+  const table = await readFile(join(root, "shared/branch-lifecycle.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  // Una tabla de datos que ambos procesos resuelven, no reglas repartidas por el código.
+  assert.match(table, /export const defaultLifecycleRules: LifecycleRule\[\]/);
+  assert.match(table, /\{ prefix: "backup", lifecycle: "permanent" \}/);
+  assert.doesNotMatch(table, /if \(prefix === "backup"\)/);
+  // La protección es una guardia real en la capa que ejecuta, no solo un adorno de la interfaz.
+  assert.match(service, /if \(operation === "delete_branch" && isProtectedBranch\(args\.name\)\)/);
+  assert.match(service, /está protegida por su prefijo/);
+  assert.match(service, /function protectedBranchIssues/);
+  assert.match(service, /lifecycle: lifecycleOf\(branch\.name\)/);
+  assert.match(planner, /never deletion\ncandidates/);
+  // Y una rama permanente jamás se pinta como integrada ni ofrece su papelera.
+  assert.match(app, /!protectedByPrefix && branch\.presence !== "remote"/);
+  assert.match(app, /const protectedByPrefix = isProtectedBranch\(branch\.name\)/);
+});
+
 test("una rama dice si vive en local, en el remoto o en ambos", async () => {
   const types = await readFile(join(root, "shared/types.ts"), "utf8");
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
