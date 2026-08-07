@@ -1248,10 +1248,22 @@ export async function planAction(cwd: string, request: string, context: Conversa
   }
 }
 
-/** What a free-form command costs: read-only subcommands stay low; anything else is high, on the app's word. */
+/**
+ * What a free-form command costs, on the app's word: these subcommands only read — they leave the
+ * working tree, the history and everything published untouched — so they are "low" and may run
+ * unattended. Anything else is "high" and always waits for confirmation. "reflog" stays out:
+ * "reflog expire" rewrites, so the subcommand alone does not prove read-only.
+ */
 const readOnlyGitSubcommands = new Set([
-  "blame", "describe", "diff", "grep", "log", "ls-files", "ls-remote", "reflog", "rev-list", "rev-parse", "shortlog", "show", "status"
+  "blame", "describe", "diff", "grep", "log", "ls-files", "ls-remote", "rev-list", "rev-parse", "shortlog", "show", "status"
 ]);
+
+/** A step that leaves the repository exactly as it found it can run without asking. */
+function isUnattended(step: PlanStep) {
+  const argv = step.argv ?? [];
+  if (step.operation === "git_command") return argv.length > 0 && readOnlyGitSubcommands.has(argv[0]);
+  return unattendedOperations.has(step.operation);
+}
 
 function operationDraft(operation: Operation, args: Record<string, string>, snapshot?: RepoSnapshot, argv: string[] = []): PlanDraft {
   const details: Partial<Record<Operation, [string, string, ActionPlan["risk"]]>> = {
@@ -1315,7 +1327,7 @@ function sequenceDraft(steps: PlanStep[], rationale: string, effects?: string[])
     summary: steps.length === 1 ? steps[0].summary : steps.map((step) => step.summary).join(", luego "),
     rationale,
     risk,
-    requiresConfirmation: steps.some((step) => !unattendedOperations.has(step.operation)),
+    requiresConfirmation: steps.some((step) => !isUnattended(step)),
     kind: "plan",
     source: "guardrail"
   };

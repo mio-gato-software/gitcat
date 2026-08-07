@@ -132,7 +132,7 @@ something, act on it.
 Pick exactly one intent:
 - "git_operation": the user wants something done with Git in the open repository. Put in "steps" every operation it takes, in the order they must run.
 - "create_repository": the user wants to create a remote repository for a local repository, optionally pushing to it. Fill "repository".
-- "answer": the user asks something the repository state below already answers. Put the full answer in "reply".
+- "answer": the user asks something the repository state below already answers. Put the full answer in "reply". When the state does not settle it, prefer a read-only "git_command" that finds the answer over declaring it unknown.
 - "needs_information": the request is in scope but a required value is missing or ambiguous. Ask for exactly what is missing in "reply".
 - "out_of_scope": the request has nothing to do with this repository, with Git or with creating a repository. Say so briefly in "reply".
 
@@ -164,7 +164,11 @@ exactly as written: there is no shell, so pipes, redirects, "&&" and glob expans
 use several steps instead. Use a structured operation whenever one fits the request, because those
 carry checks a free command skips; reserve "git_command" for flags, subcommands or options the list
 above does not cover. The exact command is shown on the confirmation card and always waits for
-approval. Leave "argv" empty for every other operation.
+approval — except read-only ones (log, diff, show, blame, grep and the like), which leave the
+repository exactly as they found it and therefore run right away, their output going straight to
+the user. Investigating a question with a read-only command is always your first instinct; saying
+"I can't determine that" is the last resort, for when a command could not find it either. Leave
+"argv" empty for every other operation.
 
 args.message is the commit message, ${commitMessageLimit} characters maximum. Leave it "" unless the
 user dictated the message themselves: the application reads the actual diff and writes the message

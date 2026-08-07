@@ -192,7 +192,7 @@ test("git_command ejecuta el comando completo que propone el modelo, sin shell",
   assert.equal(result.allowed, true, result.rationale);
   assert.equal(result.steps[0].command, "git switch -c libre");
   assert.equal(result.steps[0].risk, "high");
-  assert.equal(result.requiresConfirmation, true, "un comando libre siempre pasa por la tarjeta");
+  assert.equal(result.requiresConfirmation, true, "un comando libre que escribe siempre pasa por la tarjeta");
 
   const execution = await service.executePlan(repo, result);
   assert.equal(execution.error, undefined, execution.error);
@@ -226,6 +226,32 @@ test("git_command sin argv vuelve al modelo como incidencia estructurada", async
   assert.equal(requests.length, 2);
   assert.match(requests[1].instructions, /git_command needs the full command/);
   assert.equal(result.allowed, false);
+});
+
+test("un git_command de solo lectura corre sin confirmación; uno que escribe, no", async () => {
+  reply(plan({
+    intent: "git_operation",
+    steps: [step("git_command", {}, ["log", "-1", "--format=%ad"])],
+    summary: "Leer la fecha del último commit", rationale: "…", risk: "low"
+  }));
+  const reading = await service.planAction(repo, "¿cuándo fue el último commit?");
+  assert.equal(reading.allowed, true, reading.rationale);
+  assert.equal(reading.requiresConfirmation, false, "un comando de solo lectura no pide tarjeta");
+  assert.equal(reading.risk, "low");
+
+  const execution = await service.executePlan(repo, reading);
+  assert.equal(execution.error, undefined, execution.error);
+  assert.match(execution.output, /\d{2}:\d{2}:\d{2}/, "la salida del comando llega al usuario");
+
+  reply(plan({
+    intent: "git_operation",
+    steps: [step("git_command", {}, ["push", "--no-verify"])],
+    summary: "Push sin verificaciones", rationale: "…", risk: "high"
+  }));
+  const writing = await service.planAction(repo, "push it with --no-verify");
+  assert.equal(writing.requiresConfirmation, true, "escribir siempre pasa por la tarjeta");
+  assert.equal(writing.steps[0].command, "git push --no-verify");
+  assert.equal(writing.steps[0].risk, "high");
 });
 
 test("“merge this branch to main” se planifica y se ejecuta de principio a fin", async () => {

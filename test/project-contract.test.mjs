@@ -28,15 +28,16 @@ test("la capa de Git evita ejecutar comandos libres", async () => {
   assert.doesNotMatch(service, /exec\(.*command/);
 });
 
-test("git_command da libertad al modelo sin shell, sin desatender y sin saltarse protecciones", async () => {
+test("git_command da libertad al modelo sin shell y sin saltarse protecciones", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
   // El comando libre se ejecuta como lista de argumentos: nunca se interpreta por un shell.
   assert.match(service, /case "git_command": return reportedGit\(cwd, step\.argv \?\? \[\]\)/);
   assert.doesNotMatch(service, /exec\(.*command/);
   assert.match(planner, /there is no shell/);
-  // Nunca entra en las operaciones desatendidas: un comando libre siempre pasa por la tarjeta.
-  assert.match(service, /const unattendedOperations = new Set<Operation>\(\["status", "fetch"\]\)/);
+  // Investigar es su primer instinto: los de solo lectura corren sin confirmación; el resto, jamás.
+  assert.match(service, /readOnlyGitSubcommands/);
+  assert.match(planner, /first instinct/);
   // La protección de ramas también cubre los borrados por comando libre.
   assert.match(service, /gitBranchDeletions/);
   assert.match(planner, /only git_command takes an argument list/);
@@ -317,7 +318,9 @@ test("una acción que no puede perder trabajo se ejecuta sin pedir confirmación
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
   // El criterio vive en un solo sitio y es restrictivo a propósito.
   assert.match(service, /const unattendedOperations = new Set<Operation>\(\["status", "fetch"\]\)/);
-  assert.match(service, /requiresConfirmation: steps\.some\(\(step\) => !unattendedOperations\.has\(step\.operation\)\)/);
+  assert.match(service, /requiresConfirmation: steps\.some\(\(step\) => !isUnattended\(step\)\)/);
+  // Un comando libre solo corre desatendido si su subcomando es de solo lectura.
+  assert.match(service, /if \(step\.operation === "git_command"\) return argv\.length > 0 && readOnlyGitSubcommands\.has\(argv\[0\]\)/);
   // El flag ahora manda: se ejecuta solo, y la tarjeta no ofrece un botón que no decide nada.
   assert.match(app, /if \(unattended\) await runPlan\(turnId, plan\)/);
   assert.match(app, /plan\.allowed && !plan\.requiresConfirmation/);
