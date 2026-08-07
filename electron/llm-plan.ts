@@ -202,6 +202,11 @@ says. Deleting one is refused outright. "ephemeral": the ones a cleanup is actua
 "short": worth remarking on when it has not moved for "staleAfterDays" days or more, but ageing is
 never by itself a reason to delete anything. "medium" and "unknown" get no special treatment.
 
+A branch with a "stackedOn" continues that branch: its tip already contains that one's, which Git
+confirmed. That is the order the work has to be rebased or merged in — the base first, then the one
+standing on it — and deleting or rebasing the base without saying what happens to what stands on it
+is an answer with a hole in it.
+
 "rename_branch" takes "name" and "to". It renames a local branch and nothing else: the history is
 untouched and the remote branch keeps its published name, so a branch with an upstream stays
 published under the old one. Only rename when the user asked for it in this conversation. A naming

@@ -226,6 +226,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 /* La política que declara el prefijo: lo que se conserva, y lo que lleva demasiado quieto. */
 .branch-protected { flex: none; display: inline-flex; color: #6bd0be; }
 .branch-stale { flex: none; display: inline-flex; color: #d5a969; }
+/* Apilada sobre otra: la sangría es el orden de rebase implícito. */
+.branch-row.stacked .branch-stack-icon { color: #8fb0c9; transform: rotate(180deg); }
 /* Consistencia de nombres: observaciones descartables, nunca acciones. */
 .naming-suggestion { margin-top: 9px; padding: 9px; background: #141d2a; border: 1px solid #2b3b52; border-radius: 7px; }
 .naming-heading { display: flex; align-items: flex-start; gap: 7px; }

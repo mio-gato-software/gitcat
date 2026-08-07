@@ -171,6 +171,25 @@ test("el prefijo declara una política y las acciones protegidas la aplican", as
   assert.match(app, /const protectedByPrefix = isProtectedBranch\(branch\.name\)/);
 });
 
+test("una rama apilada lo está porque Git lo confirma, no porque el nombre lo sugiera", async () => {
+  const candidates = await readFile(join(root, "electron/stacked-branches.ts"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const types = await readFile(join(root, "shared/types.ts"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  // Los nombres solo proponen los pares; nunca deciden.
+  assert.doesNotMatch(candidates, /runGit|spawn\(|merge-base/);
+  assert.match(candidates, /export function stackCandidates/);
+  assert.match(service, /\["merge-base", "--is-ancestor", ancestor, descendant\]/);
+  assert.match(service, /if \(await isAncestor\(repoRoot, baseTip, stackedTip\)\)/);
+  // El cálculo se cachea por las dos puntas, que es lo que lo hace válido para siempre.
+  assert.match(service, /const key = `\$\{ancestor\}\\0\$\{descendant\}`/);
+  assert.match(service, /result\.code !== 0 && result\.code !== 1/, "un fallo del comando no se cachea como respuesta");
+  assert.match(types, /stackedOn\?: string/);
+  assert.match(service, /stackedOn: branch\.stackedOn \?\? null/);
+  // Solo relaciones directas: el árbol anida un nivel y no reconstruye cadenas.
+  assert.match(app, /\.\.\.node\.stacked\.map\(\(branch\) => branchRow\(branch, depth \+ 1, trim\)\)/);
+});
+
 test("una rama dice si vive en local, en el remoto o en ambos", async () => {
   const types = await readFile(join(root, "shared/types.ts"), "utf8");
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");

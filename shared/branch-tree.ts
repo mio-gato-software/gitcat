@@ -15,7 +15,8 @@ export const rootGroupKey = " root";
 export type BranchGroupKind = "prefix" | "root";
 
 export type BranchNode =
-  | { kind: "branch"; branch: Branch }
+  /** `stacked` holds the branches that continue this one, nested one level and never a chain. */
+  | { kind: "branch"; branch: Branch; stacked: Branch[] }
   | { kind: "group"; group: BranchGroup };
 
 export type BranchGroup = {
@@ -60,7 +61,30 @@ export function subgroupToken(name: string) {
 }
 
 function countBranches(nodes: BranchNode[]): number {
-  return nodes.reduce((total, node) => total + (node.kind === "branch" ? 1 : node.group.count), 0);
+  return nodes.reduce((total, node) => total + (node.kind === "branch" ? 1 + node.stacked.length : node.group.count), 0);
+}
+
+/**
+ * Branch rows for one list, with the branches that continue another nested under it. Nesting is one
+ * level deep by design: when A ← B ← C, C stays at its own level rather than being re-pointed at A,
+ * because flattening a chain onto its root would claim a relation Git was never asked about. Whatever
+ * happens, no branch is dropped — a row that is not nested is a row that stands on its own.
+ */
+function branchNodes(branches: Branch[]): BranchNode[] {
+  const present = new Map(branches.map((branch) => [branch.name, branch]));
+  const baseOf = (branch: Branch) => branch.stackedOn && present.has(branch.stackedOn) ? branch.stackedOn : undefined;
+  const nestable = (branch: Branch) => {
+    const base = baseOf(branch);
+    return base && !baseOf(present.get(base)!) ? base : undefined;
+  };
+  const followers = new Map<string, Branch[]>();
+  for (const branch of branches) {
+    const base = nestable(branch);
+    if (base) followers.set(base, [...(followers.get(base) ?? []), branch]);
+  }
+  return branches
+    .filter((branch) => !nestable(branch))
+    .map((branch) => ({ kind: "branch" as const, branch, stacked: followers.get(branch.name) ?? [] }));
 }
 
 /**
@@ -79,16 +103,26 @@ function buildGroup(prefix: string, branches: Branch[], threshold: number): Bran
 
   const children: BranchNode[] = [];
   const emitted = new Set<string>();
+  const loose = branchNodes(branches.filter((branch) => {
+    const token = subgroupToken(branch.name);
+    return !token || !promoted.has(token);
+  }));
+  const looseByName = new Map(loose.map((node) => [node.kind === "branch" ? node.branch.name : "", node]));
   for (const branch of branches) {
     const token = subgroupToken(branch.name);
-    if (!token || !promoted.has(token)) { children.push({ kind: "branch", branch }); continue; }
+    if (!token || !promoted.has(token)) {
+      // A branch nested under another is drawn there, not twice.
+      const node = looseByName.get(branch.name);
+      if (node) children.push(node);
+      continue;
+    }
     if (emitted.has(token)) continue;
     emitted.add(token);
     // The subgroup takes the place of its first member, so an ordered input stays ordered.
-    const grouped = members.get(token) ?? [];
+    const grouped = branchNodes(members.get(token) ?? []);
     children.push({
       kind: "group",
-      group: { key: `${prefix}/${token}`, label: token, kind: "prefix", count: grouped.length, children: grouped.map((item) => ({ kind: "branch", branch: item })) }
+      group: { key: `${prefix}/${token}`, label: token, kind: "prefix", count: countBranches(grouped), children: grouped }
     });
   }
   return { key: prefix, label: prefix, kind: "prefix", count: branches.length, children };
@@ -109,7 +143,7 @@ export function buildBranchTree(branches: Branch[], options: BranchTreeOptions =
   const groups = [...byPrefix].map(([prefix, group]) => buildGroup(prefix, group, threshold));
   // Branches with no prefix close the list: they are the exception, not the heading of anything.
   if (rootless.length) {
-    groups.push({ key: rootGroupKey, label: "", kind: "root", count: rootless.length, children: rootless.map((branch) => ({ kind: "branch", branch })) });
+    groups.push({ key: rootGroupKey, label: "", kind: "root", count: rootless.length, children: branchNodes(rootless) });
   }
   return { groups, showHeaders: groups.length > 1 };
 }
@@ -121,8 +155,15 @@ export function buildBranchTree(branches: Branch[], options: BranchTreeOptions =
 export function filterBranchTree(tree: BranchTree, query: string): BranchTree {
   const needle = query.trim().toLocaleLowerCase();
   if (!needle) return tree;
+  const matches = (name: string) => name.toLocaleLowerCase().includes(needle);
   const keep = (nodes: BranchNode[]): BranchNode[] => nodes.flatMap<BranchNode>((node) => {
-    if (node.kind === "branch") return node.branch.name.toLocaleLowerCase().includes(needle) ? [node] : [];
+    if (node.kind === "branch") {
+      const stacked = node.stacked.filter((branch) => matches(branch.name));
+      if (matches(node.branch.name)) return [{ ...node, stacked }];
+      // The base did not match, so its followers stand on their own instead of dragging a row the
+      // user did not search for back into the list.
+      return stacked.map((branch) => ({ kind: "branch" as const, branch, stacked: [] }));
+    }
     const children = keep(node.group.children);
     return children.length ? [{ kind: "group" as const, group: { ...node.group, children, count: countBranches(children) } }] : [];
   });
@@ -136,7 +177,10 @@ export function filterBranchTree(tree: BranchTree, query: string): BranchTree {
 
 function pathWithin(group: BranchGroup, name: string): string[] | undefined {
   for (const node of group.children) {
-    if (node.kind === "branch") { if (node.branch.name === name) return [group.key]; continue; }
+    if (node.kind === "branch") {
+      if (node.branch.name === name || node.stacked.some((branch) => branch.name === name)) return [group.key];
+      continue;
+    }
     const nested = pathWithin(node.group, name);
     if (nested) return [group.key, ...nested];
   }

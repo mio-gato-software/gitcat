@@ -6,6 +6,7 @@ import { basename, delimiter, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
 import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
 import { parseWorktrees } from "./worktrees.js";
+import { stackCandidates } from "./stacked-branches.js";
 import { isProtectedBranch, lifecycleOf, staleAfterDays } from "../shared/branch-lifecycle.js";
 import {
   findAccount, isSshAuthenticated, parseGhAccounts, parseSshGreeting, parseSshResolvedHostName, sshConfigHostAliases
@@ -220,6 +221,45 @@ async function markIntegration(repoRoot: string, branches: Branch[], targets: (s
 }
 
 /**
+ * Ancestry answers keyed by the two tips they were asked about. Two commits either are in that
+ * relation or are not, so the answer never goes stale: a branch that moves brings a new tip and a new
+ * key with it. This is what keeps the panel from paying for the same question on every refresh.
+ */
+const ancestryCache = new Map<string, boolean>();
+
+async function isAncestor(repoRoot: string, ancestor: string, descendant: string) {
+  const key = `${ancestor}\0${descendant}`;
+  const cached = ancestryCache.get(key);
+  if (cached !== undefined) return cached;
+  const result = await runGit(repoRoot, ["merge-base", "--is-ancestor", ancestor, descendant], 10_000)
+    .catch(() => undefined);
+  // Only 0 and 1 are answers; anything else (a missing object, a timeout) is not cached as one.
+  if (!result || (result.code !== 0 && result.code !== 1)) return false;
+  const answer = result.code === 0;
+  if (ancestryCache.size >= 4_000) ancestryCache.clear();
+  ancestryCache.set(key, answer);
+  return answer;
+}
+
+/**
+ * Fills in which branch each branch continues. The names propose the pairs and Git decides them, so a
+ * branch that merely reads like a continuation of another is not shown as one.
+ */
+async function markStacking(repoRoot: string, branches: Branch[]) {
+  const tips = new Map(branches.filter((branch) => branch.lastCommit).map((branch) => [branch.name, branch.lastCommit!.hash]));
+  for (const { base, stacked } of stackCandidates([...tips.keys()])) {
+    const baseTip = tips.get(base)!;
+    const stackedTip = tips.get(stacked)!;
+    // A pair sitting on the very same commit is not a stack; neither one continues the other.
+    if (baseTip === stackedTip) continue;
+    if (await isAncestor(repoRoot, baseTip, stackedTip)) {
+      const branch = branches.find((item) => item.name === stacked);
+      if (branch) branch.stackedOn = base;
+    }
+  }
+}
+
+/**
  * Remote-tracking branches keyed by the local branch name they correspond to, so the interface can
  * say whether a branch lives here, on a remote, or on both. The remote prefix is stripped using the
  * configured remote names, because a branch name may itself contain slashes.
@@ -293,6 +333,7 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     if (localNames.has(name)) continue;
     branches.push({ name, remoteRef: remote.ref, presence: "remote", mergedInto: [], ahead: 0, behind: 0, isCurrent: false, lastCommit: remote.lastCommit });
   }
+  await markStacking(repoRoot, branches);
   const worktrees = parseWorktrees(await optionalGit(repoRoot, ["worktree", "list", "--porcelain"]), repoRoot);
   for (const branch of branches) branch.checkedOutIn = worktrees.get(branch.name);
   const defaultBranchResolution = await resolveDefaultBranch(repoRoot, remotes, localNames);
@@ -741,6 +782,8 @@ function plannerState(snapshot: RepoSnapshot) {
       checkedOutIn: branch.checkedOutIn ?? null,
       // What the prefix says this branch is for. "permanent" is protected from deletion, full stop.
       lifecycle: lifecycleOf(branch.name),
+      // Verified by Git: this branch continues that one, so that one rebases first.
+      stackedOn: branch.stackedOn ?? null,
       upstream: branch.upstream ?? null,
       // Against the upstream only. These say nothing about integration into another branch.
       ahead: branch.ahead,

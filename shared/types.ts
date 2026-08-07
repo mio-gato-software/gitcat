@@ -23,6 +23,11 @@ export type Branch = {
    * here, because that branch is already the current one.
    */
   checkedOutIn?: string;
+  /**
+   * The branch this one continues: its tip is an ancestor of this one's and its name opens this
+   * one's. Verified against Git, not guessed from the name, and only ever a direct relation.
+   */
+  stackedOn?: string;
   lastCommit?: Commit;
 };
 
