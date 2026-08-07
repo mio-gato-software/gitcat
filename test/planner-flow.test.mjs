@@ -254,6 +254,26 @@ test("un git_command de solo lectura corre sin confirmación; uno que escribe, n
   assert.equal(writing.steps[0].risk, "high");
 });
 
+test("una investigación con varios comandos de solo lectura corre entera sin confirmación", async () => {
+  reply(plan({
+    intent: "git_operation",
+    steps: [
+      step("git_command", {}, ["log", "--diff-filter=A", "--follow", "--format=%an <%ae> %ad", "--", "README.md"]),
+      step("git_command", {}, ["log", "--diff-filter=D", "--format=%an <%ae> %ad", "--", "README.md"])
+    ],
+    summary: "Consultar el historial del archivo", rationale: "El usuario pregunta quién lo creó y quién lo eliminó.", risk: "low"
+  }));
+  const result = await service.planAction(repo, "investiga quién creó README.md, cuándo y quién lo eliminó");
+  assert.equal(result.allowed, true, result.rationale);
+  assert.equal(result.requiresConfirmation, false, "investigar no pide tarjeta");
+  assert.equal(result.steps.length, 2);
+
+  const execution = await service.executePlan(repo, result);
+  assert.equal(execution.error, undefined, execution.error);
+  assert.deepEqual(execution.outcomes.map((item) => item.status), ["completed", "completed"]);
+  assert.match(execution.output, /Prueba Uno/, "el autor del commit de creación aparece en la salida");
+});
+
 test("“merge this branch to main” se planifica y se ejecuta de principio a fin", async () => {
   git("switch", "-c", "feature/x");
   writeFileSync(join(repo, "feature.txt"), "trabajo\n");

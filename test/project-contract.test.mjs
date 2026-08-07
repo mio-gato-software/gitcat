@@ -38,6 +38,9 @@ test("git_command da libertad al modelo sin shell y sin saltarse protecciones", 
   // Investigar es su primer instinto: los de solo lectura corren sin confirmación; el resto, jamás.
   assert.match(service, /readOnlyGitSubcommands/);
   assert.match(planner, /first instinct/);
+  // Anunciar que lo hará no vale: la investigación es un git_operation, en este turno.
+  assert.match(planner, /is "git_operation" with read-only "git_command" steps, never "answer" or\n"needs_information"/);
+  assert.match(planner, /is a failed turn/);
   // La protección de ramas también cubre los borrados por comando libre.
   assert.match(service, /gitBranchDeletions/);
   assert.match(planner, /only git_command takes an argument list/);
