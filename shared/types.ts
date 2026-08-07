@@ -66,6 +66,8 @@ export type RepoSnapshot = {
   branches: Branch[];
   commits: Commit[];
   remotes: string[];
+  /** Each remote's URL, keyed by its name: which one a push would actually reach. */
+  remoteUrls: Record<string, string>;
 };
 
 /**

@@ -8,6 +8,7 @@ import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories
 import { parseWorktrees } from "./worktrees.js";
 import { stackCandidates } from "./stacked-branches.js";
 import { parseNameStatus } from "./diff-status.js";
+import { parseRemoteUrls } from "./remotes.js";
 import { isProtectedBranch, lifecycleOf, staleAfterDays } from "../shared/branch-lifecycle.js";
 import {
   findAccount, isSshAuthenticated, parseGhAccounts, parseSshGreeting, parseSshResolvedHostName, sshConfigHostAliases
@@ -364,7 +365,8 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     changes: parseStatus(statusRaw),
     branches,
     commits,
-    remotes
+    remotes,
+    remoteUrls: parseRemoteUrls(await optionalGit(repoRoot, ["remote", "-v"]))
   };
 }
 

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, PointerEvent as ReactPointerEvent } from "react";
 import {
-  AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Bot, Check, ChevronDown, ChevronRight, CircleDot,
+  AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Bot, Check, ChevronRight, CircleDot,
   Clock3, Cloud, Eye, EyeOff, FileDiff, FolderGit2, FolderOpen, GitBranch, GitCommitHorizontal, GitFork,
   ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List, ListTree, LoaderCircle, MessageCircle, Palette, Plus, RefreshCcw,
   Search, Send, Settings2, ShieldCheck, Sparkles, Tag, TerminalSquare, Trash2, UserRound, X
@@ -42,6 +42,33 @@ function formatDate(date: string) {
   const value = new Date(date);
   if (Number.isNaN(value.valueOf())) return date;
   return new Intl.DateTimeFormat(undefined, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(value);
+}
+
+/**
+ * A remote URL as something you can read at a glance. Both spellings Git accepts say the same thing —
+ * `git@host:owner/repo.git` and `https://host/owner/repo.git` — so both collapse to `host/owner/repo`.
+ * An SSH alias survives on purpose: on a machine with several accounts, the alias *is* the identity.
+ */
+function shortRemote(url: string) {
+  return url
+    .replace(/^[a-z+]+:\/\//i, "")
+    .replace(/^[^@/]+@/, "")
+    .replace(/:(?!\d)/, "/")
+    .replace(/\.git$/, "")
+    .replace(/\/$/, "");
+}
+
+function remoteLabel(snapshot: RepoSnapshot) {
+  const name = snapshot.remotes[0];
+  if (!name) return "Sin remoto";
+  const url = snapshot.remoteUrls[name];
+  const extra = snapshot.remotes.length > 1 ? ` +${snapshot.remotes.length - 1}` : "";
+  return `${url ? shortRemote(url) : name}${extra}`;
+}
+
+function remoteTitle(snapshot: RepoSnapshot) {
+  if (!snapshot.remotes.length) return "Este repositorio no tiene remoto configurado, así que un push no tendría a dónde ir.";
+  return snapshot.remotes.map((name) => `${name}: ${snapshot.remoteUrls[name] ?? "sin URL"}`).join("\n");
 }
 
 function shortPath(path: string) {
@@ -676,8 +703,6 @@ export default function App() {
               onDelete={(name) => void prepare("delete_branch", { name })}
               onRename={(name, to) => void prepare("rename_branch", { name, to })}
             />
-            <div className="sidebar-section"><div className="section-heading"><span>REMOTOS</span><button className="mini-icon" onClick={() => void prepare("fetch")} aria-label="Actualizar remotos" disabled={planning}><RefreshCcw size={13} /></button></div>{snapshot.remotes.length ? snapshot.remotes.map((remote) => <div className="remote-row" key={remote}><Cloud size={14} /><span>{remote}</span><span className="remote-count">configurado</span></div>) : <div className="empty-small">Sin remotos configurados.</div>}</div>
-            <div className="sidebar-bottom"><div className="security-note"><ShieldCheck size={15} /><span>Acciones protegidas<br /><small>Git se ejecuta con una lista segura. La rama por defecto y las que su prefijo conserva no se borran.</small></span></div><button className="sidebar-settings" onClick={() => setSettingsOpen(true)}><Settings2 size={15} /> Configuración LLM <ChevronDown size={13} /></button></div>
           </aside>
 
           <section className="graph-area">
@@ -690,7 +715,7 @@ export default function App() {
 
           <aside className="inspector"><div className="inspector-header"><div><div className="eyebrow">ASISTENTE DE RAMAS</div><h2>¿Qué quieres saber o hacer?</h2></div><div className="assistant-icon"><Bot size={18} /></div></div><p className="assistant-copy">{config.configured ? "Pregunta sobre el repositorio o describe una acción de Git. Las acciones se muestran como un plan verificable antes de ejecutarse." : "Sin proveedor LLM el asistente no puede interpretar nada. Configúralo para preguntar o describir acciones; el resto de la interfaz funciona igual."}</p>{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? `${conversation.length} mensaje${conversation.length === 1 ? "" : "s"}` : "Nueva conversación"}</span><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> Limpiar conversación</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: "Plan descartado sin modificar el repositorio." }))} />)}<div ref={conversationEnd} /></div><div className="chat-compose"><textarea aria-label="Solicitud para el asistente" disabled={!config.configured} value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder={config.configured ? "Ej. ¿quién trabajó en esta rama la última vez?" : "Configura un proveedor LLM para escribirle al asistente"} rows={3} /><button className="send-button" aria-label="Preparar solicitud" onClick={() => void propose(request)} disabled={planning || !request.trim() || !config.configured}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div></aside>
         </main>
-        <footer className="statusbar"><div className="status-left"><span className="status-good"><CircleDot size={12} /> {snapshot.isDirty ? `${snapshot.changes.length} cambio${snapshot.changes.length === 1 ? "" : "s"}` : "Sin cambios locales"}</span><span className="status-separator" /><span>{branchCount.local === 1 ? "1 rama local" : `${branchCount.local} ramas locales`}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} solo en el remoto` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> Última lectura {formatDate(active.loadedAt)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : "LLM no configurado"}</span></div></footer>
+        <footer className="statusbar"><div className="status-left"><span className="status-good"><CircleDot size={12} /> {snapshot.isDirty ? `${snapshot.changes.length} cambio${snapshot.changes.length === 1 ? "" : "s"}` : "Sin cambios locales"}</span><span className="status-separator" /><span>{branchCount.local === 1 ? "1 rama local" : `${branchCount.local} ramas locales`}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} solo en el remoto` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> Última lectura {formatDate(active.loadedAt)}</span><span className="remote-status" title={remoteTitle(snapshot)}><Cloud size={12} /> {remoteLabel(snapshot)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : "LLM no configurado"}</span></div></footer>
       </>}
       {activity.length > 0 && <div className="activity-dock" aria-live="polite">{activity.slice(0, 3).map((item) => <div className={`activity-item ${item.tone}`} role={item.tone === "warning" ? "alert" : "status"} key={item.id}><span className="activity-symbol">{item.tone === "success" ? <Check size={13} /> : item.tone === "warning" ? <AlertTriangle size={13} /> : <GitCommitHorizontal size={13} />}</span><div className="activity-copy"><strong>{item.label}</strong><span title={item.detail}>{item.detail}</span></div><button className="activity-close" onClick={() => dismissActivity(item.id)} aria-label={`Cerrar notificación: ${item.label}`}><X size={14} /></button></div>)}</div>}
       {toast && <div className={`toast ${toast.tone}`} role={toast.tone === "error" ? "alert" : "status"}>{toast.tone === "error" ? <AlertTriangle size={15} /> : <Check size={15} />}<span>{toast.message}</span><button onClick={() => setToast(undefined)} aria-label="Cerrar notificación"><X size={14} /></button></div>}
