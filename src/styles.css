@@ -336,3 +336,28 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .workspace-loading { flex: 1; display: grid; place-content: center; justify-items: center; gap: 12px; color: #74899c; font-size: 11px; }
 .workspace-loading svg { color: #6bd8cb; }
 .app-shell.platform-darwin .topbar { padding-left: 88px; }
+
+/* Una operación a medias y su salida: cada opción dice lo que cuesta. */
+.rebase-banner { flex-wrap: wrap; }
+.rebase-banner .outline-button { flex: none; }
+.resolving-overlay { position: fixed; inset: 0; z-index: 11; display: grid; place-content: center; justify-items: center; gap: 14px; color: #cfe0ec; background: #060a0fcc; backdrop-filter: blur(4px); font-size: 12px; }
+.resolving-overlay svg { color: #6bd8cb; }
+
+/* La revisión de la propuesta: aceptar es un acto deliberado por archivo. */
+.resolution { margin-top: 14px; border: 1px solid #223442; border-radius: 8px; overflow: hidden; }
+.resolution.accepted { border-color: #2f5d59; }
+.resolution-heading { display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; background: #101b26; cursor: pointer; }
+.resolution.accepted .resolution-heading { background: #12211f; }
+.resolution-heading input { width: 15px; height: 15px; margin: 1px 0 0; flex: none; accent-color: #68d9ca; }
+.resolution-heading > div { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.resolution-heading strong { color: #dbe7f3; font-size: 11px; overflow-wrap: anywhere; }
+.resolution-heading span { color: #8199ad; font-size: 10px; line-height: 1.5; }
+.resolution-doubt { flex: none; padding: 3px 7px; color: #e6c07b; background: #2c2418; border: 1px solid #5a482a; border-radius: 4px; font-size: 9px; font-weight: 700; }
+.resolution .diff-view { margin-top: 0; border: 0; border-top: 1px solid #223442; border-radius: 0; }
+.resolution .diff-view pre { max-height: 30vh; }
+.resolution-skipped { margin-top: 16px; padding: 12px; background: #101b26; border: 1px solid #1e2d3b; border-radius: 8px; }
+.resolution-skipped .eyebrow { display: block; margin-bottom: 9px; }
+.resolution-skipped > div { display: flex; flex-direction: column; gap: 3px; padding: 7px 0; border-top: 1px solid #1c2b37; }
+.resolution-skipped > div:first-of-type { border-top: 0; }
+.resolution-skipped strong { color: #c4d3df; font-size: 10px; overflow-wrap: anywhere; }
+.resolution-skipped span { color: #7b8ea3; font-size: 9px; line-height: 1.5; }

@@ -7,7 +7,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = await import(pathToFileURL(join(root, "dist-electron/electron/repository-plan.js")));
 const llm = await import(pathToFileURL(join(root, "dist-electron/electron/llm-plan.js")));
 
-const noArgs = { name: "", onto: "", to: "", message: "" };
+const noArgs = { name: "", onto: "", to: "", path: "", side: "", message: "" };
 const step = (operation, args = {}) => ({ operation, args: { ...noArgs, ...args } });
 const basePlan = {
   intent: "git_operation",
@@ -135,7 +135,7 @@ test("extrae JSON de markdown y repara solo cierres o comas seguros", () => {
 test("rechaza planes LLM con esquema incompleto, campos extra o tipos incorrectos", () => {
   assert.equal(llm.parseModelPlan('{"intent":"git_operation","operation":"status"}'), undefined);
   assert.equal(llm.parseModelPlan(JSON.stringify({ ...basePlan, command: "rm -rf /" })), undefined);
-  assert.equal(llm.parseModelPlan(JSON.stringify({ ...basePlan, args: { name: 1, onto: "", to: "", message: "" } })), undefined);
+  assert.equal(llm.parseModelPlan(JSON.stringify({ ...basePlan, args: { name: 1, onto: "", to: "", path: "", side: "", message: "" } })), undefined);
   assert.equal(llm.parseModelPlan(JSON.stringify({ ...basePlan, intent: "delete_everything" })), undefined);
   assert.equal(llm.parseModelPlan(JSON.stringify({ ...basePlan, operation: "github_create_repo" })), undefined);
   assert.equal(llm.parseModelPlan(JSON.stringify({ ...basePlan, repository: { ...basePlan.repository, protocol: "ftp" } })), undefined);

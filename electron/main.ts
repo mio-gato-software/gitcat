@@ -3,10 +3,11 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  executePlan, generateCommitDescription, getCommitDetail, getLlmConfig, getSnapshot, getWorkingFileDiff, loadHistory,
-  loadLlmConfig, loadMemory, planAction, prepareOperation, saveLlmConfig
+  applyConflictResolution, executePlan, generateCommitDescription, getCommitDetail, getLlmConfig, getSnapshot,
+  getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
+  proposeConflictResolution, saveLlmConfig
 } from "./git-service.js";
-import type { ActionPlan, ConversationMessage, HistoryRequest, LlmConfigInput, Operation } from "../shared/types.js";
+import type { ActionPlan, ConversationMessage, ExecutionFailure, HistoryRequest, LlmConfigInput, Operation } from "../shared/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
@@ -153,6 +154,20 @@ app.whenReady().then(async () => {
     assertTrustedSender(event);
     if (typeof file !== "string" || !file) throw new Error("El archivo solicitado no es válido.");
     return getWorkingFileDiff(assertOpenedRepository(cwd), file);
+  });
+  ipcMain.handle("conflicts:propose", (event, cwd: string) => {
+    assertTrustedSender(event);
+    return proposeConflictResolution(assertOpenedRepository(cwd));
+  });
+  ipcMain.handle("conflicts:apply", (event, cwd: string, resolutions: unknown) => {
+    assertTrustedSender(event);
+    if (!Array.isArray(resolutions)) throw new Error("Las resoluciones no son válidas.");
+    return applyConflictResolution(assertOpenedRepository(cwd), resolutions);
+  });
+  ipcMain.handle("action:recover", async (event, cwd: string, failure: ExecutionFailure, context?: ConversationMessage[]) => {
+    assertTrustedSender(event);
+    if (!failure || typeof failure !== "object" || typeof failure.error !== "string") throw new Error("El fallo reportado no es válido.");
+    return rememberPlan(await planRecovery(assertOpenedRepository(cwd), failure, context));
   });
   ipcMain.handle("action:plan", async (event, cwd: string, request: string, context?: ConversationMessage[]) => {
     assertTrustedSender(event);

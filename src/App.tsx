@@ -17,7 +17,8 @@ import type { GraphRow } from "../shared/commit-graph";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
 import type {
-  ActionPlan, Branch, Commit, CommitDetail, ConversationMessage, FileChange, HistoryScope, LlmConfig, Operation, RepoSnapshot
+  ActionPlan, Branch, Commit, CommitDetail, ConflictProposal, ConflictResolution, ConversationMessage, ExecutionFailure,
+  FileChange, HistoryScope, LlmConfig, Operation, PendingOperationKind, RepoSnapshot
 } from "../shared/types";
 
 type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string };
@@ -107,6 +108,16 @@ function clampPanes({ sidebar, inspector }: PaneWidths, total: number): PaneWidt
 }
 
 function plural(count: number, singular: string, many: string) { return `${count} ${count === 1 ? singular : many}`; }
+
+/**
+ * Electron wraps anything a handler throws in "Error invoking remote method '…': Error: …", which is
+ * plumbing the user never asked about. What is left is the sentence the service actually wrote.
+ */
+function cleanError(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const stripped = message.replace(/^Error invoking remote method '[^']*':\s*/, "").replace(/^Error:\s*/, "").trim();
+  return stripped || fallback;
+}
 
 /**
  * How the branch panel is being read right now. It is a view preference, never a change to the
@@ -282,6 +293,8 @@ export default function App() {
   const [view, setView] = useState<"history" | "changes">("history");
   const [selectedCommit, setSelectedCommit] = useState<Commit>();
   const [selectedFile, setSelectedFile] = useState<FileChange>();
+  const [proposal, setProposal] = useState<ConflictProposal>();
+  const [resolving, setResolving] = useState(false);
   const [inputDialog, setInputDialog] = useState<InputDialog>();
   const [commitFormOpen, setCommitFormOpen] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
@@ -450,7 +463,7 @@ export default function App() {
       setActiveId(id);
       addActivity({ label: "Proyecto abierto", detail: next.name, tone: "success" });
     } catch (error) {
-      setToast({ message: error instanceof Error ? error.message : "No se pudo abrir el proyecto.", tone: "error" });
+      setToast({ message: cleanError(error, "No se pudo abrir el proyecto."), tone: "error" });
     }
   };
 
@@ -471,7 +484,7 @@ export default function App() {
       updateSnapshot(path, next);
       if (announce) addActivity({ label: "Estado actualizado", detail: next.currentBranch, tone: "neutral" });
     } catch (error) {
-      setToast({ message: error instanceof Error ? error.message : "No se pudo actualizar el estado.", tone: "error" });
+      setToast({ message: cleanError(error, "No se pudo actualizar el estado."), tone: "error" });
     } finally { setRefreshingPath(undefined); }
   };
 
@@ -516,7 +529,7 @@ export default function App() {
       // Nothing to weigh up: a plan that changes no work does not need a click to say so.
       if (unattended) await runPlan(turnId, plan);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "No se pudo preparar la acción.";
+      const message = cleanError(error, "No se pudo preparar la acción.");
       updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
     }
   };
@@ -541,8 +554,10 @@ export default function App() {
       push: "Publicar la rama actual",
       merge: `Fusionar la rama ${args.name}`,
       rebase: `Rebasear sobre ${args.onto}`,
-      abort_rebase: "Abortar el rebase en curso",
-      continue_rebase: "Continuar el rebase",
+      abort_operation: "Abortar la operación a medias",
+      continue_operation: "Continuar la operación",
+      skip_operation: "Saltar el commit atascado",
+      resolve_conflict: `Resolver el conflicto de ${args.path}`,
       commit: `Crear un commit: ${args.message}`,
       github_create_repo: `Crear el repositorio privado ${args.owner}/${args.name} en ${args.host}`
     };
@@ -553,6 +568,56 @@ export default function App() {
   const applyPlan = async (turnId: number, plan: ActionPlan) => {
     if (!plan.allowed || planning) return;
     await runPlan(turnId, plan);
+  };
+
+  /**
+   * Asks the assistant how to carry on from where the repository actually is. It opens its own turn
+   * so the failure and the way out read as two separate things, which is what they are.
+   */
+  const recoverFrom = async (path: string, failure: ExecutionFailure) => {
+    const context = conversationContext(conversations[path] ?? []);
+    const turnId = addTurn(path, "¿Cómo sigo desde aquí?");
+    try {
+      const plan = await window.branchline.planRecovery(path, failure, context);
+      if (plan.repoPath !== path) throw new Error("El plan pertenece a otro repositorio.");
+      if (plan.answer) {
+        updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, status: "completed" }));
+        return;
+      }
+      // Never unattended: a way out of a half-finished operation is always the user's call.
+      updateTurn(path, turnId, (turn) => ({ ...turn, plan, status: plan.allowed ? "ready" : "completed" }));
+    } catch (error) {
+      updateTurn(path, turnId, (turn) => ({
+        ...turn,
+        error: cleanError(error, "No pude proponer cómo continuar."),
+        status: "error"
+      }));
+    }
+  };
+
+  /** Asks the model to draft every conflicted file. Nothing is written until the user accepts it. */
+  const resolveConflicts = async () => {
+    if (!snapshot || resolving) return;
+    setResolving(true);
+    setProposal(undefined);
+    try {
+      setProposal(await window.branchline.proposeConflictResolution(snapshot.path));
+    } catch (error) {
+      setToast({ message: cleanError(error, "No se pudo proponer una resolución."), tone: "error" });
+    } finally { setResolving(false); }
+  };
+
+  const applyResolutions = async (resolutions: ConflictResolution[]) => {
+    if (!snapshot || !resolutions.length) return;
+    const path = snapshot.path;
+    try {
+      updateSnapshot(path, await window.branchline.applyConflictResolution(path, resolutions));
+      setProposal(undefined);
+      addActivity({ label: "Conflictos resueltos", detail: `${plural(resolutions.length, "archivo aceptado", "archivos aceptados")}`, tone: "success" });
+    } catch (error) {
+      setToast({ message: cleanError(error, "No se pudo aplicar la resolución."), tone: "error" });
+      await refreshProject(path, false);
+    }
   };
 
   const runPlan = async (turnId: number, plan: ActionPlan) => {
@@ -566,6 +631,20 @@ export default function App() {
         updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome: progress, error: result.error, status: "error" }));
         addActivity({ label: "Git requiere atención", detail: result.error, tone: "warning" });
         setToast({ message: result.error, tone: "error" });
+        /**
+         * The repository is now holding a half-finished job the user did not ask for, and this is
+         * exactly where the conversation used to end. Planning is not acting, so the assistant is
+         * asked how to continue straight away; what it proposes still waits for a confirmation.
+         */
+        const failed = result.outcomes?.find((outcome) => outcome.status === "failed");
+        if (failed && result.snapshot.pending && config.configured) {
+          await recoverFrom(plan.repoPath, {
+            command: failed.command,
+            summary: failed.summary,
+            error: result.error,
+            skipped: (result.outcomes ?? []).filter((outcome) => outcome.status === "skipped").map((outcome) => outcome.summary)
+          });
+        }
       } else {
         const outcome = result.output || `${plan.summary} completado.`;
         updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome, status: "completed" }));
@@ -577,7 +656,7 @@ export default function App() {
         }
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Git no pudo completar la acción.";
+      const message = cleanError(error, "Git no pudo completar la acción.");
       updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
       setToast({ message, tone: "error" });
       await refreshProject(plan.repoPath, false);
@@ -604,7 +683,7 @@ export default function App() {
       updateTurn(path, turnId, (turn) => ({ ...turn, plan }));
       await runPlan(turnId, plan);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "No se pudo cambiar de rama.";
+      const message = cleanError(error, "No se pudo cambiar de rama.");
       updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
       addActivity({ label: "No se pudo cambiar de rama", detail: message, tone: "warning" });
     }
@@ -637,7 +716,7 @@ export default function App() {
         setCommitFormOpen(true);
       }
     } catch (error) {
-      setToast({ message: error instanceof Error ? error.message : "No se pudo generar la descripción.", tone: "error" });
+      setToast({ message: cleanError(error, "No se pudo generar la descripción."), tone: "error" });
       await refreshProject(repoPath, false);
     } finally { setGeneratingDescription(false); }
   };
@@ -707,7 +786,14 @@ export default function App() {
 
           <section className="graph-area">
             <div className="graph-toolbar"><div className="view-tabs"><button className={`view-tab ${view === "history" ? "active" : ""}`} onClick={() => setView("history")}>Historial</button><button className={`view-tab ${view === "changes" ? "active" : ""}`} onClick={() => setView("changes")}>Cambios <span className="count-badge">{snapshot.changes.length}</span></button></div>{view === "history" && <div className="graph-tools"><div className="search-field commit-search"><Search size={14} /><input aria-label="Buscar commits" value={commitFilter} onChange={(event) => setCommitFilter(event.target.value)} placeholder="Buscar commits" /></div></div>}</div>
-            {snapshot.isRebasing && <div className="rebase-banner"><AlertTriangle size={16} /><div><strong>Rebase en curso</strong><span>Resuelve los conflictos y elige cómo continuar.</span></div><button className="outline-button small" onClick={() => void prepare("continue_rebase")}>Continuar</button><button className="danger-link" onClick={() => void prepare("abort_rebase")}>Abortar</button></div>}
+            {snapshot.pending && <PendingBanner
+              snapshot={snapshot}
+              busy={planning}
+              onContinue={() => void prepare("continue_operation")}
+              onSkip={() => void prepare("skip_operation")}
+              onAbort={() => void prepare("abort_operation")}
+              onResolve={() => void resolveConflicts()}
+            />}
             <div className="current-branch-card"><div className="branch-dot" style={{ background: branchColor(0) }} /><div><span className="eyebrow">RAMA ACTUAL</span><div className="current-branch-name">{snapshot.currentBranch}<span className="branch-status">{snapshot.isDirty ? "Cambios locales" : "Limpia"}</span></div></div><div className="branch-stats"><span><ArrowDownToLine size={13} />{snapshot.branches.find((branch) => branch.isCurrent)?.behind ?? 0} detrás</span><span><ArrowUpFromLine size={13} />{snapshot.branches.find((branch) => branch.isCurrent)?.ahead ?? 0} adelante</span></div><button className="outline-button small" onClick={openCommitForm} disabled={!snapshot.isDirty || planning}><GitCommitHorizontal size={14} /> Commit</button></div>
             {view === "history" ? <HistoryView key={snapshot.path} snapshot={snapshot} selection={selection} filter={commitFilter} onSelect={setSelectedCommit} />
               : <ChangesView snapshot={snapshot} onOpenFile={setSelectedFile} formOpen={commitFormOpen} message={commitMessage} generating={generatingDescription} busy={planning} onOpenForm={() => setCommitFormOpen(true)} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit} />}
@@ -723,6 +809,8 @@ export default function App() {
       {inputDialog && <InputModal dialog={inputDialog} branches={snapshot?.branches ?? []} onChange={(value) => setInputDialog({ ...inputDialog, value })} onClose={() => setInputDialog(undefined)} onSubmit={submitInputDialog} />}
       {selectedCommit && snapshot && <CommitModal commit={selectedCommit} repoPath={snapshot.path} onClose={() => setSelectedCommit(undefined)} />}
       {selectedFile && snapshot && <FileDiffModal file={selectedFile} repoPath={snapshot.path} onClose={() => setSelectedFile(undefined)} />}
+      {proposal && <ConflictProposalModal proposal={proposal} busy={planning} onApply={(resolutions) => void applyResolutions(resolutions)} onClose={() => setProposal(undefined)} />}
+      {resolving && <div className="resolving-overlay" role="status"><LoaderCircle className="spin" size={22} /><span>Leyendo los dos lados de cada conflicto…</span></div>}
     </div>
   );
 }
@@ -1045,7 +1133,7 @@ function HistoryView({ snapshot, selection, filter, onSelect }: {
       setError(undefined);
     }).catch((reason) => {
       if (request.current !== id) return;
-      setError(reason instanceof Error ? reason.message : "No se pudo leer el historial.");
+      setError(cleanError(reason, "No se pudo leer el historial."));
     }).finally(() => {
       if (request.current === id) setLoading(false);
     });
@@ -1275,6 +1363,111 @@ function InputModal({ dialog, branches, onChange, onClose, onSubmit }: { dialog:
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal" role="dialog" aria-modal="true" aria-labelledby="input-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><div className="modal-heading"><div><div className="eyebrow">OPERACIÓN GIT</div><h2 id="input-modal-title">{dialog.title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label="Cerrar"><X size={17} /></button></div><label>{dialog.label}<input autoFocus value={dialog.value} onChange={(event) => onChange(event.target.value)} list={options.length ? "branch-options" : undefined} maxLength={200} /></label>{options.length > 0 && <datalist id="branch-options">{options.map((option) => <option value={option} key={option} />)}</datalist>}{hint && <p className="naming-hint" role="status"><Lightbulb size={12} /><span>Este repositorio usa <code>{hint.canonical}/</code> ({plural(hint.count, "rama", "ramas")}). ¿Querías <button type="button" onClick={() => onChange(`${hint.canonical}/${dialog.value.trim().slice(hint.typed.length + 1)}`)}><code>{hint.canonical}/…</code></button>?</span></p>}<div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>Cancelar</button><button className="primary-button" disabled={!dialog.value.trim()}><GitBranch size={14} /> Preparar</button></div></form></div>;
 }
 
+const pendingLabels: Record<PendingOperationKind, string> = {
+  rebase: "Rebase en curso",
+  merge: "Fusión en curso",
+  cherry_pick: "Cherry-pick en curso",
+  revert: "Revert en curso"
+};
+
+/**
+ * The repository is holding a half-finished job. This says which one, how far it got and what is in
+ * the way, because "a rebase is happening" is not enough to decide anything — and every way out is
+ * spelled out in terms of what it costs, since aborting and skipping both throw work away.
+ */
+function PendingBanner({ snapshot, busy, onContinue, onSkip, onAbort, onResolve }: {
+  snapshot: RepoSnapshot; busy: boolean;
+  onContinue: () => void; onSkip: () => void; onAbort: () => void; onResolve: () => void;
+}) {
+  const pending = snapshot.pending!;
+  const progress = pending.step && pending.total ? ` · commit ${pending.step} de ${pending.total}` : "";
+  const target = pending.branch && pending.onto ? ` · ${pending.branch} sobre ${pending.onto}` : pending.onto ? ` · ${pending.onto}` : "";
+  const blocked = snapshot.conflicts.length;
+  return <div className="rebase-banner">
+    <AlertTriangle size={16} />
+    <div>
+      <strong>{pendingLabels[pending.kind]}{progress}</strong>
+      <span>{blocked
+        ? `${plural(blocked, "archivo en conflicto", "archivos en conflicto")}${target}. Nada continúa hasta resolverlos.`
+        : `Sin conflictos abiertos${target}. Puedes continuar.`}</span>
+    </div>
+    {blocked > 0 && <button className="outline-button small" onClick={onResolve} disabled={busy} title="El asistente lee los dos lados y propone el archivo resuelto. No escribe nada hasta que lo aceptes."><Sparkles size={13} /> Proponer resolución</button>}
+    <button className="outline-button small" onClick={onContinue} disabled={busy || blocked > 0} title={blocked ? "Quedan conflictos por resolver" : "Sigue desde donde se detuvo"}>Continuar</button>
+    {canSkipPending(pending.kind) && <button className="danger-link" onClick={onSkip} disabled={busy} title="Descarta el commit en el que se atascó y sigue con el resto">Saltar commit</button>}
+    <button className="danger-link" onClick={onAbort} disabled={busy} title="Deshace el trabajo a medias y deja el repositorio como estaba antes de empezar">Abortar</button>
+  </div>;
+}
+
+function canSkipPending(kind: PendingOperationKind) { return kind === "rebase" || kind === "cherry_pick"; }
+
+/**
+ * The proposal, file by file, as a diff against what is on disk right now. This is the review the
+ * whole feature rests on: accepting is a deliberate act per file, and the model's own doubt is shown
+ * rather than buried, because a confident-looking wrong merge is the failure mode that matters.
+ */
+function ConflictProposalModal({ proposal, busy, onApply, onClose }: {
+  proposal: ConflictProposal; busy: boolean; onApply: (resolutions: ConflictResolution[]) => void; onClose: () => void;
+}) {
+  const [accepted, setAccepted] = useState<string[]>(() => proposal.resolutions.filter((item) => item.confidence === "high").map((item) => item.path));
+  useEscape(onClose);
+  const toggle = (path: string) => setAccepted((current) => current.includes(path) ? current.filter((item) => item !== path) : [...current, path]);
+  const chosen = proposal.resolutions.filter((resolution) => accepted.includes(resolution.path));
+
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="commit-modal wide" role="dialog" aria-modal="true" aria-labelledby="proposal-title">
+      <div className="modal-heading">
+        <div><div className="eyebrow">RESOLUCIÓN PROPUESTA POR EL ASISTENTE</div><h2 id="proposal-title">Revisa antes de aceptar</h2></div>
+        <button className="icon-button soft" onClick={onClose} aria-label="Descartar la propuesta"><X size={17} /></button>
+      </div>
+      <div className="modal-note"><ShieldCheck size={15} /><span>Nada se ha escrito todavía. Lo que aceptes se guarda en el archivo y se marca como resuelto; lo que no, se queda en conflicto tal como está.</span></div>
+      {proposal.resolutions.map((resolution) => <div className={`resolution ${accepted.includes(resolution.path) ? "accepted" : ""}`} key={resolution.path}>
+        <label className="resolution-heading">
+          <input type="checkbox" checked={accepted.includes(resolution.path)} onChange={() => toggle(resolution.path)} />
+          <div>
+            <strong>{resolution.path}</strong>
+            <span>{resolution.rationale}</span>
+          </div>
+          {resolution.confidence === "low" && <span className="resolution-doubt" title="El propio modelo avisa de que aquí tuvo que elegir. Míralo con calma.">Revisar con atención</span>}
+        </label>
+        <DiffView diff={lineDiff(proposal.current[resolution.path] ?? "", resolution.content)} truncated={false} />
+      </div>)}
+      {proposal.skipped.length > 0 && <div className="resolution-skipped">
+        <span className="eyebrow">SIN RESOLVER</span>
+        {proposal.skipped.map((entry) => <div key={entry.path}><strong>{entry.path}</strong><span>{entry.reason}</span></div>)}
+      </div>}
+      <div className="modal-actions">
+        <button className="ghost-button" onClick={onClose}>Descartar todo</button>
+        <button className="primary-button" onClick={() => onApply(chosen)} disabled={busy || !chosen.length}>
+          <Check size={14} /> Aceptar {plural(chosen.length, "archivo", "archivos")}
+        </button>
+      </div>
+    </div>
+  </div>;
+}
+
+/**
+ * A plain line-by-line difference, enough to see what the proposal changes. It is not Myers: for a
+ * conflicted file against its resolution, showing the conflict block going and what replaced it is
+ * what the reviewer needs, and a smarter algorithm would not tell them anything more.
+ */
+function lineDiff(before: string, after: string) {
+  const from = before.split("\n");
+  const to = after.split("\n");
+  const shared = new Set(to);
+  const kept = new Set(from);
+  const lines: string[] = [`--- en conflicto`, `+++ propuesto`];
+  let index = 0;
+  for (const line of from) {
+    if (shared.has(line)) {
+      while (index < to.length && !kept.has(to[index])) lines.push(`+${to[index++]}`);
+      if (index < to.length && to[index] === line) index += 1;
+      lines.push(` ${line}`);
+    } else lines.push(`-${line}`);
+  }
+  while (index < to.length) lines.push(`+${to[index++]}`);
+  return lines.join("\n");
+}
+
 /** A unified diff, coloured by what each line does. No parsing beyond the first character. */
 function DiffView({ diff, truncated }: { diff: string; truncated: boolean }) {
   const lines = useMemo(() => diff.split("\n"), [diff]);
@@ -1299,7 +1492,7 @@ function CommitModal({ commit, repoPath, onClose }: { commit: Commit; repoPath: 
     let live = true;
     window.branchline.getCommitDetail(repoPath, commit.hash)
       .then((next) => { if (live) setDetail(next); })
-      .catch((reason) => { if (live) setError(reason instanceof Error ? reason.message : "No se pudo leer el commit."); });
+      .catch((reason) => { if (live) setError(cleanError(reason, "No se pudo leer el commit.")); });
     return () => { live = false; };
   }, [repoPath, commit.hash]);
 
@@ -1340,7 +1533,7 @@ function FileDiffModal({ file, repoPath, onClose }: { file: FileChange; repoPath
     let live = true;
     window.branchline.getWorkingFileDiff(repoPath, file.path)
       .then((next) => { if (live) setDetail(next); })
-      .catch((reason) => { if (live) setError(reason instanceof Error ? reason.message : "No se pudo leer el archivo."); });
+      .catch((reason) => { if (live) setError(cleanError(reason, "No se pudo leer el archivo.")); });
     return () => { live = false; };
   }, [repoPath, file.path]);
 
