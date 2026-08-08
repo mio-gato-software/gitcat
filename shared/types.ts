@@ -245,6 +245,8 @@ export type LlmConfigInput = {
   clearApiKey?: boolean;
 };
 
+export type Locale = "en" | "es";
+
 /** What the interface hands back to the model after a plan stopped part-way. */
 export type ExecutionFailure = {
   command: string;
@@ -286,15 +288,15 @@ export type GitlineApi = {
   loadHistory: (path: string, request: HistoryRequest) => Promise<HistoryPage>;
   getCommitDetail: (path: string, hash: string) => Promise<CommitDetail>;
   getCommitFileDiff: (path: string, hash: string, file: string) => Promise<CommitDetail>;
-  proposeConflictResolution: (path: string) => Promise<ConflictProposal>;
-  applyConflictResolution: (path: string, resolutions: ConflictResolution[]) => Promise<RepoSnapshot>;
-  planRecovery: (path: string, failure: ExecutionFailure, context?: ConversationMessage[]) => Promise<ActionPlan>;
+  proposeConflictResolution: (path: string, locale?: Locale) => Promise<ConflictProposal>;
+  applyConflictResolution: (path: string, resolutions: ConflictResolution[], locale?: Locale) => Promise<RepoSnapshot>;
+  planRecovery: (path: string, failure: ExecutionFailure, context?: ConversationMessage[], locale?: Locale) => Promise<ActionPlan>;
   getWorkingFileDiff: (path: string, file: string) => Promise<CommitDetail>;
-  planAction: (path: string, request: string, context?: ConversationMessage[]) => Promise<ActionPlan>;
-  prepareOperation: (path: string, operation: Operation, args?: Record<string, string>) => Promise<ActionPlan>;
-  prepareMergeToDefault: (path: string, branch: string) => Promise<ActionPlan>;
-  generateCommitDescription: (path: string) => Promise<CommitDescriptionResult>;
-  executePlan: (path: string, planId: string) => Promise<ExecutionResult>;
+  planAction: (path: string, request: string, context?: ConversationMessage[], locale?: Locale) => Promise<ActionPlan>;
+  prepareOperation: (path: string, operation: Operation, args?: Record<string, string>, locale?: Locale) => Promise<ActionPlan>;
+  prepareMergeToDefault: (path: string, branch: string, locale?: Locale) => Promise<ActionPlan>;
+  generateCommitDescription: (path: string, locale?: Locale) => Promise<CommitDescriptionResult>;
+  executePlan: (path: string, planId: string, locale?: Locale) => Promise<ExecutionResult>;
   getLlmConfig: () => Promise<LlmConfig>;
   saveLlmConfig: (config: LlmConfigInput) => Promise<LlmConfig>;
 };

@@ -7,7 +7,7 @@ import {
   getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
   prepareMergeToDefault, proposeConflictResolution, saveLlmConfig
 } from "./git-service.js";
-import type { ActionPlan, ConversationMessage, ExecutionFailure, HistoryRequest, LlmConfigInput, Operation } from "../shared/types.js";
+import type { ActionPlan, ConversationMessage, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation } from "../shared/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
@@ -173,50 +173,50 @@ app.whenReady().then(async () => {
     if (typeof file !== "string" || !file) throw new Error("El archivo solicitado no es válido.");
     return getWorkingFileDiff(assertOpenedRepository(cwd), file);
   });
-  ipcMain.handle("conflicts:propose", (event, cwd: string) => {
+  ipcMain.handle("conflicts:propose", (event, cwd: string, locale?: Locale) => {
     assertTrustedSender(event);
-    return proposeConflictResolution(assertOpenedRepository(cwd));
+    return proposeConflictResolution(assertOpenedRepository(cwd), locale);
   });
-  ipcMain.handle("conflicts:apply", (event, cwd: string, resolutions: unknown) => {
+  ipcMain.handle("conflicts:apply", (event, cwd: string, resolutions: unknown, locale?: Locale) => {
     assertTrustedSender(event);
     if (!Array.isArray(resolutions)) throw new Error("Las resoluciones no son válidas.");
-    return applyConflictResolution(assertOpenedRepository(cwd), resolutions);
+    return applyConflictResolution(assertOpenedRepository(cwd), resolutions, locale);
   });
-  ipcMain.handle("action:recover", async (event, cwd: string, failure: ExecutionFailure, context?: ConversationMessage[]) => {
+  ipcMain.handle("action:recover", async (event, cwd: string, failure: ExecutionFailure, context?: ConversationMessage[], locale?: Locale) => {
     assertTrustedSender(event);
     if (!failure || typeof failure !== "object" || typeof failure.error !== "string") throw new Error("El fallo reportado no es válido.");
-    return rememberPlan(await planRecovery(assertOpenedRepository(cwd), failure, context));
+    return rememberPlan(await planRecovery(assertOpenedRepository(cwd), failure, context, locale));
   });
-  ipcMain.handle("action:plan", async (event, cwd: string, request: string, context?: ConversationMessage[]) => {
+  ipcMain.handle("action:plan", async (event, cwd: string, request: string, context?: ConversationMessage[], locale?: Locale) => {
     assertTrustedSender(event);
     // Shape is still checked; length is not. The model decides what it can handle.
     if (typeof request !== "string") throw new Error("La solicitud no es válida.");
     if (context !== undefined && (!Array.isArray(context) || context.some((message) =>
       !message || !["user", "assistant"].includes(message.role) || typeof message.content !== "string"
     ))) throw new Error("El contexto de conversación no es válido.");
-    return rememberPlan(await planAction(assertOpenedRepository(cwd), request, context));
+    return rememberPlan(await planAction(assertOpenedRepository(cwd), request, context, locale));
   });
-  ipcMain.handle("action:prepare", async (event, cwd: string, operation: Operation, args?: Record<string, string>) => {
+  ipcMain.handle("action:prepare", async (event, cwd: string, operation: Operation, args?: Record<string, string>, locale?: Locale) => {
     assertTrustedSender(event);
-    return rememberPlan(await prepareOperation(assertOpenedRepository(cwd), operation, args));
+    return rememberPlan(await prepareOperation(assertOpenedRepository(cwd), operation, args, locale));
   });
-  ipcMain.handle("action:prepare-merge-to-default", async (event, cwd: string, branch: string) => {
+  ipcMain.handle("action:prepare-merge-to-default", async (event, cwd: string, branch: string, locale?: Locale) => {
     assertTrustedSender(event);
     if (typeof branch !== "string") throw new Error("La rama que quieres fusionar no es válida.");
-    return rememberPlan(await prepareMergeToDefault(assertOpenedRepository(cwd), branch));
+    return rememberPlan(await prepareMergeToDefault(assertOpenedRepository(cwd), branch, locale));
   });
-  ipcMain.handle("commit:generate-description", async (event, cwd: string) => {
+  ipcMain.handle("commit:generate-description", async (event, cwd: string, locale?: Locale) => {
     assertTrustedSender(event);
-    return generateCommitDescription(assertOpenedRepository(cwd));
+    return generateCommitDescription(assertOpenedRepository(cwd), locale);
   });
-  ipcMain.handle("action:execute", async (event, cwd: string, planId: string) => {
+  ipcMain.handle("action:execute", async (event, cwd: string, planId: string, locale?: Locale) => {
     assertTrustedSender(event);
     const repoPath = assertOpenedRepository(cwd);
     const plan = typeof planId === "string" ? issuedPlans.get(planId) : undefined;
     if (!plan) throw new Error("El plan ya no es válido. Prepara la acción de nuevo.");
     issuedPlans.delete(planId);
     if (plan.repoPath !== repoPath) throw new Error("El plan pertenece a otro repositorio.");
-    return executePlan(repoPath, plan);
+    return executePlan(repoPath, plan, locale);
   });
   ipcMain.handle("llm:get-config", (event) => { assertTrustedSender(event); return getLlmConfig(); });
   ipcMain.handle("llm:save-config", (event, input: LlmConfigInput) => { assertTrustedSender(event); return saveLlmConfig(input); });
