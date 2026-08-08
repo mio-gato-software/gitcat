@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, ReactNode, PointerEvent as ReactPointerEvent } from "react";
+import type { CSSProperties, ReactNode, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
   AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Bot, Check, ChevronRight, CircleDot,
   Clock3, Cloud, Eye, EyeOff, FileDiff, FolderGit2, FolderOpen, GitBranch, GitCommitHorizontal, GitFork,
@@ -565,6 +565,13 @@ export default function App() {
     await showPlan(question ?? labels[operation] ?? "Preparar una operación Git", () => window.branchline.prepareOperation(path, operation, args), path);
   };
 
+  const prepareMergeToDefault = async (name: string) => {
+    if (!snapshot?.defaultBranch) return;
+    const path = snapshot.path;
+    const target = snapshot.defaultBranch;
+    await showPlan(`Merge ${name} to ${target}`, () => window.branchline.prepareMergeToDefault(path, name), path);
+  };
+
   const applyPlan = async (turnId: number, plan: ActionPlan) => {
     if (!plan.allowed || planning) return;
     await runPlan(turnId, plan);
@@ -781,6 +788,7 @@ export default function App() {
               onSwitchNow={(name) => void switchBranch(name)}
               onDelete={(name) => void prepare("delete_branch", { name })}
               onRename={(name, to) => void prepare("rename_branch", { name, to })}
+              onMergeToDefault={(name) => void prepareMergeToDefault(name)}
             />
           </aside>
 
@@ -864,16 +872,35 @@ function PaneDivider({ edge, width, onPointerDown, onNudge, onReset }: {
  * view: nothing is renamed, every group opens with one click, and the flat list with its filter is
  * still one click away for whoever already knows the name they are looking for.
  */
-function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, onSwitchNow, onDelete, onRename }: {
+function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, onSwitchNow, onDelete, onRename, onMergeToDefault }: {
   snapshot: RepoSnapshot; busy: boolean; selected: string; onSelect: (name: string) => void; onCreate: () => void;
   onSwitch: (name: string) => void; onSwitchNow: (name: string) => void; onDelete: (name: string) => void;
-  onRename: (from: string, to: string) => void;
+  onRename: (from: string, to: string) => void; onMergeToDefault: (name: string) => void;
 }) {
   const [saved, setSaved] = useState<BranchView | undefined>(() => readBranchView(snapshot.path));
   const [filter, setFilter] = useState("");
+  const [contextMenu, setContextMenu] = useState<{ branch: Branch; x: number; y: number }>();
   const listRef = useRef<HTMLDivElement>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
   const rows = useRef(new Map<string, HTMLButtonElement>());
   const pending = useRef<{ scrollTop: number; focused?: string }>(undefined);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if (contextMenuRef.current?.contains(event.target as Node)) return;
+      setContextMenu(undefined);
+    };
+    const closeOnKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setContextMenu(undefined);
+    };
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnKeyDown);
+    };
+  }, [contextMenu]);
 
   const order = saved?.order ?? defaultBranchOrder;
   const hideMerged = saved?.hideMerged ?? false;
@@ -944,6 +971,17 @@ function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, o
     if (node) rows.current.set(name, node); else rows.current.delete(name);
   };
 
+  const openContextMenu = (branch: Branch, event: ReactMouseEvent<HTMLDivElement>) => {
+    if (busy || !snapshot.defaultBranch || branch.name === snapshot.defaultBranch || branch.presence === "remote") return;
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu({
+      branch,
+      x: Math.min(event.clientX, Math.max(8, window.innerWidth - 286)),
+      y: Math.min(event.clientY, Math.max(8, window.innerHeight - 54))
+    });
+  };
+
   const branchRow = (branch: Branch, depth: number, trim: string) => <BranchRow
     key={branch.name}
     branch={branch}
@@ -962,6 +1000,7 @@ function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, o
     onSwitch={() => onSwitch(branch.name)}
     onSwitchNow={() => onSwitchNow(branch.name)}
     onDelete={() => onDelete(branch.name)}
+    onContextMenu={(event) => openContextMenu(branch, event)}
   />;
 
   const renderNodes = (nodes: BranchNode[], depth: number, trim: string): ReactNode[] => nodes.flatMap((node) => {
@@ -1023,6 +1062,20 @@ function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, o
         ? `Todas las demás ramas ya están integradas en ${snapshot.defaultBranch}.`
         : "No hay ramas que coincidan."}</div>}
     </div>
+    {contextMenu && snapshot.defaultBranch && <div
+      ref={contextMenuRef}
+      className="branch-context-menu"
+      role="menu"
+      aria-label={`Acciones para ${contextMenu.branch.name}`}
+      style={{ left: contextMenu.x, top: contextMenu.y }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    ><button
+      role="menuitem"
+      autoFocus
+      disabled={busy}
+      onClick={() => { const name = contextMenu.branch.name; setContextMenu(undefined); onMergeToDefault(name); }}
+    ><GitMerge size={14} /><span>Merge {contextMenu.branch.name} to {snapshot.defaultBranch}</span></button></div>}
   </div>;
 }
 
@@ -1089,12 +1142,12 @@ function branchTooltip(branch: Branch, defaultBranch?: string) {
  * branch the rest of the window is talking about, which is the thing you want far more often than a
  * checkout. Changing branch stays an explicit gesture — the double click, or the button on the row.
  */
-function BranchRow({ branch, label, variant, merged, selected, defaultBranch, colour, depth, busy, register, onSelect, onSwitch, onSwitchNow, onDelete }: { branch: Branch; label: string; variant: boolean; merged: boolean; selected: boolean; defaultBranch?: string; colour: string; depth: number; busy: boolean; register: (node: HTMLButtonElement | null) => void; onSelect: () => void; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void }) {
+function BranchRow({ branch, label, variant, merged, selected, defaultBranch, colour, depth, busy, register, onSelect, onSwitch, onSwitchNow, onDelete, onContextMenu }: { branch: Branch; label: string; variant: boolean; merged: boolean; selected: boolean; defaultBranch?: string; colour: string; depth: number; busy: boolean; register: (node: HTMLButtonElement | null) => void; onSelect: () => void; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void; onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void }) {
   const isDefault = branch.name === defaultBranch;
   const protectedByPrefix = isProtectedBranch(branch.name);
   // Read once per render rather than per row: the panel redraws on every snapshot anyway.
   const stale = staleDays(branch, Date.now());
-  return <div className={`branch-row ${branch.isCurrent ? "current" : ""} ${selected ? "selected" : ""} ${merged ? "merged" : ""} ${branch.stackedOn ? "stacked" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onSwitchNow} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch)}\nClic para ver su historial · doble clic para cambiar a ella`}><span className="branch-color" style={{ background: colour }} />{branch.stackedOn ? <GitFork size={14} className="branch-stack-icon" /> : <GitBranch size={14} />}<span className="branch-label">{label}</span>{variant && <span className="branch-variant" title={`Escribe el prefijo de otra forma que el resto del repositorio. Sigue llamándose ${branch.name}.`}>variante</span>}{merged && <span className="branch-merged" role="img" aria-label={`Ya integrada en ${defaultBranch}`} title={`Ya integrada en ${defaultBranch}: borrarla no perdería trabajo`}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={`En uso por el worktree ${branch.checkedOutIn}`} title={`En uso por el worktree ${branch.checkedOutIn}`}><FolderGit2 size={12} /></span>}{protectedByPrefix && <span className="branch-protected" role="img" aria-label="Protegida por su prefijo" title="Protegida por su prefijo: las ramas de este tipo existen para conservarse, así que Branchline no las borra ni las propone para limpieza."><ShieldCheck size={12} /></span>}{stale > 0 && <span className="branch-stale" role="img" aria-label={`Sin actividad desde hace ${stale} días`} title={`Rama de vida corta sin actividad desde hace ${stale} días. Es una observación, no una propuesta de borrado.`}><Clock3 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">actual</span>}{isDefault && <span className="current-pill">principal</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && <button className="branch-switch" onClick={onSwitch} disabled={busy} aria-label={`Cambiar a la rama ${branch.name}`} title={`Cambiar a ${branch.name}: se prepara como plan y lo confirmas`}><ArrowLeftRight size={12} /></button>}{!branch.isCurrent && !isDefault && !protectedByPrefix && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`} title={branch.mergedInto.length ? `Eliminar ${branch.name}: ya integrada en ${branch.mergedInto.join(" y ")}, no se pierde trabajo` : `Eliminar ${branch.name}: sin integrar, Git rechazará el borrado si se perdería trabajo`}><Trash2 size={12} /></button>}</div>;
+  return <div onContextMenu={onContextMenu} className={`branch-row ${branch.isCurrent ? "current" : ""} ${selected ? "selected" : ""} ${merged ? "merged" : ""} ${branch.stackedOn ? "stacked" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onSwitchNow} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch)}\nClic para ver su historial · doble clic para cambiar a ella`}><span className="branch-color" style={{ background: colour }} />{branch.stackedOn ? <GitFork size={14} className="branch-stack-icon" /> : <GitBranch size={14} />}<span className="branch-label">{label}</span>{variant && <span className="branch-variant" title={`Escribe el prefijo de otra forma que el resto del repositorio. Sigue llamándose ${branch.name}.`}>variante</span>}{merged && <span className="branch-merged" role="img" aria-label={`Ya integrada en ${defaultBranch}`} title={`Ya integrada en ${defaultBranch}: borrarla no perdería trabajo`}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={`En uso por el worktree ${branch.checkedOutIn}`} title={`En uso por el worktree ${branch.checkedOutIn}`}><FolderGit2 size={12} /></span>}{protectedByPrefix && <span className="branch-protected" role="img" aria-label="Protegida por su prefijo" title="Protegida por su prefijo: las ramas de ese tipo existen para conservarse, así que Branchline no las borra ni las propone para limpieza."><ShieldCheck size={12} /></span>}{stale > 0 && <span className="branch-stale" role="img" aria-label={`Sin actividad desde hace ${stale} días`} title={`Rama de vida corta sin actividad desde hace ${stale} días. Es una observación, no una propuesta de borrado.`}><Clock3 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">actual</span>}{isDefault && <span className="current-pill">principal</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && <button className="branch-switch" onClick={onSwitch} disabled={busy} aria-label={`Cambiar a la rama ${branch.name}`} title={`Cambiar a ${branch.name}: se prepara como plan y lo confirmas`}><ArrowLeftRight size={12} /></button>}{!branch.isCurrent && !isDefault && !protectedByPrefix && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={`Eliminar rama ${branch.name}`} title={branch.mergedInto.length ? `Eliminar ${branch.name}: ya integrada en ${branch.mergedInto.join(" y ")}, no se pierde trabajo` : `Eliminar ${branch.name}: sin integrar, Git rechazará el borrado si se perdería trabajo`}><Trash2 size={12} /></button>}</div>;
 }
 
 /**

@@ -1380,6 +1380,34 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
   return bindPlan(snapshot, draft);
 }
 
+/** A branch-row action with a known target: switch to the repository default, then merge the branch. */
+export async function prepareMergeToDefault(cwd: string, branchName: string) {
+  const snapshot = await getSnapshot(cwd);
+  const target = snapshot.defaultBranch;
+  const name = branchName.trim();
+  if (!target) throw new Error("No se pudo determinar la rama por defecto de este repositorio.");
+  if (!name || !isBranchNameSafe(name)) throw new Error("Nombre de rama no válido.");
+  if (name === target) throw new Error(`No puedes fusionar ${name} consigo misma.`);
+  const branch = snapshot.branches.find((item) => item.name === name);
+  if (!branch) throw new Error(`La rama ${name} no existe localmente.`);
+  if (branch.presence === "remote") throw new Error(`La rama ${name} solo existe en el remoto. Cámbiate a ella primero para tenerla en local.`);
+
+  const steps: PlanStep[] = [];
+  if (snapshot.currentBranch !== target) {
+    const checkout = stepFrom("checkout", { name: target });
+    if (!checkout) throw new Error(`No se pudo preparar el cambio a ${target}.`);
+    steps.push(checkout);
+  }
+  const merge = stepFrom("merge", { name });
+  if (!merge) throw new Error(`No se pudo preparar la fusión de ${name}.`);
+  steps.push(merge);
+
+  const draft = sequenceDraft(steps, `Integra ${name} en ${target}.`);
+  const plan = bindPlan(snapshot, { ...draft, summary: `Merge ${name} to ${target}` });
+  validateExecution(plan, snapshot);
+  return plan;
+}
+
 /**
  * A step against the repository as it stands right now. Every step of a sequence goes through this,
  * including the ones prepared before the earlier steps moved the repository, so nothing runs on a

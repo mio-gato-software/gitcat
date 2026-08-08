@@ -705,3 +705,17 @@ test("el error crudo de Electron no llega nunca a la interfaz", async () => {
   assert.doesNotMatch(app, /error instanceof Error \? error\.message : "No se pudo preparar la acción\."/);
   assert.doesNotMatch(app, /reason instanceof Error \? reason\.message : "No se pudo leer el historial\."/);
 });
+
+test("las ramas ofrecen fusionarse en la rama por defecto desde su menú contextual", async () => {
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
+  const preload = await readFile(join(root, "electron/preload.cjs"), "utf8");
+  assert.match(app, /onContextMenu=\{onContextMenu\}/);
+  assert.match(app, /Merge \{contextMenu\.branch\.name\} to \{snapshot\.defaultBranch\}/);
+  assert.match(app, /prepareMergeToDefault/);
+  assert.match(service, /export async function prepareMergeToDefault/);
+  assert.match(service, /git switch/);
+  assert.match(main, /action:prepare-merge-to-default/);
+  assert.match(preload, /prepareMergeToDefault/);
+});

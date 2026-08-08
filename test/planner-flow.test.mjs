@@ -300,6 +300,23 @@ test("“merge this branch to main” se planifica y se ejecuta de principio a f
   assert.equal(git("log", "-1", "--pretty=%s").trim(), "trabajo de la rama", "main recibió el trabajo de la rama");
 });
 
+test("el menú contextual prepara fusionar la rama elegida en la rama por defecto", async () => {
+  git("switch", "-c", "feature/context-menu");
+  writeFileSync(join(repo, "context-menu.txt"), "trabajo desde el menú\n");
+  git("add", "-A");
+  git("commit", "-m", "trabajo desde el menú");
+
+  const result = await service.prepareMergeToDefault(repo, "feature/context-menu");
+  assert.equal(result.summary, "Merge feature/context-menu to main");
+  assert.deepEqual(result.steps.map((item) => item.command), ["git switch main", "git merge --no-edit feature/context-menu"]);
+
+  const execution = await service.executePlan(repo, result);
+  assert.equal(execution.error, undefined, execution.error);
+  assert.equal(execution.snapshot.currentBranch, "main");
+  assert.match(execution.output, /context-menu\.txt/);
+  assert.equal(git("log", "-1", "--pretty=%s").trim(), "trabajo desde el menú");
+});
+
 test("una secuencia sigue anclada al estado que la creó: si el repositorio se movió, no se ejecuta", async () => {
   git("switch", "main");
   reply(plan({

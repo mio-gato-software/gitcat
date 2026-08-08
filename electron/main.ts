@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   applyConflictResolution, executePlan, generateCommitDescription, getCommitDetail, getLlmConfig, getSnapshot,
   getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
-  proposeConflictResolution, saveLlmConfig
+  prepareMergeToDefault, proposeConflictResolution, saveLlmConfig
 } from "./git-service.js";
 import type { ActionPlan, ConversationMessage, ExecutionFailure, HistoryRequest, LlmConfigInput, Operation } from "../shared/types.js";
 
@@ -181,6 +181,11 @@ app.whenReady().then(async () => {
   ipcMain.handle("action:prepare", async (event, cwd: string, operation: Operation, args?: Record<string, string>) => {
     assertTrustedSender(event);
     return rememberPlan(await prepareOperation(assertOpenedRepository(cwd), operation, args));
+  });
+  ipcMain.handle("action:prepare-merge-to-default", async (event, cwd: string, branch: string) => {
+    assertTrustedSender(event);
+    if (typeof branch !== "string") throw new Error("La rama que quieres fusionar no es válida.");
+    return rememberPlan(await prepareMergeToDefault(assertOpenedRepository(cwd), branch));
   });
   ipcMain.handle("commit:generate-description", async (event, cwd: string) => {
     assertTrustedSender(event);

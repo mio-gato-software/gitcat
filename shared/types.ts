@@ -291,6 +291,7 @@ export type GitlineApi = {
   getWorkingFileDiff: (path: string, file: string) => Promise<CommitDetail>;
   planAction: (path: string, request: string, context?: ConversationMessage[]) => Promise<ActionPlan>;
   prepareOperation: (path: string, operation: Operation, args?: Record<string, string>) => Promise<ActionPlan>;
+  prepareMergeToDefault: (path: string, branch: string) => Promise<ActionPlan>;
   generateCommitDescription: (path: string) => Promise<CommitDescriptionResult>;
   executePlan: (path: string, planId: string) => Promise<ExecutionResult>;
   getLlmConfig: () => Promise<LlmConfig>;
