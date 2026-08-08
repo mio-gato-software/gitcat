@@ -664,7 +664,11 @@ test("una operación a medias es un estado del que se puede salir, no un callej�
   // El fallo vuelve al modelo en vez de morir en la conversación, y lo que propone se confirma.
   assert.match(service, /export async function planRecovery/);
   assert.match(app, /await recoverFrom\(plan\.repoPath, \{/);
-  assert.match(app, /if \(failed && result\.snapshot\.pending && config\.configured\)/);
+  assert.match(app, /if \(failed && config\.configured\)/);
+  assert.match(app, /if \(config\.configured\) await recoverFrom\(path, \{/);
+  assert.match(app, /if \(config\.configured\) await recoverFrom\(plan\.repoPath, \{/);
+  assert.match(service, /function explainGitFailure/);
+  assert.match(service, /todavía no está publicada ni tiene un destino remoto asociado/);
   // La salida de un lío se propone, nunca se ejecuta sola: recoverFrom deja el plan esperando.
   assert.match(app, /updateTurn\(path, turnId, \(turn\) => \(\{ \.\.\.turn, plan, status: plan\.allowed \? "ready" : "completed" \}\)\)/);
   assert.doesNotMatch(app, /recoverFrom[\s\S]{0,600}?await runPlan/, "recoverFrom no ejecuta nada por su cuenta");
@@ -735,6 +739,8 @@ test("las fusiones desde el menú respetan cambios pendientes y la guía del age
   assert.match(guide, /Branchline is for people who need Git, not necessarily for people who already know Git/);
   assert.match(guide, /Start from the user's goal, not from Git commands/);
   assert.match(guide, /The product owns the translation/);
+  assert.match(guide, /Treat errors as moments to guide/);
+  assert.match(guide, /Do not leave a blocked action at an error message/);
   assert.match(guide, /Never treat an empty or already-contained branch as a meaningful merge/);
   assert.match(guide, /Preserve uncommitted work/);
 });

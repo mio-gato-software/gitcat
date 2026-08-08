@@ -182,6 +182,49 @@ test("push con --no-verify llega al comando cuando el usuario lo autorizó", asy
   assert.equal(local("rev-parse", "origin/main").trim(), local("rev-parse", "main").trim(), "el push llegó al remoto");
 });
 
+test("un push sin upstream se explica y ofrece publicar la rama por primera vez", async () => {
+  const origin = mkdtempSync(join(tmpdir(), "branchline-origin-upstream-"));
+  execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: origin, encoding: "utf8" });
+  const work = mkdtempSync(join(tmpdir(), "branchline-no-upstream-"));
+  const local = (...args) => execFileSync("git", args, { cwd: work, encoding: "utf8" });
+  local("init", "-b", "main");
+  local("config", "user.email", "prueba@example.com");
+  local("config", "user.name", "Prueba Uno");
+  writeFileSync(join(work, "README.md"), "hola\n");
+  local("add", "-A");
+  local("commit", "-m", "primer commit");
+  local("remote", "add", "origin", origin);
+  local("push", "-u", "origin", "main");
+  local("switch", "-c", "feature/no-upstream");
+  writeFileSync(join(work, "cambio.txt"), "algo que publicar\n");
+  local("add", "-A");
+  local("commit", "-m", "cambio pendiente");
+
+  const pushPlan = await service.prepareOperation(work, "push");
+  const failed = await service.executePlan(work, pushPlan);
+  assert.match(failed.error ?? "", /todavía no está publicada/);
+  assert.match(failed.error ?? "", /siguen a salvo/);
+
+  const failedStep = failed.outcomes.find((item) => item.status === "failed");
+  reply(plan({
+    intent: "git_operation",
+    steps: [step("git_command", {}, ["push", "--set-upstream", "origin", "feature/no-upstream"])],
+    summary: "Publicar feature/no-upstream",
+    rationale: "La rama aún no tiene una rama remota asociada; este primer push la publicará y recordará el destino.",
+    risk: "high"
+  }));
+  const recovery = await service.planRecovery(work, {
+    command: failedStep.command,
+    summary: failedStep.summary,
+    error: failed.error,
+    skipped: []
+  });
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].instructions, /--set-upstream/);
+  assert.equal(recovery.steps[0].command, "git push --set-upstream origin feature/no-upstream");
+  assert.equal(recovery.requiresConfirmation, true);
+});
+
 test("git_command ejecuta el comando completo que propone el modelo, sin shell", async () => {
   reply(plan({
     intent: "git_operation",

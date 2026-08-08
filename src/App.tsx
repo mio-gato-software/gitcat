@@ -531,6 +531,12 @@ export default function App() {
     } catch (error) {
       const message = cleanError(error, "No se pudo preparar la acción.");
       updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
+      if (config.configured) await recoverFrom(path, {
+        command: question,
+        summary: "Preparar la acción solicitada",
+        error: message,
+        skipped: []
+      });
     }
   };
 
@@ -650,7 +656,10 @@ export default function App() {
          * asked how to continue straight away; what it proposes still waits for a confirmation.
          */
         const failed = result.outcomes?.find((outcome) => outcome.status === "failed");
-        if (failed && result.snapshot.pending && config.configured) {
+        // A failed push or fetch does not create a pending Git operation, but it still needs the
+        // assistant's translation and next-step options. Recovery is for any failed plan, not only
+        // merge/rebase states that leave metadata in .git.
+        if (failed && config.configured) {
           await recoverFrom(plan.repoPath, {
             command: failed.command,
             summary: failed.summary,
@@ -673,6 +682,12 @@ export default function App() {
       updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
       setToast({ message, tone: "error" });
       await refreshProject(plan.repoPath, false);
+      if (config.configured) await recoverFrom(plan.repoPath, {
+        command: plan.command,
+        summary: plan.summary,
+        error: message,
+        skipped: plan.steps.map((step) => step.summary)
+      });
     }
   };
 
@@ -699,6 +714,12 @@ export default function App() {
       const message = cleanError(error, "No se pudo cambiar de rama.");
       updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
       addActivity({ label: "No se pudo cambiar de rama", detail: message, tone: "warning" });
+      if (config.configured) await recoverFrom(path, {
+        command: `git switch ${name}`,
+        summary: `Cambiar a ${name}`,
+        error: message,
+        skipped: []
+      });
     }
   };
 

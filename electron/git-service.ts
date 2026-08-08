@@ -1620,12 +1620,27 @@ function executionReport(outcomes: StepOutcome[]) {
  * A sequence that stops halfway needs to say where it stopped, because the repository is now in a
  * state the user did not have before and did not fully ask for either.
  */
-function failureReport(outcomes: StepOutcome[], failed: StepOutcome, detail: string) {
-  if (outcomes.length === 1) return detail;
+function explainGitFailure(command: string, detail: string, snapshot: RepoSnapshot) {
+  if (/git push(?:\s|$)/i.test(command) && /has no upstream branch|no upstream branch/i.test(detail)) {
+    const branch = snapshot.currentBranch === "HEAD" ? "esta rama" : `la rama “${snapshot.currentBranch}”`;
+    if (snapshot.remotes.length) {
+      return `${branch} todavía no está publicada ni tiene un destino remoto asociado. Tus commits siguen a salvo en este equipo. Puedes publicarla en ${snapshot.remotes[0]} para que Git recuerde el destino, o dejarla local y continuar trabajando sin subirla.`;
+    }
+    return `${branch} todavía no está publicada y este repositorio no tiene un remoto configurado. Tus commits siguen a salvo en este equipo. Puedes conectar un remoto cuando quieras publicarla, o continuar trabajando solo localmente.`;
+  }
+  if (/git push(?:\s|$)/i.test(command) && /No configured push destination|specify a remote repository/i.test(detail)) {
+    return `No hay un repositorio remoto configurado para publicar ${snapshot.currentBranch === "HEAD" ? "esta rama" : `la rama “${snapshot.currentBranch}”`}. Tus commits siguen a salvo en este equipo. Puedes conectar un remoto o continuar trabajando solo localmente.`;
+  }
+  return detail;
+}
+
+function failureReport(outcomes: StepOutcome[], failed: StepOutcome, detail: string, snapshot: RepoSnapshot) {
+  const explanation = explainGitFailure(failed.command, detail, snapshot);
+  if (outcomes.length === 1) return explanation;
   const done = outcomes.filter((outcome) => outcome.status === "completed").length;
   const skipped = outcomes.filter((outcome) => outcome.status === "skipped");
   const tail = skipped.length ? ` No se ejecutó: ${skipped.map((outcome) => outcome.summary).join(", ")}.` : "";
-  return `Se completaron ${done} de ${outcomes.length} pasos. Falló «${failed.summary}»: ${detail}${tail}`;
+  return `Se completaron ${done} de ${outcomes.length} pasos. Falló «${failed.summary}»: ${explanation}${tail}`;
 }
 
 /**
@@ -1648,10 +1663,11 @@ export async function executePlan(cwd: string, plan: ActionPlan): Promise<{ snap
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Git no pudo completar la acción.";
       outcomes[index] = { ...outcomes[index], status: "failed", output: detail };
+      const failedSnapshot = await getSnapshot(cwd);
       return {
-        snapshot: await getSnapshot(cwd),
+        snapshot: failedSnapshot,
         output: executionReport(outcomes),
-        error: failureReport(outcomes, outcomes[index], detail),
+        error: failureReport(outcomes, outcomes[index], detail, failedSnapshot),
         outcomes
       };
     }
