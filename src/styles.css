@@ -294,6 +294,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .detail-files .change-row:last-child { border-bottom: 1px solid #1c2b37; }
 .diff-view { margin-top: 14px; border: 1px solid #223442; border-radius: 8px; overflow: hidden; }
 .diff-view pre { display: flex; flex-direction: column; max-height: 46vh; margin: 0; overflow: auto; padding: 10px 0; background: #0c141d; }
+.diff-pending { position: relative; }
+.diff-pending-overlay { position: absolute; inset: 14px 0 0; display: flex; align-items: center; justify-content: center; gap: 8px; color: #b8cbd5; background: #0c141df2; border: 1px solid #223442; border-radius: 8px; font-size: 10px; }
+.diff-pending-overlay svg { color: #6bd8cb; }
 .diff-line { padding: 0 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.6; white-space: pre; }
 .diff-line.add { color: #86e2b4; background: #12281f; }
 .diff-line.remove { color: #f0a3ac; background: #2a171c; }

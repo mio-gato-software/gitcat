@@ -1560,6 +1560,13 @@ function DiffView({ diff, truncated }: { diff: string; truncated: boolean }) {
   })}</pre>{truncated && <div className="diff-note">El diff se cortó porque era enorme. Lo que falta está en el repositorio, no aquí.</div>}</div>;
 }
 
+function PendingDiffView({ detail }: { detail: CommitDetail }) {
+  return <div className="diff-pending" aria-busy="true">
+    <DiffView diff={detail.diff} truncated={detail.truncated} />
+    <div className="diff-pending-overlay" role="status"><LoaderCircle className="spin" size={15} /> Leyendo el archivo…</div>
+  </div>;
+}
+
 /**
  * What a commit actually changed. Until now this dialog listed a hash, an author and a date — every
  * fact about the commit except the only one anyone opens it for.
@@ -1568,8 +1575,8 @@ function CommitModal({ commit, repoPath, onClose }: { commit: Commit; repoPath: 
   const [detail, setDetail] = useState<CommitDetail>();
   const [error, setError] = useState<string>();
   const [selectedFile, setSelectedFile] = useState<FileChange>();
-  const [fileDetail, setFileDetail] = useState<CommitDetail>();
-  const [fileError, setFileError] = useState<string>();
+  const [fileDetail, setFileDetail] = useState<{ path: string; detail: CommitDetail }>();
+  const [fileError, setFileError] = useState<{ path: string; message: string }>();
   useEscape(onClose);
   useEffect(() => {
     let live = true;
@@ -1586,13 +1593,14 @@ function CommitModal({ commit, repoPath, onClose }: { commit: Commit; repoPath: 
   useEffect(() => {
     if (!selectedFile) return;
     let live = true;
-    setFileDetail(undefined);
-    setFileError(undefined);
     window.branchline.getCommitFileDiff(repoPath, commit.hash, selectedFile.path)
-      .then((next) => { if (live) setFileDetail(next); })
-      .catch((reason) => { if (live) setFileError(cleanError(reason, "No se pudo leer el archivo.")); });
+      .then((next) => { if (live) setFileDetail({ path: selectedFile.path, detail: next }); })
+      .catch((reason) => { if (live) setFileError({ path: selectedFile.path, message: cleanError(reason, "No se pudo leer el archivo.") }); });
     return () => { live = false; };
   }, [repoPath, commit.hash, selectedFile?.path]);
+
+  const selectedDetail = selectedFile && fileDetail?.path === selectedFile.path ? fileDetail.detail : undefined;
+  const selectedError = selectedFile && fileError?.path === selectedFile.path ? fileError.message : undefined;
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="commit-modal wide" role="dialog" aria-modal="true" aria-labelledby="commit-modal-title">
@@ -1618,9 +1626,8 @@ function CommitModal({ commit, repoPath, onClose }: { commit: Commit; repoPath: 
           </button>)}
         </div>
         {selectedFile && <div className="diff-toolbar"><span>Mostrando solo <code>{selectedFile.path}</code></span><button className="ghost-button small" onClick={() => setSelectedFile(undefined)}>Ver todos los archivos</button></div>}
-        {fileError && <div className="modal-error" role="alert"><AlertTriangle size={14} />{fileError}</div>}
-        {selectedFile && !fileDetail && !fileError && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> Leyendo el archivo…</div>}
-        {selectedFile ? fileDetail && <DiffView diff={fileDetail.diff} truncated={fileDetail.truncated} /> : <DiffView diff={detail.diff} truncated={detail.truncated} />}
+        {selectedError && <div className="modal-error" role="alert"><AlertTriangle size={14} />{selectedError}</div>}
+        {selectedFile ? selectedDetail ? <DiffView diff={selectedDetail.diff} truncated={selectedDetail.truncated} /> : selectedError ? <DiffView diff={detail.diff} truncated={detail.truncated} /> : <PendingDiffView detail={detail} /> : <DiffView diff={detail.diff} truncated={detail.truncated} />}
       </>}
     </div>
   </div>;

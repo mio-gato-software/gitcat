@@ -288,6 +288,9 @@ test("el historial habla de una rama, se puede paginar y enseña qué cambió ca
   assert.match(service, /export async function getCommitFileDiff/);
   assert.match(service, /Ese archivo no forma parte de este commit/);
   assert.match(app, /function DiffView/);
+  assert.match(app, /function PendingDiffView/);
+  assert.match(app, /fileDetail\?\.path === selectedFile\.path/);
+  assert.doesNotMatch(app, /setFileDetail\(undefined\);\n\s*setFileError\(undefined\);\n\s*window\.branchline\.getCommitFileDiff/);
   assert.match(app, /getCommitFileDiff\(repoPath, commit\.hash, selectedFile\.path\)/);
   assert.match(app, /Ver todos los archivos/);
   // Una ruta que llega de la interfaz sigue siendo una ruta: tiene que caer dentro del repositorio.
