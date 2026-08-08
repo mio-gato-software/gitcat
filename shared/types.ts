@@ -285,6 +285,7 @@ export type GitlineApi = {
   getSnapshot: (path: string) => Promise<RepoSnapshot>;
   loadHistory: (path: string, request: HistoryRequest) => Promise<HistoryPage>;
   getCommitDetail: (path: string, hash: string) => Promise<CommitDetail>;
+  getCommitFileDiff: (path: string, hash: string, file: string) => Promise<CommitDetail>;
   proposeConflictResolution: (path: string) => Promise<ConflictProposal>;
   applyConflictResolution: (path: string, resolutions: ConflictResolution[]) => Promise<RepoSnapshot>;
   planRecovery: (path: string, failure: ExecutionFailure, context?: ConversationMessage[]) => Promise<ActionPlan>;

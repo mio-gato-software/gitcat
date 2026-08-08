@@ -273,7 +273,7 @@ test("el historial habla de una rama, se puede paginar y enseña qué cambió ca
   assert.match(service, /\["rev-parse", "--verify", "--quiet", `\$\{name\}\^\{commit\}`\]/);
   assert.match(service, /args\.push\("--"\)/);
   // Los canales nuevos pasan por los mismos guardas que el resto.
-  for (const channel of ["history:load", "commit:detail", "commit:file-diff"]) {
+  for (const channel of ["history:load", "commit:detail", "commit:file-detail", "commit:file-diff"]) {
     assert.match(main, new RegExp(`ipcMain\\.handle\\("${channel}"`));
   }
   assert.equal((main.match(/assertOpenedRepository\(cwd\)/g) ?? []).length >= 6, true);
@@ -285,7 +285,11 @@ test("el historial habla de una rama, se puede paginar y enseña qué cambió ca
   // Un merge se lee contra su primer padre; "git show" a secas contestaría que no cambió nada.
   assert.match(service, /const base = lineage\[1\]/);
   assert.match(service, /export async function getCommitDetail/);
+  assert.match(service, /export async function getCommitFileDiff/);
+  assert.match(service, /Ese archivo no forma parte de este commit/);
   assert.match(app, /function DiffView/);
+  assert.match(app, /getCommitFileDiff\(repoPath, commit\.hash, selectedFile\.path\)/);
+  assert.match(app, /Ver todos los archivos/);
   // Una ruta que llega de la interfaz sigue siendo una ruta: tiene que caer dentro del repositorio.
   assert.match(service, /La ruta no pertenece a este repositorio/);
   // Y los dos desajustes del grafo: el nodo se ancla donde empalma el SVG, y la cabecera al carril real.
@@ -356,7 +360,7 @@ test("las herramientas se localizan sin depender del PATH que hereda la app", as
   assert.match(service, /function loginShellPath/);
   assert.match(service, /\["-ilc", 'printf "%s" "\$PATH"'\]/);
   assert.match(service, /const executable = await resolveTool\(command\)/);
-  assert.match(service, /env: \{ \.\.\.process\.env, PATH: searchPath \}/);
+  assert.match(service, /env: \{ \.\.\.process\.env, PATH: searchPath,/);
   assert.match(service, /no runnable gh was found in any of the/);
 });
 

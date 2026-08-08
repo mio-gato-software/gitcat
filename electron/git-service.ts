@@ -497,6 +497,29 @@ export async function getCommitDetail(cwd: string, hash: string): Promise<Commit
   return { hash: commit, files: parseNameStatus(statusRaw), ...cutDiff(diffRaw) };
 }
 
+/** The same commit reading, narrowed to one path selected in the file list. */
+export async function getCommitFileDiff(cwd: string, hash: string, file: string): Promise<CommitDetail> {
+  const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
+  if (!/^[0-9a-f]{4,40}$/i.test(hash)) throw new Error("Hash de commit no válido.");
+  const commit = await optionalGit(repoRoot, ["rev-parse", "--verify", "--quiet", `${hash}^{commit}`]);
+  if (!commit) throw new Error("Ese commit no existe en este repositorio.");
+  const absolute = resolve(repoRoot, file);
+  if (absolute !== repoRoot && !absolute.startsWith(`${repoRoot}${sep}`)) throw new Error("La ruta no pertenece a este repositorio.");
+  const relative = absolute.slice(repoRoot.length + 1);
+  const lineage = (await checkedGit(repoRoot, ["rev-list", "--parents", "-n", "1", commit])).split(" ").filter(Boolean);
+  const base = lineage[1];
+  const statusRaw = base
+    ? await checkedGit(repoRoot, ["diff", "--no-color", "--name-status", "-z", base, commit, "--"])
+    : await checkedGit(repoRoot, ["show", "--no-color", "--name-status", "-z", "--format=", commit, "--"]);
+  const files = parseNameStatus(statusRaw);
+  const selected = files.filter((change) => change.path === relative || change.from === relative);
+  if (!selected.length) throw new Error("Ese archivo no forma parte de este commit.");
+  const diffRaw = base
+    ? await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", base, commit, "--", relative])
+    : await checkedGit(repoRoot, ["show", "--no-color", "--no-ext-diff", "--unified=3", "--format=", commit, "--", relative]);
+  return { hash: commit, files: selected, ...cutDiff(diffRaw) };
+}
+
 /** One uncommitted file, so the changes tab can show what changed rather than only that it did. */
 export async function getWorkingFileDiff(cwd: string, file: string): Promise<CommitDetail> {
   const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));

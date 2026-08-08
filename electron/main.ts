@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  applyConflictResolution, executePlan, generateCommitDescription, getCommitDetail, getLlmConfig, getSnapshot,
+  applyConflictResolution, executePlan, generateCommitDescription, getCommitDetail, getCommitFileDiff, getLlmConfig, getSnapshot,
   getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
   prepareMergeToDefault, proposeConflictResolution, saveLlmConfig
 } from "./git-service.js";
@@ -161,6 +161,12 @@ app.whenReady().then(async () => {
     assertTrustedSender(event);
     if (typeof hash !== "string") throw new Error("El commit solicitado no es válido.");
     return getCommitDetail(assertOpenedRepository(cwd), hash);
+  });
+  ipcMain.handle("commit:file-detail", (event, cwd: string, hash: string, file: string) => {
+    assertTrustedSender(event);
+    if (typeof hash !== "string") throw new Error("El commit solicitado no es válido.");
+    if (typeof file !== "string" || !file) throw new Error("El archivo solicitado no es válido.");
+    return getCommitFileDiff(assertOpenedRepository(cwd), hash, file);
   });
   ipcMain.handle("commit:file-diff", (event, cwd: string, file: string) => {
     assertTrustedSender(event);

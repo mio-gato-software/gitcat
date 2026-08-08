@@ -1567,14 +1567,32 @@ function DiffView({ diff, truncated }: { diff: string; truncated: boolean }) {
 function CommitModal({ commit, repoPath, onClose }: { commit: Commit; repoPath: string; onClose: () => void }) {
   const [detail, setDetail] = useState<CommitDetail>();
   const [error, setError] = useState<string>();
+  const [selectedFile, setSelectedFile] = useState<FileChange>();
+  const [fileDetail, setFileDetail] = useState<CommitDetail>();
+  const [fileError, setFileError] = useState<string>();
   useEscape(onClose);
   useEffect(() => {
     let live = true;
+    setDetail(undefined);
+    setError(undefined);
+    setSelectedFile(undefined);
+    setFileDetail(undefined);
+    setFileError(undefined);
     window.branchline.getCommitDetail(repoPath, commit.hash)
       .then((next) => { if (live) setDetail(next); })
       .catch((reason) => { if (live) setError(cleanError(reason, "No se pudo leer el commit.")); });
     return () => { live = false; };
   }, [repoPath, commit.hash]);
+  useEffect(() => {
+    if (!selectedFile) return;
+    let live = true;
+    setFileDetail(undefined);
+    setFileError(undefined);
+    window.branchline.getCommitFileDiff(repoPath, commit.hash, selectedFile.path)
+      .then((next) => { if (live) setFileDetail(next); })
+      .catch((reason) => { if (live) setFileError(cleanError(reason, "No se pudo leer el archivo.")); });
+    return () => { live = false; };
+  }, [repoPath, commit.hash, selectedFile?.path]);
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="commit-modal wide" role="dialog" aria-modal="true" aria-labelledby="commit-modal-title">
@@ -1592,13 +1610,17 @@ function CommitModal({ commit, repoPath, onClose }: { commit: Commit; repoPath: 
       {!detail && !error && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> Leyendo el cambio…</div>}
       {detail && <>
         <div className="detail-files"><span className="eyebrow">{plural(detail.files.length, "ARCHIVO", "ARCHIVOS")}</span>
-          {detail.files.map((file) => <div className="change-row" key={file.path}>
+          {detail.files.map((file) => <button className={`change-row ${selectedFile?.path === file.path ? "selected" : ""}`} key={file.path} onClick={() => setSelectedFile(file)} aria-pressed={selectedFile?.path === file.path} title={`Ver qué cambió en ${file.path}`}>
             <span className={`change-code code-${file.code[0]?.toLowerCase()}`}>{file.code}</span>
             <span className="change-status">{changeStatus(file.code)}</span>
             <span className="change-path" title={file.path}>{file.path}</span>
-          </div>)}
+            <Info size={13} className="change-more" />
+          </button>)}
         </div>
-        <DiffView diff={detail.diff} truncated={detail.truncated} />
+        {selectedFile && <div className="diff-toolbar"><span>Mostrando solo <code>{selectedFile.path}</code></span><button className="ghost-button small" onClick={() => setSelectedFile(undefined)}>Ver todos los archivos</button></div>}
+        {fileError && <div className="modal-error" role="alert"><AlertTriangle size={14} />{fileError}</div>}
+        {selectedFile && !fileDetail && !fileError && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> Leyendo el archivo…</div>}
+        {selectedFile ? fileDetail && <DiffView diff={fileDetail.diff} truncated={fileDetail.truncated} /> : <DiffView diff={detail.diff} truncated={detail.truncated} />}
       </>}
     </div>
   </div>;
