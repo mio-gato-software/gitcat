@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu } from "electron";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -76,7 +76,7 @@ function rememberPlan(plan: ActionPlan) {
 }
 
 async function createWindow() {
-  mainWindow = new BrowserWindow({
+  const window = mainWindow = new BrowserWindow({
     width: 1480,
     height: 940,
     minWidth: 1080,
@@ -92,12 +92,24 @@ async function createWindow() {
     }
   });
 
-  mainWindow.webContents.on("will-navigate", (event, url) => {
+  window.webContents.on("will-navigate", (event, url) => {
     if (!isTrustedFrame(url)) event.preventDefault();
   });
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  if (!app.isPackaged) await mainWindow.loadURL("http://127.0.0.1:5173");
-  else await mainWindow.loadFile(join(app.getAppPath(), "dist/index.html"));
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("context-menu", (_event, params) => {
+    const menu = Menu.buildFromTemplate([
+      { role: "copy", enabled: Boolean(params.selectionText) }
+    ]);
+    menu.popup({ window });
+  });
+  window.webContents.on("before-input-event", (event, input) => {
+    const modifier = process.platform === "darwin" ? input.meta : input.control;
+    if (input.type !== "keyDown" || input.key.toLowerCase() !== "c" || !modifier || input.alt) return;
+    event.preventDefault();
+    window.webContents.copy();
+  });
+  if (!app.isPackaged) await window.loadURL("http://127.0.0.1:5173");
+  else await window.loadFile(join(app.getAppPath(), "dist/index.html"));
 }
 
 app.whenReady().then(async () => {

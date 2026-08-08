@@ -356,7 +356,7 @@ test("las herramientas se localizan sin depender del PATH que hereda la app", as
   assert.match(service, /function loginShellPath/);
   assert.match(service, /\["-ilc", 'printf "%s" "\$PATH"'\]/);
   assert.match(service, /const executable = await resolveTool\(command\)/);
-  assert.match(service, /env: \{ \.\.\.process\.env, PATH: searchPath/);
+  assert.match(service, /env: \{ \.\.\.process\.env, PATH: searchPath \}/);
   assert.match(service, /no runnable gh was found in any of the/);
 });
 
@@ -562,7 +562,7 @@ test("la validación GitHub cubre todos los campos y evita rutas arbitrarias", a
   assert.match(service, /validateRepositoryFields/);
   assert.match(repositoryPlan, /if \(!fields\.localPath\) issues\.push\(missing\("localPath"\)\)/);
   assert.match(repositoryPlan, /if \(!fields\.repository\) issues\.push\(missing\("repository"\)\)/);
-  assert.doesNotMatch(repositoryPlan, /basename\(.*localPath|basename\(.*source/);
+  assert.doesNotMatch(repositoryPlan, /basename\(.*localPath|basename\(.*source\)/);
   assert.match(service, /is not the project currently open in Branchline/);
   assert.match(service, /already points to/);
 });
@@ -684,7 +684,7 @@ test("resolver un conflicto con el modelo se propone, se revisa y solo entonces 
   assert.match(resolution, /strict: true/);
   // Escribir es un paso aparte, y cada ruta se comprueba contra los conflictos que Git reporta ahora.
   assert.match(service, /export async function applyConflictResolution/);
-  assert.match(service, /if \(!open\.has\(resolution\.path\)\) throw new Error\(`\$\{resolution\.path\} ya no está en conflicto\.`\)/);
+  assert.match(service, /if \(!open\.has\(resolution\.path\)\) throw new Error\(`\$\{resolution\.path\} ya no está en conflicto\.\`\)/);
   assert.match(service, /todavía contiene marcas de conflicto/);
   assert.match(service, /if \(!absolute\.startsWith\(`\$\{snapshot\.path\}\$\{sep\}`\)\) throw new Error\("La ruta no pertenece a este repositorio\."\)/);
   // Nunca en automático: hay un botón, y la propuesta se revisa archivo a archivo antes de aceptarla.
@@ -718,4 +718,15 @@ test("las ramas ofrecen fusionarse en la rama por defecto desde su menú context
   assert.match(service, /git switch/);
   assert.match(main, /action:prepare-merge-to-default/);
   assert.match(preload, /prepareMergeToDefault/);
+});
+
+test("el texto seleccionado tiene menú y atajos de copiar multiplataforma", async () => {
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
+  assert.match(main, /webContents\.on\("context-menu"/);
+  assert.match(main, /role: "copy"/);
+  assert.match(main, /enabled: Boolean\(params\.selectionText\)/);
+  assert.match(main, /webContents\.on\("before-input-event"/);
+  assert.match(main, /process\.platform === "darwin" \? input\.meta : input\.control/);
+  assert.match(main, /input\.key\.toLowerCase\(\) !== "c"/);
+  assert.match(main, /window\.webContents\.copy\(\)/);
 });
