@@ -2,6 +2,14 @@
 
 Read this file before starting a task in this repository.
 
+## Task source
+
+Tasks for this repository are available at [llms.txt](http://100.106.172.17:3000/llms.txt).
+
+## Naming
+
+The app is named **uncurved**. Refer to its tasks as **uncurved tasks** or simply **the board**.
+
 ## Product spirit
 
 Branchline is for people who need Git, not necessarily for people who already know Git. A user may
