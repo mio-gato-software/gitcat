@@ -24,6 +24,8 @@ test("el planificador acepta cualquier idioma y responde en el del usuario", asy
   assert.match(instructions, /never by matching words or verb forms/);
   assert.match(instructions, /same language as the user's latest message/);
   assert.match(instructions, /"\/repo"/);
+  assert.match(instructions, /A branch tip never includes uncommitted working-tree changes/);
+  assert.match(instructions, /Do not propose an empty merge/);
   assert.doesNotMatch(instructions, /Validation issues/);
 });
 

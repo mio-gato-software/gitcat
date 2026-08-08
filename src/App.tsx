@@ -569,7 +569,13 @@ export default function App() {
     if (!snapshot?.defaultBranch) return;
     const path = snapshot.path;
     const target = snapshot.defaultBranch;
-    await showPlan(`Merge ${name} to ${target}`, () => window.branchline.prepareMergeToDefault(path, name), path);
+    const question = `Merge ${name} to ${target}`;
+    // A clean branch can use the verified direct path. Once the working tree is dirty, the model must
+    // decide whether those changes belong to this branch and, if so, place a commit before the merge.
+    const context = conversationContext(conversations[path] ?? []);
+    await showPlan(question, snapshot.isDirty
+      ? () => window.branchline.planAction(path, question, context)
+      : () => window.branchline.prepareMergeToDefault(path, name), path);
   };
 
   const applyPlan = async (turnId: number, plan: ActionPlan) => {

@@ -317,6 +317,59 @@ test("el menú contextual prepara fusionar la rama elegida en la rama por defect
   assert.equal(git("log", "-1", "--pretty=%s").trim(), "trabajo desde el menú");
 });
 
+test("el menú contextual no prepara una fusión vacía cuando la rama ya está integrada", async () => {
+  const work = mkdtempSync(join(tmpdir(), "branchline-empty-merge-"));
+  const run = (...args) => execFileSync("git", args, { cwd: work, encoding: "utf8" });
+  run("init", "-b", "main");
+  run("config", "user.email", "prueba@example.com");
+  run("config", "user.name", "Prueba Uno");
+  writeFileSync(join(work, "README.md"), "hola\n");
+  run("add", "-A");
+  run("commit", "-m", "primer commit");
+  run("switch", "-c", "feature/empty");
+
+  const result = await service.prepareMergeToDefault(work, "feature/empty");
+  assert.equal(result.allowed, false);
+  assert.match(result.rationale, /ya está integrada en main/);
+  assert.match(result.summary, /Nothing to merge/);
+});
+
+test("una fusión desde una rama sucia deja que el modelo decida si debe confirmar antes", async () => {
+  const work = mkdtempSync(join(tmpdir(), "branchline-dirty-merge-"));
+  const run = (...args) => execFileSync("git", args, { cwd: work, encoding: "utf8" });
+  run("init", "-b", "main");
+  run("config", "user.email", "prueba@example.com");
+  run("config", "user.name", "Prueba Uno");
+  writeFileSync(join(work, "README.md"), "hola\n");
+  run("add", "-A");
+  run("commit", "-m", "primer commit");
+  run("switch", "-c", "feature/dirty");
+  writeFileSync(join(work, "dirty.txt"), "cambio pendiente\n");
+
+  reply(plan({
+    intent: "git_operation",
+    steps: [step("commit"), step("checkout", { name: "main" }), step("merge", { name: "feature/dirty" })],
+    summary: "Commit the pending work, then merge feature/dirty to main",
+    rationale: "The current branch has uncommitted work that belongs in the merge.",
+    risk: "high"
+  }));
+  reply("Añade el cambio pendiente");
+  const result = await service.planAction(work, "Merge feature/dirty to main");
+  assert.equal(requests.length, 2, "el modelo ve la petición y el diff se usa para escribir el commit");
+  assert.match(requests[0].instructions, /workingTreeDiff/);
+  assert.match(requests[0].instructions, /dirty\.txt/);
+  assert.deepEqual(result.steps.map((item) => item.command), [
+    'git add -A && git commit -m "Añade el cambio pendiente"',
+    "git switch main",
+    "git merge --no-edit feature/dirty"
+  ]);
+
+  const execution = await service.executePlan(work, result);
+  assert.equal(execution.error, undefined, execution.error);
+  assert.equal(execution.snapshot.currentBranch, "main");
+  assert.equal(run("show", "main:dirty.txt"), "cambio pendiente\n");
+});
+
 test("una secuencia sigue anclada al estado que la creó: si el repositorio se movió, no se ejecuta", async () => {
   git("switch", "main");
   reply(plan({

@@ -720,6 +720,25 @@ test("las ramas ofrecen fusionarse en la rama por defecto desde su menú context
   assert.match(preload, /prepareMergeToDefault/);
 });
 
+test("las fusiones desde el menú respetan cambios pendientes y la guía del agente", async () => {
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
+  const guide = await readFile(join(root, "AGENTS.md"), "utf8");
+  assert.match(app, /snapshot\.isDirty\s*\n?\s*\? \(\) => window\.branchline\.planAction/);
+  assert.match(service, /if \(snapshot\.isDirty\) throw new Error\("Hay cambios locales sin confirmar/);
+  assert.match(service, /branch\.mergedInto\.includes\(target\)/);
+  assert.match(service, /async function plannerState/);
+  assert.match(service, /workingTreeDiff/);
+  assert.match(planner, /A branch tip never includes uncommitted working-tree changes/);
+  assert.match(guide, /Read this file before starting a task/);
+  assert.match(guide, /Branchline is for people who need Git, not necessarily for people who already know Git/);
+  assert.match(guide, /Start from the user's goal, not from Git commands/);
+  assert.match(guide, /The product owns the translation/);
+  assert.match(guide, /Never treat an empty or already-contained branch as a meaningful merge/);
+  assert.match(guide, /Preserve uncommitted work/);
+});
+
 test("el texto seleccionado tiene menú y atajos de copiar multiplataforma", async () => {
   const main = await readFile(join(root, "electron/main.ts"), "utf8");
   assert.match(main, /webContents\.on\("context-menu"/);

@@ -955,7 +955,10 @@ export async function generateCommitDescription(cwd: string) {
 }
 
 /** Everything the model is allowed to reason about: verified repository facts, never raw guesses. */
-function plannerState(snapshot: RepoSnapshot) {
+async function plannerState(snapshot: RepoSnapshot) {
+  const workingTreeDiff = snapshot.isDirty
+    ? await getWorkingTreeDiff(snapshot).catch((error) => `[no se pudo leer el diff de trabajo: ${error instanceof Error ? error.message : "error desconocido"}]`)
+    : null;
   return {
     openRepositoryPath: snapshot.path,
     openRepositoryName: snapshot.name,
@@ -969,6 +972,9 @@ function plannerState(snapshot: RepoSnapshot) {
     conflicts: snapshot.conflicts.map((conflict) => ({ path: conflict.path, kind: conflict.kind, meaning: conflictLabels[conflict.kind] })),
     hasLocalChanges: snapshot.isDirty,
     localChanges: snapshot.changes.slice(0, 60),
+    // A dirty tree is not part of any branch tip. The model needs the actual diff before deciding
+    // whether a merge request should commit it, leave it alone, or ask the user what it belongs to.
+    workingTreeDiff,
     remotes: snapshot.remotes,
     branches: snapshot.branches.map((branch) => ({
       name: branch.name,
@@ -1007,7 +1013,7 @@ function plannerState(snapshot: RepoSnapshot) {
 
 async function requestPlan(request: string, snapshot: RepoSnapshot, context: ConversationMessage[], issues: PlanIssue[] = []): Promise<ModelPlan> {
   const text = await askProvider({
-    instructions: buildPlannerInstructions(plannerState(snapshot), issues),
+    instructions: buildPlannerInstructions(await plannerState(snapshot), issues),
     input: [...context, { role: "user", content: request }],
     text: { format: planResponseFormat }
   });
@@ -1386,11 +1392,15 @@ export async function prepareMergeToDefault(cwd: string, branchName: string) {
   const target = snapshot.defaultBranch;
   const name = branchName.trim();
   if (!target) throw new Error("No se pudo determinar la rama por defecto de este repositorio.");
+  if (snapshot.isDirty) throw new Error("Hay cambios locales sin confirmar. El asistente debe revisarlos antes de fusionar esta rama.");
   if (!name || !isBranchNameSafe(name)) throw new Error("Nombre de rama no válido.");
   if (name === target) throw new Error(`No puedes fusionar ${name} consigo misma.`);
   const branch = snapshot.branches.find((item) => item.name === name);
   if (!branch) throw new Error(`La rama ${name} no existe localmente.`);
   if (branch.presence === "remote") throw new Error(`La rama ${name} solo existe en el remoto. Cámbiate a ella primero para tenerla en local.`);
+  if (branch.mergedInto.includes(target)) {
+    return bindPlan(snapshot, refused(`La rama ${name} ya está integrada en ${target}; no hay commits pendientes que fusionar.`, "guardrail", `Nothing to merge: ${name} is already in ${target}`));
+  }
 
   const steps: PlanStep[] = [];
   if (snapshot.currentBranch !== target) {
