@@ -38,7 +38,9 @@ test("el instalador de mac construye el app y lo reemplaza en Applications", asy
 test("el build tiene un asset de icono reproducible", async () => {
   const icon = await readFile(join(root, "build/icon.svg"), "utf8");
   assert.match(icon, /<svg/);
-  assert.match(icon, /#6be0cf|#86ecde/);
+  assert.match(icon, /viewBox="0 0 1024 1024"/);
+  assert.match(icon, /<path/);
+  assert.doesNotMatch(icon, /<image|<script|href=/);
 });
 
 test("la capa de Git evita ejecutar comandos libres", async () => {

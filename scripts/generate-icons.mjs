@@ -14,7 +14,11 @@ function has(command) {
 
 if (!existsSync(svg)) throw new Error(`No existe ${svg}`);
 if (!has("rsvg-convert")) {
-  console.warn("rsvg-convert no está disponible; electron-builder usará build/icon.svg directamente.");
+  // Packaging prefers icon.png over SVG. Always refresh it, even on a Mac
+  // without librsvg, otherwise an old brand icon silently ships again.
+  mkdirSync(buildDir, { recursive: true });
+  execFileSync(join(root, "node_modules", ".bin", "electron"), [join(root, "scripts", "render-icon.cjs"), svg, png], { stdio: "inherit" });
+  console.log(`Ícono raster generado con Electron: ${png}`);
   process.exit(0);
 }
 

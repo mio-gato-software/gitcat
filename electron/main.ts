@@ -90,7 +90,7 @@ async function createWindow() {
     height: 940,
     minWidth: 1080,
     minHeight: 700,
-    backgroundColor: "#0b1018",
+    backgroundColor: "#1b1d1e",
     titleBarStyle: "hiddenInset",
     ...(process.platform === "darwin" ? { trafficLightPosition: { x: 16, y: 20 } } : {}),
     webPreferences: {

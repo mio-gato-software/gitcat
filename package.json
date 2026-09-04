@@ -20,6 +20,7 @@
     "dist:linux": "npm run build && npm run icons && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --linux",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p electron/tsconfig.json",
     "test": "tsc -p electron/tsconfig.json && node --test test/*.test.mjs",
+    "test:ui": "npm run build && electron scripts/check-ui.cjs",
     "start": "electron ."
   },
   "dependencies": {

@@ -1,3 +1,4 @@
+import { CatMark, SleepingCat } from "./CatMark";
 import { NotificationCenter } from "./NotificationCenter";
 import { addNotification, type Notification } from "../shared/notifications";
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -49,7 +50,7 @@ function useI18n() {
   return value;
 }
 
-const palette = ["#62d6c8", "#c59bff", "#f0b26e", "#7da7ff", "#ef7c95"];
+const palette = ["#ec806e", "#bda1e8", "#91c99b", "#86b4dc", "#e4be81"];
 
 function formatDate(date: string, locale: Locale) {
   if (!date) return "—";
@@ -820,7 +821,7 @@ export default function App() {
     <I18nContext.Provider value={{ locale, t, setLocale }}>
     <div className={`app-shell platform-${window.gitcat.platform}`}>
       <header className="topbar">
-        <div className="brand-lockup"><div className="brand-mark"><GitFork size={18} strokeWidth={2.4} /></div><span>GitCat</span><span className="brand-beta">BETA</span></div>
+        <div className="brand-lockup"><div className="brand-mark"><CatMark size={28} /></div><span>GitCat</span></div>
         <div className="window-tabs" role="tablist" aria-label={t("openProjects")}>
           {projects.map((project) => <div key={project.id} className={`window-tab ${project.id === activeId ? "active" : ""}`}>
             <button role="tab" aria-selected={project.id === activeId} onClick={() => setActiveId(project.id)}><GitBranch size={14} /><span>{project.snapshot.name}</span></button>
@@ -834,15 +835,13 @@ export default function App() {
 
       {!workspaceReady ? <div className="workspace-loading"><LoaderCircle className="spin" size={24} /><span>{t("restoringProjects")}</span></div> : !config.configured && !exploring ? <ProviderRequired onConfigure={() => setSettingsOpen(true)} onExplore={() => setExploring(true)} /> : !snapshot ? <Welcome openProject={openProject} /> : <>
         {!config.configured && <div className="provider-banner" role="status"><Eye size={14} /><span><strong>{t("noProviderBanner")}</strong> {t("noProviderBannerDetail")}</span><button className="outline-button small" onClick={() => setSettingsOpen(true)}><Settings2 size={13} /> {t("configure")}</button></div>}
-        <div className="workspace-header">
-          <div className="project-title"><div className="folder-icon"><FolderOpen size={17} /></div><div><div className="eyebrow">{t("activeProject")}</div><div className="project-name">{snapshot.name}<span className="project-path" title={snapshot.path}>{shortPath(snapshot.path)}</span></div></div></div>
-          <div className="workspace-actions"><button className="ghost-button" onClick={() => void refreshProject()} disabled={Boolean(refreshingPath)}>{refreshingPath === snapshot.path ? <LoaderCircle className="spin" size={15} /> : <RefreshCcw size={15} />} {t("refresh")}</button><button className="outline-button" onClick={() => void prepare("fetch")} disabled={planning}><ArrowDownToLine size={15} /> {t("fetch")}</button><button className="primary-button" onClick={() => void prepare("push")} disabled={planning}><ArrowUpFromLine size={15} /> {t("push")}</button></div>
-        </div>
+
 
         <main className="main-layout" ref={layoutRef} style={paneStyle}>
           {panes && <PaneDivider edge="sidebar" width={panes.sidebar} onPointerDown={startResize("sidebar")} onNudge={(delta) => nudgePane("sidebar", delta)} onReset={() => resetPane("sidebar")} />}
           {panes && <PaneDivider edge="inspector" width={panes.inspector} onPointerDown={startResize("inspector")} onNudge={(delta) => nudgePane("inspector", delta)} onReset={() => resetPane("inspector")} />}
           <aside className="sidebar">
+            <div className="sidebar-project"><div className="folder-icon"><FolderGit2 size={23} /></div><div><strong>{snapshot.name}</strong><span title={snapshot.path}>{shortPath(snapshot.path)}</span></div></div>
             <BranchPanel
               key={snapshot.path}
               snapshot={snapshot}
@@ -856,9 +855,11 @@ export default function App() {
               onRename={(name, to) => void prepare("rename_branch", { name, to })}
               onMergeToDefault={(name) => void prepareMergeToDefault(name)}
             />
+            <div className="sidebar-mascot"><SleepingCat /><span>{t("oneStepAtATime")}</span></div>
           </aside>
 
           <section className="graph-area">
+            <div className="workspace-header"><div className="workspace-intro"><h1>{t("workInContext")}</h1><div className="project-breadcrumb"><span>{snapshot.name}</span><span aria-hidden="true">/</span><strong title={snapshot.currentBranch}>{snapshot.currentBranch}</strong></div></div><div className="workspace-actions"><button className="ghost-button" onClick={() => void refreshProject()} disabled={Boolean(refreshingPath)}>{refreshingPath === snapshot.path ? <LoaderCircle className="spin" size={15} /> : <RefreshCcw size={15} />} {t("refresh")}</button><button className="ghost-button" onClick={() => void prepare("fetch")} disabled={planning}><ArrowDownToLine size={15} /> {t("fetch")}</button><button className="ghost-button" onClick={() => void prepare("push")} disabled={planning}><ArrowUpFromLine size={15} /> {t("push")}</button></div></div>
             <div className="graph-toolbar"><div className="view-tabs"><button className={`view-tab ${view === "overview" ? "active" : ""}`} onClick={() => setView("overview")}>{t("overview")}</button><button className={`view-tab ${view === "history" ? "active" : ""}`} onClick={() => setView("history")}>{t("history")}</button><button className={`view-tab ${view === "changes" ? "active" : ""}`} onClick={() => setView("changes")}>{t("changesTab")} <span className="count-badge">{snapshot.changes.length}</span></button></div>{view !== "changes" && <div className="graph-tools"><div className="search-field commit-search"><Search size={14} /><input aria-label={t("searchCommits")} value={commitFilter} onChange={(event) => setCommitFilter(event.target.value)} placeholder={t("searchCommits")} /></div></div>}</div>
             {snapshot.pending && <PendingBanner
               snapshot={snapshot}
@@ -873,9 +874,9 @@ export default function App() {
               : <ChangesView snapshot={snapshot} merge={deliveryMerge} configured={config.configured} stale={Boolean(deliveryStateId && deliveryStateId !== snapshot.stateId)} onReviewAgain={() => beginDelivery(deliveryMerge)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} formOpen={commitFormOpen} message={commitMessage} generating={generatingDescription} busy={planning} onOpenForm={() => beginDelivery(false)} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit} />}
           </section>
 
-          <aside className="inspector"><div className="inspector-header"><div><div className="eyebrow">{t("assistant")}</div><h2>{t("assistantHeading")}</h2></div><div className="assistant-icon"><Bot size={18} /></div></div><p className="assistant-copy">{config.configured ? t("assistantConfiguredCopy") : t("assistantUnconfiguredCopy")}</p>{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div><div className="chat-compose"><textarea aria-label={t("assistantRequest")} disabled={!config.configured} value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder={config.configured ? t("assistantPlaceholder") : t("configureAssistantPlaceholder")} rows={3} /><button className="send-button" aria-label={t("prepareRequest")} onClick={() => void propose(request)} disabled={planning || !request.trim() || !config.configured}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div></aside>
+          <aside className="inspector"><div className="inspector-header"><div><div className="eyebrow">{t("assistant")}</div><h2>{t("assistantHeading")}</h2></div><div className="assistant-icon"><CatMark size={29} outline /></div></div><div className="assistant-body"><p className="assistant-copy">{config.configured ? t("assistantConfiguredCopy") : t("assistantUnconfiguredCopy")}</p>{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div><div className="chat-compose"><textarea aria-label={t("assistantRequest")} disabled={!config.configured} value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder={config.configured ? t("assistantPlaceholder") : t("configureAssistantPlaceholder")} rows={3} /><button className="send-button" aria-label={t("prepareRequest")} onClick={() => void propose(request)} disabled={planning || !request.trim() || !config.configured}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div></aside>
         </main>
-        <footer className="statusbar"><div className="status-left"><span className="status-good"><CircleDot size={12} /> {snapshot.isDirty ? counted(t, snapshot.changes.length, "change", "changes") : t("noUncommittedChanges")}</span><span className="status-separator" /><span>{counted(t, branchCount.local, "localBranch", "localBranches")}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} ${t("remoteOnly")}` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> {t("lastRead", { date: formatDate(active.loadedAt, locale) })}</span><span className="remote-status" title={remoteTitle(snapshot, t)}><Cloud size={12} /> {remoteLabel(snapshot, t)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : t("llmNotConfigured")}</span></div></footer>
+        <footer className="statusbar"><div className="status-left"><span className={`status-good ${snapshot.isDirty ? "has-changes" : ""}`}><CircleDot size={12} /> {snapshot.isDirty ? counted(t, snapshot.changes.length, "change", "changes") : t("noUncommittedChanges")}</span><span className="status-separator" /><span>{counted(t, branchCount.local, "localBranch", "localBranches")}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} ${t("remoteOnly")}` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> {t("lastRead", { date: formatDate(active.loadedAt, locale) })}</span><span className="remote-status" title={remoteTitle(snapshot, t)}><Cloud size={12} /> {remoteLabel(snapshot, t)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : t("llmNotConfigured")}</span></div></footer>
       </>}
       {deliveryReview && <DeliveryReviewModal review={deliveryReview} busy={planning}
         onClose={() => { updateTurn(deliveryReview.plan.repoPath, deliveryReview.turnId, (turn) => ({ ...turn, status: "cancelled", outcome: t("planDiscarded") })); setDeliveryReview(undefined); }}
@@ -893,7 +894,7 @@ export default function App() {
 
 function Welcome({ openProject }: { openProject: () => Promise<void> }) {
   const { t } = useI18n();
-  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card"><div className="welcome-mark"><GitFork size={30} /></div><div className="eyebrow">{t("branchWorkspace")}</div><h1>{t("yourGitClearer")}</h1><p>{t("welcomeCopy")}</p><button className="primary-button welcome-button" onClick={() => void openProject()}><FolderOpen size={16} /> {t("openProject")}</button><div className="welcome-features"><span><GitMerge size={14} /> {t("safeRebase")}</span><span><MessageCircle size={14} /> {t("naturalLanguage")}</span><span><ShieldCheck size={14} /> {t("protectedCommands")}</span></div><div className="welcome-footnote">{t("configuredLlmProvider")}</div></div></div>;
+  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card"><div className="welcome-mark"><CatMark size={42} /></div><div className="eyebrow">{t("branchWorkspace")}</div><h1>{t("yourGitClearer")}</h1><p>{t("welcomeCopy")}</p><button className="primary-button welcome-button" onClick={() => void openProject()}><FolderOpen size={16} /> {t("openProject")}</button><div className="welcome-features"><span><GitMerge size={14} /> {t("safeRebase")}</span><span><MessageCircle size={14} /> {t("naturalLanguage")}</span><span><ShieldCheck size={14} /> {t("protectedCommands")}</span></div><div className="welcome-footnote">{t("configuredLlmProvider")}</div></div></div>;
 }
 
 /**
@@ -902,7 +903,7 @@ function Welcome({ openProject }: { openProject: () => Promise<void> }) {
  */
 function ProviderRequired({ onConfigure, onExplore }: { onConfigure: () => void; onExplore: () => void }) {
   const { t } = useI18n();
-  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card"><div className="welcome-mark"><Sparkles size={30} /></div><div className="eyebrow">{t("requiredLlmProvider")}</div><h1>{t("connectModel")}</h1><p>{t("requiredProviderCopy")}</p><button className="primary-button welcome-button" onClick={onConfigure}><Settings2 size={16} /> {t("configureProvider")}</button><button className="ghost-button welcome-button" onClick={onExplore}><Eye size={15} /> {t("viewWithoutProvider")}</button><div className="welcome-features"><span><MessageCircle size={14} /> {t("anyLanguage")}</span><span><ShieldCheck size={14} /> {t("verifiedPlans")}</span><span><Bot size={14} /> {t("noKeywords")}</span></div><div className="welcome-footnote">{t("encryptedApiKey")}</div></div></div>;
+  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card"><div className="welcome-mark"><CatMark size={42} /></div><div className="eyebrow">{t("requiredLlmProvider")}</div><h1>{t("connectModel")}</h1><p>{t("requiredProviderCopy")}</p><button className="primary-button welcome-button" onClick={onConfigure}><Settings2 size={16} /> {t("configureProvider")}</button><button className="ghost-button welcome-button" onClick={onExplore}><Eye size={15} /> {t("viewWithoutProvider")}</button><div className="welcome-features"><span><MessageCircle size={14} /> {t("anyLanguage")}</span><span><ShieldCheck size={14} /> {t("verifiedPlans")}</span><span><Bot size={14} /> {t("noKeywords")}</span></div><div className="welcome-footnote">{t("encryptedApiKey")}</div></div></div>;
 }
 
 /**
@@ -1244,15 +1245,15 @@ function RepositoryOverview({ snapshot, filter, onSelect, onChanges }: {
   const current = snapshot.branches.find((branch) => branch.isCurrent);
   return <>
     <div className={`activity-overview ${changed.length ? "has-updates" : ""}`}>
-      <div className="overview-heading"><div><span className="eyebrow">{t("repositoryOverview")}</span>
+      <div className="overview-heading"><div>
         <h3>{changed.length ? t("branchesUpdated", { count: changed.length }) : t("recentHistory")}</h3>
       </div>{changed.length > 0 && <button className="outline-button small" onClick={() => setBaseline(activityBaseline(snapshot))}><Check size={13} />{t("markReviewed")}</button>}</div>
-      <p>{changed.length ? t("sinceReview") : t("overviewIntro")}</p>
+      {changed.length > 0 && <p>{t("sinceReview")}</p>}
       {changed.length > 0 && <div className="updated-branches">{changed.map((name) => <span key={name} title={name}>{name}{!snapshot.branches.some((branch) => branch.name === name) ? ` · ${t("removedBranch")}` : ""}</span>)}</div>}
-      <div className="overview-stats"><button onClick={onChanges} className={snapshot.changes.length ? "needs-attention" : ""}><FileDiff size={14} /><strong>{snapshot.changes.length}</strong>{t("uncommittedFiles")}</button>
+      <details className="overview-details"><summary>{t("repositoryStatus")}</summary><p>{t("overviewIntro")}</p><div className="overview-stats"><button onClick={onChanges} className={snapshot.changes.length ? "needs-attention" : ""}><FileDiff size={14} /><strong>{snapshot.changes.length}</strong>{t("uncommittedFiles")}</button>
         <span><ArrowDownToLine size={14} /><strong>{current?.upstream ? current.behind : "—"}</strong>{t("incomingCurrent")}</span>
         <span><ArrowUpFromLine size={14} /><strong>{current?.upstream ? current.ahead : "—"}</strong>{t("outgoingCurrent")}</span></div>
-      <small>{t(current?.upstream ? "knownRemoteState" : "noRemoteComparison")}</small>
+      <small>{t(current?.upstream ? "knownRemoteState" : "noRemoteComparison")}</small></details>
       {storageError && <p role="alert">{t("activityStorageError")}</p>}
     </div>
     <HistoryView snapshot={snapshot} selection={snapshot.currentBranch} filter={filter} onSelect={onSelect} overview highlighted={highlighted} />
@@ -1341,7 +1342,7 @@ function HistoryView({ snapshot, selection, filter, onSelect, overview = false, 
           : page.hasMore ? t("commitsMore", { count: page.commits.length }) : t("noMoreCommits", { count: page.commits.length })}</span>
       </div>
     </div>
-    {overview && <><div className="overview-legend">{t("prReferenceNote")}</div><div className="overview-columns"><span>{t("branchesAndTags")}</span><span>{t("graphLabel")}</span><span>{t("changesAndPRs")}</span></div></>}
+    {overview && <><details className="overview-legend"><summary><Info size={12} />{t("readGraph")}</summary><p>{t("prReferenceNote")}</p></details><div className="overview-columns"><span>{t("branchesAndTags")}</span><span>{t("graphLabel")}</span><span>{t("changesAndPRs")}</span></div></>}
     {needle && <div className="graph-note">{t("filteredHistoryNote", { count: page.commits.length })}</div>}
     {error && <div className="graph-note error" role="alert">{error}</div>}
     {visible.length ? visible.map((commit, index) => <CommitRow
@@ -1477,11 +1478,13 @@ function BranchWorkCard({ snapshot, busy, onSave, onIntegrate }: {
   const integrated = Boolean(target && source?.mergedInto.includes(target) && !snapshot.isDirty);
   const blocked = Boolean(snapshot.pending || snapshot.conflicts.length || (!source && snapshot.head) || snapshot.currentBranch === "HEAD");
   const newFiles = snapshot.changes.filter((file) => file.code.includes("?")).length;
-  return <div className="branch-work-card">
+  return <div className={`branch-work-card ${snapshot.isDirty ? "is-dirty" : "is-saved"}`}>
+    <div className="work-symbol"><GitBranch size={22} /></div>
+    <div className="branch-work-copy">
     <div className="branch-work-heading"><GitBranch size={16} /><strong title={snapshot.currentBranch}>{snapshot.currentBranch}</strong>
       <span>{snapshot.isDirty ? t("workNeedsSaving", { count: snapshot.changes.length }) : t("workSaved")}</span></div>
     <p>{blocked ? t("finishPendingFirst") : snapshot.isDirty ? t("workSaveGuidance", { count: newFiles }) : integrated ? t("workIntegrated", { target: target! }) : canIntegrate ? t("workReadyToIntegrate", { target: target! }) : t(target ? "workOnMain" : "workNoMain")}</p>
-    <div className="branch-work-actions">
+    </div><div className="branch-work-actions">
       {snapshot.isDirty && <button className={canIntegrate ? "outline-button" : "primary-button"} disabled={busy || blocked} onClick={onSave}><GitCommitHorizontal size={14} />{t("saveChanges")}</button>}
       {canIntegrate && <button className="primary-button" disabled={busy || blocked || integrated} onClick={onIntegrate}><GitMerge size={14} />{t(snapshot.isDirty ? "saveAndIntegrate" : "integrateInto", { target: target! })}</button>}
     </div>
@@ -1543,7 +1546,7 @@ function ConversationEntry({ turn, busy, onApply, onDismiss }: { turn: Conversat
   const { t } = useI18n();
   // A sequence reports itself step by step, marks included, so it needs no outer verdict icon or colour.
   const sequence = (turn.plan?.steps.length ?? 0) > 1;
-  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><Bot size={13} /></span><div>{turn.status === "loading" && <div className="conversation-loading"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.answer && <p>{turn.answer}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
+  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.answer && <p>{turn.answer}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
 }
 
 
