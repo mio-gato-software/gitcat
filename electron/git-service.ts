@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { accessSync, constants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { createReadStream, readlinkSync, accessSync, constants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
@@ -156,13 +156,13 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
   });
 }
 
-async function checkedGit(cwd: string, args: string[]): Promise<string> {
+async function checkedGit(cwd: string, args: string[], raw = false): Promise<string> {
   const result = await runGit(cwd, args);
   if (result.code !== 0) {
     const detail = result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")} terminó con código ${result.code}`;
     throw new Error(detail);
   }
-  return result.stdout.trim();
+  return raw ? result.stdout : result.stdout.trim();
 }
 
 /**
@@ -351,7 +351,7 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
   const head = await optionalGit(repoRoot, ["rev-parse", "HEAD"]);
   const currentBranch = (await optionalGit(repoRoot, ["branch", "--show-current"])) || "HEAD";
-  const statusRaw = await checkedGit(repoRoot, ["status", "--short", "-z"]);
+  const statusRaw = await checkedGit(repoRoot, ["status", "--short", "--untracked-files=all", "-z"], true);
   const branchRaw = await checkedGit(repoRoot, [
     "for-each-ref",
     "--format=%(refname:short)%00%(upstream:short)%00%(upstream:track)%00%(objectname:short)%00%(subject)%00%(authorname)%00%(authoremail)%00%(authordate:iso-strict)",
@@ -403,12 +403,34 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   await markIntegration(repoRoot, branches, [defaultBranch, currentBranch]);
   const pending = await readPendingOperation(repoRoot);
   const changes = parseStatus(statusRaw);
+  // A file can change while keeping exactly the same status code. Bind reviews to its
+  // contents, the staged version, the branch refs and checkout, not just "M file.txt".
+  const fingerprint = createHash("sha256").update(JSON.stringify([
+    head, currentBranch, statusRaw, branchRaw, remoteBranchRaw, pending, [...worktrees],
+    await checkedGit(repoRoot, ["ls-files", "--stage", "-z"])
+  ]));
+  for (const change of changes) {
+    const file = resolve(repoRoot, change.path);
+    fingerprint.update(change.path);
+    try {
+      const stat = lstatSync(file);
+      fingerprint.update(String(stat.mode));
+      if (stat.isSymbolicLink()) fingerprint.update(readlinkSync(file));
+      else if (stat.isFile()) {
+        for await (const chunk of createReadStream(file)) fingerprint.update(chunk);
+      } else if (stat.isDirectory()) fingerprint.update(await optionalGit(file, ["rev-parse", "HEAD"]));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      fingerprint.update("missing");
+    }
+    fingerprint.update("\0");
+  }
 
   return {
     path: repoRoot,
     name: basename(repoRoot),
     head,
-    stateId: createHash("sha256").update(`${head}\0${statusRaw}`).digest("hex"),
+    stateId: fingerprint.digest("hex"),
     currentBranch,
     defaultBranch,
     defaultBranchSource: defaultBranchResolution?.source,
@@ -1421,6 +1443,49 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
   const draft = operationDraft(operation, args, snapshot, [], language);
   if (draft.allowed) validateExecution(bindPlan(snapshot, draft), snapshot, language);
   return bindPlan(snapshot, draft);
+}
+
+/** Explicit workflow: save all reviewed files on the current branch, optionally integrate locally. */
+export async function prepareBranchDelivery(cwd: string, request: { stateId: string; mergeToDefault: boolean; message?: string }, locale?: Locale) {
+  const language = normalizeLocale(locale);
+  const snapshot = await getSnapshot(cwd);
+  const fail = (es: string, en: string): never => { throw new Error(localized(language, es, en)); };
+  if (snapshot.stateId !== request.stateId) fail("Los archivos o las ramas cambiaron. Revisa los cambios de nuevo antes de guardar.", "Files or branches changed. Review the changes again before saving.");
+  if (snapshot.pending || snapshot.conflicts.length) fail("Resuelve la operación pendiente antes de guardar e integrar. Tus archivos siguen disponibles.", "Resolve the pending operation before saving and integrating. Your files remain available.");
+  const source = snapshot.branches.find((branch) => branch.isCurrent);
+  if ((!source && snapshot.head) || snapshot.currentBranch === "HEAD") fail("Cambia a una rama antes de guardar este trabajo.", "Switch to a branch before saving this work.");
+  const target = snapshot.defaultBranch;
+  if (request.mergeToDefault) {
+    if (!target || target === snapshot.currentBranch) fail("Elige una rama de trabajo distinta de la principal para integrar cambios.", "Choose a work branch different from the main branch to integrate changes.");
+    const destination = snapshot.branches.find((branch) => branch.name === target);
+    if (!destination || destination.presence === "remote") fail("La rama principal debe existir en este equipo antes de integrar.", "The main branch must exist on this computer before integrating.");
+    if (destination?.checkedOutIn) fail(`La rama ${target} está abierta en otro worktree. Guarda primero o continúa allí.`, `Branch ${target} is open in another worktree. Save first or continue there.`);
+    if (!snapshot.isDirty) {
+      const plan = await prepareMergeToDefault(cwd, snapshot.currentBranch, locale);
+      if (plan.stateId !== request.stateId) fail("El repositorio cambió. Revisa el plan de nuevo.", "The repository changed. Review the plan again.");
+      return plan;
+    }
+  }
+  if (!snapshot.changes.length) fail("No hay archivos pendientes que guardar.", "There are no pending files to save.");
+  const commit = stepFrom("commit", { message: request.message?.trim() ?? "" }, [], language)!;
+  const steps = [commit];
+  if (request.mergeToDefault) {
+    steps.push(stepFrom("checkout", { name: target! }, [], language)!);
+    steps.push(stepFrom("merge", { name: snapshot.currentBranch }, [], language)!);
+  }
+  const effects = [localized(language,
+    `Se guardarán todos los ${snapshot.changes.length} archivos listados, incluidos los nuevos, en ${snapshot.currentBranch}.`,
+    `All ${snapshot.changes.length} listed files, including new files, will be saved on ${snapshot.currentBranch}.`),
+    localized(language, "La operación es local: no publica cambios ni elimina tu rama.", "This is local: it does not publish changes or delete your branch.")];
+  if (request.mergeToDefault) effects.push(localized(language,
+    `Al terminar estarás en ${target}. Si hay conflictos, la integración se detendrá y el commit guardado seguirá en ${snapshot.currentBranch}.`,
+    `You will finish on ${target}. If conflicts occur, integration stops and the saved commit remains on ${snapshot.currentBranch}.`));
+  const draft = sequenceDraft(steps, request.mergeToDefault ? localized(language, "Guarda el trabajo revisado antes de integrarlo.", "Saves the reviewed work before integrating it.") : localized(language, "Crea una versión local del trabajo revisado en tu rama.", "Creates a local saved version of the reviewed work on your branch."), effects, language);
+  const plan = bindPlan(snapshot, { ...draft, summary: request.mergeToDefault
+    ? localized(language, `Guardar e integrar en ${target}`, `Save and integrate into ${target}`)
+    : localized(language, `Guardar cambios en ${snapshot.currentBranch}`, `Save changes on ${snapshot.currentBranch}`) });
+  validateExecution(plan, snapshot, language);
+  return plan;
 }
 
 /** A branch-row action with a known target: switch to the repository default, then merge the branch. */

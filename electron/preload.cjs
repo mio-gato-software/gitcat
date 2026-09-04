@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld("gitcat", {
   getWorkingFileDiff: (path, file) => ipcRenderer.invoke("commit:file-diff", path, file),
   planAction: (path, request, context, locale) => ipcRenderer.invoke("action:plan", path, request, context, locale),
   prepareOperation: (path, operation, args, locale) => ipcRenderer.invoke("action:prepare", path, operation, args, locale),
+  prepareBranchDelivery: (path, request, locale) => ipcRenderer.invoke("action:prepare-delivery", path, request, locale),
   prepareMergeToDefault: (path, branch, locale) => ipcRenderer.invoke("action:prepare-merge-to-default", path, branch, locale),
   generateCommitDescription: (path, locale) => ipcRenderer.invoke("commit:generate-description", path, locale),
   executePlan: (path, planId, locale) => ipcRenderer.invoke("action:execute", path, planId, locale),

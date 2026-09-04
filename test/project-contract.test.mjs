@@ -481,15 +481,17 @@ test("macOS reserva espacio para los controles de ventana", async () => {
   assert.match(styles, /\.app-shell\.platform-darwin \.topbar \{ padding-left: 88px; \}/);
 });
 
-test("las notificaciones comparten una región en el flujo sin tapar controles", async () => {
+test("las notificaciones usan un espacio fijo y el detalle se abre solo a petición", async () => {
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  const center = await readFile(join(root, "src/NotificationCenter.tsx"), "utf8");
   const styles = await readFile(join(root, "src/styles.css"), "utf8");
-  assert.match(app, /const dismissActivity/);
-  assert.match(app, /notificationDuration\(item.tone\)/);
-  assert.match(app, /aria-label=\{t\("closeNotification"/);
-  assert.match(styles, /\.notification-center \{ flex: none; display: grid;/);
-  assert.doesNotMatch(app, /className="activity-dock"|className=\{`toast/);
-  assert.doesNotMatch(styles, /\.activity-dock|\.toast/);
+  assert.match(app, /<NotificationCenter items=\{activity\}/);
+  assert.match(center, /open && <section/);
+  assert.match(center, /notificationDuration\(preview.tone\)/);
+  assert.match(center, /setPreviewId\(undefined\)/);
+  assert.match(styles, /\.notification-root \{ position: fixed; bottom: 0;/);
+  assert.match(styles, /height: 30px;/);
+  assert.doesNotMatch(styles, /\.notification-center|\.activity-dock|\.toast/);
 });
 
 test("la descripción de commit usa el diff real y conserva la confirmación", async () => {

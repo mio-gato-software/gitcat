@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   applyConflictResolution, executePlan, generateCommitDescription, getCommitDetail, getCommitFileDiff, getLlmConfig, getSnapshot,
   getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
-  prepareMergeToDefault, proposeConflictResolution, saveLlmConfig
+  prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, saveLlmConfig
 } from "./git-service.js";
 import type { ActionPlan, ConversationMessage, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation } from "../shared/types.js";
 
@@ -215,6 +215,11 @@ app.whenReady().then(async () => {
   ipcMain.handle("action:prepare", async (event, cwd: string, operation: Operation, args?: Record<string, string>, locale?: Locale) => {
     assertTrustedSender(event);
     return rememberPlan(await prepareOperation(assertOpenedRepository(cwd), operation, args, locale));
+  });
+  ipcMain.handle("action:prepare-delivery", async (event, cwd: string, request: { stateId: string; mergeToDefault: boolean; message?: string }, locale?: Locale) => {
+    assertTrustedSender(event);
+    if (!request || typeof request.stateId !== "string" || typeof request.mergeToDefault !== "boolean" || (request.message !== undefined && typeof request.message !== "string")) throw new Error("Invalid delivery request.");
+    return rememberPlan(await prepareBranchDelivery(assertOpenedRepository(cwd), request, locale));
   });
   ipcMain.handle("action:prepare-merge-to-default", async (event, cwd: string, branch: string, locale?: Locale) => {
     assertTrustedSender(event);

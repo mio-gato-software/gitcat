@@ -294,6 +294,7 @@ export type GitlineApi = {
   getWorkingFileDiff: (path: string, file: string) => Promise<CommitDetail>;
   planAction: (path: string, request: string, context?: ConversationMessage[], locale?: Locale) => Promise<ActionPlan>;
   prepareOperation: (path: string, operation: Operation, args?: Record<string, string>, locale?: Locale) => Promise<ActionPlan>;
+  prepareBranchDelivery: (path: string, request: { stateId: string; mergeToDefault: boolean; message?: string }, locale?: Locale) => Promise<ActionPlan>;
   prepareMergeToDefault: (path: string, branch: string, locale?: Locale) => Promise<ActionPlan>;
   generateCommitDescription: (path: string, locale?: Locale) => Promise<CommitDescriptionResult>;
   executePlan: (path: string, planId: string, locale?: Locale) => Promise<ExecutionResult>;
