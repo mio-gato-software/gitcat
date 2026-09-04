@@ -10,7 +10,7 @@ import { stackCandidates } from "./stacked-branches.js";
 import { parseNameStatus } from "./diff-status.js";
 import { parseRemoteUrls } from "./remotes.js";
 import {
-  canSkip, conflictLabels, conflictsFrom, parseRebaseProgress, pendingCommands, pendingLabels, resolutionFor
+  canSkip, conflictLabels, conflictsFrom, parseRebaseProgress, pendingCommands, resolutionFor
 } from "./pending-operation.js";
 import {
   buildResolutionInstructions, conflictFileLimit, parseConflictProposal, resolutionResponseFormat, validateProposal
@@ -24,7 +24,7 @@ import {
   sanitizeMemory, type Memory
 } from "./memory.js";
 import type {
-  ActionPlan, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource, FileChange, GitProtocol,
+  ActionPlan, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource, GitProtocol,
   ConflictProposal, ConflictResolution, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput,
   Locale, Operation, PendingOperation, PlanStep, RepoSnapshot, StepOutcome
 } from "../shared/types.js";
@@ -691,7 +691,7 @@ async function sshIdentity(sshHost: string, cwd: string) {
 
 /** ~/.ssh/config aliases whose effective HostName is the target host, cheapest candidates first. */
 async function sshAliasesFor(host: string, cwd: string) {
-  let config = "";
+  let config: string;
   try {
     config = readFileSync(join(homedir(), ".ssh", "config"), "utf8");
   } catch {
@@ -884,7 +884,14 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
   };
 }
 
-function extractOutputText(body: any): string {
+type ProviderResponse = {
+  output_text?: string;
+  output?: { content?: { refusal?: string; text?: string }[] }[];
+  status?: string;
+  incomplete_details?: { reason?: string };
+};
+
+function extractOutputText(body: ProviderResponse): string {
   if (typeof body?.output_text === "string" && body.output_text.trim()) return body.output_text;
   const textParts: string[] = [];
   for (const item of body?.output ?? []) {
@@ -900,7 +907,7 @@ function extractOutputText(body: any): string {
  * A truncated or empty provider answer used to fall back to a local keyword planner, which turned
  * provider problems into silent, wrong refusals. Every failure mode is now explicit.
  */
-async function callProvider(body: Record<string, unknown>, timeoutMs = 180_000, credentials: LlmConfigInput = llmState): Promise<any> {
+async function callProvider(body: Record<string, unknown>, timeoutMs = 180_000, credentials: LlmConfigInput = llmState): Promise<ProviderResponse> {
   const model = credentials.model.trim() || MODEL_FALLBACK;
   if (!credentials.apiKey.trim()) throw new Error(LLM_REQUIRED);
   const controller = new AbortController();
@@ -916,7 +923,7 @@ async function callProvider(body: Record<string, unknown>, timeoutMs = 180_000, 
   } catch (error) {
     throw new Error(controller.signal.aborted
       ? `El proveedor no respondió en ${Math.round(timeoutMs / 1000)} s.`
-      : `No se pudo contactar con el proveedor: ${error instanceof Error ? error.message : "error de red"}`);
+      : `No se pudo contactar con el proveedor: ${error instanceof Error ? error.message : "error de red"}`, { cause: error });
   } finally {
     clearTimeout(timeout);
   }
@@ -1675,8 +1682,8 @@ async function executeGithubRepositoryPlan(plan: ActionPlan, locale?: Locale) {
     if (createdRemote.code === 0) await checkedGit(source, ["remote", "remove", plan.args.remote]).catch(() => undefined);
     if (currentRemote.code === 0) await checkedGit(source, ["remote", "add", plan.args.remote, previousRemoteUrl]).catch(() => undefined);
     const message = error instanceof Error ? error.message : localized(language, "gh no pudo crear el repositorio.", "gh could not create the repository.");
-    if (repositoryCreated) throw new Error(localized(language, `El repositorio remoto se creó, pero no se pudo configurar o publicar el remoto local: ${message}`, `The remote repository was created, but the local remote could not be configured or published: ${message}`));
-    if (/forbidden|permission|not accessible|403/i.test(message)) throw new Error(localized(language, "No hay permisos suficientes para crear el repositorio privado solicitado.", "You do not have enough permission to create the requested private repository."));
+    if (repositoryCreated) throw new Error(localized(language, `El repositorio remoto se creó, pero no se pudo configurar o publicar el remoto local: ${message}`, `The remote repository was created, but the local remote could not be configured or published: ${message}`), { cause: error });
+    if (/forbidden|permission|not accessible|403/i.test(message)) throw new Error(localized(language, "No hay permisos suficientes para crear el repositorio privado solicitado.", "You do not have enough permission to create the requested private repository."), { cause: error });
     throw error;
   } finally {
     if (switching) {
@@ -1823,7 +1830,7 @@ async function verifyLlmAccess(candidate: LlmConfigInput) {
     // A 200 proves the key and the model id; the answer itself is irrelevant here.
     await callProvider({ instructions: "Reply with the single word: ok.", input: "ok", max_output_tokens: 1_000 }, 60_000, candidate);
   } catch (error) {
-    throw new Error(`No se guardó la configuración porque el proveedor no respondió correctamente. ${error instanceof Error ? error.message : "Error desconocido."}`);
+    throw new Error(`No se guardó la configuración porque el proveedor no respondió correctamente. ${error instanceof Error ? error.message : "Error desconocido."}`, { cause: error });
   }
 }
 

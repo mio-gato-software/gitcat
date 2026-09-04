@@ -12,9 +12,13 @@ npm run dev
 Para validar el proyecto:
 
 ```bash
+npm run check
+
+# Comprobaciones individuales
+npm run lint
 npm run typecheck
-npm run build
 npm test
+npm run test:ui # Incluye el build y usa un repositorio y perfil desechables
 ```
 
 ## Crear la aplicación instalable

@@ -82,7 +82,7 @@ test("un plan es una secuencia que el modelo compone y la app ejecuta de princip
   assert.match(planner, /export const planStepLimit/);
   // Cada paso se valida contra el repositorio que dejó el anterior, y el primer fallo detiene la secuencia.
   assert.match(service, /for \(const \[index, step\] of plan\.steps\.entries\(\)\)/);
-  assert.match(service, /if \(index > 0\) \{\s*\n\s*snapshot = await getSnapshot\(cwd\);\s*\n\s*validateStep\(step, snapshot\);/);
+  assert.match(service, /if \(index > 0\) \{\s*\n\s*snapshot = await getSnapshot\(cwd\);\s*\n\s*validateStep\(step, snapshot, language\);/);
   assert.match(service, /status: "failed"/);
   assert.match(service, /function failureReport/);
   assert.doesNotMatch(service, /switch \(plan\.operation\)/, "la ejecución ya no depende de una sola operación del plan");
@@ -114,7 +114,7 @@ test("un clic selecciona la rama, un doble clic cambia a ella, y los impedimento
   assert.doesNotMatch(app, /window\.setTimeout\(onSwitch/, "el clic ya no prepara un checkout con retardo");
   // Cambiar de rama sigue siendo explícito: el doble clic, o el botón de la fila.
   assert.match(app, /className="branch-switch"/);
-  assert.match(app, /addTurn\(path, `Cambiar a la rama \$\{name\}`\)/);
+  assert.match(app, /addTurn\(path, t\("branchSwitchQuestion", \{ name \}\)\)/);
   assert.match(app, /error: message, status: "error"/);
   // Una rama que deja de existir no puede dejar el historial apuntando a un nombre que Git no conoce.
   assert.match(app, /snapshot\.branches\.some\(\(branch\) => branch\.name === selectedBranch\) \? selectedBranch : snapshot\.currentBranch/);
@@ -133,8 +133,8 @@ test("el panel de ramas agrupa por convención sin renombrar nada, y la lista pl
   // El árbol es el modo por defecto, no el único: la lista plana con filtro sigue a un clic.
   assert.match(app, /function BranchPanel/);
   assert.match(app, /view\.mode === "tree" \? renderNodes\(topLevel, 0, ""\) : matches\.map/);
-  assert.match(app, /aria-label="Modo de la lista de ramas"/);
-  assert.match(app, /aria-label="Filtrar ramas"/);
+  assert.match(app, /aria-label=\{t\("branchListMode"\)\}/);
+  assert.match(app, /aria-label=\{t\("filterBranches"\)\}/);
   // El modo y los grupos abiertos se recuerdan por repositorio.
   assert.match(app, /const branchViewStorageKey = \(path: string\) => `gitcat-branch-view:\$\{path\}`/);
   assert.match(app, /writeBranchView\(snapshot\.path, updated\)/);
@@ -158,7 +158,7 @@ test("el panel ordena por actividad, marca lo ya integrado y dice qué worktree 
   // Integración: visibilidad, nunca borrado. El filtro es reversible y se recuerda.
   assert.match(branchOrder, /export function isMergedIntoDefault/);
   assert.match(app, /update\(\{ hideMerged: !hideMerged \}\)/);
-  assert.match(app, /Ocultarlas no borra nada/);
+  assert.match(app, /t\("mergedHiddenTitle", \{ count: merged\.length, branch: snapshot\.defaultBranch/);
   assert.doesNotMatch(branchOrder, /delete|prune|borrar/i);
   assert.match(styles, /\.branch-row\.merged \.branch-main \{ opacity/);
   // Los worktrees salen del porcelain de Git y llegan a la fila, al tooltip y al modelo.
@@ -166,7 +166,7 @@ test("el panel ordena por actividad, marca lo ya integrado y dice qué worktree 
   assert.match(service, /\["worktree", "list", "--porcelain"\]/);
   assert.match(service, /branch\.checkedOutIn = worktrees\.get\(branch\.name\)/);
   assert.match(service, /checkedOutIn: branch\.checkedOutIn \?\? null/);
-  assert.match(app, /en uso por el worktree \$\{branch\.checkedOutIn\}/);
+  assert.match(app, /t\("worktreeUse", \{ path: branch\.checkedOutIn \}\)/);
 });
 
 test("la consistencia de nombres se sugiere, nunca se aplica sola", async () => {
@@ -294,7 +294,7 @@ test("el historial habla de una rama, se puede paginar y enseña qué cambió ca
   assert.match(app, /fileDetail\?\.path === selectedFile\.path/);
   assert.doesNotMatch(app, /setFileDetail\(undefined\);\n\s*setFileError\(undefined\);\n\s*window\.gitcat\.getCommitFileDiff/);
   assert.match(app, /getCommitFileDiff\(repoPath, commit\.hash, selectedFile\.path\)/);
-  assert.match(app, /Ver todos los archivos/);
+  assert.match(app, /t\("showAllFiles"\)/);
   // Una ruta que llega de la interfaz sigue siendo una ruta: tiene que caer dentro del repositorio.
   assert.match(service, /La ruta no pertenece a este repositorio/);
   // Y los dos desajustes del grafo: el nodo se ancla donde empalma el SVG, y la cabecera al carril real.
@@ -386,7 +386,7 @@ test("el proveedor LLM es obligatorio y no hay plan local de reserva", async () 
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
   assert.match(service, /const LLM_REQUIRED =/);
-  assert.match(service, /if \(!isLlmConfigured\(\)\) return bindPlan\(snapshot, refused\(LLM_REQUIRED\)\)/);
+  assert.match(service, /if \(!isLlmConfigured\(\)\) return bindPlan\(snapshot, refused\(llmRequired\(language\)\)\)/);
   assert.match(service, /configured: isLlmConfigured\(\)/);
   assert.match(service, /await verifyLlmAccess\(\{ apiKey: nextApiKey, model: nextModel \}\)/);
   assert.doesNotMatch(service, /local-fallback/);
@@ -433,7 +433,7 @@ test("los controles principales tienen implementaciones concretas", async () => 
   assert.match(app, /function ChangesView/);
   assert.match(app, /prepare\("delete_branch"/);
   assert.match(app, /function CommitModal/);
-  assert.match(app, /function suggestionsFor\(snapshot: RepoSnapshot\)/);
+  assert.match(app, /function suggestionsFor\(snapshot: RepoSnapshot, t: Translate\)/);
   assert.match(app, /askSuggestion\(suggestion\.question\)/);
   assert.match(app, /if \(snapshot\.isRebasing\) options\.push/);
   assert.doesNotMatch(app, /MoreHorizontal/);
@@ -460,7 +460,7 @@ test("los defectos vuelven al modelo como datos estructurados, no como texto en 
   assert.match(planner, /Validation issues \(JSON\)/);
   assert.match(repositoryPlan, /export type RepositoryIssue = \{ field: RepositoryFieldName; problem: string \}/);
   assert.match(service, /type RepositoryPreparation = \{ draft: PlanDraft \} \| \{ blockers: PlanIssue\[\] \}/);
-  assert.match(service, /return issues\.length \? retry\(issues\) : gitOperationDraft\(plan, snapshot\)/);
+  assert.match(service, /return issues\.length \? retry\(issues\) : gitOperationDraft\(plan, snapshot, locale\)/);
   assert.match(service, /if \("blockers" in preparation\) return retry\(preparation\.blockers\)/);
 });
 
@@ -507,8 +507,8 @@ test("la descripción de commit usa el diff real y conserva la confirmación", a
   assert.match(service, /Los cambios variaron durante la generación/);
   assert.match(main, /ipcMain\.handle\("commit:generate-description"/);
   assert.match(preload, /generateCommitDescription/);
-  assert.match(app, /Generar descripción/);
-  assert.match(app, /prepare\("commit", \{ message \}\)/);
+  assert.match(app, /t\(generating \? "generatingSaveDescription" : "generateDescription"\)/);
+  assert.match(app, /window\.gitcat\.prepareBranchDelivery\(path, \{ stateId: deliveryStateId \?\? snapshot\.stateId, message, mergeToDefault: deliveryMerge \}, locale\)/);
 });
 
 test("Cambios muestra estado, ruta y formulario manual sin LLM", async () => {
@@ -516,13 +516,12 @@ test("Cambios muestra estado, ruta y formulario manual sin LLM", async () => {
   assert.match(app, /function changeStatus/);
   assert.match(app, /className="change-status"/);
   assert.match(app, /className="change-path"/);
-  assert.match(app, /sigue el idioma del historial de commits/);
-  assert.match(app, /No hay cambios sin confirmar/);
+  assert.match(app, /t\(configured \? "editableDescription" : "manualSaveDescription"\)/);
+  assert.match(app, /t\("noUncommittedChanges"\)/);
 });
 
 test("el asistente conserva la conversación completa y la envía entera", async () => {
   const types = await readFile(join(root, "shared/types.ts"), "utf8");
-  const main = await readFile(join(root, "electron/main.ts"), "utf8");
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
   assert.match(types, /export type ConversationMessage/);
@@ -530,8 +529,8 @@ test("el asistente conserva la conversación completa y la envía entera", async
   assert.match(app, /type ConversationTurn/);
   assert.match(app, /const \[conversations, setConversations\]/);
   assert.match(app, /setRequest\(""\)/);
-  assert.match(app, /Limpiar conversación/);
-  assert.match(app, /Preparando respuesta/);
+  assert.match(app, /t\("clearConversation"\)/);
+  assert.match(app, /t\("preparingResponse"\)/);
 });
 
 test("respuestas y planes quedan asociados a su turno", async () => {
@@ -539,7 +538,7 @@ test("respuestas y planes quedan asociados a su turno", async () => {
   assert.match(app, /function ConversationEntry/);
   assert.match(app, /updateTurn\(path, turnId/);
   assert.match(app, /applyPlan\(turn\.id, plan\)/);
-  assert.match(app, /Plan descartado sin modificar el repositorio/);
+  assert.match(app, /t\("planDiscarded"\)/);
 });
 
 test("GitHub privado usa una operación estructurada y confirmada", async () => {
@@ -654,7 +653,7 @@ test("una rama que está en local y en el remoto es un chip, no dos", async () =
   assert.match(app, /const label = remote \? name\.slice\(remote\.length \+ 1\) : name;/);
   assert.match(app, /note\(label, remote \? "remote" : "local"\)/);
   // Lo que solo existe en el remoto conserva su marca: eso no lo tienes aquí.
-  assert.match(app, /chip\.kind === "remote" \? `\$\{chip\.label\} · solo en el remoto`/);
+  assert.match(app, /chip\.kind === "remote" \? `\$\{chip\.label\} · \$\{t\("remoteOnlyTitle"\)\}`/);
   assert.match(app, /origin\/HEAD/, "el puntero simbólico se sigue descartando");
 });
 
@@ -699,13 +698,13 @@ test("resolver un conflicto con el modelo se propone, se revisa y solo entonces 
   assert.match(resolution, /strict: true/);
   // Escribir es un paso aparte, y cada ruta se comprueba contra los conflictos que Git reporta ahora.
   assert.match(service, /export async function applyConflictResolution/);
-  assert.match(service, /if \(!open\.has\(resolution\.path\)\) throw new Error\(`\$\{resolution\.path\} ya no está en conflicto\.\`\)/);
+  assert.match(service, /if \(!open\.has\(resolution\.path\)\) throw new Error\(localized\(language, `\$\{resolution\.path\} ya no está en conflicto\.`/);
   assert.match(service, /todavía contiene marcas de conflicto/);
-  assert.match(service, /if \(!absolute\.startsWith\(`\$\{snapshot\.path\}\$\{sep\}`\)\) throw new Error\("La ruta no pertenece a este repositorio\."\)/);
+  assert.match(service, /if \(!absolute\.startsWith\(`\$\{snapshot\.path\}\$\{sep\}`\)\) throw new Error\(localized\(locale, "La ruta no pertenece a este repositorio\."/);
   // Nunca en automático: hay un botón, y la propuesta se revisa archivo a archivo antes de aceptarla.
   assert.match(main, /ipcMain\.handle\("conflicts:propose"/);
   assert.match(app, /function ConflictProposalModal/);
-  assert.match(app, /Nada se ha escrito todavía/);
+  assert.match(app, /t\("nothingWritten"\)/);
   assert.match(app, /onApply=\{\(resolutions\) => void applyResolutions\(resolutions\)\}/);
   // La duda del propio modelo se enseña en vez de enterrarse.
   assert.match(app, /resolution\.confidence === "low" && <span className="resolution-doubt"/);
@@ -727,7 +726,7 @@ test("las ramas ofrecen fusionarse en la rama por defecto desde su menú context
   const main = await readFile(join(root, "electron/main.ts"), "utf8");
   const preload = await readFile(join(root, "electron/preload.cjs"), "utf8");
   assert.match(app, /onContextMenu=\{onContextMenu\}/);
-  assert.match(app, /Merge \{contextMenu\.branch\.name\} to \{snapshot\.defaultBranch\}/);
+  assert.match(app, /t\("mergeBranchTo", \{ name: contextMenu\.branch\.name, target: snapshot\.defaultBranch/);
   assert.match(app, /prepareMergeToDefault/);
   assert.match(service, /export async function prepareMergeToDefault/);
   assert.match(service, /git switch/);
@@ -741,7 +740,7 @@ test("las fusiones desde el menú respetan cambios pendientes y la guía del age
   const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
   const guide = await readFile(join(root, "AGENTS.md"), "utf8");
   assert.match(app, /snapshot\.isDirty\s*\n?\s*\? \(\) => window\.gitcat\.planAction/);
-  assert.match(service, /if \(snapshot\.isDirty\) throw new Error\("Hay cambios locales sin confirmar/);
+  assert.match(service, /if \(snapshot\.isDirty\) throw new Error\(localized\(language, "Hay cambios locales sin confirmar/);
   assert.match(service, /branch\.mergedInto\.includes\(target\)/);
   assert.match(service, /async function plannerState/);
   assert.match(service, /workingTreeDiff/);

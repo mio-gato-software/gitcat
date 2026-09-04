@@ -121,7 +121,6 @@ function clampPanes({ sidebar, inspector }: PaneWidths, total: number): PaneWidt
   return { sidebar: Math.round(nextSidebar), inspector: Math.round(nextInspector) };
 }
 
-function plural(count: number, singular: string, many: string) { return `${count} ${count === 1 ? singular : many}`; }
 function counted(t: Translate, count: number, singular: MessageKey, many: MessageKey) {
   return t("count", { count, word: t(count === 1 ? singular : many) });
 }

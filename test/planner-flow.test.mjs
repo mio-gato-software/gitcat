@@ -621,3 +621,25 @@ test("una key que el proveedor rechaza no se guarda", async () => {
   await assert.rejects(() => service.saveLlmConfig({ apiKey: "sk-malo", model: "otro-modelo" }), /No se guardó la configuración/);
   assert.equal(service.getLlmConfig().model, "gpt-5.6-luna");
 });
+
+
+test("un fallo de red conserva su causa y no cambia la configuración guardada", async () => {
+  const previousConfig = service.getLlmConfig();
+  const providerFetch = globalThis.fetch;
+  const networkError = new Error("connection reset");
+  globalThis.fetch = async () => { throw networkError; };
+  try {
+    await assert.rejects(
+      () => service.saveLlmConfig({ apiKey: "sk-unreachable", model: "unreachable-model" }),
+      (error) => {
+        assert.match(error.message, /No se guardó la configuración/);
+        assert.match(error.cause.message, /No se pudo contactar con el proveedor/);
+        assert.equal(error.cause.cause, networkError);
+        return true;
+      }
+    );
+    assert.deepEqual(service.getLlmConfig(), previousConfig);
+  } finally {
+    globalThis.fetch = providerFetch;
+  }
+});

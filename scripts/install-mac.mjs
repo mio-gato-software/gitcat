@@ -48,7 +48,7 @@ function installApp() {
   } catch (error) {
     rmSync(temporaryDestination, { recursive: true, force: true });
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Could not update ${destination}: ${detail}`);
+    throw new Error(`Could not update ${destination}: ${detail}`, { cause: error });
   }
 }
 
