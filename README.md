@@ -1,4 +1,4 @@
-# Branchline
+# GitCat
 
 MVP de escritorio para trabajar con ramas Git desde una vista centrada en historial, autoría y rebase. La aplicación usa Electron + React + Vite y mantiene el proceso de Git separado del renderer.
 
@@ -27,7 +27,7 @@ npm run package:dir
 
 # macOS: DMG y ZIP arm64/x64 según el host o flags de electron-builder
 npm run dist:mac
-# macOS: construir e instalar el app en /Applications/Branchline.app
+# macOS: construir e instalar el app en /Applications/GitCat.app
 npm run install:mac
 
 # Alternativas por plataforma
@@ -61,7 +61,7 @@ No hay límites artificiales sobre lo que se envía al modelo ni sobre lo que pu
 
 ## Identidades
 
-Una misma máquina puede tener varias cuentas de GitHub y varias claves SSH. Branchline no asume que la correcta sea la activa ni la predeterminada:
+Una misma máquina puede tener varias cuentas de GitHub y varias claves SSH. GitCat no asume que la correcta sea la activa ni la predeterminada:
 
 - **Cuenta `gh`**: se leen todas las cuentas autenticadas del host (`gh auth status --json hosts`), no solo la activa. Si el propietario indicado es una de ellas, se usa esa; el cambio con `gh auth switch` aparece en los efectos del plan, ocurre solo al ejecutar y se restaura después. Nunca se leen ni se manipulan tokens.
 - **Clave SSH**: se marca cada candidato (`ssh -T`) y se comprueba **qué identidad responde**, no solo que la conexión autentique. Los alias de `~/.ssh/config` cuyo `HostName` resuelve al host se prueban también, y el que responde como el propietario es el que entra en la URL del remoto.
@@ -71,7 +71,7 @@ Una misma máquina puede tener varias cuentas de GitHub y varias claves SSH. Bra
 
 La regla es una: **se recuerdan decisiones, se vuelve a medir el estado.**
 
-Una decisión es de la persona y no caduca sola —«para `eliaquin` en `github.com` uso esta cuenta y este alias SSH»— y se guarda en `branchline-memory.json` solo cuando una ejecución confirmada termina bien, nunca al proponer un plan. Las identidades se indexan por host y propietario, así que sirven en cualquier repositorio; por ruta se guarda además cómo se publicó ese repositorio en concreto (propietario, protocolo, remoto). Todo ello llega al planificador como `remembered`, para que el modelo no vuelva a preguntar lo que ya contestaste.
+Una decisión es de la persona y no caduca sola —«para `eliaquin` en `github.com` uso esta cuenta y este alias SSH»— y se guarda en `gitcat-memory.json` solo cuando una ejecución confirmada termina bien, nunca al proponer un plan. Las identidades se indexan por host y propietario, así que sirven en cualquier repositorio; por ruta se guarda además cómo se publicó ese repositorio en concreto (propietario, protocolo, remoto). Todo ello llega al planificador como `remembered`, para que el modelo no vuelva a preguntar lo que ya contestaste.
 
 El estado del entorno no se guarda jamás: si `gh` está instalado, dónde vive un binario o si una clave sigue autenticando se comprueba cada vez, porque cambia en silencio y darlo por hecho es exactamente cómo se publica con la identidad equivocada.
 

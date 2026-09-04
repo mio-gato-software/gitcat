@@ -1,8 +1,8 @@
 {
-  "name": "branchline",
+  "name": "gitcat",
   "version": "0.1.0",
   "description": "A focused, LLM-assisted Git branch workspace.",
-  "author": "Branchline",
+  "author": "GitCat",
   "main": "dist-electron/electron/main.js",
   "type": "module",
   "private": true,
@@ -41,8 +41,8 @@
     "wait-on": "^8.0.1"
   },
   "build": {
-    "appId": "com.branchline.desktop",
-    "productName": "Branchline",
+    "appId": "com.gitcat.desktop",
+    "productName": "GitCat",
     "asar": true,
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "directories": {

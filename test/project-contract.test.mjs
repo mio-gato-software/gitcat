@@ -12,7 +12,7 @@ test("el proyecto usa Electron como entrada de escritorio", async () => {
   assert.equal(packageJson.main, "dist-electron/electron/main.js");
   assert.match(packageJson.devDependencies.electron, /43\.3/);
   assert.match(packageJson.scripts["dist:mac"], /CSC_IDENTITY_AUTO_DISCOVERY=false/);
-  assert.equal(packageJson.build.productName, "Branchline");
+  assert.equal(packageJson.build.productName, "GitCat");
 });
 
 test("el instalador de mac construye el app y lo reemplaza en Applications", async () => {
@@ -22,15 +22,15 @@ test("el instalador de mac construye el app y lo reemplaza en Applications", asy
   const preview = execFileSync(process.execPath, [scriptPath, "--dry-run"], {
     cwd: root,
     encoding: "utf8",
-    env: { ...process.env, BRANCHLINE_APPLICATIONS_DIR: join(root, ".test-applications") }
+    env: { ...process.env, GITCAT_APPLICATIONS_DIR: join(root, ".test-applications") }
   });
 
   assert.equal(packageJson.scripts["install:mac"], "node scripts/install-mac.mjs");
   assert.match(preview, /npm run build/);
   assert.match(preview, /npm run icons/);
   assert.match(preview, /npm exec -- electron-builder --mac --dir --(?:arm64|x64)/);
-  assert.match(preview, /release\/mac-(?:arm64|x64)\/Branchline\.app/);
-  assert.match(preview, /\.test-applications\/Branchline\.app/);
+  assert.match(preview, /release\/mac-(?:arm64|x64)\/GitCat\.app/);
+  assert.match(preview, /\.test-applications\/GitCat\.app/);
   assert.match(script, /execFileSync\("\/usr\/bin\/ditto"/);
   assert.match(script, /renameSync\(temporaryDestination, destination\)/);
 });
@@ -123,7 +123,7 @@ test("el panel de ramas agrupa por convención sin renombrar nada, y la lista pl
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   // La agrupación es una capa de vista: vive fuera de la capa de comandos y no toca ninguna operación Git.
-  assert.doesNotMatch(branchTree, /runGit|spawn\(|checkedGit|renameSync|window\.branchline/);
+  assert.doesNotMatch(branchTree, /runGit|spawn\(|checkedGit|renameSync|window\.gitcat/);
   assert.doesNotMatch(service, /branch-tree/);
   assert.match(branchTree, /export const defaultSubgroupThreshold = 3/);
   assert.match(branchTree, /export function buildBranchTree/);
@@ -134,7 +134,7 @@ test("el panel de ramas agrupa por convención sin renombrar nada, y la lista pl
   assert.match(app, /aria-label="Modo de la lista de ramas"/);
   assert.match(app, /aria-label="Filtrar ramas"/);
   // El modo y los grupos abiertos se recuerdan por repositorio.
-  assert.match(app, /const branchViewStorageKey = \(path: string\) => `branchline-branch-view:\$\{path\}`/);
+  assert.match(app, /const branchViewStorageKey = \(path: string\) => `gitcat-branch-view:\$\{path\}`/);
   assert.match(app, /writeBranchView\(snapshot\.path, updated\)/);
   // Cambiar de modo no pierde ni el scroll ni la rama que tenía el foco.
   assert.match(app, /pending\.current = \{ scrollTop: listRef\.current\?\.scrollTop \?\? 0, focused \}/);
@@ -290,7 +290,7 @@ test("el historial habla de una rama, se puede paginar y enseña qué cambió ca
   assert.match(app, /function DiffView/);
   assert.match(app, /function PendingDiffView/);
   assert.match(app, /fileDetail\?\.path === selectedFile\.path/);
-  assert.doesNotMatch(app, /setFileDetail\(undefined\);\n\s*setFileError\(undefined\);\n\s*window\.branchline\.getCommitFileDiff/);
+  assert.doesNotMatch(app, /setFileDetail\(undefined\);\n\s*setFileError\(undefined\);\n\s*window\.gitcat\.getCommitFileDiff/);
   assert.match(app, /getCommitFileDiff\(repoPath, commit\.hash, selectedFile\.path\)/);
   assert.match(app, /Ver todos los archivos/);
   // Una ruta que llega de la interfaz sigue siendo una ruta: tiene que caer dentro del repositorio.
@@ -466,7 +466,7 @@ test("el workspace persiste y restaura los proyectos abiertos", async () => {
   const main = await readFile(join(root, "electron/main.ts"), "utf8");
   const preload = await readFile(join(root, "electron/preload.cjs"), "utf8");
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
-  assert.match(main, /branchline-workspace\.json/);
+  assert.match(main, /gitcat-workspace\.json/);
   assert.match(main, /ipcMain\.handle\("workspace:restore"/);
   assert.match(main, /ipcMain\.handle\("workspace:save"/);
   assert.match(preload, /restoreWorkspace/);
@@ -481,15 +481,15 @@ test("macOS reserva espacio para los controles de ventana", async () => {
   assert.match(styles, /\.app-shell\.platform-darwin \.topbar \{ padding-left: 88px; \}/);
 });
 
-test("las notificaciones de actividad se pueden cerrar y expiran", async () => {
+test("las notificaciones comparten una región en el flujo sin tapar controles", async () => {
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
   const styles = await readFile(join(root, "src/styles.css"), "utf8");
   assert.match(app, /const dismissActivity/);
-  assert.match(app, /activityTimers/);
-  assert.match(app, /item\.tone === "warning" \? 10_000 : 6_000/);
-  assert.match(app, /aria-label=\{`Cerrar notificación:/);
-  assert.match(styles, /\.activity-dock \{ position: fixed; z-index: 8; top: 68px; right: 16px;/);
-  assert.match(styles, /\.activity-close/);
+  assert.match(app, /notificationDuration\(item.tone\)/);
+  assert.match(app, /aria-label=\{t\("closeNotification"/);
+  assert.match(styles, /\.notification-center \{ flex: none; display: grid;/);
+  assert.doesNotMatch(app, /className="activity-dock"|className=\{`toast/);
+  assert.doesNotMatch(styles, /\.activity-dock|\.toast/);
 });
 
 test("la descripción de commit usa el diff real y conserva la confirmación", async () => {
@@ -570,7 +570,7 @@ test("la validación GitHub cubre todos los campos y evita rutas arbitrarias", a
   assert.match(repositoryPlan, /if \(!fields\.localPath\) issues\.push\(missing\("localPath"\)\)/);
   assert.match(repositoryPlan, /if \(!fields\.repository\) issues\.push\(missing\("repository"\)\)/);
   assert.doesNotMatch(repositoryPlan, /basename\(.*localPath|basename\(.*source\)/);
-  assert.match(service, /is not the project currently open in Branchline/);
+  assert.match(service, /is not the project currently open in GitCat/);
   assert.match(service, /already points to/);
 });
 
@@ -736,14 +736,14 @@ test("las fusiones desde el menú respetan cambios pendientes y la guía del age
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
   const guide = await readFile(join(root, "AGENTS.md"), "utf8");
-  assert.match(app, /snapshot\.isDirty\s*\n?\s*\? \(\) => window\.branchline\.planAction/);
+  assert.match(app, /snapshot\.isDirty\s*\n?\s*\? \(\) => window\.gitcat\.planAction/);
   assert.match(service, /if \(snapshot\.isDirty\) throw new Error\("Hay cambios locales sin confirmar/);
   assert.match(service, /branch\.mergedInto\.includes\(target\)/);
   assert.match(service, /async function plannerState/);
   assert.match(service, /workingTreeDiff/);
   assert.match(planner, /A branch tip never includes uncommitted working-tree changes/);
   assert.match(guide, /Read this file before starting a task/);
-  assert.match(guide, /Branchline is for people who need Git, not necessarily for people who already know Git/);
+  assert.match(guide, /GitCat is for people who need Git, not necessarily for people who already know Git/);
   assert.match(guide, /Start from the user's goal, not from Git commands/);
   assert.match(guide, /The product owns the translation/);
   assert.match(guide, /Treat errors as moments to guide/);

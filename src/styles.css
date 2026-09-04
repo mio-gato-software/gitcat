@@ -28,7 +28,7 @@ button:disabled { cursor: default; opacity: .55; }
 .remote-status svg { flex: none; }
 /* Ya no hay nada debajo, así que su borde inferior solo doblaría la línea de la barra de estado. */
 .branch-section { border-bottom: 0; }
-.activity-dock { position: fixed; z-index: 8; top: 68px; right: 16px; display: flex; flex-direction: column; gap: 7px; width: min(300px, calc(100vw - 32px)); pointer-events: none; }.activity-item { display: flex; align-items: flex-start; gap: 9px; padding: 9px 9px 9px 10px; background: #17222df5; border: 1px solid #2a3d4b; border-radius: 7px; box-shadow: 0 8px 30px #0008; pointer-events: auto; }.activity-symbol { width: 21px; height: 21px; display: grid; place-items: center; flex: none; color: #72dfcf; background: #1b403e; border-radius: 5px; }.activity-item.warning .activity-symbol { color: #f0b17c; background: #453324; }.activity-copy { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }.activity-item strong { color: #dceaf3; font-size: 10px; }.activity-copy span { overflow: hidden; color: #7890a1; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.activity-close { width: 24px; height: 24px; display: grid; place-items: center; flex: none; margin: -2px -2px 0 0; color: #7d90a2; background: transparent; border-radius: 5px; }.activity-close:hover { color: #eef5fa; background: #263542; }.toast { position: fixed; right: 21px; bottom: 44px; display: flex; align-items: center; gap: 9px; max-width: 450px; padding: 10px 11px; color: #d8eee9; background: #163431; border: 1px solid #37746b; border-radius: 7px; box-shadow: 0 10px 30px #0008; font-size: 10px; }.toast svg { color: #74dccd; }.toast span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.toast button { display: grid; place-items: center; margin-left: 3px; color: #91bdb8; background: transparent; }
+.activity-item { display: flex; align-items: flex-start; gap: 9px; padding: 9px 9px 9px 10px; background: #17222df5; border: 1px solid #2a3d4b; border-radius: 7px; box-shadow: 0 8px 30px #0008; pointer-events: auto; }.activity-symbol { width: 21px; height: 21px; display: grid; place-items: center; flex: none; color: #72dfcf; background: #1b403e; border-radius: 5px; }.activity-item.warning .activity-symbol { color: #f0b17c; background: #453324; }.activity-copy { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }.activity-item strong { color: #dceaf3; font-size: 10px; }.activity-copy span { overflow: hidden; color: #7890a1; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.activity-close { width: 24px; height: 24px; display: grid; place-items: center; flex: none; margin: -2px -2px 0 0; color: #7d90a2; background: transparent; border-radius: 5px; }.activity-close:hover { color: #eef5fa; background: #263542; }
 .welcome { position: relative; display: grid; place-items: center; flex: 1; overflow: hidden; background: radial-gradient(circle at 50% 40%, #132d36 0, transparent 38%); }.welcome-glow { position: absolute; width: 520px; height: 520px; border: 1px solid #26514e; border-radius: 50%; box-shadow: 0 0 130px #266b6542, inset 0 0 110px #1f57542b; opacity: .6; }.welcome-card { position: relative; width: 450px; padding: 48px; text-align: center; background: #101a24dd; border: 1px solid #2a414b; border-radius: 16px; box-shadow: 0 30px 80px #0008; }.welcome-mark { width: 60px; height: 60px; display: grid; place-items: center; margin: 0 auto 24px; color: #071a1a; background: #6ddace; border-radius: 17px; box-shadow: 0 0 45px #54d4c966; }.welcome-card h1 { margin: 9px 0 13px; color: #f1f7f8; font-size: 30px; letter-spacing: -.06em; }.welcome-card p { margin: 0 auto 25px; color: #8398aa; font-size: 12px; line-height: 1.65; }.welcome-button { width: 100%; min-height: 38px; }.welcome-features { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px 15px; margin-top: 25px; color: #71958f; font-size: 10px; }.welcome-features span { display: flex; align-items: center; gap: 5px; }.welcome-footnote { margin-top: 25px; color: #597180; font-size: 9px; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: #060a0fbb; backdrop-filter: blur(5px); }.settings-modal { width: 420px; padding: 24px; background: #121d28; border: 1px solid #304455; border-radius: 12px; box-shadow: 0 25px 90px #000c; }.modal-heading { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 20px; }.modal-heading h2 { margin: 5px 0 0; color: #edf5f7; font-size: 19px; letter-spacing: -.04em; }.provider-card { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; padding: 11px; background: #182833; border: 1px solid #2c4a53; border-radius: 8px; }.provider-logo { width: 27px; height: 27px; display: grid; place-items: center; color: #0a1c1b; background: #6bd8c9; border-radius: 7px; font-size: 16px; }.provider-card div:nth-child(2) { display: flex; flex-direction: column; gap: 3px; flex: 1; }.provider-card strong { color: #d9efeb; font-size: 11px; }.provider-card span { color: #769193; font-size: 9px; }.connected-dot { width: 7px; height: 7px; border-radius: 50%; background: #687c8e; }.connected-dot.on { background: #6addaf; box-shadow: 0 0 0 4px #6addaf1c; }.settings-modal label { display: flex; flex-direction: column; gap: 7px; margin-top: 15px; color: #a3b6c5; font-size: 10px; font-weight: 700; }.settings-modal input { padding: 10px; color: #dcebf3; background: #0e1721; border: 1px solid #2e4050; border-radius: 6px; outline: none; font-family: 'DM Mono', monospace; font-size: 10px; }.settings-modal input:focus { border-color: #62bbb3; }.settings-modal small { color: #6d8294; font-size: 9px; font-weight: 400; line-height: 1.4; }.modal-note { display: flex; gap: 8px; margin-top: 20px; padding: 10px; color: #7da39d; background: #132522; border: 1px solid #27514b; border-radius: 6px; font-size: 9px; line-height: 1.5; }.modal-note svg { color: #6bd5c6; flex: none; }.modal-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 22px; }
 .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
@@ -132,8 +132,8 @@ button:disabled { cursor: default; opacity: .55; }
 .plan-steps .step-summary { color: #cfe9e4; font-size: 9px; line-height: 1.35; overflow-wrap: anywhere; }
 .plan-steps code { display: flex; align-items: center; gap: 5px; min-width: 0; color: #8de3d7; font-family: 'DM Mono', monospace; font-size: 9px; overflow-wrap: anywhere; }
 .plan-steps code svg { flex: none; opacity: .75; }
-.toast.error { color: #f1ced2; background: #3a2027; border-color: #78404b; }
-.toast.error svg { color: #ff98a5; }
+
+
 .modal-backdrop { padding: 18px; }
 .settings-modal, .input-modal, .commit-modal { width: min(420px, 100%); max-height: calc(100vh - 36px); overflow: auto; }
 .input-modal, .commit-modal { padding: 24px; background: #121d28; border: 1px solid #304455; border-radius: 12px; box-shadow: 0 25px 90px #000c; }
@@ -173,7 +173,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
   .suggestion-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding-top: 10px; padding-bottom: 10px; }
   .suggestion-list button { align-items: flex-start; }
   .chat-compose { margin-top: 4px; }
-  .activity-dock { top: 64px; right: 12px; }
+
   .status-right .provider-status { display: none; }
 }
 
@@ -187,8 +187,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
   .suggestion-list { grid-template-columns: 1fr; }
   .statusbar { min-height: 29px; height: auto; }
   .status-right { display: none; }
-  .activity-dock { top: 62px; right: 10px; width: min(280px, calc(100vw - 20px)); }
-  .toast { right: 12px; bottom: 38px; left: 12px; max-width: none; }
+
+
 }
 
 /* Draggable pane borders. They float over the grid line so the three columns stay a plain template. */
@@ -380,3 +380,52 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .resolution-skipped > div:first-of-type { border-top: 0; }
 .resolution-skipped strong { color: #c4d3df; font-size: 10px; overflow-wrap: anywhere; }
 .resolution-skipped span { color: #7b8ea3; font-size: 9px; line-height: 1.5; }
+
+/* Repository overview keeps branch labels, graph lanes and changes in stable columns. */
+.activity-overview { flex: none; margin: 0 21px; padding: 16px; border: 1px solid #2a3c4c; border-radius: 9px; background: #121f2a; }
+.activity-overview.has-updates { border-color: #507f76; background: linear-gradient(120deg, #17342f, #121f2a 75%); }
+.overview-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.overview-heading h3 { margin: 5px 0 0; font-size: 17px; color: #e0f1ed; }
+.activity-overview p { margin: 9px 0; font-size: 11px; line-height: 1.6; color: #9db4c4; }
+.activity-overview small { display: block; margin-top: 10px; color: #8c9eaf; font-size: 9px; line-height: 1.5; }
+.overview-stats { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 14px; }
+.overview-stats > * { display: inline-flex; align-items: center; gap: 6px; color: #a6b9ca; font-size: 10px; }
+.overview-stats button { padding: 0; background: transparent; text-align: left; }
+.overview-stats button:hover { text-decoration: underline; }
+.overview-stats strong { color: #e7f2f6; font-size: 15px; }
+.overview-stats .needs-attention, .overview-stats .needs-attention strong { color: #f0c77d; }
+.updated-branches { display: flex; flex-wrap: wrap; gap: 5px; max-height: 62px; overflow: auto; }
+.updated-branches span { padding: 3px 6px; border-radius: 4px; background: #26463f; color: #b0e4d2; font-size: 10px; overflow-wrap: anywhere; }
+.overview-graph { --refs-w: 180px; padding-top: 6px; }
+.overview-graph .graph-header { padding-left: 0; align-items: center; gap: 10px; flex-wrap: wrap; }
+.overview-graph .overview-order { color: #9eb5c7; font: inherit; letter-spacing: 0; }
+.overview-legend { margin: 0 0 12px; color: #8a9fb0; font-size: 10px; line-height: 1.5; }
+.overview-columns { display: grid; grid-template-columns: var(--refs-w) var(--track-w) minmax(260px, 1fr); min-width: max-content; color: #8ea2b5; font-size: 9px; letter-spacing: .09em; border-bottom: 1px solid #2b3d4d; padding: 9px 0; }
+.overview-graph .commit-row { min-width: calc(var(--refs-w) + var(--track-w) + 260px); min-height: 58px; }
+.overview-graph .commit-row > .commit-refs { width: var(--refs-w); max-width: none; flex: none; flex-direction: column; align-items: flex-start; justify-content: center; padding: 6px 12px 6px 0; gap: 4px; }
+.overview-graph .ref-tag { max-width: 100%; display: block; text-overflow: ellipsis; }
+.overview-graph .ref-tag svg { vertical-align: -2px; margin-right: 4px; }
+.overview-graph .commit-content { padding-top: 9px; padding-bottom: 9px; }
+.overview-graph .updated-commit { background: #24453a55; box-shadow: inset 3px 0 #78d7b4; }
+.activity-badge, .pr-badge { display: inline-block; margin-right: 7px; padding: 2px 5px; border-radius: 4px; font-size: 9px; vertical-align: 1px; }
+.activity-badge { color: #a9efd0; background: #295340; }
+.pr-badge { color: #cbb5f5; background: #352943; }
+.merge-marker { vertical-align: -2px; margin-right: 6px; color: #bea4e9; }
+
+
+/* One notification region in normal layout flow: never over the toolbar or assistant. */
+.notification-center { flex: none; display: grid; grid-template-columns: 155px minmax(0, 1fr); gap: 14px; padding: 10px 21px; border-bottom: 1px solid #304452; background: #101d28; max-height: 150px; }
+.notification-heading { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 8px; font-size: 11px; color: #bbcfde; }
+.notification-heading strong span { margin-left: 5px; color: #77d9ca; }
+.notification-heading button { padding: 3px 0; color: #93aabe; background: transparent; font-size: 10px; }
+.notification-heading button:hover { color: #e7f2f7; text-decoration: underline; }
+.notification-list { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 6px; scrollbar-gutter: stable; }
+.notification-center .activity-item { flex: none; box-shadow: none; background: #172733; padding: 8px 10px; }
+.notification-center .activity-item.warning { border-color: #85603e; background: #30281f; }
+.notification-center .activity-copy span { white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; text-overflow: clip; color: #a8bece; line-height: 1.5; }
+.notification-center .activity-item.warning .activity-copy span { color: #e4c6a8; }
+.notification-center button:focus-visible { outline: 2px solid #77d9ca; outline-offset: 2px; }
+@media (max-width: 1100px) { .notification-center { grid-template-columns: 120px minmax(0, 1fr); padding: 8px 14px; max-height: 130px; } }
+/* A short window must still let the user reach the graph below status and notifications. */
+.graph-area { min-height: 0; overflow: auto; }
+.graph-area > .graph-scroll { min-height: 220px; }

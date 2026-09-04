@@ -52,7 +52,7 @@ test("el progreso de un rebase sale de sus propios archivos, y lo ilegible no se
 });
 
 test("coincide con lo que Git deja de verdad en un rebase atascado", () => {
-  const repo = mkdtempSync(join(tmpdir(), "branchline-conflict-"));
+  const repo = mkdtempSync(join(tmpdir(), "gitcat-conflict-"));
   const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
   git("init", "-q", "-b", "main", ".");
   git("config", "user.email", "t@t.t");

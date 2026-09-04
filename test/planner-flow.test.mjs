@@ -16,7 +16,7 @@ registerHooks({
 });
 const service = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
 
-const repo = mkdtempSync(join(tmpdir(), "branchline-repo-"));
+const repo = mkdtempSync(join(tmpdir(), "gitcat-repo-"));
 const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
 git("init", "-b", "main");
 git("config", "user.email", "prueba@example.com");
@@ -140,9 +140,9 @@ test("el riesgo y la confirmación deterministas prevalecen sobre los del modelo
 });
 
 test("push con --no-verify llega al comando cuando el usuario lo autorizó", async () => {
-  const origin = mkdtempSync(join(tmpdir(), "branchline-origin-"));
+  const origin = mkdtempSync(join(tmpdir(), "gitcat-origin-"));
   execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: origin, encoding: "utf8" });
-  const clone = mkdtempSync(join(tmpdir(), "branchline-clone-"));
+  const clone = mkdtempSync(join(tmpdir(), "gitcat-clone-"));
   const local = (...args) => execFileSync("git", args, { cwd: clone, encoding: "utf8" });
   local("init", "-b", "main");
   local("config", "user.email", "prueba@example.com");
@@ -183,9 +183,9 @@ test("push con --no-verify llega al comando cuando el usuario lo autorizó", asy
 });
 
 test("un push sin upstream se explica y ofrece publicar la rama por primera vez", async () => {
-  const origin = mkdtempSync(join(tmpdir(), "branchline-origin-upstream-"));
+  const origin = mkdtempSync(join(tmpdir(), "gitcat-origin-upstream-"));
   execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: origin, encoding: "utf8" });
-  const work = mkdtempSync(join(tmpdir(), "branchline-no-upstream-"));
+  const work = mkdtempSync(join(tmpdir(), "gitcat-no-upstream-"));
   const local = (...args) => execFileSync("git", args, { cwd: work, encoding: "utf8" });
   local("init", "-b", "main");
   local("config", "user.email", "prueba@example.com");
@@ -361,7 +361,7 @@ test("el menú contextual prepara fusionar la rama elegida en la rama por defect
 });
 
 test("el menú contextual no prepara una fusión vacía cuando la rama ya está integrada", async () => {
-  const work = mkdtempSync(join(tmpdir(), "branchline-empty-merge-"));
+  const work = mkdtempSync(join(tmpdir(), "gitcat-empty-merge-"));
   const run = (...args) => execFileSync("git", args, { cwd: work, encoding: "utf8" });
   run("init", "-b", "main");
   run("config", "user.email", "prueba@example.com");
@@ -378,7 +378,7 @@ test("el menú contextual no prepara una fusión vacía cuando la rama ya está 
 });
 
 test("una fusión desde una rama sucia deja que el modelo decida si debe confirmar antes", async () => {
-  const work = mkdtempSync(join(tmpdir(), "branchline-dirty-merge-"));
+  const work = mkdtempSync(join(tmpdir(), "gitcat-dirty-merge-"));
   const run = (...args) => execFileSync("git", args, { cwd: work, encoding: "utf8" });
   run("init", "-b", "main");
   run("config", "user.email", "prueba@example.com");
@@ -448,9 +448,9 @@ test("un paso que Git rechaza detiene el plan y nombra los pasos no ejecutados",
 });
 
 test("una rama se distingue si está solo en local, solo en el remoto o en ambos", async () => {
-  const origin = mkdtempSync(join(tmpdir(), "branchline-origin-"));
+  const origin = mkdtempSync(join(tmpdir(), "gitcat-origin-"));
   execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: origin, encoding: "utf8" });
-  const clone = mkdtempSync(join(tmpdir(), "branchline-clone-"));
+  const clone = mkdtempSync(join(tmpdir(), "gitcat-clone-"));
   const local = (...args) => execFileSync("git", args, { cwd: clone, encoding: "utf8" });
   local("init", "-b", "main");
   local("config", "user.email", "prueba@example.com");
@@ -508,7 +508,7 @@ test("pedir un commit no pregunta el mensaje: se escribe a partir del diff real"
 
 test("un commit planificado sin cambios locales lo dice en vez de inventar un mensaje", async () => {
   // Repositorio propio: los tests anteriores dejan cambios sin confirmar en el compartido.
-  const clean = mkdtempSync(join(tmpdir(), "branchline-limpio-"));
+  const clean = mkdtempSync(join(tmpdir(), "gitcat-limpio-"));
   const pristine = (...args) => execFileSync("git", args, { cwd: clean, encoding: "utf8" });
   pristine("init", "-b", "main");
   pristine("config", "user.email", "prueba@example.com");
@@ -526,7 +526,7 @@ test("un commit planificado sin cambios locales lo dice en vez de inventar un me
 });
 
 test("el estado dice qué ramas ya están integradas, aunque apunten a otro commit", async () => {
-  const work = mkdtempSync(join(tmpdir(), "branchline-integradas-"));
+  const work = mkdtempSync(join(tmpdir(), "gitcat-integradas-"));
   const run = (...args) => execFileSync("git", args, { cwd: work, encoding: "utf8" });
   run("init", "-b", "main");
   run("config", "user.email", "prueba@example.com");
@@ -571,9 +571,9 @@ test("el estado dice qué ramas ya están integradas, aunque apunten a otro comm
 });
 
 test("la rama por defecto sale del HEAD que publica el remoto, no de un nombre adivinado", async () => {
-  const origin = mkdtempSync(join(tmpdir(), "branchline-origen-def-"));
+  const origin = mkdtempSync(join(tmpdir(), "gitcat-origen-def-"));
   execFileSync("git", ["init", "--bare", "-b", "produccion"], { cwd: origin, encoding: "utf8" });
-  const work = mkdtempSync(join(tmpdir(), "branchline-def-"));
+  const work = mkdtempSync(join(tmpdir(), "gitcat-def-"));
   const run = (...args) => execFileSync("git", args, { cwd: work, encoding: "utf8" });
   run("init", "-b", "produccion");
   run("config", "user.email", "prueba@example.com");
@@ -594,7 +594,7 @@ test("la rama por defecto sale del HEAD que publica el remoto, no de un nombre a
 });
 
 test("la rama principal se marca para el modelo y no se puede borrar", async () => {
-  const work = mkdtempSync(join(tmpdir(), "branchline-default-protected-"));
+  const work = mkdtempSync(join(tmpdir(), "gitcat-default-protected-"));
   const run = (...args) => execFileSync("git", args, { cwd: work, encoding: "utf8" });
   run("init", "-b", "main");
   run("config", "user.email", "prueba@example.com");

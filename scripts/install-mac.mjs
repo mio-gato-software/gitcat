@@ -4,8 +4,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const appName = "Branchline.app";
-const applicationsDirectory = process.env.BRANCHLINE_APPLICATIONS_DIR || "/Applications";
+const appName = "GitCat.app";
+const applicationsDirectory = process.env.GITCAT_APPLICATIONS_DIR || "/Applications";
 const architecture = process.arch;
 const architectureFlag = architecture === "arm64" || architecture === "x64" ? `--${architecture}` : undefined;
 const dryRun = process.argv.includes("--dry-run");
@@ -63,5 +63,5 @@ if (dryRun) {
   run("npm", ["run", "icons"]);
   run("npm", buildArgs);
   installApp();
-  console.log(`Installed ${appName} in ${applicationsDirectory}. Restart Branchline to use the new build.`);
+  console.log(`Installed ${appName} in ${applicationsDirectory}. Restart GitCat to use the new build.`);
 }

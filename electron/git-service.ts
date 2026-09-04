@@ -44,9 +44,9 @@ type PlanDraft = Omit<ActionPlan, "id" | "repoPath" | "head" | "stateId">;
 const MODEL_FALLBACK = "gpt-5.6-luna";
 const RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses";
 const LLM_REQUIRED =
-  "Branchline necesita un proveedor LLM configurado: toda interpretación de tus mensajes la hace el modelo, no reglas locales. Añade tu API key y tu modelo en Configuración.";
+  "GitCat necesita un proveedor LLM configurado: toda interpretación de tus mensajes la hace el modelo, no reglas locales. Añade tu API key y tu modelo en Configuración.";
 const LLM_REQUIRED_EN =
-  "Branchline needs a configured LLM provider: the model interprets every message, not local rules. Add your API key and model in Settings.";
+  "GitCat needs a configured LLM provider: the model interprets every message, not local rules. Add your API key and model in Settings.";
 
 function llmRequired(locale?: Locale) { return localized(locale, LLM_REQUIRED, LLM_REQUIRED_EN); }
 const allowedOperations = new Set<Operation>([...executableOperations, "github_create_repo", "none"]);
@@ -64,7 +64,7 @@ function isLlmConfigured() {
   return Boolean(llmState.apiKey.trim() && (llmState.model.trim() || MODEL_FALLBACK));
 }
 
-function memoryPath() { return join(app.getPath("userData"), "branchline-memory.json"); }
+function memoryPath() { return join(app.getPath("userData"), "gitcat-memory.json"); }
 
 export function loadMemory() {
   try {
@@ -766,10 +766,10 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
   try {
     sourceSnapshot = await getSnapshot(sourcePath);
   } catch {
-    return blocked(`"${sourcePath}" is not a Git repository; Branchline never runs git init on its own, the user must create or open the repository first`, "repository.localPath");
+    return blocked(`"${sourcePath}" is not a Git repository; GitCat never runs git init on its own, the user must create or open the repository first`, "repository.localPath");
   }
   if (sourceSnapshot.path !== sourcePath) return blocked(`"${sourcePath}" is inside the repository "${sourceSnapshot.path}"; the exact repository root is required`, "repository.localPath");
-  if (sourceSnapshot.path !== snapshot.path) return blocked(`"${sourcePath}" is not the project currently open in Branchline ("${snapshot.path}"); for safety the user must open it as the active project before publishing it`, "repository.localPath");
+  if (sourceSnapshot.path !== snapshot.path) return blocked(`"${sourcePath}" is not the project currently open in GitCat ("${snapshot.path}"); for safety the user must open it as the active project before publishing it`, "repository.localPath");
 
   const { repository: name, owner, host, protocol } = repositoryPlan;
   const remote = validation.fields.remote ?? "origin";
@@ -780,7 +780,7 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
   const ghVersion = await runCommand("gh", ["--version"], sourcePath, 10_000, { GH_PROMPT_DISABLED: "1" }).catch(() => undefined);
   if (!ghVersion || ghVersion.code !== 0) {
     const searched = await toolDirectories();
-    return blocked(`GitHub CLI (gh) is required but no runnable gh was found in any of the ${searched.length} directories Branchline searched (including ${searched.slice(0, 6).join(", ")}). If gh is installed elsewhere, it is a PATH problem rather than a missing install`);
+    return blocked(`GitHub CLI (gh) is required but no runnable gh was found in any of the ${searched.length} directories GitCat searched (including ${searched.slice(0, 6).join(", ")}). If gh is installed elsewhere, it is a PATH problem rather than a missing install`);
   }
   const accounts = await ghAccounts(host, sourcePath);
   if (!accounts.length) return blocked(`no account is logged into ${host} with gh; the user must run: gh auth login --hostname ${host}`);
@@ -1735,7 +1735,7 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
   return { snapshot: await getSnapshot(cwd), output: executionReport(outcomes, language), outcomes };
 }
 
-function settingsPath() { return join(app.getPath("userData"), "branchline-settings.json"); }
+function settingsPath() { return join(app.getPath("userData"), "gitcat-settings.json"); }
 
 export function loadLlmConfig() {
   try {

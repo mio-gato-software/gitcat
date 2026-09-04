@@ -1,7 +1,7 @@
 import type { GitProtocol } from "../shared/types.js";
 
 /**
- * What Branchline is allowed to remember: choices the user confirmed, never measured state.
+ * What GitCat is allowed to remember: choices the user confirmed, never measured state.
  * Whether gh is installed, where a binary lives or whether a key still authenticates is re-checked
  * every time, because those go stale silently and assuming them is how work is published under the
  * wrong identity. A recalled value only skips the *search*; the *check* always runs.

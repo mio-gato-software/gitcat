@@ -57,7 +57,7 @@ export function isBranchNameSafe(name: string) {
 
 export const planResponseFormat = {
   type: "json_schema",
-  name: "branchline_plan",
+  name: "gitcat_plan",
   strict: true,
   schema: {
     type: "object",
@@ -113,7 +113,7 @@ export const planResponseFormat = {
  * inspects the user's words.
  */
 export function buildPlannerInstructions(repositoryState: unknown, issues: PlanIssue[] = []) {
-  const base = `You are the planning layer of Branchline, a desktop Git workspace.
+  const base = `You are the planning layer of GitCat, a desktop Git workspace.
 
 The user may write in any language, in any phrasing, direct or indirect. Decide what they mean by
 understanding the message, never by matching words or verb forms. Always write "summary",

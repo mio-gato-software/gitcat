@@ -3,7 +3,7 @@
 import type { GitlineApi } from "../shared/types";
 
 declare global {
-  interface Window { branchline: GitlineApi; }
+  interface Window { gitcat: GitlineApi; }
 }
 
 export {};

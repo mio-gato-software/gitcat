@@ -16,7 +16,7 @@ registerHooks({
 });
 const { getCommitDetail, getCommitFileDiff } = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
 
-const repo = mkdtempSync(join(tmpdir(), "branchline-commit-detail-"));
+const repo = mkdtempSync(join(tmpdir(), "gitcat-commit-detail-"));
 const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
 git("init", "-q", "-b", "main", ".");
 git("config", "user.email", "test@example.com");

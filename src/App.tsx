@@ -1,3 +1,4 @@
+import { addNotification, notificationDuration, type Notification } from "../shared/notifications";
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
@@ -13,6 +14,7 @@ import { branchSuggestions, namingCompletions, prefixAliases, variantHint } from
 import type { BranchSuggestion } from "../shared/branch-consistency";
 import { isProtectedBranch, lifecycleOf, staleDays } from "../shared/branch-lifecycle";
 import { buildCommitGraph, familyColour, maxLanes } from "../shared/commit-graph";
+import { activityBaseline, changedBranches, parseActivityBaseline, pullRequestReference } from "../shared/repository-activity";
 import type { GraphRow } from "../shared/commit-graph";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
@@ -23,8 +25,8 @@ import type {
 import { localeTag, readLocale, translate, writeLocale, type MessageKey, type Translate } from "./i18n";
 
 type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string };
-type ActivityItem = { id: number; label: string; detail: string; tone: "success" | "neutral" | "warning" };
-type Toast = { message: string; tone: "success" | "error" };
+type ActivityItem = Notification;
+
 type InputDialog = { operation: "create_branch" | "merge"; title: string; label: string; value: string };
 type Suggestion = { key: string; icon: LucideIcon; label: string } & ({ question: string } | { dialog: InputDialog });
 type ConversationTurn = {
@@ -91,7 +93,7 @@ function branchColor(index: number) { return palette[index % palette.length]; }
 
 type PaneWidths = { sidebar: number; inspector: number };
 
-const paneStorageKey = "branchline-pane-widths";
+const paneStorageKey = "gitcat-pane-widths";
 const defaultPanes: PaneWidths = { sidebar: 235, inspector: 330 };
 /** The middle column holds the graph, so it keeps a floor no drag can take away. */
 const paneRange = { sidebar: [180, 460], inspector: [255, 620], centre: 340 } as const;
@@ -148,7 +150,7 @@ const noDismissals: string[] = [];
  */
 type HistoryPrefs = { scope: HistoryScope; byFamily: boolean };
 
-const historyPrefsStorageKey = (path: string) => `branchline-history:${path}`;
+const historyPrefsStorageKey = (path: string) => `gitcat-history:${path}`;
 
 function readHistoryPrefs(path: string): HistoryPrefs {
   try {
@@ -184,7 +186,7 @@ function formatDateFull(date: string, locale: Locale) {
   return new Intl.DateTimeFormat(localeTag(locale), { dateStyle: "full", timeStyle: "short" }).format(value);
 }
 
-const branchViewStorageKey = (path: string) => `branchline-branch-view:${path}`;
+const branchViewStorageKey = (path: string) => `gitcat-branch-view:${path}`;
 
 function readBranchView(path: string): BranchView | undefined {
   try {
@@ -305,8 +307,7 @@ export default function App() {
   const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [config, setConfig] = useState<LlmConfig>({ provider: "openai", model: "gpt-5.6-luna", configured: false });
-  const [toast, setToast] = useState<Toast>();
-  const [view, setView] = useState<"history" | "changes">("history");
+  const [view, setView] = useState<"overview" | "history" | "changes">("overview");
   const [selectedCommit, setSelectedCommit] = useState<Commit>();
   const [selectedFile, setSelectedFile] = useState<FileChange>();
   const [proposal, setProposal] = useState<ConflictProposal>();
@@ -402,16 +403,16 @@ export default function App() {
   const resetPane = (edge: keyof PaneWidths) => resizePane(edge, defaultPanes[edge]);
 
   useEffect(() => {
-    window.branchline.getLlmConfig().then(setConfig).catch((error) => {
-      setToast({ message: error instanceof Error ? error.message : t("fallbackReadConfig"), tone: "error" });
+    window.gitcat.getLlmConfig().then(setConfig).catch((error) => {
+      notify({ message: error instanceof Error ? error.message : t("fallbackReadConfig"), tone: "error" });
     });
-    window.branchline.restoreWorkspace().then((workspace) => {
+    window.gitcat.restoreWorkspace().then((workspace) => {
       const loadedAt = new Date().toISOString();
       const restored = workspace.projects.map((project) => ({ id: project.path, snapshot: project, loadedAt }));
       setProjects(restored);
       setActiveId(restored.find((project) => project.snapshot.path === workspace.activePath)?.id ?? restored[0]?.id);
     }).catch((error) => {
-      setToast({ message: error instanceof Error ? error.message : t("fallbackRestoreProjects"), tone: "error" });
+      notify({ message: error instanceof Error ? error.message : t("fallbackRestoreProjects"), tone: "error" });
     }).finally(() => {
       workspaceRestored.current = true;
       setWorkspaceReady(true);
@@ -422,8 +423,8 @@ export default function App() {
     if (!workspaceRestored.current || !workspaceReady) return;
     const paths = projects.map((project) => project.snapshot.path);
     const activePath = projects.find((project) => project.id === activeId)?.snapshot.path;
-    window.branchline.saveWorkspace(paths, activePath).catch((error) => {
-      setToast({ message: error instanceof Error ? error.message : t("fallbackSaveWorkspace"), tone: "error" });
+    window.gitcat.saveWorkspace(paths, activePath).catch((error) => {
+      notify({ message: error instanceof Error ? error.message : t("fallbackSaveWorkspace"), tone: "error" });
     });
   }, [projects, activeId, workspaceReady, t]);
 
@@ -437,7 +438,7 @@ export default function App() {
     setRequest("");
     setSelectedBranch(undefined);
     setCommitFilter("");
-    setView("history");
+    setView("overview");
     setCommitFormOpen(false);
     setCommitMessage("");
     setGeneratingDescription(false);
@@ -456,12 +457,25 @@ export default function App() {
 
   const addActivity = (item: Omit<ActivityItem, "id">) => {
     const id = ++activitySequence.current;
-    setActivity((items) => [{ ...item, id }, ...items].slice(0, 4));
-    const timer = setTimeout(() => {
-      activityTimers.current.delete(id);
-      setActivity((items) => items.filter((activityItem) => activityItem.id !== id));
-    }, item.tone === "warning" ? 10_000 : 6_000);
-    activityTimers.current.set(id, timer);
+    setActivity((items) => addNotification(items, { ...item, id }));
+    const duration = notificationDuration(item.tone);
+    if (duration !== undefined) {
+      const timer = setTimeout(() => {
+        activityTimers.current.delete(id);
+        setActivity((items) => items.filter((activityItem) => activityItem.id !== id));
+      }, duration);
+      activityTimers.current.set(id, timer);
+    }
+  };
+
+  const notify = ({ message, tone }: { message: string; tone: "success" | "error" }) => {
+    addActivity({ label: t(tone === "error" ? "gitNeedsAttention" : "notificationDone"), detail: message, tone: tone === "error" ? "warning" : "success" });
+  };
+
+  const dismissAllActivity = () => {
+    for (const timer of activityTimers.current.values()) clearTimeout(timer);
+    activityTimers.current.clear();
+    setActivity([]);
   };
 
   const updateSnapshot = (path: string, next: RepoSnapshot) => {
@@ -472,7 +486,7 @@ export default function App() {
 
   const openProject = async () => {
     try {
-      const next = await window.branchline.selectProject();
+      const next = await window.gitcat.selectProject();
       if (!next) return;
       const existing = projects.find((project) => project.snapshot.path === next.path);
       if (existing) { updateSnapshot(next.path, next); setActiveId(existing.id); return; }
@@ -481,7 +495,7 @@ export default function App() {
       setActiveId(id);
       addActivity({ label: t("projectOpen"), detail: next.name, tone: "success" });
     } catch (error) {
-      setToast({ message: cleanError(error, t("fallbackOpenProject")), tone: "error" });
+      notify({ message: cleanError(error, t("fallbackOpenProject")), tone: "error" });
     }
   };
 
@@ -498,11 +512,11 @@ export default function App() {
     if (!path || refreshingPath) return;
     setRefreshingPath(path);
     try {
-      const next = await window.branchline.getSnapshot(path);
+      const next = await window.gitcat.getSnapshot(path);
       updateSnapshot(path, next);
       if (announce) addActivity({ label: t("stateUpdated"), detail: next.currentBranch, tone: "neutral" });
     } catch (error) {
-      setToast({ message: cleanError(error, t("fallbackRefresh")), tone: "error" });
+      notify({ message: cleanError(error, t("fallbackRefresh")), tone: "error" });
     } finally { setRefreshingPath(undefined); }
   };
 
@@ -564,7 +578,7 @@ export default function App() {
     const path = snapshot.path;
     const context = conversationContext(conversations[path] ?? []);
     setRequest("");
-    await showPlan(question, () => window.branchline.planAction(path, question, context, locale), path);
+    await showPlan(question, () => window.gitcat.planAction(path, question, context, locale), path);
   };
 
   const prepare = async (operation: Operation, args: Record<string, string> = {}, question?: string) => {
@@ -586,7 +600,7 @@ export default function App() {
       github_create_repo: t("createPrivateRepo", { owner: args.owner, name: args.name, host: args.host })
     };
     const path = snapshot.path;
-    await showPlan(question ?? labels[operation] ?? t("prepareGitOperation"), () => window.branchline.prepareOperation(path, operation, args, locale), path);
+    await showPlan(question ?? labels[operation] ?? t("prepareGitOperation"), () => window.gitcat.prepareOperation(path, operation, args, locale), path);
   };
 
   const prepareMergeToDefault = async (name: string) => {
@@ -598,8 +612,8 @@ export default function App() {
     // decide whether those changes belong to this branch and, if so, place a commit before the merge.
     const context = conversationContext(conversations[path] ?? []);
     await showPlan(question, snapshot.isDirty
-      ? () => window.branchline.planAction(path, question, context, locale)
-      : () => window.branchline.prepareMergeToDefault(path, name, locale), path);
+      ? () => window.gitcat.planAction(path, question, context, locale)
+      : () => window.gitcat.prepareMergeToDefault(path, name, locale), path);
   };
 
   const applyPlan = async (turnId: number, plan: ActionPlan) => {
@@ -615,7 +629,7 @@ export default function App() {
     const context = conversationContext(conversations[path] ?? []);
     const turnId = addTurn(path, t("actionQuestion"));
     try {
-      const plan = await window.branchline.planRecovery(path, failure, context, locale);
+      const plan = await window.gitcat.planRecovery(path, failure, context, locale);
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
       if (plan.answer) {
         updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, status: "completed" }));
@@ -638,9 +652,9 @@ export default function App() {
     setResolving(true);
     setProposal(undefined);
     try {
-      setProposal(await window.branchline.proposeConflictResolution(snapshot.path, locale));
+      setProposal(await window.gitcat.proposeConflictResolution(snapshot.path, locale));
     } catch (error) {
-      setToast({ message: cleanError(error, t("fallbackProposeResolution")), tone: "error" });
+      notify({ message: cleanError(error, t("fallbackProposeResolution")), tone: "error" });
     } finally { setResolving(false); }
   };
 
@@ -648,11 +662,11 @@ export default function App() {
     if (!snapshot || !resolutions.length) return;
     const path = snapshot.path;
     try {
-      updateSnapshot(path, await window.branchline.applyConflictResolution(path, resolutions, locale));
+      updateSnapshot(path, await window.gitcat.applyConflictResolution(path, resolutions, locale));
       setProposal(undefined);
       addActivity({ label: t("conflictsResolved"), detail: counted(t, resolutions.length, "acceptedFile", "acceptedFiles"), tone: "success" });
     } catch (error) {
-      setToast({ message: cleanError(error, t("fallbackApplyResolution")), tone: "error" });
+      notify({ message: cleanError(error, t("fallbackApplyResolution")), tone: "error" });
       await refreshProject(path, false);
     }
   };
@@ -660,14 +674,13 @@ export default function App() {
   const runPlan = async (turnId: number, plan: ActionPlan) => {
     updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, status: "executing" }));
     try {
-      const result = await window.branchline.executePlan(plan.repoPath, plan.id, locale);
+      const result = await window.gitcat.executePlan(plan.repoPath, plan.id, locale);
       updateSnapshot(plan.repoPath, result.snapshot);
       if (result.error) {
         // A sequence that stopped halfway did change the repository: show what ran, not only the failure.
         const progress = plan.steps.length > 1 ? result.output : undefined;
         updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome: progress, error: result.error, status: "error" }));
         addActivity({ label: t("gitNeedsAttention"), detail: result.error, tone: "warning" });
-        setToast({ message: result.error, tone: "error" });
         /**
          * The repository is now holding a half-finished job the user did not ask for, and this is
          * exactly where the conversation used to end. Planning is not acting, so the assistant is
@@ -688,8 +701,7 @@ export default function App() {
       } else {
         const outcome = result.output || t("completed", { summary: plan.summary });
         updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome, status: "completed" }));
-        addActivity({ label: t("actionExecuted"), detail: plan.command, tone: "success" });
-        setToast({ message: outcome, tone: "success" });
+        addActivity({ label: t("actionExecuted"), detail: outcome, tone: "success" });
         if (plan.steps.some((step) => step.operation === "commit")) {
           setCommitMessage("");
           setCommitFormOpen(false);
@@ -698,7 +710,7 @@ export default function App() {
     } catch (error) {
       const message = cleanError(error, t("fallbackGitAction"));
       updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
-      setToast({ message, tone: "error" });
+      notify({ message, tone: "error" });
       await refreshProject(plan.repoPath, false);
       if (config.configured) await recoverFrom(plan.repoPath, {
         command: plan.command,
@@ -719,7 +731,7 @@ export default function App() {
     const path = snapshot.path;
     const turnId = addTurn(path, t("branchSwitchQuestion", { name }));
     try {
-      const plan = await window.branchline.prepareOperation(path, "checkout", { name }, locale);
+      const plan = await window.gitcat.prepareOperation(path, "checkout", { name }, locale);
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
       if (!plan.allowed) {
         updateTurn(path, turnId, (turn) => ({ ...turn, plan, status: "completed" }));
@@ -762,13 +774,13 @@ export default function App() {
     const sequence = requestSequence.current;
     setGeneratingDescription(true);
     try {
-      const result = await window.branchline.generateCommitDescription(repoPath, locale);
+      const result = await window.gitcat.generateCommitDescription(repoPath, locale);
       if (requestSequence.current === sequence && result.stateId === stateId) {
         setCommitMessage(result.description);
         setCommitFormOpen(true);
       }
     } catch (error) {
-      setToast({ message: cleanError(error, t("fallbackGenerateDescription")), tone: "error" });
+      notify({ message: cleanError(error, t("fallbackGenerateDescription")), tone: "error" });
       await refreshProject(repoPath, false);
     } finally { setGeneratingDescription(false); }
   };
@@ -799,9 +811,9 @@ export default function App() {
 
   return (
     <I18nContext.Provider value={{ locale, t, setLocale }}>
-    <div className={`app-shell platform-${window.branchline.platform}`}>
+    <div className={`app-shell platform-${window.gitcat.platform}`}>
       <header className="topbar">
-        <div className="brand-lockup"><div className="brand-mark"><GitFork size={18} strokeWidth={2.4} /></div><span>branchline</span><span className="brand-beta">BETA</span></div>
+        <div className="brand-lockup"><div className="brand-mark"><GitFork size={18} strokeWidth={2.4} /></div><span>GitCat</span><span className="brand-beta">BETA</span></div>
         <div className="window-tabs" role="tablist" aria-label={t("openProjects")}>
           {projects.map((project) => <div key={project.id} className={`window-tab ${project.id === activeId ? "active" : ""}`}>
             <button role="tab" aria-selected={project.id === activeId} onClick={() => setActiveId(project.id)}><GitBranch size={14} /><span>{project.snapshot.name}</span></button>
@@ -811,6 +823,14 @@ export default function App() {
         </div>
         <div className="top-actions"><button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label={t("settings")}><Settings2 size={17} /></button></div>
       </header>
+      {activity.length > 0 && <section className="notification-center" aria-label={t("notifications")}>
+        <div className="notification-heading"><strong>{t("notifications")} <span>{activity.length}</span></strong><button onClick={dismissAllActivity}>{t("clearNotifications")}</button></div>
+        <div className="notification-list">{activity.map((item) => <div className={`activity-item ${item.tone}`} role={item.tone === "warning" ? "alert" : "status"} key={item.id}>
+          <span className="activity-symbol">{item.tone === "success" ? <Check size={13} /> : item.tone === "warning" ? <AlertTriangle size={13} /> : <Info size={13} />}</span>
+          <div className="activity-copy"><strong>{item.label}</strong><span>{item.detail}</span></div>
+          <button className="activity-close" onClick={() => dismissActivity(item.id)} aria-label={t("closeNotification", { label: item.label })}><X size={14} /></button>
+        </div>)}</div>
+      </section>}
 
       {!workspaceReady ? <div className="workspace-loading"><LoaderCircle className="spin" size={24} /><span>{t("restoringProjects")}</span></div> : !config.configured && !exploring ? <ProviderRequired onConfigure={() => setSettingsOpen(true)} onExplore={() => setExploring(true)} /> : !snapshot ? <Welcome openProject={openProject} /> : <>
         {!config.configured && <div className="provider-banner" role="status"><Eye size={14} /><span><strong>{t("noProviderBanner")}</strong> {t("noProviderBannerDetail")}</span><button className="outline-button small" onClick={() => setSettingsOpen(true)}><Settings2 size={13} /> {t("configure")}</button></div>}
@@ -839,7 +859,7 @@ export default function App() {
           </aside>
 
           <section className="graph-area">
-            <div className="graph-toolbar"><div className="view-tabs"><button className={`view-tab ${view === "history" ? "active" : ""}`} onClick={() => setView("history")}>{t("history")}</button><button className={`view-tab ${view === "changes" ? "active" : ""}`} onClick={() => setView("changes")}>{t("changesTab")} <span className="count-badge">{snapshot.changes.length}</span></button></div>{view === "history" && <div className="graph-tools"><div className="search-field commit-search"><Search size={14} /><input aria-label={t("searchCommits")} value={commitFilter} onChange={(event) => setCommitFilter(event.target.value)} placeholder={t("searchCommits")} /></div></div>}</div>
+            <div className="graph-toolbar"><div className="view-tabs"><button className={`view-tab ${view === "overview" ? "active" : ""}`} onClick={() => setView("overview")}>{t("overview")}</button><button className={`view-tab ${view === "history" ? "active" : ""}`} onClick={() => setView("history")}>{t("history")}</button><button className={`view-tab ${view === "changes" ? "active" : ""}`} onClick={() => setView("changes")}>{t("changesTab")} <span className="count-badge">{snapshot.changes.length}</span></button></div>{view !== "changes" && <div className="graph-tools"><div className="search-field commit-search"><Search size={14} /><input aria-label={t("searchCommits")} value={commitFilter} onChange={(event) => setCommitFilter(event.target.value)} placeholder={t("searchCommits")} /></div></div>}</div>
             {snapshot.pending && <PendingBanner
               snapshot={snapshot}
               busy={planning}
@@ -849,7 +869,7 @@ export default function App() {
               onResolve={() => void resolveConflicts()}
             />}
             <div className="current-branch-card"><div className="branch-dot" style={{ background: branchColor(0) }} /><div><span className="eyebrow">{t("currentBranch")}</span><div className="current-branch-name">{snapshot.currentBranch}<span className="branch-status">{snapshot.isDirty ? t("localChanges") : t("clean")}</span></div></div><div className="branch-stats"><span><ArrowDownToLine size={13} />{snapshot.branches.find((branch) => branch.isCurrent)?.behind ?? 0} {t("behind")}</span><span><ArrowUpFromLine size={13} />{snapshot.branches.find((branch) => branch.isCurrent)?.ahead ?? 0} {t("ahead")}</span></div><button className="outline-button small" onClick={openCommitForm} disabled={!snapshot.isDirty || planning}><GitCommitHorizontal size={14} /> {t("commit")}</button></div>
-            {view === "history" ? <HistoryView key={snapshot.path} snapshot={snapshot} selection={selection} filter={commitFilter} onSelect={setSelectedCommit} />
+            {view === "overview" ? <RepositoryOverview key={snapshot.path} snapshot={snapshot} filter={commitFilter} onSelect={setSelectedCommit} onChanges={() => setView("changes")} /> : view === "history" ? <HistoryView key={snapshot.path} snapshot={snapshot} selection={selection} filter={commitFilter} onSelect={setSelectedCommit} />
               : <ChangesView snapshot={snapshot} onOpenFile={setSelectedFile} formOpen={commitFormOpen} message={commitMessage} generating={generatingDescription} busy={planning} onOpenForm={() => setCommitFormOpen(true)} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit} />}
           </section>
 
@@ -857,9 +877,7 @@ export default function App() {
         </main>
         <footer className="statusbar"><div className="status-left"><span className="status-good"><CircleDot size={12} /> {snapshot.isDirty ? counted(t, snapshot.changes.length, "change", "changes") : t("noUncommittedChanges")}</span><span className="status-separator" /><span>{counted(t, branchCount.local, "localBranch", "localBranches")}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} ${t("remoteOnly")}` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> {t("lastRead", { date: formatDate(active.loadedAt, locale) })}</span><span className="remote-status" title={remoteTitle(snapshot, t)}><Cloud size={12} /> {remoteLabel(snapshot, t)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : t("llmNotConfigured")}</span></div></footer>
       </>}
-      {activity.length > 0 && <div className="activity-dock" aria-live="polite">{activity.slice(0, 3).map((item) => <div className={`activity-item ${item.tone}`} role={item.tone === "warning" ? "alert" : "status"} key={item.id}><span className="activity-symbol">{item.tone === "success" ? <Check size={13} /> : item.tone === "warning" ? <AlertTriangle size={13} /> : <GitCommitHorizontal size={13} />}</span><div className="activity-copy"><strong>{item.label}</strong><span title={item.detail}>{item.detail}</span></div><button className="activity-close" onClick={() => dismissActivity(item.id)} aria-label={t("closeNotification", { label: item.label })}><X size={14} /></button></div>)}</div>}
-      {toast && <div className={`toast ${toast.tone}`} role={toast.tone === "error" ? "alert" : "status"}>{toast.tone === "error" ? <AlertTriangle size={15} /> : <Check size={15} />}<span>{toast.message}</span><button onClick={() => setToast(undefined)} aria-label={t("closeToast")}><X size={14} /></button></div>}
-      {settingsOpen && <SettingsModal config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onSaved={(next) => { setConfig(next); setSettingsOpen(false); setToast({ message: t("settingsSaved"), tone: "success" }); }} />}
+      {settingsOpen && <SettingsModal config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onSaved={(next) => { setConfig(next); setSettingsOpen(false); notify({ message: t("settingsSaved"), tone: "success" }); }} />}
       {inputDialog && <InputModal dialog={inputDialog} branches={snapshot?.branches ?? []} onChange={(value) => setInputDialog({ ...inputDialog, value })} onClose={() => setInputDialog(undefined)} onSubmit={submitInputDialog} />}
       {selectedCommit && snapshot && <CommitModal commit={selectedCommit} repoPath={snapshot.path} onClose={() => setSelectedCommit(undefined)} />}
       {selectedFile && snapshot && <FileDiffModal file={selectedFile} repoPath={snapshot.path} onClose={() => setSelectedFile(undefined)} />}
@@ -876,7 +894,7 @@ function Welcome({ openProject }: { openProject: () => Promise<void> }) {
 }
 
 /**
- * Branchline interprets every request with the configured model — there is no keyword fallback — so
+ * GitCat interprets every request with the configured model — there is no keyword fallback — so
  * the provider is a hard requirement rather than an optional extra.
  */
 function ProviderRequired({ onConfigure, onExplore }: { onConfigure: () => void; onExplore: () => void }) {
@@ -1202,17 +1220,44 @@ function BranchRow({ branch, label, variant, merged, selected, defaultBranch, co
   return <div onContextMenu={onContextMenu} className={`branch-row ${branch.isCurrent ? "current" : ""} ${selected ? "selected" : ""} ${merged ? "merged" : ""} ${branch.stackedOn ? "stacked" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onSwitchNow} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch, t)}\n${t("branchClickHint")}`}><span className="branch-color" style={{ background: colour }} />{branch.stackedOn ? <GitFork size={14} className="branch-stack-icon" /> : <GitBranch size={14} />}<span className="branch-label">{label}</span>{variant && <span className="branch-variant" title={t("variantPrefix", { name: branch.name })}>{t("variant")}</span>}{merged && <span className="branch-merged" role="img" aria-label={t("mergedBadge", { branch: defaultBranch ?? "" })} title={t("mergedTitle", { branch: defaultBranch ?? "" })}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={t("worktreeBadge", { path: branch.checkedOutIn })} title={t("worktreeBadge", { path: branch.checkedOutIn })}><FolderGit2 size={12} /></span>}{protectedByPrefix && <span className="branch-protected" role="img" aria-label={t("protectedBadge")} title={t("protectedTitle")}><ShieldCheck size={12} /></span>}{stale > 0 && <span className="branch-stale" role="img" aria-label={t("staleBadge", { days: stale })} title={t("staleTitle", { days: stale })}><Clock3 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">{t("current")}</span>}{isDefault && <span className="current-pill">{t("primary")}</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && <button className="branch-switch" onClick={onSwitch} disabled={busy} aria-label={t("switchBranch", { name: branch.name })} title={t("switchBranchTitle", { name: branch.name })}><ArrowLeftRight size={12} /></button>}{!branch.isCurrent && !isDefault && !protectedByPrefix && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={t("deleteBranch", { name: branch.name })} title={branch.mergedInto.length ? t("deleteMergedBranch", { name: branch.name, branches: branch.mergedInto.join(t("and")) }) : t("deleteUnmergedBranch", { name: branch.name })}><Trash2 size={12} /></button>}</div>;
 }
 
-/**
- * The history, drawn as the graph it always was. Lanes come from Git's own topological order, and the
- * colour of a line says which family of branches it belongs to rather than which row it happens to be.
- */
-/**
- * The history, scoped to the branch the window is talking about. It used to be `git log --all`, which
- * meant the list never had anything to do with any branch: selecting one changed nothing, and the
- * count implied a completeness a fixed window of 80 commits never had.
- */
-function HistoryView({ snapshot, selection, filter, onSelect }: {
-  snapshot: RepoSnapshot; selection: string; filter: string; onSelect: (commit: Commit) => void;
+/** Repository-wide activity remains pending until the user explicitly reviews it. */
+function RepositoryOverview({ snapshot, filter, onSelect, onChanges }: {
+  snapshot: RepoSnapshot; filter: string; onSelect: (commit: Commit) => void; onChanges: () => void;
+}) {
+  const { t } = useI18n();
+  const storageKey = `gitcat-activity:${snapshot.path}`;
+  const [baseline, setBaseline] = useState(() => {
+    try { return parseActivityBaseline(localStorage.getItem(storageKey)) ?? activityBaseline(snapshot); }
+    catch { return activityBaseline(snapshot); }
+  });
+  const [storageError, setStorageError] = useState(false);
+  useEffect(() => {
+    try { localStorage.setItem(storageKey, JSON.stringify(baseline)); setStorageError(false); }
+    catch { setStorageError(true); }
+  }, [storageKey, baseline]);
+  const changed = changedBranches(baseline, activityBaseline(snapshot));
+  const highlighted = new Set(snapshot.branches.filter((branch) => changed.includes(branch.name))
+    .flatMap((branch) => branch.lastCommit ? [branch.lastCommit.shortHash] : []));
+  const current = snapshot.branches.find((branch) => branch.isCurrent);
+  return <>
+    <div className={`activity-overview ${changed.length ? "has-updates" : ""}`}>
+      <div className="overview-heading"><div><span className="eyebrow">{t("repositoryOverview")}</span>
+        <h3>{changed.length ? t("branchesUpdated", { count: changed.length }) : t("recentHistory")}</h3>
+      </div>{changed.length > 0 && <button className="outline-button small" onClick={() => setBaseline(activityBaseline(snapshot))}><Check size={13} />{t("markReviewed")}</button>}</div>
+      <p>{changed.length ? t("sinceReview") : t("overviewIntro")}</p>
+      {changed.length > 0 && <div className="updated-branches">{changed.map((name) => <span key={name} title={name}>{name}{!snapshot.branches.some((branch) => branch.name === name) ? ` · ${t("removedBranch")}` : ""}</span>)}</div>}
+      <div className="overview-stats"><button onClick={onChanges} className={snapshot.changes.length ? "needs-attention" : ""}><FileDiff size={14} /><strong>{snapshot.changes.length}</strong>{t("uncommittedFiles")}</button>
+        <span><ArrowDownToLine size={14} /><strong>{current?.upstream ? current.behind : "—"}</strong>{t("incomingCurrent")}</span>
+        <span><ArrowUpFromLine size={14} /><strong>{current?.upstream ? current.ahead : "—"}</strong>{t("outgoingCurrent")}</span></div>
+      <small>{t(current?.upstream ? "knownRemoteState" : "noRemoteComparison")}</small>
+      {storageError && <p role="alert">{t("activityStorageError")}</p>}
+    </div>
+    <HistoryView snapshot={snapshot} selection={snapshot.currentBranch} filter={filter} onSelect={onSelect} overview highlighted={highlighted} />
+  </>;
+}
+
+function HistoryView({ snapshot, selection, filter, onSelect, overview = false, highlighted }: {
+  snapshot: RepoSnapshot; selection: string; filter: string; onSelect: (commit: Commit) => void; overview?: boolean; highlighted?: Set<string>;
 }) {
   const { t } = useI18n();
   const [prefs, setPrefs] = useState(() => readHistoryPrefs(snapshot.path));
@@ -1223,13 +1268,14 @@ function HistoryView({ snapshot, selection, filter, onSelect }: {
   // one they are looking at.
   const request = useRef(0);
 
-  const { scope, byFamily } = prefs;
+  const { byFamily } = prefs;
+  const scope = overview ? "all" : prefs.scope;
   const branch = scope === "all" ? undefined : selection;
 
   const fetchPage = (skip: number) => {
     const id = ++request.current;
     setLoading(true);
-    window.branchline.loadHistory(snapshot.path, { scope, branch, skip }).then((next) => {
+    window.gitcat.loadHistory(snapshot.path, { scope, branch, skip }).then((next) => {
       if (request.current !== id) return;
       setPage((current) => ({
         commits: skip === 0 ? next.commits : [...current.commits, ...next.commits],
@@ -1273,12 +1319,12 @@ function HistoryView({ snapshot, selection, filter, onSelect }: {
     "branch-only": t("branchOnlyScope", { branch: selection })
   };
 
-  return <div className="graph-scroll" style={{ "--track-w": `${trackWidth}px` } as CSSProperties}>
+  return <div className={`graph-scroll ${overview ? "overview-graph" : ""}`} style={{ "--track-w": `${trackWidth}px` } as CSSProperties}>
     <div className="graph-header">
       <div className="graph-scope">
-        <label className="scope-field"><GitBranch size={12} /><span className="visually-hidden">{t("historyScope")}</span><select aria-label={t("historyScope")} value={scope} onChange={(event) => update({ scope: event.target.value as HistoryScope })}>
+        {overview ? <span className="overview-order">{t("historyDirection")}</span> : <label className="scope-field"><GitBranch size={12} /><span className="visually-hidden">{t("historyScope")}</span><select aria-label={t("historyScope")} value={scope} onChange={(event) => update({ scope: event.target.value as HistoryScope })}>
           {(Object.keys(scopeLabels) as HistoryScope[]).map((value) => <option value={value} key={value}>{scopeLabels[value]}</option>)}
-        </select></label>
+        </select></label>}
         {scope === "branch-only" && <span className="scope-note">{page.comparedTo
           ? t("comparedTo", { branch: page.comparedTo })
           : t("noDefaultComparison")}</span>}
@@ -1292,11 +1338,14 @@ function HistoryView({ snapshot, selection, filter, onSelect }: {
           : page.hasMore ? t("commitsMore", { count: page.commits.length }) : t("noMoreCommits", { count: page.commits.length })}</span>
       </div>
     </div>
+    {overview && <><div className="overview-legend">{t("prReferenceNote")}</div><div className="overview-columns"><span>{t("branchesAndTags")}</span><span>{t("graphLabel")}</span><span>{t("changesAndPRs")}</span></div></>}
     {needle && <div className="graph-note">{t("filteredHistoryNote", { count: page.commits.length })}</div>}
     {error && <div className="graph-note error" role="alert">{error}</div>}
     {visible.length ? visible.map((commit, index) => <CommitRow
       key={commit.hash}
       commit={commit}
+      overview={overview}
+      updated={highlighted?.has(commit.shortHash)}
       row={rows.get(commit.hash)}
       lanes={lanes}
       trackWidth={trackWidth}
@@ -1372,18 +1421,26 @@ function refChips(refs: string[], remotes: string[]): RefChip[] {
   });
 }
 
-function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, onSelect }: { commit: Commit; row?: GraphRow; lanes: number; trackWidth: number; remotes: string[]; colour: string; byFamily: boolean; onSelect: () => void }) {
+function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, onSelect, overview = false, updated = false }: { overview?: boolean; updated?: boolean; commit: Commit; row?: GraphRow; lanes: number; trackWidth: number; remotes: string[]; colour: string; byFamily: boolean; onSelect: () => void }) {
   const { t, locale } = useI18n();
   const lane = row && lanes ? Math.min(row.lane, lanes - 1) : 0;
   const chips = refChips(commit.refs, remotes);
   const shown = chips.slice(0, 2);
   const rest = chips.slice(2);
-  return <div className="commit-row"><div className="graph-track" style={{ width: trackWidth }}>
+  const pr = pullRequestReference(commit.subject);
+  const refs = <div className="commit-refs">
+      {(overview ? chips : shown).map((chip) => <span className={`ref-tag ${chip.kind}`} key={chip.label} title={chip.kind === "remote" ? `${chip.label} · ${t("remoteOnlyTitle")}` : chip.label}>
+        {chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <GitBranch size={11} />}{chip.label}
+      </span>)}
+      {!overview && rest.length > 0 && <span className="ref-tag more" title={rest.map((chip) => chip.label).join("\n")}>+{rest.length}</span>}
+    </div>;
+  return <div className={`commit-row ${updated ? "updated-commit" : ""}`}>
+    {overview && refs}<div className="graph-track" style={{ width: trackWidth }}>
     {row && lanes > 0 ? <GraphLanes row={row} lanes={lanes} colour={colour} byFamily={byFamily} /> : <span className="track-line" />}
     <span className="commit-node" style={{ left: laneX(lane) - 5.5, borderColor: colour, boxShadow: `0 0 0 4px ${colour}18` }} />
   </div><button className="commit-content" onClick={onSelect} aria-label={t("inspectCommit", { hash: commit.shortHash, subject: commit.subject })}>
     <div className="commit-main">
-      <div className="commit-subject">{commit.subject || t("commitWithoutMessage")}</div>
+      <div className="commit-subject" title={commit.subject}>{updated && <span className="activity-badge">{t("updatedLabel")}</span>}{overview && pr && <span className="pr-badge">PR #{pr}</span>}{overview && commit.parents.length > 1 && <GitMerge size={13} className="merge-marker" />}{commit.subject || t("commitWithoutMessage")}</div>
       <div className="commit-meta">
         <span className="hash-chip">{commit.shortHash}</span>
         <span className="commit-author">{commit.author}</span>
@@ -1392,12 +1449,7 @@ function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, 
         <span title={formatDateFull(commit.date, locale)}>{relativeTime(commit.date, locale)}</span>
       </div>
     </div>
-    <div className="commit-refs">
-      {shown.map((chip) => <span className={`ref-tag ${chip.kind}`} key={chip.label} title={chip.kind === "remote" ? `${chip.label} · ${t("remoteOnlyTitle")}` : chip.label}>
-        {chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <GitBranch size={11} />}{chip.label}
-      </span>)}
-      {rest.length > 0 && <span className="ref-tag more" title={rest.map((chip) => chip.label).join("\n")}>+{rest.length}</span>}
-    </div>
+    {!overview && refs}
     <Info size={15} className="commit-more" />
   </button></div>;
 }
@@ -1451,7 +1503,7 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onSaved }: { c
   const save = async () => {
     if (!model.trim()) { setError(t("indicateModel")); return; }
     setSaving(true); setError(undefined);
-    try { onSaved(await window.branchline.saveLlmConfig({ apiKey, model, clearApiKey })); }
+    try { onSaved(await window.gitcat.saveLlmConfig({ apiKey, model, clearApiKey })); }
     catch (reason) { setError(reason instanceof Error ? reason.message : t("fallbackSaveConfig")); }
     finally { setSaving(false); }
   };
@@ -1619,7 +1671,7 @@ function CommitModal({ commit, repoPath, onClose }: { commit: Commit; repoPath: 
     setSelectedFile(undefined);
     setFileDetail(undefined);
     setFileError(undefined);
-    window.branchline.getCommitDetail(repoPath, commit.hash)
+    window.gitcat.getCommitDetail(repoPath, commit.hash)
       .then((next) => { if (live) setDetail(next); })
       .catch((reason) => { if (live) setError(cleanError(reason, t("fallbackReadCommit"))); });
     return () => { live = false; };
@@ -1627,7 +1679,7 @@ function CommitModal({ commit, repoPath, onClose }: { commit: Commit; repoPath: 
   useEffect(() => {
     if (!selectedFile) return;
     let live = true;
-    window.branchline.getCommitFileDiff(repoPath, commit.hash, selectedFile.path)
+    window.gitcat.getCommitFileDiff(repoPath, commit.hash, selectedFile.path)
       .then((next) => { if (live) setFileDetail({ path: selectedFile.path, detail: next }); })
       .catch((reason) => { if (live) setFileError({ path: selectedFile.path, message: cleanError(reason, t("fallbackReadFile")) }); });
     return () => { live = false; };
@@ -1675,7 +1727,7 @@ function FileDiffModal({ file, repoPath, onClose }: { file: FileChange; repoPath
   useEscape(onClose);
   useEffect(() => {
     let live = true;
-    window.branchline.getWorkingFileDiff(repoPath, file.path)
+    window.gitcat.getWorkingFileDiff(repoPath, file.path)
       .then((next) => { if (live) setDetail(next); })
       .catch((reason) => { if (live) setError(cleanError(reason, t("fallbackReadFile"))); });
     return () => { live = false; };

@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
-contextBridge.exposeInMainWorld("branchline", {
+contextBridge.exposeInMainWorld("gitcat", {
   platform: process.platform,
   selectProject: () => ipcRenderer.invoke("project:select"),
   restoreWorkspace: () => ipcRenderer.invoke("workspace:restore"),

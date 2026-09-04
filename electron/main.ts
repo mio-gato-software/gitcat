@@ -1,3 +1,4 @@
+import { legacyAppName, migrateProfileFiles, profilePath } from "./app-identity.js";
 import { app, BrowserWindow, dialog, ipcMain, Menu } from "electron";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -9,13 +10,21 @@ import {
 } from "./git-service.js";
 import type { ActionPlan, ConversationMessage, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation } from "../shared/types.js";
 
+// Electron captures the encryption identity before app-ready. Keep the existing Keychain
+// identity for upgrades, then use the new display name once startup has initialized it.
+const userProfile = profilePath(app.getPath("appData"));
+mkdirSync(userProfile, { recursive: true });
+app.setPath("userData", userProfile);
+app.setPath("sessionData", userProfile);
+if (userProfile === join(app.getPath("appData"), legacyAppName)) app.setName(legacyAppName);
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 const openedRepositories = new Set<string>();
 const issuedPlans = new Map<string, ActionPlan>();
 let persistedWorkspace: { paths: string[]; activePath?: string } = { paths: [] };
 
-function workspacePath() { return join(app.getPath("userData"), "branchline-workspace.json"); }
+function workspacePath() { return join(app.getPath("userData"), "gitcat-workspace.json"); }
 
 function loadWorkspace() {
   try {
@@ -63,7 +72,7 @@ function assertTrustedSender(event: Electron.IpcMainInvokeEvent) {
 }
 
 function assertOpenedRepository(cwd: unknown) {
-  if (typeof cwd !== "string" || !openedRepositories.has(resolve(cwd))) throw new Error("El repositorio no está abierto en Branchline.");
+  if (typeof cwd !== "string" || !openedRepositories.has(resolve(cwd))) throw new Error("El repositorio no está abierto en GitCat.");
   return resolve(cwd);
 }
 
@@ -113,6 +122,13 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  app.setName("GitCat");
+  app.setAboutPanelOptions({ applicationName: "GitCat" });
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    ...(process.platform === "darwin" ? [{ role: "appMenu" as const, label: "GitCat" }] : [{ role: "fileMenu" as const }]),
+    { role: "editMenu" }, { role: "viewMenu" }, { role: "windowMenu" }
+  ]));
+  migrateProfileFiles(app.getPath("userData"));
   loadLlmConfig();
   loadMemory();
   loadWorkspace();

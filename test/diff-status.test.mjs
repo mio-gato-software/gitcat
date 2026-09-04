@@ -32,7 +32,7 @@ test("una salida vacía o truncada no inventa archivos", () => {
 });
 
 test("coincide con lo que git escribe de verdad, renombrado incluido", () => {
-  const repo = mkdtempSync(join(tmpdir(), "branchline-status-"));
+  const repo = mkdtempSync(join(tmpdir(), "gitcat-status-"));
   const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
   git("init", "-q", "-b", "main", ".");
   git("config", "user.email", "t@t.t");

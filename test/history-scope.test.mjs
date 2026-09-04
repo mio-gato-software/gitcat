@@ -13,7 +13,7 @@ const graph = await import(pathToFileURL(join(root, "dist-electron/shared/commit
  * Un repositorio de verdad: el alcance del historial se decide con argumentos de Git, así que
  * comprobarlo contra la salida real es la única forma de saber que dice lo que dice.
  */
-const repo = mkdtempSync(join(tmpdir(), "branchline-history-"));
+const repo = mkdtempSync(join(tmpdir(), "gitcat-history-"));
 const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
 git("init", "-q", "-b", "main", ".");
 git("config", "user.email", "t@t.t");

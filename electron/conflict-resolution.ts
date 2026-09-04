@@ -36,7 +36,7 @@ export const conflictFileLimit = 120_000;
 
 export const resolutionResponseFormat = {
   type: "json_schema",
-  name: "branchline_conflict_resolution",
+  name: "gitcat_conflict_resolution",
   strict: true,
   schema: {
     type: "object",
@@ -77,7 +77,7 @@ export function buildResolutionInstructions(context: {
   ours: string;
   theirs: string;
 }) {
-  return `You are resolving Git merge conflicts inside Branchline. A ${context.operation} is in progress${
+  return `You are resolving Git merge conflicts inside GitCat. A ${context.operation} is in progress${
     context.branch ? ` replaying "${context.branch}"` : ""}${context.onto ? ` onto "${context.onto}"` : ""}.
 
 "ours" is ${context.ours}. "theirs" is ${context.theirs}. Get this the right way round: in a rebase they

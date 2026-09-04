@@ -1,4 +1,4 @@
-# Branchline development guide
+# GitCat development guide
 
 Read this file before starting a task in this repository.
 
@@ -8,11 +8,12 @@ Tasks for this repository are available at [llms.txt](http://100.106.172.17:3000
 
 ## Naming
 
-The app is named **uncurved**. Refer to its tasks as **uncurved tasks** or simply **the board**.
+The desktop app is named **GitCat**. Its task tracker is **uncurved**; refer to tracker tasks as
+**uncurved tasks** or simply **the board**.
 
 ## Product spirit
 
-Branchline is for people who need Git, not necessarily for people who already know Git. A user may
+GitCat is for people who need Git, not necessarily for people who already know Git. A user may
 be unfamiliar with branches, commits, remotes, conflicts, or the terminology of tools such as
 GitKraken, and should still be able to make progress without buying another tool or learning a
 specialized workflow first.
@@ -45,6 +46,21 @@ specialized workflow first.
 - Check the current branch and worktree status; preserve existing user changes.
 - Trace the existing UI, IPC/preload bridge, service validation, and execution path before adding a parallel path.
 - Read the relevant tests and update the smallest contract that expresses the new behavior.
+
+## Personal use and immediate delivery
+
+- This repository is currently for the owner's personal use. Keep this assumption until the owner
+  explicitly changes it.
+- A request to change the application includes standing authorization to make the updated app
+  available immediately on the owner's Mac. After implementing and validating an app change, run
+  `npm run install:mac`, gracefully quit the running GitCat app, and open
+  `/Applications/GitCat.app`. Verify that the installed app starts successfully.
+- Complete this delivery without asking for another installation or restart confirmation. Do not
+  stop at source changes or a build when the installed app still needs updating.
+- Preserve user data and repository work. If validation or installation exposes a new blocking
+  problem, attempt recovery and report the concrete blocker instead of claiming delivery succeeded.
+- This preference concerns the personal installed application; public releases and distribution to
+  other people are outside this default workflow. Documentation-only changes do not need a reinstall.
 
 ## Git safety
 

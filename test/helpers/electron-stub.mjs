@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Minimal stand-in so the Git service can be exercised outside a running Electron app.
-const userData = mkdtempSync(join(tmpdir(), "branchline-userdata-"));
+const userData = mkdtempSync(join(tmpdir(), "gitcat-userdata-"));
 
 export const app = { getPath: () => userData };
 export const safeStorage = {

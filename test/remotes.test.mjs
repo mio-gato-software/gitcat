@@ -29,7 +29,7 @@ test("una salida vacía o rara no inventa remotos", () => {
 });
 
 test("coincide con lo que git escribe de verdad", () => {
-  const repo = mkdtempSync(join(tmpdir(), "branchline-remotes-"));
+  const repo = mkdtempSync(join(tmpdir(), "gitcat-remotes-"));
   const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
   git("init", "-q", "-b", "main", ".");
   git("remote", "add", "origin", "git@github-trabajo:empresa/proyecto.git");
