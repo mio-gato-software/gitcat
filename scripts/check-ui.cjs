@@ -55,6 +55,10 @@ app.whenReady().then(async () => {
     plans.set(plan.id, plan); return plan;
   });
   ipcMain.handle('action:execute', (_, p, id, locale) => service.executePlan(p, plans.get(id), locale));
+  ipcMain.handle('action:prepare', async (_, p, operation, args, locale) => {
+    const plan = await service.prepareOperation(p, operation, args, locale);
+    plans.set(plan.id, plan); return plan;
+  });
 
   const win = new BrowserWindow({ width: 1480, height: 940, show: false, webPreferences: { preload: path.join(root, 'electron/preload.cjs') } });
   const js = code => win.webContents.executeJavaScript(code);
@@ -105,6 +109,35 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelectorAll('.commit-row')[1].classList.contains('selected')`);
   await js(`document.querySelector('.commit-row.wip').click()`);
   await waitFor(`document.querySelector('.inspector .changes-view')`);
+  // The new-project button shares the tabs' vertical centre.
+  const centres = JSON.parse(await js(`JSON.stringify([...document.querySelectorAll('.window-tab, .tab-add')].map((node) => { const r = node.getBoundingClientRect(); return r.top + r.height / 2; }))`));
+  assert.ok(Math.abs(centres[0] - centres[centres.length - 1]) <= 1, `tab centres ${centres}`);
+  // A right click on a commit with a branch offers that branch's actions and the commit's own.
+  await js(`(() => { const row = [...document.querySelectorAll('.commit-row')].find((node) => node.querySelector('.ref-tag')?.textContent === 'main'); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 600, clientY: 300 })); })()`);
+  await waitFor(`document.querySelector('.context-menu')`);
+  const menuText = await js(`document.querySelector('.context-menu').innerText`);
+  for (const entry of [/Cambiar a la rama main/, /Mover feature\/new-menu encima de main/, /Nueva rama desde este commit/, /Deshacer este commit/, /Copiar el hash/]) assert.match(menuText, entry);
+  // main is already inside feature/new-menu, so a merge would bring nothing and is not offered.
+  assert.doesNotMatch(menuText, /Fusionar main en/);
+  assert.doesNotMatch(menuText, /Eliminar la rama main|Renombrar/, 'The default branch is never offered for deletion or renaming');
+  await capture('context-menu');
+  await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+  await waitFor(`!document.querySelector('.context-menu')`);
+  // The WIP row has its own short menu.
+  await js(`document.querySelector('.commit-row.wip').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 600, clientY: 200 }))`);
+  await waitFor(`document.querySelector('.context-menu')`);
+  assert.match(await js(`document.querySelector('.context-menu').innerText`), /Guardar cambios/);
+  await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+  // The branch panel can step aside and come back, and the choice is remembered.
+  const graphWidth = () => js(`document.querySelector('.graph-area').getBoundingClientRect().width`);
+  const withPanel = await graphWidth();
+  await js(`document.querySelector('[aria-label="Ocultar el panel de ramas"]').click()`);
+  await waitFor(`!document.querySelector('.sidebar')`);
+  assert.ok(await graphWidth() > withPanel + 150, 'The graph takes the branch panel column');
+  assert.equal(await js(`localStorage.getItem('gitcat-branch-panel')`), 'hidden');
+  await capture('panel-hidden');
+  await js(`document.querySelector('[aria-label="Mostrar el panel de ramas"]').click()`);
+  await waitFor(`document.querySelector('.sidebar')`);
   assert.equal(git('status', '--porcelain'), before, 'Reading the graph and its details never mutates Git');
   await assertFits(); await capture('overview');
 
@@ -147,8 +180,14 @@ app.whenReady().then(async () => {
   assert.equal(git('branch', '--show-current'), 'main');
   assert.equal(git('status', '--porcelain'), '');
   assert.equal(git('show', 'main:new-file.txt'), 'new file');
+  // Double-clicking a branch label in the graph checks that branch out.
+  await waitFor(`[...document.querySelectorAll('.ref-tag')].some((node) => node.textContent === 'feature/search')`);
+  await js(`[...document.querySelectorAll('.ref-tag')].find((node) => node.textContent === 'feature/search').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  for (let attempt = 0; attempt < 100 && git('branch', '--show-current') !== 'feature/search'; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(git('branch', '--show-current'), 'feature/search');
+  await waitFor(`document.querySelector('.toolbar-field.branch strong')?.textContent === 'feature/search'`);
   win.destroy();
-  console.log('PASS: graph with work in progress, commit details, compact layout, stable notifications, reviewed save and integration.');
+  console.log('PASS: graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, reviewed save and integration, double-click checkout.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));

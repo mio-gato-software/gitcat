@@ -7,7 +7,8 @@ import {
   AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Bot, Check, ChevronRight, CircleDot,
   Clock3, Cloud, CloudDownload, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
   FolderOpen, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
-  ListTree, LoaderCircle, Maximize2, MessageCircle, Palette, PencilLine, Plus, RefreshCcw, Search, Send, Settings2, ShieldCheck,
+  ListTree, LoaderCircle, Maximize2, MessageCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen, Palette, Pencil, PencilLine, Plus,
+  RefreshCcw, Search, Send, Settings2, ShieldCheck, Undo2,
   Sparkles, Tag, TerminalSquare, Trash2, UserRound, X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -30,9 +31,21 @@ import { localeTag, readLocale, translate, writeLocale, type MessageKey, type Tr
 type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string };
 type GraphFocus = { kind: "wip" } | { kind: "commit"; commit: Commit };
 type InspectorTab = "details" | "assistant";
+/** What was right-clicked: a commit, the branch label on it, both, or the uncommitted work. */
+type MenuTarget = { x: number; y: number; commit?: Commit; branch?: string; work?: boolean };
+type MenuEntry =
+  | { key: string; icon: LucideIcon; label: string; onSelect: () => void; disabled?: boolean; danger?: boolean; hint?: string }
+  | { key: string; heading: string }
+  | { key: string; separator: true };
+
+const sidebarStorageKey = "gitcat-branch-panel";
+function readSidebarHidden() {
+  try { return localStorage.getItem(sidebarStorageKey) === "hidden"; } catch { return false; }
+}
 type ActivityItem = Notification;
 
-type InputDialog = { operation: "create_branch" | "merge"; title: string; label: string; value: string };
+/** `from` is the commit a new branch starts at, or the branch a rename starts from. */
+type InputDialog = { operation: "create_branch" | "merge" | "rename_branch"; title: string; label: string; value: string; from?: string };
 type Suggestion = { key: string; icon: LucideIcon; label: string } & ({ question: string } | { dialog: InputDialog });
 type ConversationTurn = {
   id: number;
@@ -318,6 +331,8 @@ export default function App() {
   const [graphCommits, setGraphCommits] = useState<Commit[]>([]);
   const [jumpTo, setJumpTo] = useState<{ hash: string; at: number }>();
   const [modalCommit, setModalCommit] = useState<{ commit: Commit; file?: FileChange }>();
+  const [menu, setMenu] = useState<MenuTarget>();
+  const [sidebarHidden, setSidebarHidden] = useState(readSidebarHidden);
   const [selectedFile, setSelectedFile] = useState<FileChange>();
   const [proposal, setProposal] = useState<ConflictProposal>();
   const [resolving, setResolving] = useState(false);
@@ -345,16 +360,21 @@ export default function App() {
   snapshotRef.current = snapshot;
   const conversation = snapshot ? conversations[snapshot.path] ?? [] : [];
   const planning = conversation.some((turn) => turn.status === "loading" || turn.status === "executing");
-  const paneStyle = panes
-    ? { "--sidebar-w": `${panes.sidebar}px`, "--inspector-w": `${panes.inspector}px` } as CSSProperties
+  // A hidden branch panel gives its column to the graph; its saved width waits for it to come back.
+  const paneStyle = panes || sidebarHidden
+    ? { ...(panes ? { "--sidebar-w": `${panes.sidebar}px`, "--inspector-w": `${panes.inspector}px` } : {}), ...(sidebarHidden ? { "--sidebar-w": "0px" } : {}) } as CSSProperties
     : undefined;
+  const toggleSidebar = (hidden: boolean) => {
+    setSidebarHidden(hidden);
+    try { localStorage.setItem(sidebarStorageKey, hidden ? "hidden" : "shown"); } catch { /* a view preference only */ }
+  };
 
   // Adopt whatever widths the stylesheet chose for this window, so the handles start on the real borders.
   useLayoutEffect(() => {
-    if (panes || !layoutRef.current) return;
+    if (panes || sidebarHidden || !layoutRef.current) return;
     const columns = getComputedStyle(layoutRef.current).gridTemplateColumns.split(" ").map(Number.parseFloat);
     if (columns.length === 3 && columns.every(Number.isFinite)) setPanes({ sidebar: columns[0], inspector: columns[2] });
-  }, [panes, snapshot, workspaceReady, exploring, config.configured]);
+  }, [panes, snapshot, workspaceReady, exploring, config.configured, sidebarHidden]);
 
   useEffect(() => {
     if (panes) try { localStorage.setItem(paneStorageKey, JSON.stringify(panes)); } catch { /* a full quota must not break resizing */ }
@@ -447,6 +467,7 @@ export default function App() {
     setSelectedBranch(undefined);
     setCommitFilter("");
     setFocus(undefined);
+    setMenu(undefined);
     setInspectorTab("details");
     setGraphCommits([]);
     setCommitMessage("");
@@ -587,7 +608,7 @@ export default function App() {
     if (!snapshot) return;
     const labels: Partial<Record<Operation, string>> = {
       checkout: t("switchBranch", { name: args.name }),
-      create_branch: t("createNamedBranch", { name: args.name }),
+      create_branch: args.from ? t("createNamedBranchFrom", { name: args.name, hash: args.from.slice(0, 7) }) : t("createNamedBranch", { name: args.name }),
       delete_branch: t("deleteNamedBranch", { name: args.name }),
       rename_branch: t("renameNamedBranch", { name: args.name, to: args.to }),
       fetch: t("updateRemoteRefs"),
@@ -755,8 +776,11 @@ export default function App() {
 
   const submitInputDialog = () => {
     if (!inputDialog?.value.trim()) return;
-    const args: Record<string, string> = { name: inputDialog.value.trim() };
+    const value = inputDialog.value.trim();
     const operation = inputDialog.operation;
+    const args: Record<string, string> = operation === "rename_branch" && inputDialog.from ? { name: inputDialog.from, to: value }
+      : operation === "create_branch" && inputDialog.from ? { name: value, from: inputDialog.from }
+      : { name: value };
     setInputDialog(undefined);
     void prepare(operation, args);
   };
@@ -841,6 +865,67 @@ export default function App() {
     if (jump && next.kind === "commit") setJumpTo({ hash: next.commit.hash, at: Date.now() });
   };
 
+  const copyText = (text: string, what: string) => {
+    void navigator.clipboard?.writeText(text)
+      .then(() => addActivity({ label: t("copiedToClipboard"), detail: what, tone: "neutral" }))
+      .catch(() => notify({ message: t("clipboardFailed"), tone: "error" }));
+  };
+
+  /**
+   * What a right click offers, built from the repository as it is now. Every Git change still goes
+   * through a plan: the menu only picks the operation, it never runs one that needs a confirmation.
+   * Anything without a direct operation is asked of the assistant, which plans it the same way.
+   */
+  const menuItems = (target: MenuTarget): MenuEntry[] => {
+    if (!snapshot) return [];
+    const current = snapshot.currentBranch;
+    const base = snapshot.defaultBranch;
+    const ask = (question: string) => { void propose(question); };
+    const assistantHint = config.configured ? undefined : t("llmNotConfigured");
+    const entries: MenuEntry[] = [];
+
+    if (target.work) {
+      const canIntegrate = Boolean(base && base !== current);
+      entries.push({ key: "save", icon: GitCommitHorizontal, label: t("saveChanges"), onSelect: () => beginDelivery(false) });
+      if (canIntegrate) entries.push({ key: "save-integrate", icon: GitMerge, label: t("saveAndIntegrate", { target: base! }), onSelect: () => beginDelivery(true) });
+      entries.push({ key: "explain-work", icon: MessageSquareText, label: t("explainWork"), onSelect: () => ask(t("explainWorkQuestion", { branch: current })), disabled: !config.configured, hint: assistantHint });
+      return entries;
+    }
+
+    const branch = target.branch ? snapshot.branches.find((item) => item.name === target.branch) : undefined;
+    if (branch) {
+      const name = branch.name;
+      const local = branch.presence !== "remote";
+      entries.push({ key: "branch-heading", heading: name });
+      if (!branch.isCurrent) entries.push({ key: "switch", icon: ArrowLeftRight, label: t("switchBranch", { name }), onSelect: () => void switchBranch(name), hint: t("doubleClickHint") });
+      if (branch.isCurrent && branch.upstream) entries.push({ key: "pull", icon: ArrowDownToLine, label: t("pullLatest"), onSelect: () => void prepare("pull") });
+      if (branch.isCurrent) entries.push({ key: "push", icon: ArrowUpFromLine, label: t(branch.upstream ? "pushBranch" : "publishBranch"), onSelect: () => void prepare("push") });
+      // An already-contained branch would merge nothing, and the default branch is never rewritten from here.
+      if (!branch.isCurrent && current !== "HEAD" && !branch.mergedInto.includes(current)) entries.push({ key: "merge", icon: GitMerge, label: t("mergeBranchTo", { name, target: current }), onSelect: () => void prepare("merge", { name }) });
+      if (local && base && name !== base && base !== current && !branch.mergedInto.includes(base)) entries.push({ key: "merge-default", icon: GitMerge, label: t("mergeBranchTo", { name, target: base }), onSelect: () => void prepareMergeToDefault(name) });
+      if (!branch.isCurrent && local && current !== "HEAD" && current !== base) entries.push({ key: "rebase", icon: GitFork, label: t("rebaseCurrentOnto", { branch: current, onto: name }), onSelect: () => void prepare("rebase", { onto: name }) });
+      if (base && name !== base) entries.push({ key: "explain-branch", icon: MessageSquareText, label: t("explainBranch"), onSelect: () => ask(t("explainBranchQuestion", { branch: name, base })), disabled: !config.configured, hint: assistantHint });
+      if (local && name !== base) entries.push({ key: "rename", icon: Pencil, label: t("renameBranchAction"), onSelect: () => setInputDialog({ operation: "rename_branch", title: t("renameNamedBranchTitle", { name }), label: t("branchName"), value: name, from: name }) });
+      if (!branch.isCurrent && local && name !== base && !isProtectedBranch(name)) entries.push({ key: "delete", icon: Trash2, label: t("deleteBranch", { name }), onSelect: () => void prepare("delete_branch", { name }), danger: true });
+    }
+
+    const commit = target.commit;
+    if (commit) {
+      if (entries.length) entries.push({ key: "commit-separator", separator: true });
+      entries.push({ key: "commit-heading", heading: t("commitActions", { hash: commit.shortHash }) });
+      entries.push({ key: "branch-here", icon: GitBranchPlus, label: t("createBranchHere"), onSelect: () => setInputDialog({ operation: "create_branch", title: t("newBranchFrom", { hash: commit.shortHash }), label: t("branchName"), value: "", from: commit.hash }) });
+      entries.push({ key: "diff", icon: Maximize2, label: t("fullDiff"), onSelect: () => setModalCommit({ commit }) });
+      entries.push({ key: "explain-commit", icon: MessageSquareText, label: t("explainCommit"), onSelect: () => ask(t("explainCommitQuestion", { hash: commit.shortHash, subject: commit.subject })), disabled: !config.configured, hint: assistantHint });
+      entries.push({ key: "revert", icon: Undo2, label: t("revertCommit"), onSelect: () => ask(t("revertCommitQuestion", { hash: commit.shortHash, subject: commit.subject, branch: current })), disabled: !config.configured, hint: assistantHint ?? t("revertCommitHint") });
+    }
+
+    entries.push({ key: "copy-separator", separator: true });
+    if (commit) entries.push({ key: "copy-hash", icon: Copy, label: t("copyHash"), onSelect: () => copyText(commit.hash, commit.shortHash) });
+    if (commit) entries.push({ key: "copy-message", icon: Copy, label: t("copyMessage"), onSelect: () => copyText(commit.body ? `${commit.subject}\n\n${commit.body}` : commit.subject, commit.subject) });
+    if (branch) entries.push({ key: "copy-branch", icon: Copy, label: t("copyBranchName"), onSelect: () => copyText(branch.name, branch.name) });
+    return entries;
+  };
+
   /** Picking a branch also points the graph at its tip, so the list answers "where is it" straight away. */
   const selectBranch = (name: string) => {
     setSelectedBranch(name);
@@ -884,9 +969,9 @@ export default function App() {
           onIntegrate={() => beginDelivery(true)}
         />
         <main className="main-layout" ref={layoutRef} style={paneStyle}>
-          {panes && <PaneDivider edge="sidebar" width={panes.sidebar} onPointerDown={startResize("sidebar")} onNudge={(delta) => nudgePane("sidebar", delta)} onReset={() => resetPane("sidebar")} />}
+          {panes && !sidebarHidden && <PaneDivider edge="sidebar" width={panes.sidebar} onPointerDown={startResize("sidebar")} onNudge={(delta) => nudgePane("sidebar", delta)} onReset={() => resetPane("sidebar")} />}
           {panes && <PaneDivider edge="inspector" width={panes.inspector} onPointerDown={startResize("inspector")} onNudge={(delta) => nudgePane("inspector", delta)} onReset={() => resetPane("inspector")} />}
-          <aside className="sidebar">
+          {!sidebarHidden && <aside className="sidebar">
             <BranchPanel
               key={snapshot.path}
               snapshot={snapshot}
@@ -898,12 +983,13 @@ export default function App() {
               onSwitchNow={(name) => void switchBranch(name)}
               onDelete={(name) => void prepare("delete_branch", { name })}
               onRename={(name, to) => void prepare("rename_branch", { name, to })}
-              onMergeToDefault={(name) => void prepareMergeToDefault(name)}
+              onMenu={(branch, x, y) => setMenu({ x, y, branch: branch.name })}
+              onCollapse={() => toggleSidebar(true)}
             />
             <div className="sidebar-mascot"><SleepingCat /><span>{t("oneStepAtATime")}</span></div>
-          </aside>
+          </aside>}
 
-          <section className="graph-area">
+          <section className={`graph-area ${sidebarHidden ? "full-width" : ""}`}>
             {snapshot.pending && <PendingBanner
               snapshot={snapshot}
               busy={planning}
@@ -923,6 +1009,10 @@ export default function App() {
               onFocus={focusOn}
               onOpen={(commit) => setModalCommit({ commit })}
               onLoaded={setGraphCommits}
+              onCheckout={(name) => void switchBranch(name)}
+              onMenu={(target) => setMenu(target)}
+              sidebarHidden={sidebarHidden}
+              onShowSidebar={() => toggleSidebar(false)}
             />
           </section>
 
@@ -948,6 +1038,7 @@ export default function App() {
         onApply={async () => { const review = deliveryReview; setDeliveryReview(undefined); await applyPlan(review.turnId, review.plan); }} />}
       {settingsOpen && <SettingsModal config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onSaved={(next) => { setConfig(next); setSettingsOpen(false); notify({ message: t("settingsSaved"), tone: "success" }); }} />}
       {inputDialog && <InputModal dialog={inputDialog} branches={snapshot?.branches ?? []} onChange={(value) => setInputDialog({ ...inputDialog, value })} onClose={() => setInputDialog(undefined)} onSubmit={submitInputDialog} />}
+      {menu && snapshot && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu)} label={menu.work ? t("uncommittedHeading") : menu.commit ? t("commitActions", { hash: menu.commit.shortHash }) : t("actionsFor", { name: menu.branch ?? "" })} onClose={() => setMenu(undefined)} />}
       {modalCommit && snapshot && <CommitModal commit={modalCommit.commit} initialFile={modalCommit.file} repoPath={snapshot.path} onClose={() => setModalCommit(undefined)} />}
       {selectedFile && snapshot && <FileDiffModal file={selectedFile} repoPath={snapshot.path} onClose={() => setSelectedFile(undefined)} />}
       {proposal && <ConflictProposalModal proposal={proposal} busy={planning} onApply={(resolutions) => void applyResolutions(resolutions)} onClose={() => setProposal(undefined)} />}
@@ -1009,36 +1100,17 @@ function PaneDivider({ edge, width, onPointerDown, onNudge, onReset }: {
  * view: nothing is renamed, every group opens with one click, and the flat list with its filter is
  * still one click away for whoever already knows the name they are looking for.
  */
-function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, onSwitchNow, onDelete, onRename, onMergeToDefault }: {
+function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, onSwitchNow, onDelete, onRename, onMenu, onCollapse }: {
   snapshot: RepoSnapshot; busy: boolean; selected: string; onSelect: (name: string) => void; onCreate: () => void;
   onSwitch: (name: string) => void; onSwitchNow: (name: string) => void; onDelete: (name: string) => void;
-  onRename: (from: string, to: string) => void; onMergeToDefault: (name: string) => void;
+  onRename: (from: string, to: string) => void; onMenu: (branch: Branch, x: number, y: number) => void; onCollapse: () => void;
 }) {
   const { t } = useI18n();
   const [saved, setSaved] = useState<BranchView | undefined>(() => readBranchView(snapshot.path));
   const [filter, setFilter] = useState("");
-  const [contextMenu, setContextMenu] = useState<{ branch: Branch; x: number; y: number }>();
   const listRef = useRef<HTMLDivElement>(null);
-  const contextMenuRef = useRef<HTMLDivElement>(null);
   const rows = useRef(new Map<string, HTMLButtonElement>());
   const pending = useRef<{ scrollTop: number; focused?: string }>(undefined);
-
-  useEffect(() => {
-    if (!contextMenu) return;
-    const closeOnPointerDown = (event: PointerEvent) => {
-      if (contextMenuRef.current?.contains(event.target as Node)) return;
-      setContextMenu(undefined);
-    };
-    const closeOnKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setContextMenu(undefined);
-    };
-    document.addEventListener("pointerdown", closeOnPointerDown);
-    document.addEventListener("keydown", closeOnKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnPointerDown);
-      document.removeEventListener("keydown", closeOnKeyDown);
-    };
-  }, [contextMenu]);
 
   const order = saved?.order ?? defaultBranchOrder;
   const hideMerged = saved?.hideMerged ?? false;
@@ -1110,14 +1182,9 @@ function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, o
   };
 
   const openContextMenu = (branch: Branch, event: ReactMouseEvent<HTMLDivElement>) => {
-    if (busy || !snapshot.defaultBranch || branch.name === snapshot.defaultBranch || branch.presence === "remote") return;
     event.preventDefault();
     event.stopPropagation();
-    setContextMenu({
-      branch,
-      x: Math.min(event.clientX, Math.max(8, window.innerWidth - 286)),
-      y: Math.min(event.clientY, Math.max(8, window.innerHeight - 54))
-    });
+    onMenu(branch, event.clientX, event.clientY);
   };
 
   const branchRow = (branch: Branch, depth: number, trim: string) => <BranchRow
@@ -1170,6 +1237,7 @@ function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, o
         <button className={view.mode === "flat" ? "active" : ""} aria-pressed={view.mode === "flat"} onClick={() => setMode("flat")} title={t("flatList")}><List size={13} /></button>
       </div>
       <button className="mini-icon" onClick={onCreate} aria-label={t("createBranch")}><Plus size={14} /></button>
+      <button className="mini-icon" onClick={onCollapse} aria-label={t("hideBranchPanel")} title={t("hideBranchPanel")}><PanelLeftClose size={14} /></button>
     </div></div>
     <div className="search-field"><Search size={14} /><input aria-label={t("filterBranches")} value={filter} onChange={(event) => setFilter(event.target.value)} placeholder={t("filterBranches")} /></div>
     <div className="branch-filters">
@@ -1200,20 +1268,6 @@ function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, o
         ? t("allOtherBranchesMerged", { branch: snapshot.defaultBranch ?? "" })
         : t("noMatchingBranches")}</div>}
     </div>
-    {contextMenu && snapshot.defaultBranch && <div
-      ref={contextMenuRef}
-      className="branch-context-menu"
-      role="menu"
-      aria-label={t("actionsFor", { name: contextMenu.branch.name })}
-      style={{ left: contextMenu.x, top: contextMenu.y }}
-      onPointerDown={(event) => event.stopPropagation()}
-      onContextMenu={(event) => event.preventDefault()}
-    ><button
-      role="menuitem"
-      autoFocus
-      disabled={busy}
-      onClick={() => { const name = contextMenu.branch.name; setContextMenu(undefined); onMergeToDefault(name); }}
-    ><GitMerge size={14} /><span>{t("mergeBranchTo", { name: contextMenu.branch.name, target: snapshot.defaultBranch ?? "" })}</span></button></div>}
   </div>;
 }
 
@@ -1358,10 +1412,12 @@ function workSummary(files: FileChange[], t: Translate) {
  * The whole repository as one graph, newest first: which branch each line of work belongs to, what
  * every commit said and how much it changed, and — above it all — the work that is not saved yet.
  */
-function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpTo, onFocus, onOpen, onLoaded }: {
+function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpTo, onFocus, onOpen, onLoaded, onCheckout, onMenu, sidebarHidden, onShowSidebar }: {
   snapshot: RepoSnapshot; selection: string; filter: string; onFilterChange: (value: string) => void;
   focus?: GraphFocus; jumpTo?: { hash: string; at: number }; onFocus: (focus: GraphFocus) => void;
   onOpen: (commit: Commit) => void; onLoaded: (commits: Commit[]) => void;
+  onCheckout: (branch: string) => void; onMenu: (target: MenuTarget) => void;
+  sidebarHidden: boolean; onShowSidebar: () => void;
 }) {
   const { t, locale } = useI18n();
   const [prefs, setPrefs] = useState(() => readHistoryPrefs(snapshot.path));
@@ -1473,6 +1529,7 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
 
   return <div className="graph-panel">
     <div className="graph-header">
+      {sidebarHidden && <button className="mini-icon" onClick={onShowSidebar} aria-label={t("showBranchPanel")} title={t("showBranchPanel")}><PanelLeftOpen size={15} /></button>}
       <div className="graph-scope">
         <label className="scope-field"><GitBranch size={12} /><span className="visually-hidden">{t("historyScope")}</span><select aria-label={t("historyScope")} value={scope} onChange={(event) => update({ scope: event.target.value as HistoryScope })}>
           {(Object.keys(scopeLabels) as HistoryScope[]).map((value) => <option value={value} key={value}>{scopeLabels[value]}</option>)}
@@ -1519,6 +1576,11 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
         register={(node) => { if (node) buttons.current.set(commit.hash, node); else buttons.current.delete(commit.hash); }}
         onSelect={() => focusCommit(commit)}
         onOpen={() => commit.hash === workInProgressHash ? focusCommit(commit) : onOpen(commit)}
+        onCheckout={onCheckout}
+        onMenu={(branch, x, y) => {
+          focusCommit(commit);
+          onMenu(commit.hash === workInProgressHash ? { x, y, work: true } : { x, y, commit, branch });
+        }}
       />) : !loading && <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommits")}</strong><span>{needle ? t("filterNoCommits") : scope === "branch-only" ? t("branchNoUniqueCommits", { branch: selection, base: page.comparedTo ?? t("primary") }) : t("branchNoHistory")}</span></div>}
       {loading && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> {t("readHistory")}</div>}
       {!loading && page.hasMore && !needle && <button className="load-more" onClick={() => fetchPage(page.commits.length)}>{t("loadMoreCommits")}</button>}
@@ -1629,11 +1691,12 @@ function refChips(refs: string[], remotes: string[]): RefChip[] {
   });
 }
 
-function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, selected, updated, head, marker, work, register, onSelect, onOpen }: {
+function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, selected, updated, head, marker, work, register, onSelect, onOpen, onCheckout, onMenu }: {
   commit: Commit; row?: GraphRow; lanes: number; trackWidth: number; remotes: string[]; colour: string; byFamily: boolean;
   selected: boolean; updated: boolean; head: boolean; marker: string;
   work?: { summary: string; count: number; branch: string };
   register: (node: HTMLButtonElement | null) => void; onSelect: () => void; onOpen: () => void;
+  onCheckout: (branch: string) => void; onMenu: (branch: string | undefined, x: number, y: number) => void;
 }) {
   const { t, locale } = useI18n();
   const lane = row && lanes ? Math.min(row.lane, lanes - 1) : 0;
@@ -1644,6 +1707,12 @@ function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, 
   const merge = commit.parents.length > 1;
   const chipTitle = (chip: RefChip) => chip.kind === "remote" ? `${chip.label} · ${t("remoteOnlyTitle")}` : chip.label;
   const node = work ? "wip" : merge ? "merge" : "avatar";
+  // A branch label is the branch: a double click moves there, a right click is about that branch.
+  const branchOf = (chip?: RefChip) => chip && chip.kind !== "tag" ? chip.label : undefined;
+  const chipEvents = (chip: RefChip) => chip.kind === "tag" ? {} : {
+    onDoubleClick: (event: ReactMouseEvent) => { event.stopPropagation(); if (chip.kind !== "head") onCheckout(chip.label); },
+    onContextMenu: (event: ReactMouseEvent) => { event.preventDefault(); event.stopPropagation(); onMenu(chip.label, event.clientX, event.clientY); }
+  };
   const size = node === "merge" ? 10 : 20;
   return <div
     className={`commit-row ${selected ? "selected" : ""} ${updated ? "updated-commit" : ""} ${head ? "head" : ""} ${work ? "wip" : ""}`}
@@ -1651,9 +1720,10 @@ function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, 
     data-hash={commit.hash}
     onClick={onSelect}
     onDoubleClick={onOpen}
+    onContextMenu={(event) => { event.preventDefault(); onMenu(branchOf(first), event.clientX, event.clientY); }}
   >
     <div className="commit-refs">
-      {first && <span className={`ref-tag ${first.kind}`} title={chips.map(chipTitle).join("\n")}>
+      {first && <span className={`ref-tag ${first.kind}`} title={`${chips.map(chipTitle).join("\n")}${first.kind === "tag" ? "" : `\n${t(first.kind === "head" ? "currentBranchHint" : "doubleClickSwitchHint")}`}`} {...chipEvents(first)}>
         {first.kind === "head" ? <Check size={11} /> : first.kind === "tag" ? <Tag size={11} /> : first.kind === "remote" ? <Cloud size={11} /> : <GitBranch size={11} />}<span>{first.label}</span>
       </span>}
       {rest.length > 0 && <span className="ref-tag more" title={rest.map(chipTitle).join("\n")}>+{rest.length}</span>}
@@ -1994,7 +2064,7 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onSaved }: { c
 function InputModal({ dialog, branches, onChange, onClose, onSubmit }: { dialog: InputDialog; branches: Branch[]; onChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
   const { t } = useI18n();
   useEscape(onClose);
-  const creating = dialog.operation === "create_branch";
+  const creating = dialog.operation === "create_branch" || dialog.operation === "rename_branch";
   const options = useMemo(
     () => creating ? namingCompletions(branches) : branches.filter((branch) => !branch.isCurrent).map((branch) => branch.name),
     [creating, branches]
@@ -2228,4 +2298,47 @@ function useEscape(onClose: () => void) {
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
   }, [onClose]);
+}
+
+/**
+ * A menu at the pointer. It closes on a click elsewhere, on Escape, on scroll or on resize, and the
+ * arrow keys move between its entries, so it behaves like the menus of the rest of the system.
+ */
+function ContextMenu({ x, y, items, label, onClose }: { x: number; y: number; items: MenuEntry[]; label: string; onClose: () => void }) {
+  const menu = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ left: x, top: y });
+  useLayoutEffect(() => {
+    const box = menu.current?.getBoundingClientRect();
+    if (!box) return;
+    setPosition({ left: Math.max(8, Math.min(x, window.innerWidth - box.width - 8)), top: Math.max(8, Math.min(y, window.innerHeight - box.height - 8)) });
+    menu.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+  }, [x, y]);
+  useEffect(() => {
+    const outside = (event: PointerEvent) => { if (!menu.current?.contains(event.target as Node)) onClose(); };
+    const key = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("pointerdown", outside, true);
+    document.addEventListener("keydown", key);
+    window.addEventListener("resize", onClose);
+    window.addEventListener("wheel", onClose, { passive: true });
+    return () => {
+      document.removeEventListener("pointerdown", outside, true);
+      document.removeEventListener("keydown", key);
+      window.removeEventListener("resize", onClose);
+      window.removeEventListener("wheel", onClose);
+    };
+  }, [onClose]);
+  const walk = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    const buttons = [...(menu.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [])];
+    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    buttons[(index + (event.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length]?.focus();
+  };
+  return <div ref={menu} className="context-menu" role="menu" aria-label={label} style={position} onKeyDown={walk} onContextMenu={(event) => event.preventDefault()}>
+    {items.map((item) => "separator" in item ? <div key={item.key} className="menu-separator" role="separator" />
+      : "heading" in item ? <div key={item.key} className="menu-heading" title={item.heading}>{item.heading}</div>
+      : <button key={item.key} role="menuitem" title={item.hint} className={item.danger ? "danger" : ""} disabled={item.disabled} onClick={() => { onClose(); item.onSelect(); }}>
+        <item.icon size={14} /><span>{item.label}</span>
+      </button>)}
+  </div>;
 }

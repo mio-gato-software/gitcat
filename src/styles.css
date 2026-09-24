@@ -72,10 +72,6 @@ button:disabled { cursor: default; opacity: .55; }
 .branch-delete { width: 25px; height: 25px; flex: none; display: grid; place-items: center; color: var(--muted); background: transparent; border-radius: 5px; opacity: 0; }
 .branch-row:hover .branch-delete, .branch-delete:focus-visible { opacity: 1; }
 .branch-delete:hover { color: #ff9ca8; background: #3d242b; }
-.branch-context-menu { position: fixed; z-index: 9; min-width: 260px; max-width: calc(100vw - 16px); padding: 4px; background: var(--raised); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 12px 32px #000b; }
-.branch-context-menu button { width: 100%; display: flex; align-items: center; gap: 9px; padding: 8px 9px; color: var(--text); background: transparent; border-radius: 5px; font-size: 10px; text-align: left; white-space: nowrap; }
-.branch-context-menu button:hover, .branch-context-menu button:focus-visible { color: #f1fffc; background: #21413f; outline: none; }
-.branch-context-menu button svg { flex: none; color: #70d7ca; }
 
 .assistant-result { display: flex; align-items: flex-start; gap: 8px; margin: 0 21px 14px; padding: 10px; color: var(--secondary); background: var(--raised); border: 1px solid var(--border); border-radius: 7px; font-size: 10px; line-height: 1.5; }
 .assistant-result > svg { flex: none; color: #6ed8cb; }

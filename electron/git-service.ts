@@ -619,7 +619,7 @@ function quoteToken(token: string) {
 function buildCommand(operation: Operation, args: Record<string, string>, argv: string[] = []) {
   switch (operation) {
     case "checkout": return `git switch ${args.name}`;
-    case "create_branch": return `git switch -c ${args.name}`;
+    case "create_branch": return `git switch -c ${args.name}${args.from ? ` ${args.from}` : ""}`;
     case "delete_branch": return `git branch -d ${args.name}`;
     case "rename_branch": return `git branch -m ${args.name} ${args.to}`;
     case "fetch": return "git fetch --prune";
@@ -1366,7 +1366,9 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
   const details: Partial<Record<Operation, [string, string, ActionPlan["risk"]]>> = {
     status: [localized(locale, "Actualizar la vista del repositorio", "Refresh the repository view"), localized(locale, "Lee el estado actual sin modificar archivos.", "Reads the current state without changing files."), "low"],
     checkout: [localized(locale, `Cambiar a ${args.name}`, `Switch to ${args.name}`), localized(locale, "Cambia la rama activa conservando los cambios locales compatibles.", "Switches the active branch while preserving compatible local changes."), "medium"],
-    create_branch: [localized(locale, `Crear y cambiar a ${args.name}`, `Create and switch to ${args.name}`), localized(locale, "Crea una rama local desde HEAD.", "Creates a local branch from HEAD."), "medium"],
+    create_branch: [localized(locale, `Crear y cambiar a ${args.name}`, `Create and switch to ${args.name}`), args.from
+      ? localized(locale, `Crea una rama local que empieza en el commit ${args.from.slice(0, 7)} y cambia a ella. Los cambios sin guardar te acompañan si no chocan.`, `Creates a local branch that starts at commit ${args.from.slice(0, 7)} and switches to it. Uncommitted changes come along when they do not clash.`)
+      : localized(locale, "Crea una rama local desde HEAD.", "Creates a local branch from HEAD."), "medium"],
     delete_branch: [localized(locale, `Eliminar la rama ${args.name}`, `Delete branch ${args.name}`), localized(locale, "Elimina una rama local ya integrada.", "Deletes an already-merged local branch."), "high"],
     rename_branch: [localized(locale, `Renombrar ${args.name} a ${args.to}`, `Rename ${args.name} to ${args.to}`), localized(locale, "Cambia el nombre de una rama local. No toca su historia ni la rama remota.", "Renames a local branch. It does not change its history or the remote branch."), "medium"],
     fetch: [localized(locale, "Actualizar referencias remotas", "Update remote references"), localized(locale, "Descarga referencias y elimina remotas obsoletas.", "Downloads references and prunes stale remote-tracking branches."), "low"],
@@ -1473,6 +1475,10 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
     if ("blockers" in preparation) throw new Error(preparation.blockers.map((blocker) => `${blocker.field}: ${blocker.problem}`).join(" "));
     return bindPlan(snapshot, preparation.draft);
   }
+  if (operation === "create_branch" && args.from && /^[0-9a-f]{7,40}$/i.test(args.from)
+      && !(await optionalGit(snapshot.path, ["rev-parse", "--verify", "--quiet", `${args.from}^{commit}`]))) {
+    throw new Error(localized(language, "Ese commit ya no existe en este repositorio.", "That commit no longer exists in this repository."));
+  }
   const draft = operationDraft(operation, args, snapshot, [], language);
   if (draft.allowed) validateExecution(bindPlan(snapshot, draft), snapshot, language);
   return bindPlan(snapshot, draft);
@@ -1571,6 +1577,8 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
   if (operation === "commit" && (!args.message?.trim() || args.message.length > commitMessageLimit)) throw new Error(localized(language, "El mensaje de commit no es válido.", "The commit message is invalid."));
   if (operation === "commit" && !snapshot.changes.length) throw new Error(localized(language, "No hay cambios locales para confirmar.", "There are no local changes to commit."));
   if (operation === "checkout" && !snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(localized(language, `La rama ${args.name} no existe localmente.`, `Branch ${args.name} does not exist locally.`));
+  // A start point is a commit hash picked in the graph: only hex, so it can never read as an option.
+  if (operation === "create_branch" && args.from !== undefined && !/^[0-9a-f]{7,40}$/i.test(args.from)) throw new Error(localized(language, "El commit de partida no es válido.", "The starting commit is invalid."));
   if (operation === "create_branch" && snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(localized(language, `La rama ${args.name} ya existe.`, `Branch ${args.name} already exists.`));
   if (operation === "delete_branch" && args.name === snapshot.defaultBranch) throw new Error(localized(language, `No puedes borrar la rama por defecto (${snapshot.defaultBranch}).`, `You cannot delete the default branch (${snapshot.defaultBranch}).`));
   if (operation === "delete_branch" && args.name === snapshot.currentBranch) throw new Error(localized(language, "No puedes borrar la rama activa.", "You cannot delete the active branch."));
@@ -1724,7 +1732,7 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
   switch (step.operation) {
     case "status": return "";
     case "checkout": return reportedGit(cwd, ["switch", args.name]);
-    case "create_branch": return reportedGit(cwd, ["switch", "-c", args.name]);
+    case "create_branch": return reportedGit(cwd, ["switch", "-c", args.name, ...(args.from ? [args.from] : [])]);
     case "delete_branch": return reportedGit(cwd, ["branch", "-d", "--", args.name]);
     // "-m" and never "-M": Git must refuse when the new name is taken, rather than overwrite a branch.
     case "rename_branch": return reportedGit(cwd, ["branch", "-m", "--", args.name, args.to]);

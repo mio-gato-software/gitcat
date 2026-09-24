@@ -727,7 +727,9 @@ test("las ramas ofrecen fusionarse en la rama por defecto desde su menú context
   const main = await readFile(join(root, "electron/main.ts"), "utf8");
   const preload = await readFile(join(root, "electron/preload.cjs"), "utf8");
   assert.match(app, /onContextMenu=\{onContextMenu\}/);
-  assert.match(app, /t\("mergeBranchTo", \{ name: contextMenu\.branch\.name, target: snapshot\.defaultBranch/);
+  // El menú de una rama es el mismo en el panel y en el grafo, y sigue ofreciendo integrarla en la principal.
+  assert.match(app, /onMenu=\{\(branch, x, y\) => setMenu\(\{ x, y, branch: branch\.name \}\)\}/);
+  assert.match(app, /key: "merge-default", icon: GitMerge, label: t\("mergeBranchTo", \{ name, target: base \}\), onSelect: \(\) => void prepareMergeToDefault\(name\)/);
   assert.match(app, /prepareMergeToDefault/);
   assert.match(service, /export async function prepareMergeToDefault/);
   assert.match(service, /git switch/);
