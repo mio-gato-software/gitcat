@@ -1,0 +1,241 @@
+/*
+ * The main view: a repository bar, one dense graph of every branch, and a details pane that says what
+ * the selected commit — or the uncommitted work — changed. Same graphite, coral and mint as the rest.
+ */
+:root {
+  --add: #93d3a2;
+  --del: #ef8f86;
+  --amber: #e4be81;
+  --lavender: #bda1e8;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Repository bar */
+.repo-toolbar { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 16px; min-height: 58px; padding: 0 16px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.toolbar-context { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.toolbar-field { display: grid; gap: 2px; min-width: 0; }
+.toolbar-caption { color: var(--muted); font-size: 10px; letter-spacing: .02em; }
+.toolbar-field strong { display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; color: var(--text); font-size: 14px; font-weight: 650; letter-spacing: -.01em; white-space: nowrap; }
+.toolbar-field strong > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.toolbar-field.branch strong { color: var(--mint); font-weight: 550; }
+.toolbar-field.branch strong svg { flex: none; }
+.toolbar-separator { flex: none; margin-top: 12px; color: var(--muted); }
+.toolbar-sync { flex: none; display: inline-flex; gap: 8px; margin-top: 12px; padding: 3px 7px; color: var(--secondary); background: var(--raised); border: 1px solid var(--border); border-radius: 5px; font: 10.5px var(--mono); }
+.toolbar-sync span { display: inline-flex; align-items: center; gap: 3px; }
+.toolbar-tools { display: flex; align-items: center; gap: 2px; }
+.tool-button { display: grid; justify-items: center; gap: 4px; min-width: 56px; padding: 7px 8px 6px; color: var(--secondary); background: transparent; border-radius: 7px; font-size: 10.5px; }
+.tool-button:hover:not(:disabled) { color: var(--text); background: var(--raised); }
+.tool-button svg { color: var(--text); }
+.tool-divider { width: 1px; height: 30px; margin: 0 6px; background: var(--border); }
+.toolbar-delivery { display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; }
+.delivery-status { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; color: var(--mint); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.delivery-status svg { flex: none; }
+.toolbar-delivery.is-dirty .delivery-status { color: var(--coral); }
+.delivery-actions { display: flex; flex: none; gap: 8px; }
+.delivery-actions button { min-height: 32px; white-space: nowrap; }
+
+/* Sidebar: the branch list, denser now that the repository lives in the bar above. */
+.sidebar-section { padding: 14px 10px 10px; }
+.branch-list { margin-top: 10px; }
+.branch-row { height: 30px; margin-bottom: 1px; font-size: 12.5px; }
+.branch-group { height: 26px; }
+/* The name is what the row is for, so badges give way before it does. */
+.branch-main { overflow: hidden; }
+.branch-main > .branch-label { flex: 0 1 auto; min-width: 6ch; }
+.branch-main > .current-pill { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The graph */
+.graph-area { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--canvas); container-type: inline-size; }
+.graph-panel { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.graph-header { flex: none; display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.graph-scope { display: flex; flex: 0 1 auto; align-items: center; gap: 8px; min-width: 0; }
+.scope-field { display: flex; flex: 0 1 auto; align-items: center; gap: 5px; min-width: 0; height: 26px; padding: 0 8px; color: var(--mint); background: var(--canvas); border: 1px solid var(--border); border-radius: 6px; }
+.scope-field:focus-within { border-color: var(--coral); }
+.scope-field select { min-width: 0; max-width: 240px; padding: 0; field-sizing: content; text-overflow: ellipsis; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 11px; font-weight: 600; appearance: none; cursor: pointer; }
+.scope-field option { color: var(--text); background: var(--surface); }
+.scope-note { min-width: 0; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.graph-header-right { display: flex; flex: 0 1 auto; align-items: center; gap: 10px; min-width: 0; margin-left: auto; }
+.graph-colour-toggle { flex: none; display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px; color: var(--muted); background: var(--canvas); border: 1px solid var(--border); border-radius: 6px; font-size: 10.5px; font-weight: 600; }
+.graph-colour-toggle:hover { color: var(--text); }
+.graph-count { color: var(--muted); font: 10px var(--mono); white-space: nowrap; }
+.commit-search { flex: 0 1 170px; width: 170px; min-width: 96px; height: 28px; }
+.commit-search input { font-size: 11.5px; }
+.activity-strip { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; height: 28px; padding: 0 4px 0 10px; color: var(--secondary); background: #223027; border: 1px solid #41684b; border-radius: 6px; font-size: 11px; }
+.activity-strip strong { flex: none; color: #c2e5c8; font-weight: 600; }
+.activity-names { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.activity-strip .outline-button { flex: none; min-height: 22px; margin-left: auto; padding: 0 8px; border-color: #41684b; font-size: 10.5px; }
+.activity-pulse { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--mint); box-shadow: 0 0 0 3px #9bcca52b; }
+.graph-note { flex: none; margin: 8px 12px 0; padding: 7px 9px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; font-size: 10.5px; line-height: 1.45; }
+.graph-note.error { color: #efadb5; background: #351f26; border-color: #6a3944; }
+
+.graph-scroll { --refs-w: 190px; --changes-w: 112px; --when-w: 92px; flex: 1; min-height: 0; overflow: auto; padding-bottom: 16px; outline: none; }
+.graph-columns, .commit-row { display: grid; grid-template-columns: var(--refs-w) var(--track-w, 40px) minmax(120px, 1fr) var(--changes-w) var(--when-w); }
+.graph-columns { position: sticky; top: 0; z-index: 2; align-items: center; height: 28px; color: var(--muted); background: var(--canvas); border-bottom: 1px solid var(--border); font-size: 9.5px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; }
+.graph-columns > span { overflow: hidden; padding-left: 10px; white-space: nowrap; }
+.graph-columns > span:nth-child(2) { padding-left: 4px; }
+.graph-columns .col-changes, .graph-columns .col-when { padding: 0 12px 0 0; text-align: right; }
+
+.commit-row { position: relative; height: 30px; color: var(--secondary); cursor: default; }
+.commit-row:hover { background: var(--surface); }
+.commit-row.selected { background: color-mix(in srgb, var(--lane) 15%, var(--canvas)); box-shadow: inset 0 1px color-mix(in srgb, var(--lane) 30%, transparent), inset 0 -1px color-mix(in srgb, var(--lane) 30%, transparent); }
+.commit-row.updated-commit::before { position: absolute; top: 4px; bottom: 4px; left: 0; width: 3px; border-radius: 0 2px 2px 0; background: var(--mint); content: ''; }
+
+.commit-refs { display: flex; align-items: center; gap: 4px; min-width: 0; padding-left: 10px; overflow: hidden; }
+.ref-tag { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 4px; min-width: 0; height: 20px; padding: 0 7px; overflow: hidden; color: color-mix(in srgb, var(--lane, var(--mint)) 72%, white); background: color-mix(in srgb, var(--lane, var(--mint)) 20%, var(--canvas)); border: 1px solid color-mix(in srgb, var(--lane, var(--mint)) 42%, transparent); border-radius: 4px; font-size: 11px; white-space: nowrap; }
+.ref-tag svg { flex: none; }
+.ref-tag > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ref-tag.head { color: var(--text); font-weight: 650; border-color: color-mix(in srgb, var(--lane, var(--coral)) 70%, transparent); }
+.ref-tag.remote { border-style: dashed; }
+.ref-tag.tag { color: #d6bbea; background: #2c2636; border-color: #4a3d69; }
+.ref-tag.more { flex: none; padding: 0 5px; color: var(--secondary); background: var(--raised); border-color: var(--border); font-size: 10px; }
+.ref-connector { flex: 1 0 6px; height: 2px; margin-right: -1px; background: var(--lane); opacity: .75; }
+
+.graph-track { position: relative; height: 100%; }
+.track-line { position: absolute; top: 0; bottom: 0; left: 14px; width: 2px; background: var(--border); }
+.graph-lanes line, .graph-lanes path { stroke-width: 2; }
+.graph-lanes .ref-link { opacity: .75; }
+.commit-node { position: absolute; z-index: 1; display: grid; place-items: center; box-sizing: border-box; border-radius: 50%; }
+.commit-node.avatar { width: 20px; height: 20px; border: 2px solid; font-size: 8px; font-weight: 750; letter-spacing: -.02em; line-height: 1; box-shadow: 0 0 0 2px var(--canvas); }
+.commit-node.merge { width: 10px; height: 10px; border: 0; box-shadow: 0 0 0 2px var(--canvas); }
+.commit-node.wip { width: 20px; height: 20px; color: var(--lane); background: var(--canvas); border: 2px dashed; }
+.commit-row.selected .commit-node.avatar, .commit-row.selected .commit-node.merge { box-shadow: 0 0 0 2px color-mix(in srgb, var(--lane) 15%, var(--canvas)); }
+
+.commit-content { display: flex; align-items: center; gap: 7px; min-width: 0; height: 100%; padding: 0 10px 0 8px; color: inherit; background: transparent; border: 0; border-radius: 0; text-align: left; cursor: default; }
+.commit-content:focus-visible { outline: 2px solid var(--coral); outline-offset: -2px; }
+.commit-subject { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--text); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.commit-body { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.commit-row.head .commit-subject { font-weight: 650; }
+.commit-row.wip .commit-subject { color: var(--secondary); font-style: italic; }
+.wip-tag { flex: none; padding: 1px 6px; color: var(--coral); border: 1px dashed #7a4a3e; border-radius: 4px; font: 10.5px var(--mono); }
+.activity-badge, .pr-badge { flex: none; padding: 2px 5px; border-radius: 4px; font-size: 9.5px; font-weight: 600; }
+.activity-badge { color: #c2e5c8; background: #2c4a35; }
+.pr-badge { color: #d6bbea; background: #352943; }
+.merge-marker { flex: none; color: var(--lavender); }
+
+.commit-changes, .commit-when { display: flex; align-items: center; justify-content: flex-end; min-width: 0; padding-right: 12px; overflow: hidden; }
+.commit-when span { padding: 2px 6px; color: var(--muted); background: var(--raised); border-radius: 4px; font-size: 10px; white-space: nowrap; }
+.commit-row.selected .commit-when span { color: var(--secondary); }
+
+.change-stats { display: inline-flex; flex: none; align-items: center; gap: 5px; font: 10.5px var(--mono); white-space: nowrap; }
+.change-stats.empty, .change-stats.binary, .change-stats.wip-count { color: var(--muted); font-family: inherit; font-size: 10.5px; }
+.change-stats.wip-count { color: var(--coral); }
+.stat-add { color: var(--add); }
+.stat-del { color: var(--del); }
+.stat-bar { display: inline-flex; gap: 1px; margin-left: 1px; }
+.stat-bar i { width: 5px; height: 9px; border-radius: 1px; background: var(--del); opacity: .85; }
+.stat-bar i.add { background: var(--add); }
+
+.graph-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 70px 15px; color: var(--muted); text-align: center; }
+.graph-empty strong { color: var(--text); font-size: 13px; }
+.graph-empty span { max-width: 300px; font-size: 11px; line-height: 1.5; }
+.graph-loading { display: flex; align-items: center; gap: 8px; padding: 14px 12px 14px calc(var(--refs-w, 0px) + 10px); color: var(--muted); font-size: 11px; }
+.graph-loading svg { color: var(--mint); }
+.load-more { display: block; width: calc(100% - 24px); margin: 12px; padding: 8px; color: var(--secondary); background: var(--surface); border: 1px solid var(--border); border-radius: 7px; font-size: 11px; font-weight: 600; }
+.load-more:hover { color: var(--text); background: var(--raised); }
+
+@container (max-width: 760px) {
+  .graph-scroll { --refs-w: 150px; --when-w: 0px; }
+  .commit-when, .graph-columns .col-when { display: none; }
+  .graph-count { display: none; }
+}
+@container (max-width: 600px) {
+  .graph-scroll { --refs-w: 120px; --changes-w: 0px; }
+  .commit-changes, .graph-columns .col-changes { display: none; }
+  .commit-body { display: none; }
+  .graph-colour-toggle { font-size: 0; gap: 0; }
+  .commit-search { width: 130px; }
+}
+
+/* Inspector: details of what is selected, or the assistant */
+.inspector-tabs { flex: none; display: flex; align-items: stretch; gap: 2px; height: 44px; padding: 0 10px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.inspector-tabs button { position: relative; display: inline-flex; align-items: center; gap: 7px; padding: 0 12px; color: var(--muted); background: transparent; font-size: 12px; font-weight: 600; }
+.inspector-tabs button:hover { color: var(--text); }
+.inspector-tabs button.active { color: var(--text); }
+.inspector-tabs button.active::after { position: absolute; right: 8px; bottom: -1px; left: 8px; height: 2px; background: var(--coral); content: ''; }
+.inspector-tabs button.active svg { color: var(--coral); }
+.tab-count { display: inline-grid; place-items: center; min-width: 17px; height: 17px; padding: 0 5px; color: var(--secondary); background: var(--hover); border-radius: 9px; font-size: 9.5px; font-weight: 700; }
+.tab-count.attention { color: #251813; background: var(--coral); }
+.inspector-body { flex: 1; min-height: 0; overflow: auto; padding: 14px 14px 12px; }
+.assistant-copy { margin: 16px 18px 4px; font-size: 12px; line-height: 1.6; }
+.chat-compose { margin: 10px 12px 12px; }
+.chat-compose textarea { padding: 11px 44px 11px 12px; }
+.send-button { bottom: 9px; }
+
+.detail-head { display: flex; align-items: center; gap: 7px; min-width: 0; margin-bottom: 12px; color: var(--muted); font-size: 11px; }
+.detail-head > code { color: var(--text); font: 12px var(--mono); }
+.detail-head .mini-icon { width: 24px; height: 24px; }
+.detail-head .ghost-button { margin-left: auto; min-height: 26px; padding: 0 8px; font-size: 11px; }
+.detail-kind { display: inline-flex; flex: none; align-items: center; gap: 5px; color: var(--secondary); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.detail-branch { display: inline-flex; align-items: center; gap: 5px; min-width: 0; margin-left: auto; overflow: hidden; color: var(--mint); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.detail-branch svg { flex: none; }
+.detail-message { padding: 12px 13px; background: var(--raised); border: 1px solid var(--border); border-radius: 8px; }
+.detail-message h3 { margin: 0; color: var(--text); font-size: 13.5px; font-weight: 600; line-height: 1.45; overflow-wrap: anywhere; }
+.detail-message p { max-height: 200px; margin: 8px 0 0; overflow: auto; color: var(--secondary); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.detail-author { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 4px 10px; margin: 14px 0 12px; }
+.detail-author > div:nth-child(2) { display: grid; gap: 2px; min-width: 0; }
+.detail-author strong { overflow: hidden; color: var(--text); font-size: 12.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.detail-author span { color: var(--muted); font-size: 11px; }
+.detail-parents { grid-column: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--muted); font-size: 10.5px; }
+.detail-parents code { color: var(--secondary); font: 10.5px var(--mono); }
+.hash-link { padding: 0; color: #c9b3e6; background: transparent; font: 10.5px var(--mono); text-decoration: underline dotted; text-underline-offset: 2px; }
+.hash-link:hover { color: var(--text); }
+.avatar-chip { display: inline-grid; flex: none; place-items: center; border-radius: 50%; font-weight: 750; letter-spacing: -.02em; }
+.detail-refs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 12px; }
+.detail-refs .ref-tag { max-width: 100%; }
+.detail-note { display: flex; align-items: flex-start; gap: 6px; margin: 0 0 12px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.detail-note svg { flex: none; margin-top: 2px; color: var(--lavender); }
+
+.change-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 0; border-top: 1px solid var(--border); color: var(--secondary); font-size: 11.5px; }
+.change-summary > span:not(.change-stats) { display: inline-flex; align-items: center; gap: 5px; }
+.change-summary .change-stats { margin-left: auto; }
+.kind-added .change-status, .change-summary .kind-added svg { color: var(--add); }
+.kind-modified .change-status, .change-summary .kind-modified svg { color: var(--amber); }
+.kind-deleted .change-status, .change-summary .kind-deleted svg { color: var(--del); }
+.kind-renamed .change-status, .change-summary .kind-renamed svg { color: var(--lavender); }
+.kind-conflict .change-status, .change-summary .kind-conflict svg { color: var(--coral); }
+.file-list-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; color: var(--muted); font-size: 10.5px; }
+.file-list .mode-toggle button { display: inline-flex; align-items: center; gap: 4px; width: auto; padding: 0 7px; font-size: 10.5px; }
+.change-list { overflow: hidden; background: var(--surface); border: 1px solid var(--border); border-radius: 7px; }
+.change-row, .change-folder-row { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; height: 29px; padding-right: 10px; color: var(--secondary); background: transparent; border-bottom: 1px solid var(--raised); font-size: 12px; text-align: left; }
+.change-row:last-child, .change-folder-row:last-child { border-bottom: 0; }
+.change-row:hover { color: var(--text); background: var(--raised); }
+.change-row.selected { color: var(--text); background: var(--hover); box-shadow: inset 2px 0 var(--coral); }
+.change-folder-row { color: var(--muted); font-size: 11.5px; }
+.change-folder-row:hover { color: var(--text); }
+.change-folder-row svg { flex: none; }
+.change-status { display: inline-flex; flex: none; color: var(--muted); }
+.change-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.change-folder { color: var(--muted); }
+.change-name { color: inherit; }
+.change-row .change-stats { margin-left: auto; }
+.change-code { width: 34px; flex: none; color: var(--amber); font: 700 10.5px var(--mono); }
+.code-a, .code-\? { color: var(--add); }
+.code-d { color: var(--del); }
+.change-more { flex: none; margin-left: auto; color: var(--muted); }
+.detail-files { margin-top: 4px; }
+.detail-files .eyebrow { display: block; margin-bottom: 8px; }
+.detail-files .change-row { padding-left: 10px; }
+
+.commit-form { margin-top: 14px; padding: 12px; background: var(--raised); border: 1px solid var(--border); border-radius: 8px; }
+.commit-form-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.commit-form-heading h3 { min-width: 0; margin: 0; color: var(--text); font-size: 12.5px; font-weight: 600; line-height: 1.35; }
+.commit-form-heading .outline-button { flex: none; white-space: nowrap; }
+.commit-form textarea { width: 100%; min-height: 64px; padding: 9px 10px; resize: vertical; color: var(--text); background: var(--canvas); border: 1px solid var(--border); border-radius: 7px; outline: none; font-size: 12.5px; line-height: 1.5; }
+.commit-form textarea:focus { border-color: var(--coral); }
+.commit-form textarea::placeholder { color: var(--muted); }
+.commit-form-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.commit-form-meta span:last-child { flex: none; }
+.commit-form .delivery-option { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; color: var(--secondary); font-size: 11.5px; line-height: 1.5; }
+.delivery-option input { accent-color: var(--coral); }
+.commit-form-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.commit-form-actions .primary-button { width: 100%; }
+.file-inclusion-note { margin: 10px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.55; }
+.diff-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; color: var(--muted); font-size: 11px; }
+.diff-toolbar code { min-width: 0; overflow: hidden; color: var(--secondary); font-family: var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.diff-toolbar .ghost-button { flex: none; }
+
+@media (max-width: 1360px) { .delivery-status { display: none; } }
+@media (max-width: 1200px) {
+  .tool-button { min-width: 38px; padding: 8px; }
+  .tool-button span { display: none; }
+}

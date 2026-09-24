@@ -148,3 +148,20 @@ export function buildCommitGraph(commits: Commit[], remotes: string[] = [], defa
   ), 1);
   return { rows, laneCount };
 }
+
+/** The id the working tree takes while it is drawn in the graph. No commit hash can collide with it. */
+export const workInProgressHash = "working-tree";
+
+/**
+ * The uncommitted work drawn as the commit it is about to become: first in the list, continuing from
+ * HEAD, and claimed by the checked-out branch so its lane takes that branch's colour. It is a view of
+ * the working tree only; nothing about it exists in Git until the user saves it.
+ */
+export function withWorkInProgress(commits: Commit[], head: string, branch: string): Commit[] {
+  if (!head) return commits;
+  const wip: Commit = {
+    hash: workInProgressHash, shortHash: "", subject: "", author: "", email: "", date: "",
+    refs: branch && branch !== "HEAD" ? [branch] : [], parents: [head]
+  };
+  return [wip, ...commits];
+}

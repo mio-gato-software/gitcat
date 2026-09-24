@@ -47,3 +47,17 @@ test("el diff de un archivo solo acepta rutas que pertenecen al commit", async (
   await assert.rejects(() => getCommitFileDiff(repo, commit, "missing.txt"), /no forma parte de este commit/);
   await assert.rejects(() => getCommitFileDiff(repo, commit, "../outside.txt"), /no pertenece a este repositorio/);
 });
+
+test("el historial trae el cuerpo del mensaje y cuánto cambió cada commit", async () => {
+  const { loadHistory } = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
+  writeFileSync(join(repo, "three.txt"), "a\nb\nc\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "tres líneas", "-m", "Un cuerpo\ncon dos líneas");
+  const page = await loadHistory(repo, { scope: "all", limit: 1 });
+  assert.equal(page.commits[0].subject, "tres líneas");
+  assert.equal(page.commits[0].body, "Un cuerpo\ncon dos líneas");
+  assert.deepEqual(page.commits[0].stats, { files: 1, additions: 3, deletions: 0 });
+  const detail = await getCommitDetail(repo, page.commits[0].hash);
+  assert.deepEqual(detail.stats["three.txt"], { additions: 3, deletions: 0, binary: false });
+  assert.equal(detail.body, "Un cuerpo\ncon dos líneas");
+});

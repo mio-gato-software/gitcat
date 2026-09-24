@@ -41,7 +41,16 @@ export type Commit = {
   refs: string[];
   /** Parent hashes in Git's own order, so the first is the one the branch continues. The edges of the graph. */
   parents: string[];
+  /** The message after its subject line, when the history page carried it. */
+  body?: string;
+  /** How much the commit changed against its first parent. Only history pages measure it. */
+  stats?: CommitStats;
 };
+
+export type CommitStats = { files: number; additions: number; deletions: number };
+
+/** Lines one file gained and lost. Binary files have no lines to count, and say so. */
+export type FileStats = { additions: number; deletions: number; binary: boolean };
 
 export type FileChange = {
   code: string;
@@ -127,8 +136,12 @@ export type HistoryPage = {
 
 export type CommitDetail = {
   hash: string;
+  /** The message after the subject line, so the detail can show everything the author wrote. */
+  body?: string;
   /** Against the first parent, which is what a merge commit actually brought in. */
   files: FileChange[];
+  /** Line counts per file, keyed by the path the file has after the change. */
+  stats: Record<string, FileStats>;
   diff: string;
   /** A diff too large to hand over whole was cut, and says so rather than looking complete. */
   truncated: boolean;

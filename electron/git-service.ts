@@ -7,7 +7,7 @@ import { safeStorage, app } from "electron";
 import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
 import { parseWorktrees } from "./worktrees.js";
 import { stackCandidates } from "./stacked-branches.js";
-import { parseNameStatus } from "./diff-status.js";
+import { parseNameStatus, parseNumstat, parseShortstat } from "./diff-status.js";
 import { parseRemoteUrls } from "./remotes.js";
 import {
   canSkip, conflictLabels, conflictsFrom, parseRebaseProgress, pendingCommands, resolutionFor
@@ -446,7 +446,23 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   };
 }
 
-const historyFormat = "--pretty=format:%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D%x1f%P";
+/**
+ * History pages also carry each commit's message body and how much it changed, so the graph can say
+ * what a commit did without opening it. Records are framed with \x1e and the fields end with \x1d,
+ * because the body spans lines and `--shortstat` writes its summary right after the format.
+ */
+const historyFormat = "--pretty=format:%x1e%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D%x1f%P%x1f%b%x1d";
+
+function parseHistory(raw: string): Commit[] {
+  return raw.split("\x1e").flatMap((record) => {
+    const [fields = "", stat = ""] = record.split("\x1d");
+    const parts = fields.split("\x1f");
+    const commit = parseCommit(parts.slice(0, 8).join("\x1f"));
+    if (!commit) return [];
+    const text = parts.slice(8).join("\x1f").trim();
+    return [{ ...commit, body: text || undefined, stats: parseShortstat(stat) ?? { files: 0, additions: 0, deletions: 0 } }];
+  });
+}
 export const historyPageSize = 80;
 /** A diff nobody is going to read in one sitting, and that would only stall the window. */
 const diffLimit = 400_000;
@@ -482,7 +498,8 @@ export async function loadHistory(cwd: string, request: HistoryRequest): Promise
   if (!(await optionalGit(repoRoot, ["rev-parse", "HEAD"]))) return empty;
 
   // One more than asked for, so "is there more behind this" is answered rather than guessed.
-  const args = ["log", "--topo-order", "-n", String(limit + 1), "--skip", String(skip), "--date=iso-strict", historyFormat];
+  // A merge is measured against its first parent, the same reading the commit detail gives it.
+  const args = ["log", "--topo-order", "-n", String(limit + 1), "--skip", String(skip), "--date=iso-strict", "--shortstat", "--diff-merges=first-parent", historyFormat];
   let comparedTo: string | undefined;
   if (scope === "all") args.splice(1, 0, "--all");
   else {
@@ -500,7 +517,7 @@ export async function loadHistory(cwd: string, request: HistoryRequest): Promise
   args.push("--");
 
   const raw = await checkedGit(repoRoot, args);
-  const parsed = raw.split("\n").map(parseCommit).filter((commit): commit is Commit => Boolean(commit));
+  const parsed = parseHistory(raw);
   return { commits: parsed.slice(0, limit), hasMore: parsed.length > limit, scope, branch: request.branch, comparedTo };
 }
 
@@ -521,7 +538,15 @@ export async function getCommitDetail(cwd: string, hash: string): Promise<Commit
   const diffRaw = base
     ? await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", base, commit, "--"])
     : await checkedGit(repoRoot, ["show", "--no-color", "--no-ext-diff", "--unified=3", "--format=", commit, "--"]);
-  return { hash: commit, files: parseNameStatus(statusRaw), ...cutDiff(diffRaw) };
+  const body = (await checkedGit(repoRoot, ["show", "-s", "--no-color", "--format=%b", commit])).trim();
+  return { hash: commit, body: body || undefined, files: parseNameStatus(statusRaw), stats: await commitFileStats(repoRoot, commit, base), ...cutDiff(diffRaw) };
+}
+
+/** Lines gained and lost per file, against the same first parent the rest of the detail uses. */
+async function commitFileStats(repoRoot: string, commit: string, base?: string) {
+  return parseNumstat(base
+    ? await checkedGit(repoRoot, ["diff", "--no-color", "--numstat", "-z", base, commit, "--"])
+    : await checkedGit(repoRoot, ["show", "--no-color", "--numstat", "-z", "--format=", commit, "--"]));
 }
 
 /** The same commit reading, narrowed to one path selected in the file list. */
@@ -544,7 +569,8 @@ export async function getCommitFileDiff(cwd: string, hash: string, file: string)
   const diffRaw = base
     ? await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", base, commit, "--", relative])
     : await checkedGit(repoRoot, ["show", "--no-color", "--no-ext-diff", "--unified=3", "--format=", commit, "--", relative]);
-  return { hash: commit, files: selected, ...cutDiff(diffRaw) };
+  const stats = await commitFileStats(repoRoot, commit, base);
+  return { hash: commit, files: selected, stats: Object.fromEntries(selected.flatMap((change) => stats[change.path] ? [[change.path, stats[change.path]]] : [])), ...cutDiff(diffRaw) };
 }
 
 /** One uncommitted file, so the changes tab can show what changed rather than only that it did. */
@@ -558,18 +584,18 @@ export async function getWorkingFileDiff(cwd: string, file: string): Promise<Com
   const tracked = head
     ? await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", "HEAD", "--", relative])
     : await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", "--", relative]);
-  if (tracked.trim()) return { hash: "", files: [], ...cutDiff(tracked) };
+  if (tracked.trim()) return { hash: "", files: [], stats: {}, ...cutDiff(tracked) };
 
   // Untracked files have nothing to diff against, so the file itself is the change.
   const untracked = await checkedGit(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z", "--", relative]);
-  if (!untracked.split("\0").filter(Boolean).length) return { hash: "", files: [], diff: "", truncated: false };
+  if (!untracked.split("\0").filter(Boolean).length) return { hash: "", files: [], stats: {}, diff: "", truncated: false };
   try {
     const content = readFileSync(absolute);
-    if (content.includes(0)) return { hash: "", files: [], diff: `--- /dev/null\n+++ b/${relative}\n[archivo binario]`, truncated: false };
+    if (content.includes(0)) return { hash: "", files: [], stats: {}, diff: `--- /dev/null\n+++ b/${relative}\n[archivo binario]`, truncated: false };
     const body = content.toString("utf8").split("\n").map((line) => `+${line}`).join("\n");
-    return { hash: "", files: [], ...cutDiff(`--- /dev/null\n+++ b/${relative}\n@@ archivo nuevo @@\n${body}`) };
+    return { hash: "", files: [], stats: {}, ...cutDiff(`--- /dev/null\n+++ b/${relative}\n@@ archivo nuevo @@\n${body}`) };
   } catch (error) {
-    return { hash: "", files: [], diff: `[no se pudo leer: ${error instanceof Error ? error.message : "error desconocido"}]`, truncated: false };
+    return { hash: "", files: [], stats: {}, diff: `[no se pudo leer: ${error instanceof Error ? error.message : "error desconocido"}]`, truncated: false };
   }
 }
 

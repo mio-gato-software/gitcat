@@ -114,7 +114,7 @@ test("un clic selecciona la rama, un doble clic cambia a ella, y los impedimento
   assert.doesNotMatch(app, /window\.setTimeout\(onSwitch/, "el clic ya no prepara un checkout con retardo");
   // Cambiar de rama sigue siendo explícito: el doble clic, o el botón de la fila.
   assert.match(app, /className="branch-switch"/);
-  assert.match(app, /addTurn\(path, t\("branchSwitchQuestion", \{ name \}\)\)/);
+  assert.match(app, /addTurn\(path, t\("branchSwitchQuestion", \{ name \}\), false\)/);
   assert.match(app, /error: message, status: "error"/);
   // Una rama que deja de existir no puede dejar el historial apuntando a un nombre que Git no conoce.
   assert.match(app, /snapshot\.branches\.some\(\(branch\) => branch\.name === selectedBranch\) \? selectedBranch : snapshot\.currentBranch/);
@@ -266,9 +266,9 @@ test("el historial habla de una rama, se puede paginar y enseña qué cambió ca
   const preload = await readFile(join(root, "electron/preload.cjs"), "utf8");
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
   const styles = await readFile(join(root, "src/styles.css"), "utf8");
-  // El alcance por defecto es la rama, no todas las refs a la vez.
+  // La vista principal abre con todas las ramas; limitarla a una sigue a un clic en su cabecera.
   assert.match(types, /export type HistoryScope = "all" \| "branch" \| "branch-only"/);
-  assert.match(app, /scope: \["all", "branch", "branch-only"\]\.includes\(stored\?\.scope\) \? stored\.scope : "branch"/);
+  assert.match(app, /scope: \["all", "branch", "branch-only"\]\.includes\(stored\?\.scope\) \? stored\.scope : "all"/);
   // Una rama acaba en los argumentos de git, así que se comprueba la forma y luego se resuelve la ref.
   assert.match(service, /async function verifiedRevision/);
   assert.match(service, /if \(!isBranchNameSafe\(name\)\) throw new Error/);
@@ -297,9 +297,10 @@ test("el historial habla de una rama, se puede paginar y enseña qué cambió ca
   assert.match(app, /t\("showAllFiles"\)/);
   // Una ruta que llega de la interfaz sigue siendo una ruta: tiene que caer dentro del repositorio.
   assert.match(service, /La ruta no pertenece a este repositorio/);
-  // Y los dos desajustes del grafo: el nodo se ancla donde empalma el SVG, y la cabecera al carril real.
+  // Y los dos desajustes del grafo: el nodo se ancla donde empalma el SVG, y las columnas al carril real.
   assert.match(styles, /\.commit-node \{ top: 50%; left: auto; transform: translateY\(-50%\); \}/);
-  assert.match(styles, /\.graph-header \{ padding-left: var\(--track-w, 43px\); \}/);
+  const workspace = await readFile(join(root, "src/workspace.css"), "utf8");
+  assert.match(workspace, /\.graph-columns, \.commit-row \{ display: grid; grid-template-columns: var\(--refs-w\) var\(--track-w, 40px\)/);
 });
 
 test("una rama dice si vive en local, en el remoto o en ambos", async () => {

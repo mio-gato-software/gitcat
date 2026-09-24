@@ -43,6 +43,8 @@ app.whenReady().then(async () => {
   ipcMain.handle('workspace:save', () => {});
   ipcMain.handle('llm:get-config', () => ({ provider: 'openai', model: 'ui-test', configured: true }));
   ipcMain.handle('history:load', (_, p, request) => service.loadHistory(p, request));
+  ipcMain.handle('commit:detail', (_, p, hash) => service.getCommitDetail(p, hash));
+  ipcMain.handle('commit:file-diff', (_, p, file) => service.getWorkingFileDiff(p, file));
   ipcMain.handle('repo:snapshot', () => {
     if (refreshError) throw new Error('A long example error for notification layout. '.repeat(30));
     return service.getSnapshot(repo);
@@ -69,31 +71,48 @@ app.whenReady().then(async () => {
     fs.writeFileSync(path.join(screenshots, `${name}.png`), (await win.webContents.capturePage()).toPNG());
   };
   const assertFits = async () => assert.deepEqual(await js(`(() => {
-    const nodes = [...document.querySelectorAll('.workspace-actions button, .branch-work-actions button, .view-tab, .notification-bell, .chat-compose textarea, .send-button')];
+    const nodes = [...document.querySelectorAll('.tool-button, .delivery-actions button, .inspector-tabs button, .commit-search, .notification-bell, .chat-compose textarea, .send-button')];
     return nodes.filter(node => { const r = node.getBoundingClientRect(); return r.left < 0 || r.right > innerWidth || r.width < 20 || r.bottom > innerHeight; }).map(node => node.textContent || node.getAttribute('aria-label'));
   })()`), [], 'Primary controls fit the window');
 
   await win.loadFile(path.join(root, 'dist/index.html'));
   await js(`localStorage.setItem('gitcat-locale', 'es')`);
   await win.loadFile(path.join(root, 'dist/index.html'));
-  await waitFor(`document.querySelectorAll('.commit-row').length === 5`);
-  assert.equal(await js(`document.querySelector('h1').textContent`), 'Tu trabajo, en contexto');
-  assert.equal(await js(`document.querySelector('.overview-details').open`), false);
+  // Five commits plus the uncommitted work, drawn as its own row above HEAD.
+  await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
   const before = git('status', '--porcelain');
-  await js(`document.querySelector('.overview-details summary').click()`);
-  assert.equal(await js(`document.querySelector('.overview-details').open`), true);
-  assert.match(await js(`document.querySelector('.overview-details').innerText`), /no tiene una rama de seguimiento/);
-  await js(`document.querySelector('.overview-details summary').click(); document.querySelector('.overview-legend summary').click()`);
-  assert.equal(await js(`document.querySelector('.overview-legend').open`), true);
-  assert.equal(git('status', '--porcelain'), before, 'Opening explanatory details never mutates Git');
-  await js(`document.querySelector('.overview-legend summary').click()`);
+  assert.equal(await js(`document.querySelector('.commit-row').classList.contains('wip')`), true);
+  assert.match(await js(`document.querySelector('.commit-row.wip').innerText`), /WIP/);
+  // Every commit says how much it changed, without opening it.
+  assert.match(await js(`document.querySelector('.commit-row.head .commit-changes').innerText`), /\+1/);
+  // Nothing picked yet: the details pane shows the uncommitted work and its files.
+  await waitFor(`document.querySelector('.inspector .changes-view .change-list')`);
+  assert.match(await js(`document.querySelector('.inspector .change-summary').innerText`), /1 modificado\n1 añadido/);
+  assert.equal(await js(`document.querySelectorAll('.inspector .change-row').length`), 2);
+  // Picking a commit shows its message, author and files with their line counts.
+  await js(`document.querySelectorAll('.commit-row')[2].click()`);
+  await waitFor(`document.querySelector('.commit-inspector .change-row')`);
+  assert.match(await js(`document.querySelector('.commit-inspector .detail-message').innerText`), /Integrar el buscador/);
+  assert.match(await js(`document.querySelector('.commit-inspector .change-list').innerText`), /search\.txt/);
+  await capture('overview-commit');
+  // The tree view groups the same files by folder, and the choice is remembered.
+  await js(`document.querySelectorAll('.file-list .mode-toggle button')[1].click()`);
+  assert.equal(await js(`localStorage.getItem('gitcat-file-list-mode')`), 'tree');
+  await js(`document.querySelectorAll('.file-list .mode-toggle button')[0].click()`);
+  // Arrow keys walk the graph and the details follow.
+  await js(`document.querySelectorAll('.commit-row')[2].querySelector('.commit-content').focus()`);
+  await js(`document.querySelector('.graph-scroll').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }))`);
+  await waitFor(`document.querySelectorAll('.commit-row')[1].classList.contains('selected')`);
+  await js(`document.querySelector('.commit-row.wip').click()`);
+  await waitFor(`document.querySelector('.inspector .changes-view')`);
+  assert.equal(git('status', '--porcelain'), before, 'Reading the graph and its details never mutates Git');
   await assertFits(); await capture('overview');
 
   // A long error must stay in the reserved footer, with no layout movement.
-  const box = () => js(`JSON.stringify(document.querySelector('.branch-work-card').getBoundingClientRect())`);
+  const box = () => js(`JSON.stringify(document.querySelector('.repo-toolbar').getBoundingClientRect())`);
   const beforeNotification = await box();
   refreshError = true;
-  await js(`document.querySelector('.workspace-actions button').click()`);
+  await js(`document.querySelector('.tool-button').click()`);
   await waitFor(`document.querySelector('.notification-preview.warning')`);
   assert.equal(await box(), beforeNotification);
   await js(`document.querySelector('.notification-bell').click()`);
@@ -106,17 +125,17 @@ app.whenReady().then(async () => {
   win.setSize(1080, 720);
   await js(`localStorage.setItem('gitcat-pane-widths', JSON.stringify({ sidebar: 460, inspector: 620 }))`);
   await win.loadFile(path.join(root, 'dist/index.html'));
-  await waitFor(`document.querySelectorAll('.commit-row').length === 5`);
+  await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
   await assertFits(); await capture('compact');
   await js(`localStorage.removeItem('gitcat-pane-widths')`);
   win.setSize(1480, 940);
   await win.loadFile(path.join(root, 'dist/index.html'));
-  await waitFor(`document.querySelector('.branch-work-actions .primary-button')`);
+  await waitFor(`document.querySelector('.delivery-actions .primary-button')`);
 
-  await js(`document.querySelector('.branch-work-actions .primary-button').click()`);
+  await js(`document.querySelector('.delivery-actions .primary-button').click()`);
   await waitFor(`document.querySelector('#commit-description')?.value === 'Update menu and add a new file'`);
   assert.equal(await js(`document.querySelector('.delivery-option input').checked`), true);
-  assert.match(await js(`document.querySelector('.change-list').innerText`), /Nuevo · incluido/);
+  assert.match(await js(`document.querySelector('.inspector .change-row[title^="Nuevo · incluido"]').innerText`), /new-file\.txt/);
   await capture('changes');
   await js(`document.querySelector('.commit-form-actions button').click()`);
   await waitFor(`document.querySelector('.delivery-review-modal')`);
@@ -124,12 +143,12 @@ app.whenReady().then(async () => {
   assert.equal(git('branch', '--show-current'), 'feature/new-menu');
   assert.equal(git('status', '--porcelain'), before, 'Review must precede all Git changes');
   await js(`document.querySelector('.delivery-review-modal .plan-actions .primary-button').click()`);
-  await waitFor(`document.querySelector('.branch-work-card.is-saved')`);
+  await waitFor(`document.querySelector('.toolbar-delivery.is-saved')`);
   assert.equal(git('branch', '--show-current'), 'main');
   assert.equal(git('status', '--porcelain'), '');
   assert.equal(git('show', 'main:new-file.txt'), 'new file');
   win.destroy();
-  console.log('PASS: disclosures, graph, compact layout, stable notifications, reviewed save and integration.');
+  console.log('PASS: graph with work in progress, commit details, compact layout, stable notifications, reviewed save and integration.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));

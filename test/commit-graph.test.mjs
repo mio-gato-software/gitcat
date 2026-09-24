@@ -149,3 +149,23 @@ test("los carriles liberados se reutilizan en vez de crecer sin fin", () => {
   ]);
   assert.equal(built.laneCount <= 2, true, `carriles: ${built.laneCount}`);
 });
+
+test("el trabajo sin guardar se dibuja encima de HEAD, en su carril y con su color", async () => {
+  const { buildCommitGraph, withWorkInProgress, workInProgressHash } = graph;
+  const commits = [
+    { hash: "b", shortHash: "b", subject: "otra", author: "", email: "", date: "", refs: ["other"], parents: ["a"] },
+    { hash: "h", shortHash: "h", subject: "head", author: "", email: "", date: "", refs: ["HEAD -> feature/x"], parents: ["a"] },
+    { hash: "a", shortHash: "a", subject: "base", author: "", email: "", date: "", refs: ["main"], parents: [] }
+  ];
+  const listed = withWorkInProgress(commits, "h", "feature/x");
+  assert.equal(listed[0].hash, workInProgressHash);
+  assert.deepEqual(listed[0].parents, ["h"]);
+  const built = buildCommitGraph(listed, [], "main");
+  const wip = built.rows[0];
+  const head = built.rows.find((row) => row.commit.hash === "h");
+  // La línea que sale del WIP llega a HEAD: el trabajo continúa desde el commit sobre el que se escribe.
+  assert.deepEqual(head.incoming, [wip.outgoing[0]]);
+  assert.equal(wip.family, "feature");
+  // Sin HEAD no hay nada de lo que continuar, así que no se inventa una fila.
+  assert.equal(withWorkInProgress(commits, "", "feature/x").length, 3);
+});

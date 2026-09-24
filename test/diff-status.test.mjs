@@ -58,3 +58,20 @@ test("coincide con lo que git escribe de verdad, renombrado incluido", () => {
   assert.deepEqual(parsed.filter((change) => !change.code.startsWith("R")).map((change) => [change.code, change.path]).sort(),
     [["A", "tercero.txt"], ["M", "otro.txt"]]);
 });
+
+test("numstat cuenta líneas por archivo, sigue los renombrados y no inventa ceros en binarios", async () => {
+  const { parseNumstat } = await import(pathToFileURL(join(root, "dist-electron/electron/diff-status.js")));
+  const raw = ["3\t1\ta.txt", "0\t0\t", "viejo.txt", "nuevo.txt", "-\t-\timg.png", ""].join("\0");
+  assert.deepEqual(parseNumstat(raw), {
+    "a.txt": { additions: 3, deletions: 1, binary: false },
+    "nuevo.txt": { additions: 0, deletions: 0, binary: false },
+    "img.png": { additions: 0, deletions: 0, binary: true }
+  });
+});
+
+test("shortstat lee el resumen de git en cualquiera de sus formas", async () => {
+  const { parseShortstat } = await import(pathToFileURL(join(root, "dist-electron/electron/diff-status.js")));
+  assert.deepEqual(parseShortstat(" 3 files changed, 10 insertions(+), 2 deletions(-)"), { files: 3, additions: 10, deletions: 2 });
+  assert.deepEqual(parseShortstat(" 1 file changed, 1 deletion(-)"), { files: 1, additions: 0, deletions: 1 });
+  assert.equal(parseShortstat(""), undefined);
+});

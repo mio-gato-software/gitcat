@@ -2,12 +2,13 @@ import { CatMark, SleepingCat } from "./CatMark";
 import { NotificationCenter } from "./NotificationCenter";
 import { addNotification, type Notification } from "../shared/notifications";
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, ReactNode, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
+import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
   AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Bot, Check, ChevronRight, CircleDot,
-  Clock3, Cloud, Eye, EyeOff, FileDiff, FolderGit2, FolderOpen, GitBranch, GitCommitHorizontal, GitFork,
-  ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List, ListTree, LoaderCircle, MessageCircle, Palette, Plus, RefreshCcw,
-  Search, Send, Settings2, ShieldCheck, Sparkles, Tag, TerminalSquare, Trash2, UserRound, X
+  Clock3, Cloud, CloudDownload, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
+  FolderOpen, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
+  ListTree, LoaderCircle, Maximize2, MessageCircle, Palette, PencilLine, Plus, RefreshCcw, Search, Send, Settings2, ShieldCheck,
+  Sparkles, Tag, TerminalSquare, Trash2, UserRound, X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { buildBranchTree, filterBranchTree, groupPathFor, prefixOf } from "../shared/branch-tree";
@@ -15,18 +16,20 @@ import type { BranchNode } from "../shared/branch-tree";
 import { branchSuggestions, namingCompletions, prefixAliases, variantHint } from "../shared/branch-consistency";
 import type { BranchSuggestion } from "../shared/branch-consistency";
 import { isProtectedBranch, lifecycleOf, staleDays } from "../shared/branch-lifecycle";
-import { buildCommitGraph, familyColour, maxLanes } from "../shared/commit-graph";
+import { buildCommitGraph, familyColour, maxLanes, withWorkInProgress, workInProgressHash } from "../shared/commit-graph";
 import { activityBaseline, changedBranches, parseActivityBaseline, pullRequestReference } from "../shared/repository-activity";
 import type { GraphRow } from "../shared/commit-graph";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
 import type {
   ActionPlan, Branch, Commit, CommitDetail, ConflictProposal, ConflictResolution, ConversationMessage, ExecutionFailure,
-  FileChange, HistoryScope, LlmConfig, Locale, Operation, PendingOperationKind, RepoSnapshot
+  FileChange, FileStats, HistoryScope, LlmConfig, Locale, Operation, PendingOperationKind, RepoSnapshot
 } from "../shared/types";
 import { localeTag, readLocale, translate, writeLocale, type MessageKey, type Translate } from "./i18n";
 
 type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string };
+type GraphFocus = { kind: "wip" } | { kind: "commit"; commit: Commit };
+type InspectorTab = "details" | "assistant";
 type ActivityItem = Notification;
 
 type InputDialog = { operation: "create_branch" | "merge"; title: string; label: string; value: string };
@@ -86,11 +89,6 @@ function remoteTitle(snapshot: RepoSnapshot, t: Translate) {
   return snapshot.remotes.map((name) => `${name}: ${snapshot.remoteUrls[name] ?? t("noRemoteUrl")}`).join("\n");
 }
 
-function shortPath(path: string) {
-  const pieces = path.split(/[\\/]/);
-  return pieces.length > 3 ? `…/${pieces.slice(-2).join("/")}` : path;
-}
-
 function branchColor(index: number) { return palette[index % palette.length]; }
 
 type PaneWidths = { sidebar: number; inspector: number };
@@ -146,22 +144,28 @@ type BranchView = { mode: BranchViewMode; expanded: string[]; order: BranchOrder
 const noDismissals: string[] = [];
 
 /**
- * How this repository's history is being read. Scoped to the selected branch by default, because a
- * list of every ref at once cannot answer the question anyone is actually asking of it.
+ * How this repository's history is being read. The main view opens on every branch at once, because
+ * that is what answers "what changed here"; scoping to one branch is a choice away in its header.
  */
 type HistoryPrefs = { scope: HistoryScope; byFamily: boolean };
 
-const historyPrefsStorageKey = (path: string) => `gitcat-history:${path}`;
+const historyPrefsStorageKey = (path: string) => `gitcat-graph:${path}`;
+/**
+ * Where the old History tab kept its choices. Its scope described that tab, not the main view, so
+ * only the colouring carries over; the graph starts on every branch until the user narrows it.
+ */
+const legacyHistoryPrefsStorageKey = (path: string) => `gitcat-history:${path}`;
 
 function readHistoryPrefs(path: string): HistoryPrefs {
   try {
     const stored = JSON.parse(localStorage.getItem(historyPrefsStorageKey(path)) ?? "null");
+    const legacy = stored ? null : JSON.parse(localStorage.getItem(legacyHistoryPrefsStorageKey(path)) ?? "null");
     return {
-      scope: ["all", "branch", "branch-only"].includes(stored?.scope) ? stored.scope : "branch",
-      byFamily: stored?.byFamily !== false
+      scope: ["all", "branch", "branch-only"].includes(stored?.scope) ? stored.scope : "all",
+      byFamily: (stored ?? legacy)?.byFamily !== false
     };
   } catch { /* a corrupt entry just means the defaults */ }
-  return { scope: "branch", byFamily: true };
+  return { scope: "all", byFamily: true };
 }
 
 function writeHistoryPrefs(path: string, prefs: HistoryPrefs) {
@@ -308,13 +312,16 @@ export default function App() {
   const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [config, setConfig] = useState<LlmConfig>({ provider: "openai", model: "gpt-5.6-luna", configured: false });
-  const [view, setView] = useState<"overview" | "history" | "changes">("overview");
-  const [selectedCommit, setSelectedCommit] = useState<Commit>();
+  /** What the details pane is about: the uncommitted work, or one commit picked in the graph. */
+  const [focus, setFocus] = useState<GraphFocus>();
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
+  const [graphCommits, setGraphCommits] = useState<Commit[]>([]);
+  const [jumpTo, setJumpTo] = useState<{ hash: string; at: number }>();
+  const [modalCommit, setModalCommit] = useState<{ commit: Commit; file?: FileChange }>();
   const [selectedFile, setSelectedFile] = useState<FileChange>();
   const [proposal, setProposal] = useState<ConflictProposal>();
   const [resolving, setResolving] = useState(false);
   const [inputDialog, setInputDialog] = useState<InputDialog>();
-  const [commitFormOpen, setCommitFormOpen] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
   const [deliveryMerge, setDeliveryMerge] = useState(false);
   const [deliveryStateId, setDeliveryStateId] = useState<string>();
@@ -439,8 +446,9 @@ export default function App() {
     setRequest("");
     setSelectedBranch(undefined);
     setCommitFilter("");
-    setView("overview");
-    setCommitFormOpen(false);
+    setFocus(undefined);
+    setInspectorTab("details");
+    setGraphCommits([]);
     setCommitMessage("");
     setDeliveryReview(undefined);
     setDeliveryStateId(undefined);
@@ -518,9 +526,11 @@ export default function App() {
     }));
   };
 
-  const addTurn = (path: string, question: string) => {
+  /** A new turn brings the assistant forward, unless it only reports a gesture that explains itself. */
+  const addTurn = (path: string, question: string, reveal = true) => {
     const turn: ConversationTurn = { id: ++conversationSequence.current, question, status: "loading" };
     setConversations((items) => ({ ...items, [path]: [...(items[path] ?? []), turn] }));
+    if (reveal) setInspectorTab("assistant");
     return turn.id;
   };
 
@@ -581,6 +591,7 @@ export default function App() {
       delete_branch: t("deleteNamedBranch", { name: args.name }),
       rename_branch: t("renameNamedBranch", { name: args.name, to: args.to }),
       fetch: t("updateRemoteRefs"),
+      pull: t("pullCurrentBranch"),
       push: t("publishCurrentBranch"),
       merge: t("mergeNamedBranch", { name: args.name }),
       rebase: t("rebaseOnto", { name: args.onto }),
@@ -694,10 +705,7 @@ export default function App() {
         const outcome = result.output || t("completed", { summary: plan.summary });
         updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome, status: "completed" }));
         addActivity({ label: t("actionExecuted"), detail: outcome, tone: "success" });
-        if (plan.steps.some((step) => step.operation === "commit")) {
-          setCommitMessage("");
-          setCommitFormOpen(false);
-        }
+        if (plan.steps.some((step) => step.operation === "commit")) setCommitMessage("");
       }
     } catch (error) {
       const message = cleanError(error, t("fallbackGitAction"));
@@ -721,7 +729,7 @@ export default function App() {
   const switchBranch = async (name: string) => {
     if (!snapshot || planning) return;
     const path = snapshot.path;
-    const turnId = addTurn(path, t("branchSwitchQuestion", { name }));
+    const turnId = addTurn(path, t("branchSwitchQuestion", { name }), false);
     try {
       const plan = await window.gitcat.prepareOperation(path, "checkout", { name }, locale);
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
@@ -755,8 +763,8 @@ export default function App() {
 
   const openCommitForm = () => {
     if (!snapshot?.changes.length) return;
-    setView("changes");
-    setCommitFormOpen(true);
+    setFocus({ kind: "wip" });
+    setInspectorTab("details");
   };
 
   const generateDescription = async () => {
@@ -769,7 +777,6 @@ export default function App() {
       const result = await window.gitcat.generateCommitDescription(repoPath, locale);
       if (requestSequence.current === sequence && result.stateId === stateId && snapshotRef.current?.stateId === result.stateId && snapshotRef.current?.path === repoPath) {
         setCommitMessage(result.description);
-        setCommitFormOpen(true);
       }
     } catch (error) {
       notify({ message: cleanError(error, t("fallbackGenerateDescription")), tone: "error" });
@@ -815,6 +822,32 @@ export default function App() {
     ? (selectedBranch && snapshot.branches.some((branch) => branch.name === selectedBranch) ? selectedBranch : snapshot.currentBranch)
     : "";
 
+  /**
+   * What the details pane shows when nothing has been picked: the uncommitted work if there is any,
+   * because that is what changes next, and otherwise the commit the checkout is standing on. A commit
+   * picked from an older list is swapped for the loaded one, which carries its body and stats.
+   */
+  const richer = (commit: Commit) => graphCommits.find((item) => item.hash === commit.hash || item.hash.startsWith(commit.shortHash || commit.hash)) ?? commit;
+  const headCommit = snapshot?.head ? graphCommits.find((commit) => commit.hash === snapshot.head) ?? snapshot.commits.find((commit) => commit.hash === snapshot.head) : undefined;
+  const activeFocus: GraphFocus | undefined = !snapshot ? undefined
+    : focus?.kind === "commit" ? { kind: "commit", commit: richer(focus.commit) }
+    : snapshot.isDirty ? { kind: "wip" }
+    : headCommit ? { kind: "commit", commit: headCommit } : undefined;
+  const waiting = conversation.filter((turn) => turn.status === "ready").length;
+
+  const focusOn = (next: GraphFocus, jump = false) => {
+    setFocus(next);
+    setInspectorTab("details");
+    if (jump && next.kind === "commit") setJumpTo({ hash: next.commit.hash, at: Date.now() });
+  };
+
+  /** Picking a branch also points the graph at its tip, so the list answers "where is it" straight away. */
+  const selectBranch = (name: string) => {
+    setSelectedBranch(name);
+    const tip = snapshot?.branches.find((branch) => branch.name === name)?.lastCommit;
+    if (tip) focusOn({ kind: "commit", commit: richer(tip) }, true);
+  };
+
 
   return (
     <I18nContext.Provider value={{ locale, t, setLocale }}>
@@ -836,17 +869,30 @@ export default function App() {
         {!config.configured && <div className="provider-banner" role="status"><Eye size={14} /><span><strong>{t("noProviderBanner")}</strong> {t("noProviderBannerDetail")}</span><button className="outline-button small" onClick={() => setSettingsOpen(true)}><Settings2 size={13} /> {t("configure")}</button></div>}
 
 
+        <RepoToolbar
+          snapshot={snapshot}
+          busy={planning}
+          deliveryBusy={planning || generatingDescription}
+          refreshing={refreshingPath === snapshot.path}
+          refreshDisabled={Boolean(refreshingPath)}
+          onRefresh={() => void refreshProject()}
+          onFetch={() => void prepare("fetch")}
+          onPull={() => void prepare("pull")}
+          onPush={() => void prepare("push")}
+          onBranch={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
+          onSave={() => beginDelivery(false)}
+          onIntegrate={() => beginDelivery(true)}
+        />
         <main className="main-layout" ref={layoutRef} style={paneStyle}>
           {panes && <PaneDivider edge="sidebar" width={panes.sidebar} onPointerDown={startResize("sidebar")} onNudge={(delta) => nudgePane("sidebar", delta)} onReset={() => resetPane("sidebar")} />}
           {panes && <PaneDivider edge="inspector" width={panes.inspector} onPointerDown={startResize("inspector")} onNudge={(delta) => nudgePane("inspector", delta)} onReset={() => resetPane("inspector")} />}
           <aside className="sidebar">
-            <div className="sidebar-project"><div className="folder-icon"><FolderGit2 size={23} /></div><div><strong>{snapshot.name}</strong><span title={snapshot.path}>{shortPath(snapshot.path)}</span></div></div>
             <BranchPanel
               key={snapshot.path}
               snapshot={snapshot}
               busy={planning}
               selected={selection}
-              onSelect={setSelectedBranch}
+              onSelect={selectBranch}
               onCreate={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
               onSwitch={(name) => void prepare("checkout", { name })}
               onSwitchNow={(name) => void switchBranch(name)}
@@ -858,8 +904,6 @@ export default function App() {
           </aside>
 
           <section className="graph-area">
-            <div className="workspace-header"><div className="workspace-intro"><h1>{t("workInContext")}</h1><div className="project-breadcrumb"><span>{snapshot.name}</span><span aria-hidden="true">/</span><strong title={snapshot.currentBranch}>{snapshot.currentBranch}</strong></div></div><div className="workspace-actions"><button className="ghost-button" onClick={() => void refreshProject()} disabled={Boolean(refreshingPath)}>{refreshingPath === snapshot.path ? <LoaderCircle className="spin" size={15} /> : <RefreshCcw size={15} />} {t("refresh")}</button><button className="ghost-button" onClick={() => void prepare("fetch")} disabled={planning}><ArrowDownToLine size={15} /> {t("fetch")}</button><button className="ghost-button" onClick={() => void prepare("push")} disabled={planning}><ArrowUpFromLine size={15} /> {t("push")}</button></div></div>
-            <div className="graph-toolbar"><div className="view-tabs"><button className={`view-tab ${view === "overview" ? "active" : ""}`} onClick={() => setView("overview")}>{t("overview")}</button><button className={`view-tab ${view === "history" ? "active" : ""}`} onClick={() => setView("history")}>{t("history")}</button><button className={`view-tab ${view === "changes" ? "active" : ""}`} onClick={() => setView("changes")}>{t("changesTab")} <span className="count-badge">{snapshot.changes.length}</span></button></div>{view !== "changes" && <div className="graph-tools"><div className="search-field commit-search"><Search size={14} /><input aria-label={t("searchCommits")} value={commitFilter} onChange={(event) => setCommitFilter(event.target.value)} placeholder={t("searchCommits")} /></div></div>}</div>
             {snapshot.pending && <PendingBanner
               snapshot={snapshot}
               busy={planning}
@@ -868,12 +912,34 @@ export default function App() {
               onAbort={() => void prepare("abort_operation")}
               onResolve={() => void resolveConflicts()}
             />}
-            <BranchWorkCard snapshot={snapshot} busy={planning || generatingDescription} onSave={() => beginDelivery(false)} onIntegrate={() => beginDelivery(true)} />
-            {view === "overview" ? <RepositoryOverview key={snapshot.path} snapshot={snapshot} filter={commitFilter} onSelect={setSelectedCommit} onChanges={() => setView("changes")} /> : view === "history" ? <HistoryView key={snapshot.path} snapshot={snapshot} selection={selection} filter={commitFilter} onSelect={setSelectedCommit} />
-              : <ChangesView snapshot={snapshot} merge={deliveryMerge} configured={config.configured} stale={Boolean(deliveryStateId && deliveryStateId !== snapshot.stateId)} onReviewAgain={() => beginDelivery(deliveryMerge)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} formOpen={commitFormOpen} message={commitMessage} generating={generatingDescription} busy={planning} onOpenForm={() => beginDelivery(false)} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit} />}
+            <HistoryView
+              key={snapshot.path}
+              snapshot={snapshot}
+              selection={selection}
+              filter={commitFilter}
+              onFilterChange={setCommitFilter}
+              focus={activeFocus}
+              jumpTo={jumpTo}
+              onFocus={focusOn}
+              onOpen={(commit) => setModalCommit({ commit })}
+              onLoaded={setGraphCommits}
+            />
           </section>
 
-          <aside className="inspector"><div className="inspector-header"><div><div className="eyebrow">{t("assistant")}</div><h2>{t("assistantHeading")}</h2></div><div className="assistant-icon"><CatMark size={29} outline /></div></div><div className="assistant-body"><p className="assistant-copy">{config.configured ? t("assistantConfiguredCopy") : t("assistantUnconfiguredCopy")}</p>{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div><div className="chat-compose"><textarea aria-label={t("assistantRequest")} disabled={!config.configured} value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder={config.configured ? t("assistantPlaceholder") : t("configureAssistantPlaceholder")} rows={3} /><button className="send-button" aria-label={t("prepareRequest")} onClick={() => void propose(request)} disabled={planning || !request.trim() || !config.configured}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div></aside>
+          <aside className="inspector">
+            <div className="inspector-tabs" role="tablist" aria-label={t("inspectorTabs")}>
+              <button role="tab" aria-selected={inspectorTab === "details"} className={inspectorTab === "details" ? "active" : ""} onClick={() => setInspectorTab("details")}><FileDiff size={14} />{t("detailsTab")}</button>
+              <button role="tab" aria-selected={inspectorTab === "assistant"} className={inspectorTab === "assistant" ? "active" : ""} onClick={() => setInspectorTab("assistant")}><CatMark size={15} outline />{t("assistantTab")}{planning ? <LoaderCircle className="spin" size={12} /> : waiting > 0 ? <span className="tab-count attention" title={t("plansWaiting", { count: waiting })}>{waiting}</span> : conversation.length > 0 && <span className="tab-count">{conversation.length}</span>}</button>
+            </div>
+            {inspectorTab === "details" ? <div className="inspector-body">
+              {activeFocus?.kind === "wip"
+                ? <ChangesView snapshot={snapshot} merge={deliveryMerge} configured={config.configured} stale={Boolean(deliveryStateId && deliveryStateId !== snapshot.stateId)} onReviewAgain={() => beginDelivery(deliveryMerge)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} message={commitMessage} generating={generatingDescription} busy={planning} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit} />
+                : activeFocus
+                  ? <CommitInspector key={activeFocus.commit.hash} commit={activeFocus.commit} snapshot={snapshot} known={graphCommits} onFocus={(commit) => focusOn({ kind: "commit", commit }, true)} onOpen={(file) => setModalCommit({ commit: activeFocus.commit, file })} />
+                  : <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommitSelected")}</strong><span>{t("noCommitSelectedHint")}</span></div>}
+            </div> : <div className="assistant-body"><p className="assistant-copy">{config.configured ? t("assistantConfiguredCopy") : t("assistantUnconfiguredCopy")}</p>{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div>}
+            <div className="chat-compose"><textarea aria-label={t("assistantRequest")} disabled={!config.configured} value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder={config.configured ? t("assistantPlaceholder") : t("configureAssistantPlaceholder")} rows={2} /><button className="send-button" aria-label={t("prepareRequest")} onClick={() => void propose(request)} disabled={planning || !request.trim() || !config.configured}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div>
+          </aside>
         </main>
         <footer className="statusbar"><div className="status-left"><span className={`status-good ${snapshot.isDirty ? "has-changes" : ""}`}><CircleDot size={12} /> {snapshot.isDirty ? counted(t, snapshot.changes.length, "change", "changes") : t("noUncommittedChanges")}</span><span className="status-separator" /><span>{counted(t, branchCount.local, "localBranch", "localBranches")}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} ${t("remoteOnly")}` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> {t("lastRead", { date: formatDate(active.loadedAt, locale) })}</span><span className="remote-status" title={remoteTitle(snapshot, t)}><Cloud size={12} /> {remoteLabel(snapshot, t)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : t("llmNotConfigured")}</span></div></footer>
       </>}
@@ -882,7 +948,7 @@ export default function App() {
         onApply={async () => { const review = deliveryReview; setDeliveryReview(undefined); await applyPlan(review.turnId, review.plan); }} />}
       {settingsOpen && <SettingsModal config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onSaved={(next) => { setConfig(next); setSettingsOpen(false); notify({ message: t("settingsSaved"), tone: "success" }); }} />}
       {inputDialog && <InputModal dialog={inputDialog} branches={snapshot?.branches ?? []} onChange={(value) => setInputDialog({ ...inputDialog, value })} onClose={() => setInputDialog(undefined)} onSubmit={submitInputDialog} />}
-      {selectedCommit && snapshot && <CommitModal commit={selectedCommit} repoPath={snapshot.path} onClose={() => setSelectedCommit(undefined)} />}
+      {modalCommit && snapshot && <CommitModal commit={modalCommit.commit} initialFile={modalCommit.file} repoPath={snapshot.path} onClose={() => setModalCommit(undefined)} />}
       {selectedFile && snapshot && <FileDiffModal file={selectedFile} repoPath={snapshot.path} onClose={() => setSelectedFile(undefined)} />}
       {proposal && <ConflictProposalModal proposal={proposal} busy={planning} onApply={(resolutions) => void applyResolutions(resolutions)} onClose={() => setProposal(undefined)} />}
       {resolving && <div className="resolving-overlay" role="status"><LoaderCircle className="spin" size={22} /><span>{t("readConflictSides")}</span></div>}
@@ -1223,11 +1289,11 @@ function BranchRow({ branch, label, variant, merged, selected, defaultBranch, co
   return <div onContextMenu={onContextMenu} className={`branch-row ${branch.isCurrent ? "current" : ""} ${selected ? "selected" : ""} ${merged ? "merged" : ""} ${branch.stackedOn ? "stacked" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onSwitchNow} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch, t)}\n${t("branchClickHint")}`}><span className="branch-color" style={{ background: colour }} />{branch.stackedOn ? <GitFork size={14} className="branch-stack-icon" /> : <GitBranch size={14} />}<span className="branch-label">{label}</span>{variant && <span className="branch-variant" title={t("variantPrefix", { name: branch.name })}>{t("variant")}</span>}{merged && <span className="branch-merged" role="img" aria-label={t("mergedBadge", { branch: defaultBranch ?? "" })} title={t("mergedTitle", { branch: defaultBranch ?? "" })}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={t("worktreeBadge", { path: branch.checkedOutIn })} title={t("worktreeBadge", { path: branch.checkedOutIn })}><FolderGit2 size={12} /></span>}{protectedByPrefix && <span className="branch-protected" role="img" aria-label={t("protectedBadge")} title={t("protectedTitle")}><ShieldCheck size={12} /></span>}{stale > 0 && <span className="branch-stale" role="img" aria-label={t("staleBadge", { days: stale })} title={t("staleTitle", { days: stale })}><Clock3 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">{t("current")}</span>}{isDefault && <span className="current-pill">{t("primary")}</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && <button className="branch-switch" onClick={onSwitch} disabled={busy} aria-label={t("switchBranch", { name: branch.name })} title={t("switchBranchTitle", { name: branch.name })}><ArrowLeftRight size={12} /></button>}{!branch.isCurrent && !isDefault && !protectedByPrefix && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={t("deleteBranch", { name: branch.name })} title={branch.mergedInto.length ? t("deleteMergedBranch", { name: branch.name, branches: branch.mergedInto.join(t("and")) }) : t("deleteUnmergedBranch", { name: branch.name })}><Trash2 size={12} /></button>}</div>;
 }
 
-/** Repository-wide activity remains pending until the user explicitly reviews it. */
-function RepositoryOverview({ snapshot, filter, onSelect, onChanges }: {
-  snapshot: RepoSnapshot; filter: string; onSelect: (commit: Commit) => void; onChanges: () => void;
-}) {
-  const { t } = useI18n();
+/**
+ * Branches whose tips moved since the user last marked the repository reviewed. The baseline is a
+ * per-repository view preference, so it lives in this machine's storage and never touches Git.
+ */
+function useActivity(snapshot: RepoSnapshot) {
   const storageKey = `gitcat-activity:${snapshot.path}`;
   const [baseline, setBaseline] = useState(() => {
     try { return parseActivityBaseline(localStorage.getItem(storageKey)) ?? activityBaseline(snapshot); }
@@ -1241,38 +1307,76 @@ function RepositoryOverview({ snapshot, filter, onSelect, onChanges }: {
   const changed = changedBranches(baseline, activityBaseline(snapshot));
   const highlighted = new Set(snapshot.branches.filter((branch) => changed.includes(branch.name))
     .flatMap((branch) => branch.lastCommit ? [branch.lastCommit.shortHash] : []));
-  const current = snapshot.branches.find((branch) => branch.isCurrent);
-  return <>
-    <div className={`activity-overview ${changed.length ? "has-updates" : ""}`}>
-      <div className="overview-heading"><div>
-        <h3>{changed.length ? t("branchesUpdated", { count: changed.length }) : t("recentHistory")}</h3>
-      </div>{changed.length > 0 && <button className="outline-button small" onClick={() => setBaseline(activityBaseline(snapshot))}><Check size={13} />{t("markReviewed")}</button>}</div>
-      {changed.length > 0 && <p>{t("sinceReview")}</p>}
-      {changed.length > 0 && <div className="updated-branches">{changed.map((name) => <span key={name} title={name}>{name}{!snapshot.branches.some((branch) => branch.name === name) ? ` · ${t("removedBranch")}` : ""}</span>)}</div>}
-      <details className="overview-details"><summary>{t("repositoryStatus")}</summary><p>{t("overviewIntro")}</p><div className="overview-stats"><button onClick={onChanges} className={snapshot.changes.length ? "needs-attention" : ""}><FileDiff size={14} /><strong>{snapshot.changes.length}</strong>{t("uncommittedFiles")}</button>
-        <span><ArrowDownToLine size={14} /><strong>{current?.upstream ? current.behind : "—"}</strong>{t("incomingCurrent")}</span>
-        <span><ArrowUpFromLine size={14} /><strong>{current?.upstream ? current.ahead : "—"}</strong>{t("outgoingCurrent")}</span></div>
-      <small>{t(current?.upstream ? "knownRemoteState" : "noRemoteComparison")}</small></details>
-      {storageError && <p role="alert">{t("activityStorageError")}</p>}
-    </div>
-    <HistoryView snapshot={snapshot} selection={snapshot.currentBranch} filter={filter} onSelect={onSelect} overview highlighted={highlighted} />
-  </>;
+  return { changed, highlighted, storageError, markReviewed: () => setBaseline(activityBaseline(snapshot)) };
 }
 
-function HistoryView({ snapshot, selection, filter, onSelect, overview = false, highlighted }: {
-  snapshot: RepoSnapshot; selection: string; filter: string; onSelect: (commit: Commit) => void; overview?: boolean; highlighted?: Set<string>;
+/**
+ * A coarse "when" for the graph's margin. It only appears where it changes from the row above, so a
+ * run of commits from the same day reads as one block instead of repeating itself on every line.
+ */
+function timeMarker(date: string, locale: Locale) {
+  const value = Date.parse(date);
+  if (Number.isNaN(value)) return "";
+  const startOfDay = (time: number) => { const day = new Date(time); day.setHours(0, 0, 0, 0); return day.valueOf(); };
+  const days = Math.round((startOfDay(Date.now()) - startOfDay(value)) / 86_400_000);
+  const formatter = new Intl.RelativeTimeFormat(localeTag(locale), { numeric: "auto" });
+  if (days < 7) return formatter.format(-Math.max(days, 0), "day");
+  if (days < 30) return formatter.format(-Math.round(days / 7), "week");
+  if (days < 365) return formatter.format(-Math.round(days / 30), "month");
+  return formatter.format(-Math.round(days / 365), "year");
+}
+
+type FileKind = "added" | "modified" | "deleted" | "renamed" | "conflict";
+
+/** Conflicts first: "DU" or "AA" is a file both sides touched, whatever else its letters say. */
+function fileKind(code: string): FileKind {
+  if (code.includes("U") || code === "AA" || code === "DD") return "conflict";
+  if (code.includes("?") || code.includes("A")) return "added";
+  if (code.includes("R") || code.includes("C")) return "renamed";
+  if (code.includes("D")) return "deleted";
+  return "modified";
+}
+
+const fileKindIcons: Record<FileKind, LucideIcon> = {
+  added: FilePlus, modified: FilePen, deleted: FileMinus, renamed: FileSymlink, conflict: AlertTriangle
+};
+
+function workSummary(files: FileChange[], t: Translate) {
+  const counts = new Map<FileKind, number>();
+  for (const file of files) counts.set(fileKind(file.code), (counts.get(fileKind(file.code)) ?? 0) + 1);
+  const words: Record<FileKind, [MessageKey, MessageKey]> = {
+    modified: ["summaryModifiedOne", "summaryModified"], added: ["summaryAddedOne", "summaryAdded"], deleted: ["summaryDeletedOne", "summaryDeleted"],
+    renamed: ["summaryRenamedOne", "summaryRenamed"], conflict: ["summaryConflictOne", "summaryConflict"]
+  };
+  return (Object.keys(words) as FileKind[]).flatMap((kind) => {
+    const count = counts.get(kind) ?? 0;
+    return count ? [{ kind, count, label: t(words[kind][count === 1 ? 0 : 1], { count }) }] : [];
+  });
+}
+
+/**
+ * The whole repository as one graph, newest first: which branch each line of work belongs to, what
+ * every commit said and how much it changed, and — above it all — the work that is not saved yet.
+ */
+function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpTo, onFocus, onOpen, onLoaded }: {
+  snapshot: RepoSnapshot; selection: string; filter: string; onFilterChange: (value: string) => void;
+  focus?: GraphFocus; jumpTo?: { hash: string; at: number }; onFocus: (focus: GraphFocus) => void;
+  onOpen: (commit: Commit) => void; onLoaded: (commits: Commit[]) => void;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [prefs, setPrefs] = useState(() => readHistoryPrefs(snapshot.path));
   const [page, setPage] = useState<{ commits: Commit[]; hasMore: boolean; comparedTo?: string }>({ commits: [], hasMore: false });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
+  const activity = useActivity(snapshot);
   // Every load is numbered, so a slow answer for a scope the user already left cannot overwrite the
   // one they are looking at.
   const request = useRef(0);
+  const scroller = useRef<HTMLDivElement>(null);
+  const buttons = useRef(new Map<string, HTMLButtonElement>());
+  const jumped = useRef(0);
 
-  const { byFamily } = prefs;
-  const scope = overview ? "all" : prefs.scope;
+  const { byFamily, scope } = prefs;
   const branch = scope === "all" ? undefined : selection;
 
   const fetchPage = (skip: number) => {
@@ -1295,6 +1399,7 @@ function HistoryView({ snapshot, selection, filter, onSelect, overview = false, 
   };
 
   useEffect(() => { fetchPage(0); }, [snapshot.path, snapshot.head, snapshot.stateId, scope, branch]);
+  useEffect(() => { onLoaded(page.commits); }, [page.commits]);
 
   const update = (next: Partial<HistoryPrefs>) => {
     const merged = { ...prefs, ...next };
@@ -1302,19 +1407,63 @@ function HistoryView({ snapshot, selection, filter, onSelect, overview = false, 
     writeHistoryPrefs(snapshot.path, merged);
   };
 
+  const needle = filter.trim().toLocaleLowerCase();
+  // The working tree only belongs in a list that contains the commit it continues from.
+  const showWork = snapshot.isDirty && Boolean(snapshot.head) && !needle && (scope === "all" || branch === snapshot.currentBranch);
+  const listed = useMemo(
+    () => showWork ? withWorkInProgress(page.commits, snapshot.head, snapshot.currentBranch) : page.commits,
+    [showWork, page.commits, snapshot.head, snapshot.currentBranch]
+  );
   const graph = useMemo(
-    () => buildCommitGraph(page.commits, snapshot.remotes, snapshot.defaultBranch),
-    [page.commits, snapshot.remotes, snapshot.defaultBranch]
+    () => buildCommitGraph(listed, snapshot.remotes, snapshot.defaultBranch),
+    [listed, snapshot.remotes, snapshot.defaultBranch]
   );
   const rows = useMemo(() => new Map(graph.rows.map((row) => [row.commit.hash, row])), [graph]);
-  const needle = filter.trim().toLocaleLowerCase();
   const visible = useMemo(() => needle
-    ? page.commits.filter((commit) => [commit.subject, commit.author, commit.hash, ...commit.refs]
+    ? page.commits.filter((commit) => [commit.subject, commit.body ?? "", commit.author, commit.hash, ...commit.refs]
         .some((field) => field.toLocaleLowerCase().includes(needle)))
-    : page.commits, [page.commits, needle]);
+    : listed, [page.commits, listed, needle]);
   // A filtered list is a selection of commits, not a graph: the lanes between them no longer connect.
   const lanes = needle ? 0 : Math.min(graph.laneCount, maxLanes);
-  const trackWidth = lanes ? Math.max(43, lanes * laneWidth + laneOffset + 10) : 43;
+  const trackWidth = lanes ? Math.max(40, lanes * laneWidth + laneOffset) : 40;
+  const markers = useMemo(() => {
+    let previous = "";
+    return visible.map((commit) => {
+      const label = commit.date ? timeMarker(commit.date, locale) : "";
+      if (!label || label === previous) return "";
+      previous = label;
+      return label;
+    });
+  }, [visible, locale]);
+  const summary = useMemo(() => workSummary(snapshot.changes, t).map((item) => item.label).join(" · "), [snapshot.changes, t]);
+
+  const isFocused = (commit: Commit) => commit.hash === workInProgressHash
+    ? focus?.kind === "wip"
+    : focus?.kind === "commit" && (commit.hash === focus.commit.hash || commit.hash.startsWith(focus.commit.shortHash || focus.commit.hash));
+  const focusCommit = (commit: Commit) => onFocus(commit.hash === workInProgressHash ? { kind: "wip" } : { kind: "commit", commit });
+
+  // Picking a branch in the sidebar brings its tip into view once, and never again on a later reload.
+  useEffect(() => {
+    if (!jumpTo || jumped.current === jumpTo.at) return;
+    const target = visible.find((commit) => commit.hash.startsWith(jumpTo.hash) || jumpTo.hash.startsWith(commit.hash));
+    const node = target && buttons.current.get(target.hash);
+    if (!node) return;
+    jumped.current = jumpTo.at;
+    node.scrollIntoView({ block: "center" });
+  }, [jumpTo, visible]);
+
+  /** Up and down walk the graph the way a list of files is walked, and the details pane follows. */
+  const walk = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const index = visible.findIndex(isFocused);
+    const next = visible[Math.min(Math.max(index + (event.key === "ArrowDown" ? 1 : -1), 0), visible.length - 1)];
+    if (!next || next === visible[index]) return;
+    event.preventDefault();
+    focusCommit(next);
+    const node = buttons.current.get(next.hash);
+    node?.focus();
+    node?.scrollIntoView({ block: "nearest" });
+  };
 
   const scopeLabels: Record<HistoryScope, string> = {
     all: t("allBranches"),
@@ -1322,16 +1471,22 @@ function HistoryView({ snapshot, selection, filter, onSelect, overview = false, 
     "branch-only": t("branchOnlyScope", { branch: selection })
   };
 
-  return <div className={`graph-scroll ${overview ? "overview-graph" : ""}`} style={{ "--track-w": `${trackWidth}px` } as CSSProperties}>
+  return <div className="graph-panel">
     <div className="graph-header">
       <div className="graph-scope">
-        {overview ? <span className="overview-order">{t("historyDirection")}</span> : <label className="scope-field"><GitBranch size={12} /><span className="visually-hidden">{t("historyScope")}</span><select aria-label={t("historyScope")} value={scope} onChange={(event) => update({ scope: event.target.value as HistoryScope })}>
+        <label className="scope-field"><GitBranch size={12} /><span className="visually-hidden">{t("historyScope")}</span><select aria-label={t("historyScope")} value={scope} onChange={(event) => update({ scope: event.target.value as HistoryScope })}>
           {(Object.keys(scopeLabels) as HistoryScope[]).map((value) => <option value={value} key={value}>{scopeLabels[value]}</option>)}
-        </select></label>}
+        </select></label>
         {scope === "branch-only" && <span className="scope-note">{page.comparedTo
           ? t("comparedTo", { branch: page.comparedTo })
           : t("noDefaultComparison")}</span>}
       </div>
+      {activity.changed.length > 0 && <div className="activity-strip" role="status" title={t("sinceReview")}>
+        <span className="activity-pulse" aria-hidden="true" />
+        <strong>{t("branchesUpdated", { count: activity.changed.length })}</strong>
+        <span className="activity-names">{activity.changed.map((name) => snapshot.branches.some((item) => item.name === name) ? name : `${name} · ${t("removedBranch")}`).join(", ")}</span>
+        <button className="outline-button small" onClick={activity.markReviewed}><Check size={12} />{t("markReviewed")}</button>
+      </div>}
       <div className="graph-header-right">
         <button className="graph-colour-toggle" aria-pressed={byFamily} onClick={() => update({ byFamily: !byFamily })} title={byFamily
           ? t("familyColourTitle")
@@ -1339,52 +1494,102 @@ function HistoryView({ snapshot, selection, filter, onSelect, overview = false, 
         <span className="graph-count">{needle
           ? t("loadedCommits", { shown: visible.length, total: page.commits.length })
           : page.hasMore ? t("commitsMore", { count: page.commits.length }) : t("noMoreCommits", { count: page.commits.length })}</span>
+        <div className="search-field commit-search"><Search size={13} /><input aria-label={t("searchCommits")} value={filter} onChange={(event) => onFilterChange(event.target.value)} placeholder={t("searchCommits")} /></div>
       </div>
     </div>
-    {overview && <><details className="overview-legend"><summary><Info size={12} />{t("readGraph")}</summary><p>{t("prReferenceNote")}</p></details><div className="overview-columns"><span>{t("branchesAndTags")}</span><span>{t("graphLabel")}</span><span>{t("changesAndPRs")}</span></div></>}
+    {activity.storageError && <div className="graph-note error" role="alert">{t("activityStorageError")}</div>}
     {needle && <div className="graph-note">{t("filteredHistoryNote", { count: page.commits.length })}</div>}
     {error && <div className="graph-note error" role="alert">{error}</div>}
-    {visible.length ? visible.map((commit, index) => <CommitRow
-      key={commit.hash}
-      commit={commit}
-      overview={overview}
-      updated={highlighted?.has(commit.shortHash)}
-      row={rows.get(commit.hash)}
-      lanes={lanes}
-      trackWidth={trackWidth}
-      remotes={snapshot.remotes}
-      colour={byFamily ? familyColour(rows.get(commit.hash)?.family ?? "") : branchColor(index)}
-      byFamily={byFamily}
-      onSelect={() => onSelect(commit)}
-    />) : !loading && <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommits")}</strong><span>{needle ? t("filterNoCommits") : scope === "branch-only" ? t("branchNoUniqueCommits", { branch: selection, base: page.comparedTo ?? t("primary") }) : t("branchNoHistory")}</span></div>}
-    {loading && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> {t("readHistory")}</div>}
-    {!loading && page.hasMore && !needle && <button className="load-more" onClick={() => fetchPage(page.commits.length)}>{t("loadMoreCommits")}</button>}
+    <div className="graph-scroll" ref={scroller} style={{ "--track-w": `${trackWidth}px` } as CSSProperties} onKeyDown={walk}>
+      <div className="graph-columns" aria-hidden="true"><span>{t("branchesAndTags")}</span><span>{t("graphLabel")}</span><span>{t("columnMessage")}</span><span className="col-changes">{t("columnChanges")}</span><span className="col-when">{t("columnWhen")}</span></div>
+      {visible.length ? visible.map((commit, index) => <CommitRow
+        key={commit.hash}
+        commit={commit}
+        work={commit.hash === workInProgressHash ? { summary, count: snapshot.changes.length, branch: snapshot.currentBranch } : undefined}
+        head={commit.hash === snapshot.head}
+        selected={isFocused(commit)}
+        updated={activity.highlighted.has(commit.shortHash)}
+        marker={markers[index]}
+        row={rows.get(commit.hash)}
+        lanes={lanes}
+        trackWidth={trackWidth}
+        remotes={snapshot.remotes}
+        colour={byFamily ? familyColour(rows.get(commit.hash)?.family ?? "") : branchColor(index)}
+        byFamily={byFamily}
+        register={(node) => { if (node) buttons.current.set(commit.hash, node); else buttons.current.delete(commit.hash); }}
+        onSelect={() => focusCommit(commit)}
+        onOpen={() => commit.hash === workInProgressHash ? focusCommit(commit) : onOpen(commit)}
+      />) : !loading && <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommits")}</strong><span>{needle ? t("filterNoCommits") : scope === "branch-only" ? t("branchNoUniqueCommits", { branch: selection, base: page.comparedTo ?? t("primary") }) : t("branchNoHistory")}</span></div>}
+      {loading && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> {t("readHistory")}</div>}
+      {!loading && page.hasMore && !needle && <button className="load-more" onClick={() => fetchPage(page.commits.length)}>{t("loadMoreCommits")}</button>}
+    </div>
   </div>;
 }
 
-const laneWidth = 14;
-const laneOffset = 12;
+const laneWidth = 20;
+const laneOffset = 14;
 const laneX = (lane: number) => lane * laneWidth + laneOffset;
 
 /**
  * One row of the graph. The lines are an SVG stretched to whatever height the row ends up with, and
  * the node stays a DOM element so that stretching never turns the circle into an ellipse. Both are
  * anchored to the same midpoint, so the joint always lands on the node whatever the row measures.
+ * A row with refs also draws the short rule that ties its labels to the node they name.
  */
-function GraphLanes({ row, lanes, colour, byFamily }: { row: GraphRow; lanes: number; colour: string; byFamily: boolean }) {
+function GraphLanes({ row, lanes, colour, byFamily, connector, dashed }: { row: GraphRow; lanes: number; colour: string; byFamily: boolean; connector: boolean; dashed: boolean }) {
   const width = lanes * laneWidth + laneOffset;
   const visible = (lane: number) => lane < lanes;
-  const tone = (family: string) => byFamily ? familyColour(family) : "#294153";
+  const tone = (family: string) => byFamily ? familyColour(family) : "#4a4d4b";
+  const dash = dashed ? "3 3" : undefined;
   return <svg className="graph-lanes" viewBox={`0 0 ${width} 100`} preserveAspectRatio="none" aria-hidden="true">
+    {connector && visible(row.lane) && <line className="ref-link" x1={0} y1={50} x2={laneX(row.lane)} y2={50} stroke={colour} />}
     {row.through.filter((line) => visible(line.lane)).map((line) =>
       <line key={`t${line.lane}`} x1={laneX(line.lane)} y1={0} x2={laneX(line.lane)} y2={100} stroke={tone(line.family)} />)}
     {row.incoming.filter(visible).map((lane) => lane === row.lane
       ? <line key={`i${lane}`} x1={laneX(lane)} y1={0} x2={laneX(lane)} y2={50} stroke={colour} />
       : <path key={`i${lane}`} d={`M ${laneX(lane)} 0 L ${laneX(lane)} 20 Q ${laneX(lane)} 50 ${laneX(row.lane)} 50`} fill="none" stroke={colour} />)}
     {row.outgoing.filter(visible).map((lane) => lane === row.lane
-      ? <line key={`o${lane}`} x1={laneX(lane)} y1={50} x2={laneX(lane)} y2={100} stroke={colour} />
-      : <path key={`o${lane}`} d={`M ${laneX(row.lane)} 50 Q ${laneX(lane)} 50 ${laneX(lane)} 80 L ${laneX(lane)} 100`} fill="none" stroke={colour} />)}
+      ? <line key={`o${lane}`} x1={laneX(lane)} y1={50} x2={laneX(lane)} y2={100} stroke={colour} strokeDasharray={dash} />
+      : <path key={`o${lane}`} d={`M ${laneX(row.lane)} 50 Q ${laneX(lane)} 50 ${laneX(lane)} 80 L ${laneX(lane)} 100`} fill="none" stroke={colour} strokeDasharray={dash} />)}
   </svg>;
+}
+
+/** Same name, same colour, on every machine: the tone comes from the author, not from the list. */
+function authorTone(key: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < key.length; index += 1) { hash ^= key.charCodeAt(index); hash = Math.imul(hash, 16777619); }
+  const hue = [14, 34, 56, 96, 128, 168, 190, 212, 246, 276, 302, 344][(hash >>> 0) % 12];
+  return { background: `hsl(${hue} 30% 30%)`, color: `hsl(${hue} 75% 86%)` };
+}
+
+function initials(name: string) {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  const letters = words.length > 1 ? [words[0], words[words.length - 1]] : words;
+  return letters.map((word) => [...word][0] ?? "").join("").toLocaleUpperCase() || "?";
+}
+
+function Avatar({ name, email, size }: { name: string; email: string; size: number }) {
+  return <span className="avatar-chip" style={{ ...authorTone(email || name), width: size, height: size, fontSize: Math.round(size * 0.4) }} title={email ? `${name} <${email}>` : name} aria-hidden="true">{initials(name)}</span>;
+}
+
+/** Small counts stay exact; past a thousand lines the scale matters more than the last digit. */
+function compactCount(value: number, locale: Locale) {
+  return new Intl.NumberFormat(localeTag(locale), value >= 1_000 ? { notation: "compact", maximumFractionDigits: 1 } : {}).format(value);
+}
+
+/** Lines in and out, and a five-block bar for the proportion — the shape of a change, readable at a glance. */
+function ChangeStats({ additions, deletions, files, binary = false }: { additions: number; deletions: number; files?: number; binary?: boolean }) {
+  const { t, locale } = useI18n();
+  const total = additions + deletions;
+  const title = files === undefined ? undefined : t("commitStatsTitle", { files, additions, deletions });
+  if (binary) return <span className="change-stats binary">{t("binaryFile")}</span>;
+  if (!total) return <span className="change-stats empty" title={title}>{files ? counted(t, files, "file", "files") : "—"}</span>;
+  const added = Math.round((additions / total) * 5);
+  return <span className="change-stats" title={title}>
+    {additions > 0 && <span className="stat-add">+{compactCount(additions, locale)}</span>}
+    {deletions > 0 && <span className="stat-del">−{compactCount(deletions, locale)}</span>}
+    <span className="stat-bar" aria-hidden="true">{Array.from({ length: 5 }, (_, index) => <i key={index} className={index < added ? "add" : "del"} />)}</span>
+  </span>;
 }
 
 type RefChip = { label: string; kind: "head" | "local" | "remote" | "tag" };
@@ -1424,37 +1629,60 @@ function refChips(refs: string[], remotes: string[]): RefChip[] {
   });
 }
 
-function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, onSelect, overview = false, updated = false }: { overview?: boolean; updated?: boolean; commit: Commit; row?: GraphRow; lanes: number; trackWidth: number; remotes: string[]; colour: string; byFamily: boolean; onSelect: () => void }) {
+function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, selected, updated, head, marker, work, register, onSelect, onOpen }: {
+  commit: Commit; row?: GraphRow; lanes: number; trackWidth: number; remotes: string[]; colour: string; byFamily: boolean;
+  selected: boolean; updated: boolean; head: boolean; marker: string;
+  work?: { summary: string; count: number; branch: string };
+  register: (node: HTMLButtonElement | null) => void; onSelect: () => void; onOpen: () => void;
+}) {
   const { t, locale } = useI18n();
   const lane = row && lanes ? Math.min(row.lane, lanes - 1) : 0;
-  const chips = refChips(commit.refs, remotes);
-  const shown = chips.slice(0, 2);
-  const rest = chips.slice(2);
+  // The checked-out branch leads, because it is the label the user is most likely looking for.
+  const chips = work ? [] : refChips(commit.refs, remotes).sort((a, b) => Number(b.kind === "head") - Number(a.kind === "head"));
+  const [first, ...rest] = chips;
   const pr = pullRequestReference(commit.subject);
-  const refs = <div className="commit-refs">
-      {(overview ? chips : shown).map((chip) => <span className={`ref-tag ${chip.kind}`} key={chip.label} title={chip.kind === "remote" ? `${chip.label} · ${t("remoteOnlyTitle")}` : chip.label}>
-        {chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <GitBranch size={11} />}{chip.label}
-      </span>)}
-      {!overview && rest.length > 0 && <span className="ref-tag more" title={rest.map((chip) => chip.label).join("\n")}>+{rest.length}</span>}
-    </div>;
-  return <div className={`commit-row ${updated ? "updated-commit" : ""}`}>
-    {overview && refs}<div className="graph-track" style={{ width: trackWidth }}>
-    {row && lanes > 0 ? <GraphLanes row={row} lanes={lanes} colour={colour} byFamily={byFamily} /> : <span className="track-line" />}
-    <span className="commit-node" style={{ left: laneX(lane) - 5.5, borderColor: colour, boxShadow: `0 0 0 4px ${colour}18` }} />
-  </div><button className="commit-content" onClick={onSelect} aria-label={t("inspectCommit", { hash: commit.shortHash, subject: commit.subject })}>
-    <div className="commit-main">
-      <div className="commit-subject" title={commit.subject}>{updated && <span className="activity-badge">{t("updatedLabel")}</span>}{overview && pr && <span className="pr-badge">PR #{pr}</span>}{overview && commit.parents.length > 1 && <GitMerge size={13} className="merge-marker" />}{commit.subject || t("commitWithoutMessage")}</div>
-      <div className="commit-meta">
-        <span className="hash-chip">{commit.shortHash}</span>
-        <span className="commit-author">{commit.author}</span>
-        <span className="meta-divider">·</span>
-        {/* Relative is what gets scanned; the exact date, with its year, is one hover away. */}
-        <span title={formatDateFull(commit.date, locale)}>{relativeTime(commit.date, locale)}</span>
-      </div>
+  const merge = commit.parents.length > 1;
+  const chipTitle = (chip: RefChip) => chip.kind === "remote" ? `${chip.label} · ${t("remoteOnlyTitle")}` : chip.label;
+  const node = work ? "wip" : merge ? "merge" : "avatar";
+  const size = node === "merge" ? 10 : 20;
+  return <div
+    className={`commit-row ${selected ? "selected" : ""} ${updated ? "updated-commit" : ""} ${head ? "head" : ""} ${work ? "wip" : ""}`}
+    style={{ "--lane": colour } as CSSProperties}
+    data-hash={commit.hash}
+    onClick={onSelect}
+    onDoubleClick={onOpen}
+  >
+    <div className="commit-refs">
+      {first && <span className={`ref-tag ${first.kind}`} title={chips.map(chipTitle).join("\n")}>
+        {first.kind === "head" ? <Check size={11} /> : first.kind === "tag" ? <Tag size={11} /> : first.kind === "remote" ? <Cloud size={11} /> : <GitBranch size={11} />}<span>{first.label}</span>
+      </span>}
+      {rest.length > 0 && <span className="ref-tag more" title={rest.map(chipTitle).join("\n")}>+{rest.length}</span>}
+      {first && <span className="ref-connector" />}
     </div>
-    {!overview && refs}
-    <Info size={15} className="commit-more" />
-  </button></div>;
+    <div className="graph-track" style={{ width: trackWidth }}>
+      {row && lanes > 0 ? <GraphLanes row={row} lanes={lanes} colour={colour} byFamily={byFamily} connector={Boolean(first)} dashed={Boolean(work)} /> : <span className="track-line" />}
+      <span className={`commit-node ${node}`} style={{ left: laneX(lane) - size / 2, borderColor: colour, ...(node === "avatar" ? authorTone(commit.email || commit.author) : node === "merge" ? { background: colour } : {}) }} title={work ? undefined : `${commit.author} · ${formatDateFull(commit.date, locale)}`}>
+        {node === "avatar" ? initials(commit.author) : node === "wip" ? <PencilLine size={10} /> : null}
+      </span>
+    </div>
+    <button className="commit-content" ref={register} aria-pressed={selected} aria-label={work ? t("inspectWork", { branch: work.branch }) : t("inspectCommit", { hash: commit.shortHash, subject: commit.subject })}>
+      {work ? <>
+        <span className="wip-tag">// WIP</span>
+        <span className="commit-subject">{work.summary}</span>
+      </> : <>
+        {updated && <span className="activity-badge">{t("updatedLabel")}</span>}
+        {pr && <span className="pr-badge" title={t("prReferenceNote")}>PR #{pr}</span>}
+        {merge && <GitMerge size={12} className="merge-marker" />}
+        <span className="commit-subject" title={commit.subject}>{commit.subject || t("commitWithoutMessage")}</span>
+        {commit.body && <span className="commit-body">{commit.body.replace(/\s+/g, " ")}</span>}
+      </>}
+    </button>
+    <div className="commit-changes">
+      {work ? <span className="change-stats wip-count">{counted(t, work.count, "file", "files")}</span>
+        : commit.stats && <ChangeStats additions={commit.stats.additions} deletions={commit.stats.deletions} files={commit.stats.files} />}
+    </div>
+    <div className="commit-when" title={commit.date ? formatDateFull(commit.date, locale) : undefined}>{marker && <span>{marker}</span>}</div>
+  </div>;
 }
 
 function changeStatus(code: string, t: Translate) {
@@ -1467,8 +1695,14 @@ function changeStatus(code: string, t: Translate) {
   return t("modified");
 }
 
-function BranchWorkCard({ snapshot, busy, onSave, onIntegrate }: {
-  snapshot: RepoSnapshot; busy: boolean; onSave: () => void; onIntegrate: () => void;
+/**
+ * The repository bar: where you are, the everyday Git verbs, and the next step for this branch. The
+ * verbs still go through a plan, so a click here explains itself before anything changes.
+ */
+function RepoToolbar({ snapshot, busy, deliveryBusy, refreshing, refreshDisabled, onRefresh, onFetch, onPull, onPush, onBranch, onSave, onIntegrate }: {
+  snapshot: RepoSnapshot; busy: boolean; deliveryBusy: boolean; refreshing: boolean; refreshDisabled: boolean;
+  onRefresh: () => void; onFetch: () => void; onPull: () => void; onPush: () => void; onBranch: () => void;
+  onSave: () => void; onIntegrate: () => void;
 }) {
   const { t } = useI18n();
   const source = snapshot.branches.find((branch) => branch.isCurrent);
@@ -1477,44 +1711,214 @@ function BranchWorkCard({ snapshot, busy, onSave, onIntegrate }: {
   const integrated = Boolean(target && source?.mergedInto.includes(target) && !snapshot.isDirty);
   const blocked = Boolean(snapshot.pending || snapshot.conflicts.length || (!source && snapshot.head) || snapshot.currentBranch === "HEAD");
   const newFiles = snapshot.changes.filter((file) => file.code.includes("?")).length;
-  return <div className={`branch-work-card ${snapshot.isDirty ? "is-dirty" : "is-saved"}`}>
-    <div className="work-symbol"><GitBranch size={22} /></div>
-    <div className="branch-work-copy">
-    <div className="branch-work-heading"><GitBranch size={16} /><strong title={snapshot.currentBranch}>{snapshot.currentBranch}</strong>
-      <span>{snapshot.isDirty ? t("workNeedsSaving", { count: snapshot.changes.length }) : t("workSaved")}</span></div>
-    <p>{blocked ? t("finishPendingFirst") : snapshot.isDirty ? t("workSaveGuidance", { count: newFiles }) : integrated ? t("workIntegrated", { target: target! }) : canIntegrate ? t("workReadyToIntegrate", { target: target! }) : t(target ? "workOnMain" : "workNoMain")}</p>
-    </div><div className="branch-work-actions">
-      {snapshot.isDirty && <button className={canIntegrate ? "outline-button" : "primary-button"} disabled={busy || blocked} onClick={onSave}><GitCommitHorizontal size={14} />{t("saveChanges")}</button>}
-      {canIntegrate && <button className="primary-button" disabled={busy || blocked || integrated} onClick={onIntegrate}><GitMerge size={14} />{t(snapshot.isDirty ? "saveAndIntegrate" : "integrateInto", { target: target! })}</button>}
+  const guidance = blocked ? t("finishPendingFirst") : snapshot.isDirty ? t("workSaveGuidance", { count: newFiles }) : integrated ? t("workIntegrated", { target: target! }) : canIntegrate ? t("workReadyToIntegrate", { target: target! }) : t(target ? "workOnMain" : "workNoMain");
+  const tool = (Icon: LucideIcon, label: string, onClick: () => void, disabled: boolean, title?: string, spinning = false) =>
+    <button className="tool-button" onClick={onClick} disabled={disabled} title={title ?? label}>{spinning ? <LoaderCircle className="spin" size={17} /> : <Icon size={17} />}<span>{label}</span></button>;
+  return <div className="repo-toolbar">
+    <div className="toolbar-context">
+      <div className="toolbar-field"><span className="toolbar-caption">{t("toolbarRepository")}</span><strong title={snapshot.path}>{snapshot.name}</strong></div>
+      <ChevronRight size={14} className="toolbar-separator" aria-hidden="true" />
+      <div className="toolbar-field branch"><span className="toolbar-caption">{t("toolbarBranch")}</span><strong title={snapshot.currentBranch}><GitBranch size={13} /><span>{snapshot.currentBranch}</span></strong></div>
+      {source?.upstream && (source.ahead > 0 || source.behind > 0) && <span className="toolbar-sync" title={t("syncTitle", { ahead: source.ahead, behind: source.behind, upstream: source.upstream })}>
+        {source.behind > 0 && <span><ArrowDownToLine size={11} />{source.behind}</span>}
+        {source.ahead > 0 && <span><ArrowUpFromLine size={11} />{source.ahead}</span>}
+      </span>}
+    </div>
+    <div className="toolbar-tools">
+      {tool(RefreshCcw, t("refresh"), onRefresh, refreshDisabled, t("refreshTitle"), refreshing)}
+      {tool(CloudDownload, t("fetch"), onFetch, busy, t("fetchTitle"))}
+      {tool(ArrowDownToLine, t("pull"), onPull, busy, t("pullTitle"))}
+      {tool(ArrowUpFromLine, t("push"), onPush, busy, t("pushTitle"))}
+      <span className="tool-divider" aria-hidden="true" />
+      {tool(GitBranchPlus, t("branchTool"), onBranch, busy, t("newBranch"))}
+    </div>
+    <div className={`toolbar-delivery ${snapshot.isDirty ? "is-dirty" : "is-saved"}`} title={guidance}>
+      <span className="delivery-status">{snapshot.isDirty
+        ? <><CircleDot size={12} />{t("workNeedsSaving", { count: snapshot.changes.length })}</>
+        : integrated ? <><Check size={12} />{t("integratedStatus", { target: target! })}</> : <><Check size={12} />{t("workSaved")}</>}</span>
+      <div className="delivery-actions">
+        {snapshot.isDirty && <button className={canIntegrate ? "outline-button" : "primary-button"} disabled={deliveryBusy || blocked} onClick={onSave}><GitCommitHorizontal size={14} />{t("saveChanges")}</button>}
+        {canIntegrate && !integrated && <button className="primary-button" disabled={deliveryBusy || blocked} onClick={onIntegrate}><GitMerge size={14} />{t(snapshot.isDirty ? "saveAndIntegrate" : "integrateInto", { target: target! })}</button>}
+      </div>
     </div>
   </div>;
 }
 
-function ChangesView({ snapshot, formOpen, message, generating, busy, onOpenForm, onOpenFile, onMessageChange, onGenerate, onPrepare, merge, configured, stale, onReviewAgain, onMergeChange }: {
-  snapshot: RepoSnapshot; formOpen: boolean; message: string; generating: boolean; busy: boolean;
-  onOpenForm: () => void; onOpenFile: (file: FileChange) => void; onMessageChange: (message: string) => void; onGenerate: () => void; onPrepare: () => void;
+type FileListMode = "path" | "tree";
+const fileListStorageKey = "gitcat-file-list-mode";
+
+function readFileListMode(): FileListMode {
+  try { return localStorage.getItem(fileListStorageKey) === "tree" ? "tree" : "path"; }
+  catch { return "path"; }
+}
+
+/** How many files of each kind, and how many lines in and out when they were counted. */
+function ChangeSummary({ files, stats }: { files: FileChange[]; stats?: Record<string, FileStats> }) {
+  const { t } = useI18n();
+  const totals = stats && Object.values(stats).reduce((sum, file) => ({ additions: sum.additions + file.additions, deletions: sum.deletions + file.deletions }), { additions: 0, deletions: 0 });
+  return <div className="change-summary">
+    {workSummary(files, t).map((item) => { const Icon = fileKindIcons[item.kind]; return <span key={item.kind} className={`kind-${item.kind}`}><Icon size={13} />{item.label}</span>; })}
+    {totals && (totals.additions > 0 || totals.deletions > 0) && <ChangeStats additions={totals.additions} deletions={totals.deletions} files={files.length} />}
+  </div>;
+}
+
+/**
+ * The files a change touched, as a flat list of paths or as the folders they live in. Either way
+ * each file says what happened to it and how much, and a click opens exactly that file's diff.
+ */
+function FileList({ files, stats, onOpen }: { files: FileChange[]; stats?: Record<string, FileStats>; onOpen: (file: FileChange) => void }) {
+  const { t } = useI18n();
+  const [mode, setModeState] = useState<FileListMode>(readFileListMode);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const setMode = (next: FileListMode) => {
+    setModeState(next);
+    try { localStorage.setItem(fileListStorageKey, next); } catch { /* the default is fine */ }
+  };
+  const sorted = useMemo(() => [...files].sort((a, b) => a.path.localeCompare(b.path)), [files]);
+
+  const fileRow = (file: FileChange, depth: number, label: string, folder: string, index: number) => {
+    const kind = fileKind(file.code);
+    const Icon = fileKindIcons[kind];
+    const status = file.code.includes("?") ? t("newFileIncluded") : changeStatus(file.code, t);
+    const counts = stats?.[file.path];
+    return <button className={`change-row kind-${kind}`} key={`${file.path}-${index}`} style={{ paddingLeft: 10 + depth * 14 }} onClick={() => onOpen(file)} title={`${status} · ${file.from ? `${file.from} → ` : ""}${file.path}`}>
+      <span className="change-status"><Icon size={14} /><span className="visually-hidden">{status}</span></span>
+      <span className="change-path">{folder && <span className="change-folder">{folder}</span>}<span className="change-name">{label}</span></span>
+      {counts && <ChangeStats additions={counts.additions} deletions={counts.deletions} binary={counts.binary} />}
+    </button>;
+  };
+
+  const tree = () => {
+    const rows: ReactNode[] = [];
+    let open: string[] = [];
+    sorted.forEach((file, index) => {
+      const parts = file.path.split("/");
+      const folders = parts.slice(0, -1);
+      // Close whatever the previous path had open that this one does not share, then open the rest.
+      let shared = 0;
+      while (shared < open.length && open[shared] === folders[shared]) shared += 1;
+      open = open.slice(0, shared);
+      for (let depth = shared; depth < folders.length; depth += 1) {
+        const key = folders.slice(0, depth + 1).join("/");
+        const hidden = folders.slice(0, depth).some((_, level) => collapsed.has(folders.slice(0, level + 1).join("/")));
+        open.push(folders[depth]);
+        if (hidden) continue;
+        const isOpen = !collapsed.has(key);
+        rows.push(<button key={`dir:${key}`} className="change-folder-row" style={{ paddingLeft: 10 + depth * 14 }} aria-expanded={isOpen} onClick={() => setCollapsed((current) => {
+          const next = new Set(current);
+          if (next.has(key)) next.delete(key); else next.add(key);
+          return next;
+        })}><ChevronRight size={12} className={`branch-chevron ${isOpen ? "open" : ""}`} /><Folder size={13} /><span>{folders[depth]}</span></button>);
+      }
+      const hidden = folders.some((_, level) => collapsed.has(folders.slice(0, level + 1).join("/")));
+      if (!hidden) rows.push(fileRow(file, folders.length, parts[parts.length - 1], "", index));
+    });
+    return rows;
+  };
+
+  return <div className="file-list">
+    <div className="file-list-toolbar">
+      <span>{counted(t, files.length, "file", "files")}</span>
+      <div className="mode-toggle" role="group" aria-label={t("fileListMode")}>
+        <button className={mode === "path" ? "active" : ""} aria-pressed={mode === "path"} onClick={() => setMode("path")} title={t("pathView")}><List size={13} /><span>{t("pathView")}</span></button>
+        <button className={mode === "tree" ? "active" : ""} aria-pressed={mode === "tree"} onClick={() => setMode("tree")} title={t("treeView")}><ListTree size={13} /><span>{t("treeView")}</span></button>
+      </div>
+    </div>
+    <div className="change-list">
+      {mode === "path" ? sorted.map((file, index) => {
+        const cut = file.path.lastIndexOf("/");
+        return fileRow(file, 0, file.path.slice(cut + 1), cut >= 0 ? file.path.slice(0, cut + 1) : "", index);
+      }) : tree()}
+    </div>
+  </div>;
+}
+
+/** The uncommitted work: what changed, and the form that turns it into a saved version. */
+function ChangesView({ snapshot, message, generating, busy, onOpenFile, onMessageChange, onGenerate, onPrepare, merge, configured, stale, onReviewAgain, onMergeChange }: {
+  snapshot: RepoSnapshot; message: string; generating: boolean; busy: boolean;
+  onOpenFile: (file: FileChange) => void; onMessageChange: (message: string) => void; onGenerate: () => void; onPrepare: () => void;
   merge: boolean; configured: boolean; stale: boolean; onReviewAgain: () => void; onMergeChange: (value: boolean) => void;
 }) {
   const { t } = useI18n();
   const hasChanges = snapshot.changes.length > 0;
   const canMerge = snapshot.defaultBranch && snapshot.defaultBranch !== snapshot.currentBranch;
   return <div className="changes-view">
-    <div className="changes-heading"><div><span className="eyebrow">{t("worktree", { branch: snapshot.currentBranch })}</span><h3>{hasChanges ? t("reviewFiles", { count: snapshot.changes.length }) : t("everythingClean")}</h3></div></div>
+    <div className="detail-head"><span className="detail-kind"><PencilLine size={13} />{t("uncommittedHeading")}</span><span className="detail-branch" title={snapshot.currentBranch}><GitBranch size={12} />{snapshot.currentBranch}</span></div>
     {hasChanges ? <>
-      <p className="file-inclusion-note">{t("allFilesIncluded")}</p>
-      {formOpen ? <div className="commit-form">
+      <ChangeSummary files={snapshot.changes} />
+      <FileList files={snapshot.changes} onOpen={onOpenFile} />
+      <div className="commit-form">
         <div className="commit-form-heading"><h3>{t("saveDescription")}</h3><button className="outline-button small" onClick={onGenerate} disabled={!configured || generating || busy}>{generating ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{t(generating ? "generatingSaveDescription" : "generateDescription")}</button></div>
-        <label htmlFor="commit-description">{t("commitMessage")}</label><textarea id="commit-description" value={message} onChange={(event) => onMessageChange(event.target.value)} maxLength={120} rows={2} placeholder={t("commitPlaceholder")} disabled={generating || busy} />
+        <label htmlFor="commit-description" className="visually-hidden">{t("commitMessage")}</label><textarea id="commit-description" value={message} onChange={(event) => onMessageChange(event.target.value)} maxLength={120} rows={3} placeholder={t("commitPlaceholder")} disabled={generating || busy} />
         <div className="commit-form-meta"><span>{t(configured ? "editableDescription" : "manualSaveDescription")}</span><span>{message.length}/120</span></div>
         {canMerge && <label className="delivery-option"><input type="checkbox" checked={merge} disabled={busy} onChange={(event) => onMergeChange(event.target.checked)} /><span>{t("integrateAfterSave", { target: snapshot.defaultBranch! })}</span></label>}
         {stale && <div className="delivery-stale" role="alert">{t("filesChangedReview")} <button className="outline-button small" onClick={onReviewAgain}>{t("reviewUpdatedFiles")}</button></div>}
         <div className="commit-form-actions"><button className="primary-button" onClick={onPrepare} disabled={stale || !message.trim() || generating || busy}><ShieldCheck size={14} />{t(merge && canMerge ? "reviewSaveAndMerge" : "reviewSave")}</button></div>
-      </div> : <button className="outline-button" onClick={onOpenForm} disabled={busy}>{t("saveChanges")}</button>}
-      <div className="change-list">{snapshot.changes.map((change, index) => <button className="change-row" key={`${change.path}-${index}`} onClick={() => onOpenFile(change)} title={t("showFile", { path: change.path })}>
-        <span className={`change-code code-${change.code[0]?.toLowerCase()}`}>{change.code.includes("?") ? "+" : change.code}</span>
-        <span className="change-status">{change.code.includes("?") ? t("newFileIncluded") : changeStatus(change.code, t)}</span><span className="change-path" title={change.path}>{change.path}</span><Info size={13} className="change-more" />
-      </button>)}</div>
+        <p className="file-inclusion-note">{t("allFilesIncluded")}</p>
+      </div>
     </> : <div className="graph-empty"><Check size={26} /><strong>{t("noUncommittedChanges")}</strong><span>{t("savedNextStep")}</span></div>}
+  </div>;
+}
+
+/**
+ * Everything about one commit without leaving the graph: its message, who wrote it and when, the
+ * commits it continues, and every file it touched with how much. The full diff is one click away.
+ */
+function CommitInspector({ commit, snapshot, known, onFocus, onOpen }: {
+  commit: Commit; snapshot: RepoSnapshot; known: Commit[]; onFocus: (commit: Commit) => void; onOpen: (file?: FileChange) => void;
+}) {
+  const { t, locale } = useI18n();
+  const [detail, setDetail] = useState<CommitDetail>();
+  const [error, setError] = useState<string>();
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    let live = true;
+    window.gitcat.getCommitDetail(snapshot.path, commit.hash)
+      .then((next) => { if (live) setDetail(next); })
+      .catch((reason) => { if (live) setError(cleanError(reason, t("fallbackReadCommit"))); });
+    return () => { live = false; };
+  }, [snapshot.path, commit.hash]);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1400);
+    return () => clearTimeout(timer);
+  }, [copied]);
+
+  const hash = detail?.hash ?? commit.hash;
+  const body = detail?.body ?? commit.body;
+  const chips = refChips(commit.refs, snapshot.remotes);
+  const copy = () => { void navigator.clipboard?.writeText(hash).then(() => setCopied(true)).catch(() => undefined); };
+  return <div className="commit-inspector">
+    <div className="detail-head">
+      <span className="detail-kind"><GitCommitHorizontal size={13} />commit</span>
+      <code title={hash}>{hash.slice(0, 7)}</code>
+      <button className="mini-icon" onClick={copy} aria-label={t("copyHash")} title={copied ? t("copied") : t("copyHash")}>{copied ? <Check size={13} /> : <Copy size={13} />}</button>
+      <button className="ghost-button small" onClick={() => onOpen()} title={t("fullDiffTitle")}><Maximize2 size={13} />{t("fullDiff")}</button>
+    </div>
+    <div className="detail-message">
+      <h3>{commit.subject || t("commitWithoutMessage")}</h3>
+      {body && <p>{body}</p>}
+    </div>
+    <div className="detail-author">
+      <Avatar name={commit.author} email={commit.email} size={34} />
+      <div><strong>{commit.author || "—"}</strong><span title={formatDateFull(commit.date, locale)}>{t("authoredOn", { date: formatDate(commit.date, locale) })} · {relativeTime(commit.date, locale)}</span></div>
+      {commit.parents.length > 0 && <div className="detail-parents"><span>{t(commit.parents.length > 1 ? "parentsLabel" : "parentLabel")}</span>{commit.parents.map((parent) => {
+        const found = known.find((item) => item.hash === parent);
+        return found
+          ? <button key={parent} className="hash-link" onClick={() => onFocus(found)} title={found.subject}>{parent.slice(0, 7)}</button>
+          : <code key={parent}>{parent.slice(0, 7)}</code>;
+      })}</div>}
+    </div>
+    {chips.length > 0 && <div className="detail-refs">{chips.map((chip) => <span className={`ref-tag ${chip.kind}`} key={chip.label} title={chip.kind === "remote" ? `${chip.label} · ${t("remoteOnlyTitle")}` : chip.label}>
+      {chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <GitBranch size={11} />}{chip.label}
+    </span>)}</div>}
+    {commit.parents.length > 1 && <p className="detail-note"><GitMerge size={12} />{t("mergeDetails", { hash: commit.parents[0].slice(0, 7) })}</p>}
+    {error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}
+    {!detail && !error && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> {t("readingChange")}</div>}
+    {detail && <>
+      <ChangeSummary files={detail.files} stats={detail.stats} />
+      {detail.files.length ? <FileList files={detail.files} stats={detail.stats} onOpen={(file) => onOpen(file)} /> : <p className="detail-note">{t("commitTouchesNothing")}</p>}
+    </>}
   </div>;
 }
 
@@ -1728,7 +2132,7 @@ function PendingDiffView({ detail }: { detail: CommitDetail }) {
  * What a commit actually changed. Until now this dialog listed a hash, an author and a date — every
  * fact about the commit except the only one anyone opens it for.
  */
-function CommitModal({ commit, repoPath, onClose }: { commit: Commit; repoPath: string; onClose: () => void }) {
+function CommitModal({ commit, initialFile, repoPath, onClose }: { commit: Commit; initialFile?: FileChange; repoPath: string; onClose: () => void }) {
   const { t, locale } = useI18n();
   const [detail, setDetail] = useState<CommitDetail>();
   const [error, setError] = useState<string>();
@@ -1740,7 +2144,7 @@ function CommitModal({ commit, repoPath, onClose }: { commit: Commit; repoPath: 
     let live = true;
     setDetail(undefined);
     setError(undefined);
-    setSelectedFile(undefined);
+    setSelectedFile(initialFile);
     setFileDetail(undefined);
     setFileError(undefined);
     window.gitcat.getCommitDetail(repoPath, commit.hash)
