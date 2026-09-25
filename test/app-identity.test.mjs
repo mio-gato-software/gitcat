@@ -24,13 +24,13 @@ test('upgrades retain the profile and copy stored configuration without overwrit
     assert.equal(readFileSync(join(old, 'branchline-settings.json'), 'utf8'), '{"encryptedApiKey":"ciphertext"}');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
-test('language, pane layout and per-project reviews survive the rename', () => {
-  const values = new Map([['branchline-locale', 'es'], ['branchline-pane-widths', '[200,300]'], ['branchline-activity:/repo', 'review'], ['gitcat-locale', 'en']]);
+test('language, pane layout and per-project views survive the rename', () => {
+  const values = new Map([['branchline-locale', 'es'], ['branchline-pane-widths', '[200,300]'], ['branchline-graph:/repo', 'view'], ['gitcat-locale', 'en']]);
   const storage = { get length() { return values.size; }, key: i => [...values.keys()][i] ?? null, getItem: k => values.get(k) ?? null, setItem: (k,v) => values.set(k,v) };
   migratePreferences(storage);
   assert.equal(values.get('gitcat-locale'), 'en');
   assert.equal(values.get('gitcat-pane-widths'), '[200,300]');
-  assert.equal(values.get('gitcat-activity:/repo'), 'review');
+  assert.equal(values.get('gitcat-graph:/repo'), 'view');
   assert.equal(values.get('branchline-locale'), 'es');
   assert.doesNotThrow(() => migratePreferences({ get length() { throw new Error('Unavailable'); } }));
 });

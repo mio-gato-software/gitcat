@@ -60,11 +60,6 @@
 .graph-count { color: var(--muted); font: 10px var(--mono); white-space: nowrap; }
 .commit-search { flex: 0 1 170px; width: 170px; min-width: 96px; height: 28px; }
 .commit-search input { font-size: 11.5px; }
-.activity-strip { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; height: 28px; padding: 0 4px 0 10px; color: var(--secondary); background: #223027; border: 1px solid #41684b; border-radius: 6px; font-size: 11px; }
-.activity-strip strong { flex: none; color: #c2e5c8; font-weight: 600; }
-.activity-names { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
-.activity-strip .outline-button { flex: none; min-height: 22px; margin-left: auto; padding: 0 8px; border-color: #41684b; font-size: 10.5px; }
-.activity-pulse { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--mint); box-shadow: 0 0 0 3px #9bcca52b; }
 .graph-note { flex: none; margin: 8px 12px 0; padding: 7px 9px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; font-size: 10.5px; line-height: 1.45; }
 .graph-note.error { color: #efadb5; background: #351f26; border-color: #6a3944; }
 
@@ -78,7 +73,6 @@
 .commit-row { position: relative; height: 30px; color: var(--secondary); cursor: default; }
 .commit-row:hover { background: var(--surface); }
 .commit-row.selected { background: color-mix(in srgb, var(--lane) 15%, var(--canvas)); box-shadow: inset 0 1px color-mix(in srgb, var(--lane) 30%, transparent), inset 0 -1px color-mix(in srgb, var(--lane) 30%, transparent); }
-.commit-row.updated-commit::before { position: absolute; top: 4px; bottom: 4px; left: 0; width: 3px; border-radius: 0 2px 2px 0; background: var(--mint); content: ''; }
 
 .commit-refs { display: flex; align-items: center; gap: 4px; min-width: 0; padding-left: 10px; overflow: hidden; }
 .ref-tag { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 4px; min-width: 0; height: 20px; padding: 0 7px; overflow: hidden; color: color-mix(in srgb, var(--lane, var(--mint)) 72%, white); background: color-mix(in srgb, var(--lane, var(--mint)) 20%, var(--canvas)); border: 1px solid color-mix(in srgb, var(--lane, var(--mint)) 42%, transparent); border-radius: 4px; font-size: 11px; white-space: nowrap; }
@@ -107,8 +101,7 @@
 .commit-row.head .commit-subject { font-weight: 650; }
 .commit-row.wip .commit-subject { color: var(--secondary); font-style: italic; }
 .wip-tag { flex: none; padding: 1px 6px; color: var(--coral); border: 1px dashed #7a4a3e; border-radius: 4px; font: 10.5px var(--mono); }
-.activity-badge, .pr-badge { flex: none; padding: 2px 5px; border-radius: 4px; font-size: 9.5px; font-weight: 600; }
-.activity-badge { color: #c2e5c8; background: #2c4a35; }
+.pr-badge { flex: none; padding: 2px 5px; border-radius: 4px; font-size: 9.5px; font-weight: 600; }
 .pr-badge { color: #d6bbea; background: #352943; }
 .merge-marker { flex: none; color: var(--lavender); }
 

@@ -186,8 +186,13 @@ app.whenReady().then(async () => {
   for (let attempt = 0; attempt < 100 && git('branch', '--show-current') !== 'feature/search'; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(git('branch', '--show-current'), 'feature/search');
   await waitFor(`document.querySelector('.toolbar-field.branch strong')?.textContent === 'feature/search'`);
+  // Work done outside GitCat appears on its own when the window comes back, without pressing Refresh.
+  assert.equal(await js(`Boolean(document.querySelector('.activity-strip'))`), false, 'No branch review strip');
+  git('branch', 'outside/terminal');
+  // A read is skipped while GitCat is still finishing the checkout, so focus is offered until one lands.
+  await waitFor(`document.querySelector('aside.sidebar').textContent.includes('outside') || (window.dispatchEvent(new Event('focus')), false)`);
   win.destroy();
-  console.log('PASS: graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, reviewed save and integration, double-click checkout.');
+  console.log('PASS: graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, reviewed save and integration, double-click checkout, background refresh.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));

@@ -18,7 +18,8 @@ import { branchSuggestions, namingCompletions, prefixAliases, variantHint } from
 import type { BranchSuggestion } from "../shared/branch-consistency";
 import { isProtectedBranch, lifecycleOf, staleDays } from "../shared/branch-lifecycle";
 import { buildCommitGraph, familyColour, maxLanes, withWorkInProgress, workInProgressHash } from "../shared/commit-graph";
-import { activityBaseline, changedBranches, parseActivityBaseline, pullRequestReference } from "../shared/repository-activity";
+import { pullRequestReference } from "../shared/repository-activity";
+import { autoRefreshIntervalMs, refreshedProject } from "../shared/auto-refresh";
 import type { GraphRow } from "../shared/commit-graph";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
@@ -346,6 +347,10 @@ export default function App() {
   const [exploring, setExploring] = useState(false);
   const [panes, setPanes] = useState<PaneWidths | undefined>(readPaneWidths);
   const requestSequence = useRef(0);
+  /** Counts every deliberate snapshot update, so a slower background read never overwrites a newer one. */
+  const snapshotWrites = useRef(0);
+  const syncing = useRef(false);
+  const syncFailedFor = useRef<string>(undefined);
   const activitySequence = useRef(0);
   const conversationSequence = useRef(0);
   const workspaceRestored = useRef(false);
@@ -499,6 +504,7 @@ export default function App() {
   };
 
   const updateSnapshot = (path: string, next: RepoSnapshot) => {
+    snapshotWrites.current += 1;
     setProjects((items) => items.map((project) => project.snapshot.path === path
       ? { ...project, snapshot: next, loadedAt: new Date().toISOString() }
       : project));
@@ -539,6 +545,47 @@ export default function App() {
       notify({ message: cleanError(error, t("fallbackRefresh")), tone: "error" });
     } finally { setRefreshingPath(undefined); }
   };
+
+  /**
+   * A quiet re-read of the repository on screen, so work done in a terminal, an editor or another
+   * tool shows up without pressing Refresh. It waits while GitCat itself is reading or changing the
+   * repository, and a failure is reported once rather than on every attempt.
+   */
+  const syncActive = async () => {
+    const path = snapshotRef.current?.path;
+    if (!path || syncing.current || refreshingPath || planning || resolving) return;
+    syncing.current = true;
+    const writes = snapshotWrites.current;
+    try {
+      const next = await window.gitcat.getSnapshot(path);
+      if (snapshotWrites.current !== writes) return;
+      const loadedAt = new Date().toISOString();
+      setProjects((items) => items.map((project) => project.snapshot.path === path ? refreshedProject(project, next, loadedAt) : project));
+      syncFailedFor.current = undefined;
+    } catch (error) {
+      if (syncFailedFor.current !== path) notify({ message: cleanError(error, t("fallbackRefresh")), tone: "error" });
+      syncFailedFor.current = path;
+    } finally { syncing.current = false; }
+  };
+  const syncActiveRef = useRef(syncActive);
+  syncActiveRef.current = syncActive;
+
+  // Opening a tab shows that repository as it is now, not as it was when the tab was last looked at.
+  useEffect(() => { if (workspaceReady) void syncActiveRef.current(); }, [activeId, workspaceReady]);
+
+  // While the window is showing, it keeps itself current; coming back to it reads straight away.
+  useEffect(() => {
+    const sync = () => void syncActiveRef.current();
+    const tick = () => { if (document.visibilityState === "visible") sync(); };
+    const timer = window.setInterval(tick, autoRefreshIntervalMs);
+    window.addEventListener("focus", sync);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", sync);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, []);
 
   const updateTurn = (path: string, id: number, update: (turn: ConversationTurn) => ConversationTurn) => {
     setConversations((items) => ({
@@ -1344,27 +1391,6 @@ function BranchRow({ branch, label, variant, merged, selected, defaultBranch, co
 }
 
 /**
- * Branches whose tips moved since the user last marked the repository reviewed. The baseline is a
- * per-repository view preference, so it lives in this machine's storage and never touches Git.
- */
-function useActivity(snapshot: RepoSnapshot) {
-  const storageKey = `gitcat-activity:${snapshot.path}`;
-  const [baseline, setBaseline] = useState(() => {
-    try { return parseActivityBaseline(localStorage.getItem(storageKey)) ?? activityBaseline(snapshot); }
-    catch { return activityBaseline(snapshot); }
-  });
-  const [storageError, setStorageError] = useState(false);
-  useEffect(() => {
-    try { localStorage.setItem(storageKey, JSON.stringify(baseline)); setStorageError(false); }
-    catch { setStorageError(true); }
-  }, [storageKey, baseline]);
-  const changed = changedBranches(baseline, activityBaseline(snapshot));
-  const highlighted = new Set(snapshot.branches.filter((branch) => changed.includes(branch.name))
-    .flatMap((branch) => branch.lastCommit ? [branch.lastCommit.shortHash] : []));
-  return { changed, highlighted, storageError, markReviewed: () => setBaseline(activityBaseline(snapshot)) };
-}
-
-/**
  * A coarse "when" for the graph's margin. It only appears where it changes from the row above, so a
  * run of commits from the same day reads as one block instead of repeating itself on every line.
  */
@@ -1424,7 +1450,6 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
   const [page, setPage] = useState<{ commits: Commit[]; hasMore: boolean; comparedTo?: string }>({ commits: [], hasMore: false });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
-  const activity = useActivity(snapshot);
   // Every load is numbered, so a slow answer for a scope the user already left cannot overwrite the
   // one they are looking at.
   const request = useRef(0);
@@ -1538,12 +1563,6 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
           ? t("comparedTo", { branch: page.comparedTo })
           : t("noDefaultComparison")}</span>}
       </div>
-      {activity.changed.length > 0 && <div className="activity-strip" role="status" title={t("sinceReview")}>
-        <span className="activity-pulse" aria-hidden="true" />
-        <strong>{t("branchesUpdated", { count: activity.changed.length })}</strong>
-        <span className="activity-names">{activity.changed.map((name) => snapshot.branches.some((item) => item.name === name) ? name : `${name} · ${t("removedBranch")}`).join(", ")}</span>
-        <button className="outline-button small" onClick={activity.markReviewed}><Check size={12} />{t("markReviewed")}</button>
-      </div>}
       <div className="graph-header-right">
         <button className="graph-colour-toggle" aria-pressed={byFamily} onClick={() => update({ byFamily: !byFamily })} title={byFamily
           ? t("familyColourTitle")
@@ -1554,7 +1573,6 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
         <div className="search-field commit-search"><Search size={13} /><input aria-label={t("searchCommits")} value={filter} onChange={(event) => onFilterChange(event.target.value)} placeholder={t("searchCommits")} /></div>
       </div>
     </div>
-    {activity.storageError && <div className="graph-note error" role="alert">{t("activityStorageError")}</div>}
     {needle && <div className="graph-note">{t("filteredHistoryNote", { count: page.commits.length })}</div>}
     {error && <div className="graph-note error" role="alert">{error}</div>}
     <div className="graph-scroll" ref={scroller} style={{ "--track-w": `${trackWidth}px` } as CSSProperties} onKeyDown={walk}>
@@ -1565,7 +1583,6 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
         work={commit.hash === workInProgressHash ? { summary, count: snapshot.changes.length, branch: snapshot.currentBranch } : undefined}
         head={commit.hash === snapshot.head}
         selected={isFocused(commit)}
-        updated={activity.highlighted.has(commit.shortHash)}
         marker={markers[index]}
         row={rows.get(commit.hash)}
         lanes={lanes}
@@ -1691,9 +1708,9 @@ function refChips(refs: string[], remotes: string[]): RefChip[] {
   });
 }
 
-function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, selected, updated, head, marker, work, register, onSelect, onOpen, onCheckout, onMenu }: {
+function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, selected, head, marker, work, register, onSelect, onOpen, onCheckout, onMenu }: {
   commit: Commit; row?: GraphRow; lanes: number; trackWidth: number; remotes: string[]; colour: string; byFamily: boolean;
-  selected: boolean; updated: boolean; head: boolean; marker: string;
+  selected: boolean; head: boolean; marker: string;
   work?: { summary: string; count: number; branch: string };
   register: (node: HTMLButtonElement | null) => void; onSelect: () => void; onOpen: () => void;
   onCheckout: (branch: string) => void; onMenu: (branch: string | undefined, x: number, y: number) => void;
@@ -1715,7 +1732,7 @@ function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, 
   };
   const size = node === "merge" ? 10 : 20;
   return <div
-    className={`commit-row ${selected ? "selected" : ""} ${updated ? "updated-commit" : ""} ${head ? "head" : ""} ${work ? "wip" : ""}`}
+    className={`commit-row ${selected ? "selected" : ""} ${head ? "head" : ""} ${work ? "wip" : ""}`}
     style={{ "--lane": colour } as CSSProperties}
     data-hash={commit.hash}
     onClick={onSelect}
@@ -1740,7 +1757,6 @@ function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, 
         <span className="wip-tag">// WIP</span>
         <span className="commit-subject">{work.summary}</span>
       </> : <>
-        {updated && <span className="activity-badge">{t("updatedLabel")}</span>}
         {pr && <span className="pr-badge" title={t("prReferenceNote")}>PR #{pr}</span>}
         {merge && <GitMerge size={12} className="merge-marker" />}
         <span className="commit-subject" title={commit.subject}>{commit.subject || t("commitWithoutMessage")}</span>
