@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("gitcat", {
   restoreWorkspace: () => ipcRenderer.invoke("workspace:restore"),
   saveWorkspace: (paths, activePath) => ipcRenderer.invoke("workspace:save", paths, activePath),
   getSnapshot: (path) => ipcRenderer.invoke("repo:snapshot", path),
+  fetchRemotes: (path) => ipcRenderer.invoke("repo:fetch", path),
   loadHistory: (path, request) => ipcRenderer.invoke("history:load", path, request),
   getCommitDetail: (path, hash) => ipcRenderer.invoke("commit:detail", path, hash),
   getCommitFileDiff: (path, hash, file) => ipcRenderer.invoke("commit:file-detail", path, hash, file),

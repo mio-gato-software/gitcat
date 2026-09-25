@@ -298,6 +298,7 @@ export type GitlineApi = {
   restoreWorkspace: () => Promise<RestoredWorkspace>;
   saveWorkspace: (paths: string[], activePath?: string) => Promise<void>;
   getSnapshot: (path: string) => Promise<RepoSnapshot>;
+  fetchRemotes: (path: string) => Promise<RepoSnapshot>;
   loadHistory: (path: string, request: HistoryRequest) => Promise<HistoryPage>;
   getCommitDetail: (path: string, hash: string) => Promise<CommitDetail>;
   getCommitFileDiff: (path: string, hash: string, file: string) => Promise<CommitDetail>;

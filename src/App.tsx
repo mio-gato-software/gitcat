@@ -5,7 +5,7 @@ import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef,
 import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
   AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Bot, Check, ChevronRight, CircleDot,
-  Clock3, Cloud, CloudDownload, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
+  Clock3, Cloud, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
   FolderOpen, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
   ListTree, LoaderCircle, Maximize2, MessageCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen, Palette, Pencil, PencilLine, Plus,
   RefreshCcw, Search, Send, Settings2, ShieldCheck, Undo2,
@@ -19,7 +19,7 @@ import type { BranchSuggestion } from "../shared/branch-consistency";
 import { isProtectedBranch, lifecycleOf, staleDays } from "../shared/branch-lifecycle";
 import { buildCommitGraph, familyColour, maxLanes, withWorkInProgress, workInProgressHash } from "../shared/commit-graph";
 import { pullRequestReference } from "../shared/repository-activity";
-import { autoRefreshIntervalMs, refreshedProject } from "../shared/auto-refresh";
+import { autoRefreshIntervalMs, backgroundFetchDue, refreshedProject } from "../shared/auto-refresh";
 import type { GraphRow } from "../shared/commit-graph";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
@@ -29,7 +29,7 @@ import type {
 } from "../shared/types";
 import { localeTag, readLocale, translate, writeLocale, type MessageKey, type Translate } from "./i18n";
 
-type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string };
+type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string; fetchedAt?: string };
 type GraphFocus = { kind: "wip" } | { kind: "commit"; commit: Commit };
 type InspectorTab = "details" | "assistant";
 /** What was right-clicked: a commit, the branch label on it, both, or the uncommitted work. */
@@ -351,6 +351,9 @@ export default function App() {
   const snapshotWrites = useRef(0);
   const syncing = useRef(false);
   const syncFailedFor = useRef<string>(undefined);
+  /** When each repository last asked its remote, whether or not the remote answered. */
+  const fetchAttempts = useRef(new Map<string, number>());
+  const fetchFailedFor = useRef<string>(undefined);
   const activitySequence = useRef(0);
   const conversationSequence = useRef(0);
   const workspaceRestored = useRef(false);
@@ -365,6 +368,9 @@ export default function App() {
   snapshotRef.current = snapshot;
   const conversation = snapshot ? conversations[snapshot.path] ?? [] : [];
   const planning = conversation.some((turn) => turn.status === "loading" || turn.status === "executing");
+  // Something prepared against the current state that the user has not decided on yet.
+  const awaitingDecision = conversation.some((turn) => turn.status === "ready") || Boolean(deliveryReview || inputDialog || proposal || generatingDescription
+    || (snapshot?.isDirty && deliveryStateId === snapshot.stateId));
   // A hidden branch panel gives its column to the graph; its saved width waits for it to come back.
   const paneStyle = panes || sidebarHidden
     ? { ...(panes ? { "--sidebar-w": `${panes.sidebar}px`, "--inspector-w": `${panes.inspector}px` } : {}), ...(sidebarHidden ? { "--sidebar-w": "0px" } : {}) } as CSSProperties
@@ -503,10 +509,11 @@ export default function App() {
     setActivity([]);
   };
 
-  const updateSnapshot = (path: string, next: RepoSnapshot) => {
+  const updateSnapshot = (path: string, next: RepoSnapshot, fetched = false) => {
     snapshotWrites.current += 1;
+    const now = new Date().toISOString();
     setProjects((items) => items.map((project) => project.snapshot.path === path
-      ? { ...project, snapshot: next, loadedAt: new Date().toISOString() }
+      ? { ...project, snapshot: next, loadedAt: now, ...(fetched ? { fetchedAt: now } : {}) }
       : project));
   };
 
@@ -534,6 +541,44 @@ export default function App() {
     });
   };
 
+  /**
+   * The Refresh button: "am I up to date?". It reads this Mac's copy first, so the answer never waits
+   * on the network, then asks the remote for news. Neither step changes a branch or a file. When the
+   * remote cannot be reached, the local view is still current and the assistant is asked for a way on.
+   */
+  const refreshEverything = async () => {
+    const path = snapshot?.path;
+    if (!path || refreshingPath) return;
+    setRefreshingPath(path);
+    let failure: string | undefined;
+    try {
+      const local = await window.gitcat.getSnapshot(path);
+      updateSnapshot(path, local);
+      if (!local.remotes.length) {
+        addActivity({ label: t("stateUpdated"), detail: t("refreshedLocal", { branch: local.currentBranch }), tone: "neutral" });
+        return;
+      }
+      fetchAttempts.current.set(path, Date.now());
+      try {
+        const next = await window.gitcat.fetchRemotes(path);
+        updateSnapshot(path, next, true);
+        fetchFailedFor.current = undefined;
+        addActivity({ label: t("stateUpdated"), detail: t("refreshedRemote", { branch: next.currentBranch, remote: remoteLabel(next, t) }), tone: "neutral" });
+      } catch (error) {
+        failure = cleanError(error, t("fallbackFetch"));
+        addActivity({ label: t("remoteUnreachable"), detail: t("remoteUnreachableDetail", { remote: remoteLabel(local, t), reason: failure }), tone: "warning" });
+      }
+    } catch (error) {
+      notify({ message: cleanError(error, t("fallbackRefresh")), tone: "error" });
+    } finally { setRefreshingPath(undefined); }
+    if (failure && config.configured) await recoverFrom(path, {
+      command: "git fetch --all --prune",
+      summary: t("checkRemote"),
+      error: failure,
+      skipped: []
+    });
+  };
+
   const refreshProject = async (path = snapshot?.path, announce = true) => {
     if (!path || refreshingPath) return;
     setRefreshingPath(path);
@@ -556,12 +601,29 @@ export default function App() {
     if (!path || syncing.current || refreshingPath || planning || resolving) return;
     syncing.current = true;
     const writes = snapshotWrites.current;
+    const adopt = (next: RepoSnapshot, fetched = false) => {
+      const at = new Date().toISOString();
+      setProjects((items) => items.map((project) => project.snapshot.path === path ? refreshedProject(project, next, at, fetched ? at : undefined) : project));
+    };
     try {
-      const next = await window.gitcat.getSnapshot(path);
+      const local = await window.gitcat.getSnapshot(path);
       if (snapshotWrites.current !== writes) return;
-      const loadedAt = new Date().toISOString();
-      setProjects((items) => items.map((project) => project.snapshot.path === path ? refreshedProject(project, next, loadedAt) : project));
+      adopt(local);
       syncFailedFor.current = undefined;
+      const now = Date.now();
+      if (!backgroundFetchDue({ hasRemote: local.remotes.length > 0, awaitingDecision, lastAttempt: fetchAttempts.current.get(path), now })) return;
+      fetchAttempts.current.set(path, now);
+      let next: RepoSnapshot;
+      try { next = await window.gitcat.fetchRemotes(path); } catch (error) {
+        // Offline or signed out: the local view stays current, and one notice is enough until it recovers.
+        if (fetchFailedFor.current !== path) addActivity({ label: t("remoteUnreachable"), detail: t("remoteUnreachableDetail", { remote: remoteLabel(local, t), reason: cleanError(error, t("fallbackFetch")) }), tone: "warning" });
+        fetchFailedFor.current = path;
+        return;
+      }
+      fetchFailedFor.current = undefined;
+      if (snapshotWrites.current !== writes) return;
+      adopt(next, true);
+      if (next.stateId !== local.stateId) addActivity({ label: t("remoteHasNews"), detail: t("remoteHasNewsDetail", { remote: remoteLabel(next, t) }), tone: "neutral" });
     } catch (error) {
       if (syncFailedFor.current !== path) notify({ message: cleanError(error, t("fallbackRefresh")), tone: "error" });
       syncFailedFor.current = path;
@@ -1007,8 +1069,7 @@ export default function App() {
           deliveryBusy={planning || generatingDescription}
           refreshing={refreshingPath === snapshot.path}
           refreshDisabled={Boolean(refreshingPath)}
-          onRefresh={() => void refreshProject()}
-          onFetch={() => void prepare("fetch")}
+          onRefresh={() => void refreshEverything()}
           onPull={() => void prepare("pull")}
           onPush={() => void prepare("push")}
           onBranch={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
@@ -1078,7 +1139,7 @@ export default function App() {
             <div className="chat-compose"><textarea aria-label={t("assistantRequest")} disabled={!config.configured} value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder={config.configured ? t("assistantPlaceholder") : t("configureAssistantPlaceholder")} rows={2} /><button className="send-button" aria-label={t("prepareRequest")} onClick={() => void propose(request)} disabled={planning || !request.trim() || !config.configured}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div>
           </aside>
         </main>
-        <footer className="statusbar"><div className="status-left"><span className={`status-good ${snapshot.isDirty ? "has-changes" : ""}`}><CircleDot size={12} /> {snapshot.isDirty ? counted(t, snapshot.changes.length, "change", "changes") : t("noUncommittedChanges")}</span><span className="status-separator" /><span>{counted(t, branchCount.local, "localBranch", "localBranches")}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} ${t("remoteOnly")}` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> {t("lastRead", { date: formatDate(active.loadedAt, locale) })}</span><span className="remote-status" title={remoteTitle(snapshot, t)}><Cloud size={12} /> {remoteLabel(snapshot, t)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : t("llmNotConfigured")}</span></div></footer>
+        <footer className="statusbar"><div className="status-left"><span className={`status-good ${snapshot.isDirty ? "has-changes" : ""}`}><CircleDot size={12} /> {snapshot.isDirty ? counted(t, snapshot.changes.length, "change", "changes") : t("noUncommittedChanges")}</span><span className="status-separator" /><span>{counted(t, branchCount.local, "localBranch", "localBranches")}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} ${t("remoteOnly")}` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> {t("lastRead", { date: formatDate(active.loadedAt, locale) })}</span><span className="remote-status" title={snapshot.remotes.length ? `${remoteTitle(snapshot, t)}\n${active.fetchedAt ? t("remoteCheckedAt", { date: formatDate(active.fetchedAt, locale) }) : t("remoteNotChecked")}` : remoteTitle(snapshot, t)}><Cloud size={12} /> {remoteLabel(snapshot, t)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : t("llmNotConfigured")}</span></div></footer>
       </>}
       {deliveryReview && <DeliveryReviewModal review={deliveryReview} busy={planning}
         onClose={() => { updateTurn(deliveryReview.plan.repoPath, deliveryReview.turnId, (turn) => ({ ...turn, status: "cancelled", outcome: t("planDiscarded") })); setDeliveryReview(undefined); }}
@@ -1785,9 +1846,9 @@ function changeStatus(code: string, t: Translate) {
  * The repository bar: where you are, the everyday Git verbs, and the next step for this branch. The
  * verbs still go through a plan, so a click here explains itself before anything changes.
  */
-function RepoToolbar({ snapshot, busy, deliveryBusy, refreshing, refreshDisabled, onRefresh, onFetch, onPull, onPush, onBranch, onSave, onIntegrate }: {
+function RepoToolbar({ snapshot, busy, deliveryBusy, refreshing, refreshDisabled, onRefresh, onPull, onPush, onBranch, onSave, onIntegrate }: {
   snapshot: RepoSnapshot; busy: boolean; deliveryBusy: boolean; refreshing: boolean; refreshDisabled: boolean;
-  onRefresh: () => void; onFetch: () => void; onPull: () => void; onPush: () => void; onBranch: () => void;
+  onRefresh: () => void; onPull: () => void; onPush: () => void; onBranch: () => void;
   onSave: () => void; onIntegrate: () => void;
 }) {
   const { t } = useI18n();
@@ -1812,7 +1873,6 @@ function RepoToolbar({ snapshot, busy, deliveryBusy, refreshing, refreshDisabled
     </div>
     <div className="toolbar-tools">
       {tool(RefreshCcw, t("refresh"), onRefresh, refreshDisabled, t("refreshTitle"), refreshing)}
-      {tool(CloudDownload, t("fetch"), onFetch, busy, t("fetchTitle"))}
       {tool(ArrowDownToLine, t("pull"), onPull, busy, t("pullTitle"))}
       {tool(ArrowUpFromLine, t("push"), onPush, busy, t("pushTitle"))}
       <span className="tool-divider" aria-hidden="true" />

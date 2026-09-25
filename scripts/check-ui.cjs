@@ -139,6 +139,8 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('[aria-label="Mostrar el panel de ramas"]').click()`);
   await waitFor(`document.querySelector('.sidebar')`);
   assert.equal(git('status', '--porcelain'), before, 'Reading the graph and its details never mutates Git');
+  // Refresh answers "am I up to date?" on its own, so there is no separate Fetch button beside it.
+  assert.deepEqual(JSON.parse(await js(`JSON.stringify([...document.querySelectorAll('.toolbar-tools .tool-button')].map((node) => node.innerText.trim()))`)), ['Actualizar', 'Pull', 'Push', 'Rama']);
   await assertFits(); await capture('overview');
 
   // A long error must stay in the reserved footer, with no layout movement.

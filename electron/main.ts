@@ -1,10 +1,11 @@
 import { legacyAppName, migrateProfileFiles, profilePath } from "./app-identity.js";
+import { exclusive } from "./repository-queue.js";
 import { app, BrowserWindow, dialog, ipcMain, Menu } from "electron";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  applyConflictResolution, executePlan, generateCommitDescription, getCommitDetail, getCommitFileDiff, getLlmConfig, getSnapshot,
+  applyConflictResolution, executePlan, fetchRemotes, generateCommitDescription, getCommitDetail, getCommitFileDiff, getLlmConfig, getSnapshot,
   getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
   prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, saveLlmConfig
 } from "./git-service.js";
@@ -166,6 +167,11 @@ app.whenReady().then(async () => {
     assertTrustedSender(event);
     return getSnapshot(assertOpenedRepository(cwd));
   });
+  ipcMain.handle("repo:fetch", (event, cwd: string) => {
+    assertTrustedSender(event);
+    const repoPath = assertOpenedRepository(cwd);
+    return exclusive(repoPath, () => fetchRemotes(repoPath));
+  });
   ipcMain.handle("history:load", (event, cwd: string, request: HistoryRequest) => {
     assertTrustedSender(event);
     if (!request || typeof request !== "object") throw new Error("La petición de historial no es válida.");
@@ -196,12 +202,14 @@ app.whenReady().then(async () => {
   ipcMain.handle("conflicts:apply", (event, cwd: string, resolutions: unknown, locale?: Locale) => {
     assertTrustedSender(event);
     if (!Array.isArray(resolutions)) throw new Error("Las resoluciones no son válidas.");
-    return applyConflictResolution(assertOpenedRepository(cwd), resolutions, locale);
+    const repoPath = assertOpenedRepository(cwd);
+    return exclusive(repoPath, () => applyConflictResolution(repoPath, resolutions, locale));
   });
   ipcMain.handle("action:recover", async (event, cwd: string, failure: ExecutionFailure, context?: ConversationMessage[], locale?: Locale) => {
     assertTrustedSender(event);
     if (!failure || typeof failure !== "object" || typeof failure.error !== "string") throw new Error("El fallo reportado no es válido.");
-    return rememberPlan(await planRecovery(assertOpenedRepository(cwd), failure, context, locale));
+    const repoPath = assertOpenedRepository(cwd);
+    return rememberPlan(await exclusive(repoPath, () => planRecovery(repoPath, failure, context, locale)));
   });
   ipcMain.handle("action:plan", async (event, cwd: string, request: string, context?: ConversationMessage[], locale?: Locale) => {
     assertTrustedSender(event);
@@ -210,25 +218,30 @@ app.whenReady().then(async () => {
     if (context !== undefined && (!Array.isArray(context) || context.some((message) =>
       !message || !["user", "assistant"].includes(message.role) || typeof message.content !== "string"
     ))) throw new Error("El contexto de conversación no es válido.");
-    return rememberPlan(await planAction(assertOpenedRepository(cwd), request, context, locale));
+    const repoPath = assertOpenedRepository(cwd);
+    return rememberPlan(await exclusive(repoPath, () => planAction(repoPath, request, context, locale)));
   });
   ipcMain.handle("action:prepare", async (event, cwd: string, operation: Operation, args?: Record<string, string>, locale?: Locale) => {
     assertTrustedSender(event);
-    return rememberPlan(await prepareOperation(assertOpenedRepository(cwd), operation, args, locale));
+    const repoPath = assertOpenedRepository(cwd);
+    return rememberPlan(await exclusive(repoPath, () => prepareOperation(repoPath, operation, args, locale)));
   });
   ipcMain.handle("action:prepare-delivery", async (event, cwd: string, request: { stateId: string; mergeToDefault: boolean; message?: string }, locale?: Locale) => {
     assertTrustedSender(event);
     if (!request || typeof request.stateId !== "string" || typeof request.mergeToDefault !== "boolean" || (request.message !== undefined && typeof request.message !== "string")) throw new Error("Invalid delivery request.");
-    return rememberPlan(await prepareBranchDelivery(assertOpenedRepository(cwd), request, locale));
+    const repoPath = assertOpenedRepository(cwd);
+    return rememberPlan(await exclusive(repoPath, () => prepareBranchDelivery(repoPath, request, locale)));
   });
   ipcMain.handle("action:prepare-merge-to-default", async (event, cwd: string, branch: string, locale?: Locale) => {
     assertTrustedSender(event);
     if (typeof branch !== "string") throw new Error("La rama que quieres fusionar no es válida.");
-    return rememberPlan(await prepareMergeToDefault(assertOpenedRepository(cwd), branch, locale));
+    const repoPath = assertOpenedRepository(cwd);
+    return rememberPlan(await exclusive(repoPath, () => prepareMergeToDefault(repoPath, branch, locale)));
   });
   ipcMain.handle("commit:generate-description", async (event, cwd: string, locale?: Locale) => {
     assertTrustedSender(event);
-    return generateCommitDescription(assertOpenedRepository(cwd), locale);
+    const repoPath = assertOpenedRepository(cwd);
+    return exclusive(repoPath, () => generateCommitDescription(repoPath, locale));
   });
   ipcMain.handle("action:execute", async (event, cwd: string, planId: string, locale?: Locale) => {
     assertTrustedSender(event);
@@ -237,7 +250,7 @@ app.whenReady().then(async () => {
     if (!plan) throw new Error("El plan ya no es válido. Prepara la acción de nuevo.");
     issuedPlans.delete(planId);
     if (plan.repoPath !== repoPath) throw new Error("El plan pertenece a otro repositorio.");
-    return executePlan(repoPath, plan, locale);
+    return exclusive(repoPath, () => executePlan(repoPath, plan, locale));
   });
   ipcMain.handle("llm:get-config", (event) => { assertTrustedSender(event); return getLlmConfig(); });
   ipcMain.handle("llm:save-config", (event, input: LlmConfigInput) => { assertTrustedSender(event); return saveLlmConfig(input); });

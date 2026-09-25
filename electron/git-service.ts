@@ -1809,6 +1809,16 @@ function failureReport(outcomes: StepOutcome[], failed: StepOutcome, detail: str
 }
 
 /**
+ * Brings every remote's branches up to date, for Refresh and the quiet background check. Only
+ * remote-tracking refs move: local branches, the working tree and anything already published stay
+ * exactly as they were, which is why this never needs a plan or a confirmation.
+ */
+export async function fetchRemotes(cwd: string): Promise<RepoSnapshot> {
+  if (await optionalGit(cwd, ["remote"])) await reportedGit(cwd, ["fetch", "--all", "--prune", "--quiet"]);
+  return getSnapshot(cwd);
+}
+
+/**
  * Runs the approved plan end to end. Each step is validated against the repository the previous step
  * produced, and the first failure stops the sequence: a half-finished merge must never be reported as
  * done, and the steps that never ran are named so the user knows exactly where things stand.
