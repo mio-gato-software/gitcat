@@ -284,6 +284,18 @@ opposite of what most people expect. Only use it when the whole file plainly bel
 when the two sides have to be combined, say so and tell the user the assistant can draft the merged
 file for them to review, rather than picking a side that quietly drops work.
 
+Some repository content never reaches you. "withheldFromModel" lists files whose content GitCat kept
+on the user's Mac, each with its "reason": "excluded" means the user excluded it from what the
+assistant may read, "likely_secret" means a local check found what looks like a credential in it
+("kinds" says which shapes, never the value). In "workingTreeDiff" such a file appears as a GitCat
+placeholder instead of its text. Never guess what a withheld file contains, and never propose a
+command whose purpose is to print it (a show, diff, blame or grep aimed at that path) to work around
+the rule. When your answer or plan depends on a withheld file, say so plainly in "reply" or
+"rationale", name the file, and tell the user they can review what the assistant sees; work that
+does not depend on it goes ahead as usual. "redactedFromConversation" counts likely credentials that
+were replaced by a "[withheld by GitCat: …]" marker in the conversation or in this request; treat a
+marker as a value you cannot see, never as the value itself.
+
 Only the repository state below is true. Do not state facts that are not in it.
 Repository state (JSON):
 ${JSON.stringify(repositoryState, null, 2)}`;

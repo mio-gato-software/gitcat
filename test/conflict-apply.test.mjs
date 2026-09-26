@@ -57,6 +57,7 @@ function conflictedRepository(files = ["a.txt", "b.txt"]) {
 }
 
 async function propose(repo, paths = ["a.txt", "b.txt"]) {
+  await service.acknowledgeAiSharing(repo);
   answerFor(paths);
   return service.proposeConflictResolution(repo, "en");
 }

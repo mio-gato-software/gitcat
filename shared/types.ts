@@ -78,7 +78,54 @@ export type SelectedChange = { path: string; version: string };
  * A save from the Changes view. Without `selection` every listed file is saved and the whole
  * repository state is the binding; with it, only those files are saved and each one's version is.
  */
-export type DeliveryRequest = { stateId: string; mergeToDefault: boolean; message?: string; selection?: SelectedChange[] };
+export type DeliveryRequest = {
+  stateId: string; mergeToDefault: boolean; message?: string; selection?: SelectedChange[];
+  /**
+   * The person looked at the likely secrets the review flagged in the files being saved and chose to
+   * save them anyway. Without it, a save that would record one comes back as a question, not a plan.
+   */
+  secretsReviewed?: boolean;
+};
+
+/** The shape a local check recognised. Never the matched text: a finding must be safe to show and log. */
+export type SecretKind =
+  | "credential_file" | "private_key" | "aws_access_key" | "github_token" | "slack_token" | "stripe_key"
+  | "api_key" | "google_api_key" | "jwt" | "credential_url" | "secret_assignment";
+
+/** Where something looks like a credential: a file, the line when there is one, and what it resembles. */
+export type SecretFinding = { path: string; line?: number; kind: SecretKind };
+
+/**
+ * A file whose content did not go to the provider. The model reads a placeholder that names it and
+ * the reason, and the interface says the same, so an answer limited by it is never silently limited.
+ */
+export type WithheldFile = { path: string; reason: "excluded" | "likely_secret"; findings?: SecretFinding[] };
+
+/** What a request to the provider is for. Each one reads a different part of the repository. */
+export type AiSharingPurpose = "planning" | "description" | "conflicts" | "recovery";
+
+/**
+ * What happens to one file in a request: its content is sent, sent because the person reviewed it,
+ * or withheld because it is excluded or looks like it holds a credential.
+ */
+export type AiSharingFile = { path: string; status: "sent" | "reviewed" | "excluded" | "likely_secret"; findings: SecretFinding[] };
+
+/** Everything the disclosure shows before repository content leaves this Mac for the configured provider. */
+export type AiSharingPreview = {
+  repoPath: string;
+  provider: "openai";
+  model: string;
+  /** The host requests go to. */
+  destination: string;
+  /** Whether the person already agreed to share this repository with the assistant. */
+  acknowledged: boolean;
+  acknowledgedAt?: string;
+  purpose: AiSharingPurpose;
+  /** Path patterns this repository never shares, stored on this Mac rather than in the repository. */
+  exclusions: string[];
+  /** The files this request would read, and what happens to each one. */
+  files: AiSharingFile[];
+};
 
 /**
  * A Git job that stopped part-way. It is a state the repository is in, not a failure that happened:
@@ -166,6 +213,8 @@ export type CommitDetail = {
   diff: string;
   /** A diff too large to hand over whole was cut, and says so rather than looking complete. */
   truncated: boolean;
+  /** For a review before saving: likely credentials among what the save would record. */
+  secrets?: SecretFinding[];
 };
 
 export type ConflictResolution = {
@@ -189,6 +238,8 @@ export type ConflictProposal = {
   skipped: { path: string; reason: string }[];
   /** What each file looks like right now, so the interface can show the change rather than assert it. */
   current: Record<string, string>;
+  /** Conflicted files whose content was not sent, and why. They are listed in `skipped` as well. */
+  withheld?: WithheldFile[];
 };
 
 /**
@@ -304,6 +355,12 @@ export type ActionPlan = {
    * branch tip. It replaces the `stateId` comparison at execution.
    */
   selection?: { changes: SelectedChange[]; binding: string; target?: string };
+  /** Files whose content the model did not read while preparing this, so the answer says what it is missing. */
+  withheld?: WithheldFile[];
+  /** Likely credentials in what this plan would save. The review shows them before anything is confirmed. */
+  secrets?: SecretFinding[];
+  /** Nothing was sent: the person has not yet agreed to share this repository with the assistant. */
+  sharingRequired?: boolean;
   risk: "low" | "medium" | "high";
   requiresConfirmation: boolean;
   /** "question" is the assistant asking for something, not a failure; the interface must not dress it as one. */
@@ -341,6 +398,11 @@ export type ExecutionResult = {
   error?: string;
   /** What each step of the plan actually did, so a sequence that stops halfway is never reported as a success. */
   outcomes?: StepOutcome[];
+  /**
+   * The output shows a file that is excluded or looks like a credential. It is shown to the person, and
+   * kept out of the conversation that later goes back to the assistant.
+   */
+  withheldFromAssistant?: boolean;
 };
 
 export type CommitDescriptionResult = {
@@ -348,6 +410,8 @@ export type CommitDescriptionResult = {
   stateId: string;
   /** The files the description was written from, with the versions that were read. */
   selection?: SelectedChange[];
+  /** Ticked files whose content the model did not read; the description can only reflect their names. */
+  withheld?: WithheldFile[];
 };
 
 export type ConversationMessage = {
@@ -423,6 +487,14 @@ export type GitlineApi = {
   /** Exactly what a save of these files would record, against the last saved version. */
   getSelectionDiff: (path: string, paths: string[], locale?: Locale) => Promise<CommitDetail>;
   executePlan: (path: string, planId: string, locale?: Locale) => Promise<ExecutionResult>;
+  /** What a request to the assistant would send from this repository, and whether sharing was agreed. */
+  getAiSharing: (path: string, purpose: AiSharingPurpose, paths?: string[], locale?: Locale) => Promise<AiSharingPreview>;
+  acknowledgeAiSharing: (path: string) => Promise<void>;
+  setAiSharingExclusions: (path: string, exclusions: string[], locale?: Locale) => Promise<string[]>;
+  /** Shares one flagged file at its current version after the person reviewed it, or stops sharing it. */
+  setAiSharingReview: (path: string, file: string, share: boolean, locale?: Locale) => Promise<void>;
+  /** Likely credentials among the uncommitted changes, found on this Mac. */
+  scanChangesForSecrets: (path: string) => Promise<SecretFinding[]>;
   getLlmConfig: () => Promise<LlmConfig>;
   saveLlmConfig: (config: LlmConfigInput) => Promise<LlmConfig>;
 };

@@ -8,12 +8,21 @@ import type { GitProtocol } from "../shared/types.js";
  */
 export type IdentityMemory = { account?: string; sshHost?: string; confirmedAt: string };
 export type RepositoryMemory = { host?: string; owner?: string; protocol?: GitProtocol; remote?: string; confirmedAt: string };
-export type Memory = { identities: Record<string, IdentityMemory>; repositories: Record<string, RepositoryMemory> };
+/**
+ * What the person decided about sharing one repository with the assistant. It lives on this Mac, never
+ * inside the repository: `acknowledgedAt` is when they agreed that its content may go to the provider,
+ * `exclusions` are path patterns it must never read, and `reviewed` holds the flagged files they looked
+ * at and chose to share, each bound to the version they saw — an edit makes it a new question.
+ */
+export type SharingMemory = { acknowledgedAt?: string; exclusions: string[]; reviewed: Record<string, string>; confirmedAt: string };
+export type Memory = { identities: Record<string, IdentityMemory>; repositories: Record<string, RepositoryMemory>; sharing: Record<string, SharingMemory> };
 
 const entryLimit = 200;
+const exclusionLimit = 200;
+const reviewedLimit = 500;
 
 export function emptyMemory(): Memory {
-  return { identities: {}, repositories: {} };
+  return { identities: {}, repositories: {}, sharing: {} };
 }
 
 /** Keyed by host and owner, not by repository: it answers "who am I on this host", which every repository shares. */
@@ -65,7 +74,39 @@ export function sanitizeMemory(value: unknown): Memory {
     };
     if (Object.keys(remembered).length > 1) repositories[key] = remembered;
   }
-  return { identities: prune(identities), repositories: prune(repositories) };
+  const sharing: Memory["sharing"] = {};
+  for (const [key, entry] of Object.entries((record.sharing ?? {}) as Record<string, unknown>)) {
+    if (!entry || typeof entry !== "object") continue;
+    const item = entry as Record<string, unknown>;
+    const exclusions = Array.isArray(item.exclusions)
+      ? [...new Set(item.exclusions.filter((pattern): pattern is string => typeof pattern === "string" && Boolean(pattern.trim()) && pattern.length <= 300 && !/[\r\n\0]/.test(pattern)).map((pattern) => pattern.trim()))].slice(0, exclusionLimit)
+      : [];
+    const reviewed = Object.fromEntries(Object.entries((item.reviewed && typeof item.reviewed === "object" ? item.reviewed : {}) as Record<string, unknown>)
+      .filter(([path, version]) => path && typeof version === "string" && /^[0-9a-f]{16,128}$/.test(version))
+      .slice(0, reviewedLimit)) as Record<string, string>;
+    const acknowledgedAt = optionalString(item.acknowledgedAt) && !Number.isNaN(new Date(item.acknowledgedAt as string).valueOf()) ? (item.acknowledgedAt as string).trim() : undefined;
+    if (!acknowledgedAt && !exclusions.length && !Object.keys(reviewed).length) continue;
+    sharing[key] = { ...(acknowledgedAt ? { acknowledgedAt } : {}), exclusions, reviewed, confirmedAt: timestamp(item.confirmedAt) };
+  }
+  return { identities: prune(identities), repositories: prune(repositories), sharing: prune(sharing) };
+}
+
+export function recallSharing(memory: Memory, path: string): SharingMemory {
+  return memory.sharing[path] ?? { exclusions: [], reviewed: {}, confirmedAt: new Date(0).toISOString() };
+}
+
+/** Replaces the given parts of what was decided about sharing this repository; the rest is kept. */
+export function rememberSharing(memory: Memory, path: string, patch: Partial<Omit<SharingMemory, "confirmedAt">>, now: string): Memory {
+  const previous = recallSharing(memory, path);
+  const next: SharingMemory = {
+    ...previous,
+    ...patch,
+    exclusions: (patch.exclusions ?? previous.exclusions).slice(0, exclusionLimit),
+    reviewed: Object.fromEntries(Object.entries(patch.reviewed ?? previous.reviewed).slice(-reviewedLimit)),
+    confirmedAt: now
+  };
+  if (!next.acknowledgedAt) delete next.acknowledgedAt;
+  return { ...memory, sharing: prune({ ...memory.sharing, [path]: next }) };
 }
 
 export function recallIdentity(memory: Memory, host: string, owner: string): IdentityMemory | undefined {
@@ -112,10 +153,14 @@ export function rememberRepository(memory: Memory, path: string, patch: Omit<Rep
 /** A project found at a new location keeps what was confirmed about it; the old path is forgotten. */
 export function relocateRepository(memory: Memory, from: string, to: string): Memory {
   const entry = memory.repositories[from];
-  if (!entry || from === to) return memory;
+  const sharingEntry = memory.sharing[from];
+  if ((!entry && !sharingEntry) || from === to) return memory;
   const repositories = { ...memory.repositories };
+  const sharing = { ...memory.sharing };
   delete repositories[from];
+  delete sharing[from];
   // Whatever was already confirmed at the new location is the more recent truth.
-  repositories[to] = repositories[to] ?? entry;
-  return { ...memory, repositories };
+  if (entry) repositories[to] = repositories[to] ?? entry;
+  if (sharingEntry) sharing[to] = sharing[to] ?? sharingEntry;
+  return { ...memory, repositories, sharing };
 }

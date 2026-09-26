@@ -21,11 +21,16 @@ import {
   findAccount, isSshAuthenticated, parseGhAccounts, parseSshGreeting, parseSshResolvedHostName, sshConfigHostAliases
 } from "./host-identity.js";
 import {
-  emptyMemory, forgetSshHost, recallIdentity, recallRepository, relocateRepository, rememberIdentity, rememberRepository,
-  sanitizeMemory, type Memory
+  emptyMemory, forgetSshHost, recallIdentity, recallRepository, recallSharing, relocateRepository, rememberIdentity, rememberRepository,
+  rememberSharing, sanitizeMemory, type Memory
 } from "./memory.js";
+import {
+  credentialFindings, isCredentialFile, isExcluded, mayBeCredentialFile, normalizeExclusion, redactText, scanDiff, scanText, withheldPlaceholder,
+  type DiffFinding
+} from "./outbound-content.js";
 import type {
-  ActionPlan, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource, DeliveryRequest, FileChange, GitProtocol, SelectedChange,
+  ActionPlan, AiSharingFile, AiSharingPreview, AiSharingPurpose, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource,
+  DeliveryRequest, FileChange, GitProtocol, SecretFinding, SecretKind, SelectedChange, WithheldFile,
   ConflictApplyResult, ConflictFileOutcome, ConflictProposal, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput,
   Locale, Operation, PendingOperation, PlanStep, RepoSnapshot, StepOutcome
 } from "../shared/types.js";
@@ -1071,24 +1076,327 @@ async function getWorkingTreeDiff(snapshot: RepoSnapshot, paths?: string[], disp
 }
 
 /**
+ * One changed file as it would reach the provider: the exact text — its diff, or the whole file when
+ * Git does not track it yet — and what the local checks found in it. `credential` is about the name,
+ * `exists` says whether the file is on disk now, which decides whether a save records it at all.
+ */
+type ChangeChunk = { path: string; text: string; credential: boolean; findings: DiffFinding[]; exists: boolean };
+
+/** One file of a request after the sharing rules: what the model reads when its content may go out. */
+type OutboundFile = AiSharingFile & { text: string };
+
+/** What a request to the provider had to leave out, gathered across every call it makes. */
+type SharingNotes = { withheld: WithheldFile[]; redacted: number };
+
+const newNotes = (): SharingNotes => ({ withheld: [], redacted: 0 });
+
+function noteWithheld(notes: SharingNotes | undefined, files: WithheldFile[]) {
+  if (!notes) return;
+  for (const file of files) if (!notes.withheld.some((item) => item.path === file.path)) notes.withheld.push(file);
+}
+
+function onDisk(absolute: string) {
+  try { lstatSync(absolute); return true; } catch { return false; }
+}
+
+/** A small text file read only to decide whether its name makes it a credential. */
+function readForNameCheck(absolute: string) {
+  try {
+    const stat = lstatSync(absolute);
+    if (!stat.isFile() || stat.size > 1_000_000) return undefined;
+    const raw = readFileSync(absolute);
+    return raw.includes(0) ? undefined : raw.toString("utf8");
+  } catch { return undefined; }
+}
+
+/** Where one file's section of a patch begins. Every other line of a patch starts with a diff marker. */
+const patchSectionStart = /^(?=diff --git |diff --cc |\* Unmerged path )/m;
+
+/**
+ * Every uncommitted change, file by file, as the text that would describe it: the tracked diff against
+ * the last saved version and each new file whole. Nothing is cut short. Git lists the files and writes
+ * the patch in the same order; if the two ever disagree, each file is read on its own instead.
+ */
+async function changeChunks(snapshot: RepoSnapshot, paths?: string[]): Promise<ChangeChunk[]> {
+  const scope = paths ? literalPaths(paths) : [];
+  const base = snapshot.head || await emptyTree(snapshot.path);
+  const diff = ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-renames", "--unified=3", base, "--"];
+  const names = (await checkedGit(snapshot.path, ["-c", "core.quotePath=false", "diff", "--name-only", "-z", "--no-renames", base, "--", ...scope], true))
+    .split("\0").filter(Boolean);
+  const chunks: ChangeChunk[] = [];
+  if (names.length) {
+    let pieces = (await checkedGit(snapshot.path, [...diff, ...scope], true)).split(patchSectionStart).filter((piece) => piece.trim());
+    if (pieces.length !== names.length) {
+      pieces = [];
+      for (const name of names) pieces.push(await checkedGit(snapshot.path, [...diff, ...literalPaths([name])], true));
+    }
+    names.forEach((name, index) => {
+      const text = pieces[index] ?? "";
+      const absolute = resolve(snapshot.path, name);
+      const exists = onDisk(absolute);
+      const credential = mayBeCredentialFile(name) && isCredentialFile(name, exists ? readForNameCheck(absolute) : undefined);
+      chunks.push({ path: name, text: text.startsWith("\n") ? text : `\n${text}`, credential, findings: scanDiff(name, text), exists });
+    });
+  }
+  const untracked = (await checkedGit(snapshot.path, ["ls-files", "--others", "--exclude-standard", "-z", ...(paths ? ["--", ...scope] : [])], true))
+    .split("\0").filter(Boolean);
+  for (const relativePath of untracked) {
+    const absolutePath = resolve(snapshot.path, relativePath);
+    if (!absolutePath.startsWith(`${snapshot.path}${sep}`)) continue;
+    const header = `\n--- /dev/null\n+++ b/${relativePath}\n@@ archivo nuevo @@\n`;
+    try {
+      if (lstatSync(absolutePath).isSymbolicLink()) {
+        chunks.push({ path: relativePath, text: `\n+++ b/${relativePath}\n[enlace simbólico omitido]`, credential: false, findings: [], exists: true });
+        continue;
+      }
+      const content = readFileSync(absolutePath);
+      if (content.includes(0)) {
+        chunks.push({ path: relativePath, text: `${header}[archivo binario omitido]`, credential: isCredentialFile(relativePath), findings: [], exists: true });
+        continue;
+      }
+      const text = content.toString("utf8");
+      chunks.push({
+        path: relativePath, text: `${header}${text}`, credential: isCredentialFile(relativePath, text),
+        findings: scanText(relativePath, text).map((finding) => ({ ...finding, side: "added" as const })), exists: true
+      });
+    } catch (reason) {
+      // A file too large for a single Buffer, or unreadable: reported, never silently dropped.
+      chunks.push({ path: relativePath, text: `\n+++ b/${relativePath}\n[no se pudo leer: ${reason instanceof Error ? reason.message : "error desconocido"}]`, credential: isCredentialFile(relativePath), findings: [], exists: true });
+    }
+  }
+  return chunks;
+}
+
+/** The version of every listed path, both sides of a rename included, so a review is bound to what was seen. */
+function versionsOf(snapshot: RepoSnapshot) {
+  const versions = new Map<string, string>();
+  for (const change of snapshot.changes) for (const path of changePaths(change)) if (change.version) versions.set(path, change.version);
+  return versions;
+}
+
+function plainFindings(findings: SecretFinding[]): SecretFinding[] {
+  return findings.map(({ path, line, kind }) => (line ? { path, line, kind } : { path, kind }));
+}
+
+/**
+ * The sharing rules for one file, in order: an exclusion always wins; then anything that looks like a
+ * credential is withheld unless the person reviewed exactly this version and chose to share it.
+ */
+function classifyOutbound(snapshot: RepoSnapshot, path: string, text: string, findings: SecretFinding[], versions: Map<string, string>): OutboundFile {
+  const sharing = recallSharing(memory, snapshot.path);
+  if (isExcluded(path, sharing.exclusions)) return { path, status: "excluded", findings: [], text };
+  if (!findings.length) return { path, status: "sent", findings: [], text };
+  const version = versions.get(path);
+  return { path, status: version && sharing.reviewed[path] === version ? "reviewed" : "likely_secret", findings: plainFindings(findings), text };
+}
+
+function chunkFindings(chunk: ChangeChunk): SecretFinding[] {
+  return chunk.credential ? [{ path: chunk.path, kind: "credential_file" }, ...chunk.findings] : chunk.findings;
+}
+
+/** The single gate every change passes on its way to the provider, whichever request carries it. */
+async function outboundChanges(snapshot: RepoSnapshot, paths?: string[]): Promise<OutboundFile[]> {
+  const versions = versionsOf(snapshot);
+  return (await changeChunks(snapshot, paths)).map((chunk) => classifyOutbound(snapshot, chunk.path, chunk.text, chunkFindings(chunk), versions));
+}
+
+function isWithheld(file: AiSharingFile) {
+  return file.status === "excluded" || file.status === "likely_secret";
+}
+
+function withheldFiles(files: AiSharingFile[]): WithheldFile[] {
+  return files.filter(isWithheld).map((file) => ({
+    path: file.path, reason: file.status === "excluded" ? "excluded" as const : "likely_secret" as const,
+    ...(file.findings.length ? { findings: file.findings } : {})
+  }));
+}
+
+/** What the model reads for one file: its text, or a placeholder that names it and says why it is missing. */
+function modelText(file: OutboundFile) {
+  if (!isWithheld(file)) return file.text;
+  return `\n--- ${file.path}\n${withheldPlaceholder(withheldFiles([file])[0])}`;
+}
+
+/** The working tree diff as the model may read it, with every withheld file standing in as a placeholder. */
+async function modelWorkingTreeDiff(snapshot: RepoSnapshot, paths?: string[]) {
+  const files = await outboundChanges(snapshot, paths);
+  const diff = files.map(modelText).filter(Boolean).join("\n");
+  if (!diff.trim()) throw new Error("No hay un diff de texto disponible para describir.");
+  return { diff, files, withheld: withheldFiles(files) };
+}
+
+/**
+ * Likely credentials a save of these files would newly record: credential files that will exist after
+ * the save, and anything in the lines it adds. A secret that is only being removed is not one of them.
+ */
+function saveFindings(chunks: ChangeChunk[]): SecretFinding[] {
+  return chunks.flatMap((chunk) => [
+    ...(chunk.credential && chunk.exists ? [{ path: chunk.path, kind: "credential_file" as const }] : []),
+    ...plainFindings(chunk.findings.filter((finding) => finding.side === "added"))
+  ]);
+}
+
+/**
+ * Free text on its way out — the conversation, a Git error, the request itself — with every likely
+ * credential replaced by a marker. The count is kept so the planner can be told something was removed.
+ */
+function redactOutgoing(text: string, counter: { redacted: number }) {
+  const result = redactText(text);
+  counter.redacted += result.redacted;
+  return result.text;
+}
+
+function sharingAcknowledged(repoPath: string) {
+  return Boolean(recallSharing(memory, repoPath).acknowledgedAt);
+}
+
+function sharingRequiredText(language: Locale) {
+  return localized(language,
+    "Antes de que el asistente lea este repositorio, revisa qué partes se enviarán al proveedor configurado y dale tu visto bueno. No se envió nada. Todo lo demás sigue funcionando sin el asistente: puedes guardar con tu propia descripción, cambiar de rama y usar cualquier control de Git.",
+    "Before the assistant reads this repository, review which parts will be sent to the configured provider and approve it. Nothing was sent. Everything else keeps working without the assistant: you can save with your own description, switch branches and use every Git control.");
+}
+
+function sharingRequiredPlan(snapshot: RepoSnapshot, language: Locale): ActionPlan {
+  return bindPlan(snapshot, {
+    ...refused(sharingRequiredText(language), "guardrail", localized(language, "Revisa qué se comparte con el asistente", "Review what is shared with the assistant"), "question"),
+    sharingRequired: true
+  });
+}
+
+const secretKindText: Record<SecretKind, [string, string]> = {
+  credential_file: ["archivo de credenciales", "credential file"],
+  private_key: ["clave privada", "private key"],
+  aws_access_key: ["clave de acceso de AWS", "AWS access key"],
+  github_token: ["token de GitHub", "GitHub token"],
+  slack_token: ["token de Slack", "Slack token"],
+  stripe_key: ["clave de Stripe", "Stripe key"],
+  api_key: ["clave de API", "API key"],
+  google_api_key: ["clave de API de Google", "Google API key"],
+  jwt: ["token firmado (JWT)", "signed token (JWT)"],
+  credential_url: ["contraseña dentro de una URL", "password inside a URL"],
+  secret_assignment: ["contraseña o clave en la configuración", "password or key in settings"]
+};
+
+/** Findings by file, with line and kind only: "config/.env (credential file; line 3: AWS access key)". */
+function secretsText(findings: SecretFinding[], language: Locale) {
+  const byPath = new Map<string, SecretFinding[]>();
+  for (const finding of findings) byPath.set(finding.path, [...(byPath.get(finding.path) ?? []), finding]);
+  return [...byPath].map(([path, items]) => `${path} (${items.slice(0, 4).map((item) => {
+    const kind = localized(language, ...secretKindText[item.kind]);
+    return item.line ? localized(language, `línea ${item.line}: ${kind}`, `line ${item.line}: ${kind}`) : kind;
+  }).join("; ")}${items.length > 4 ? "; …" : ""})`).join(", ");
+}
+
+/** What the person decided about one repository, as the interface shows it before anything is sent. */
+export async function getAiSharing(cwd: string, purpose: AiSharingPurpose, paths?: string[], locale?: Locale): Promise<AiSharingPreview> {
+  const language = normalizeLocale(locale);
+  const snapshot = await getSnapshot(cwd);
+  const sharing = recallSharing(memory, snapshot.path);
+  let files: AiSharingFile[] = [];
+  if (purpose === "conflicts") files = (await readConflicts(snapshot)).flatMap((entry) => entry.file ? [entry.file] : []);
+  else if (snapshot.isDirty) {
+    const selection = purpose === "description" && paths ? currentSelection(snapshot, paths, language) : undefined;
+    files = await outboundChanges(snapshot, selection?.paths);
+  }
+  return {
+    repoPath: snapshot.path,
+    provider: "openai",
+    model: llmState.model || MODEL_FALLBACK,
+    destination: new URL(RESPONSES_ENDPOINT).host,
+    acknowledged: Boolean(sharing.acknowledgedAt),
+    ...(sharing.acknowledgedAt ? { acknowledgedAt: sharing.acknowledgedAt } : {}),
+    purpose,
+    exclusions: sharing.exclusions,
+    files: files.map(({ path, status, findings }) => ({ path, status, findings }))
+  };
+}
+
+/** The person read what leaves the Mac for this repository and agreed to it. Remembered on this Mac. */
+export async function acknowledgeAiSharing(cwd: string) {
+  const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
+  const now = new Date().toISOString();
+  saveMemory(rememberSharing(memory, repoRoot, { acknowledgedAt: now }, now));
+}
+
+/** Replaces this repository's exclusions. Invalid patterns are refused as a whole, so nothing half-applies. */
+export async function setAiSharingExclusions(cwd: string, exclusions: unknown, locale?: Locale): Promise<string[]> {
+  const language = normalizeLocale(locale);
+  const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
+  if (!Array.isArray(exclusions) || exclusions.length > 200) throw new Error(localized(language, "La lista de exclusiones no es válida. No se cambió nada.", "The exclusion list is invalid. Nothing was changed."));
+  const normalized: string[] = [];
+  for (const raw of exclusions) {
+    const pattern = normalizeExclusion(raw);
+    if (!pattern) throw new Error(localized(language,
+      `${JSON.stringify(typeof raw === "string" ? raw.slice(0, 80) : "")} no es un patrón válido: usa una ruta del repositorio como «secretos/», «*.sql» o «config/prod.yml». No se cambió nada.`,
+      `${JSON.stringify(typeof raw === "string" ? raw.slice(0, 80) : "")} is not a valid pattern: use a repository path such as “secrets/”, “*.sql” or “config/prod.yml”. Nothing was changed.`));
+    if (!normalized.includes(pattern)) normalized.push(pattern);
+  }
+  const now = new Date().toISOString();
+  saveMemory(rememberSharing(memory, repoRoot, { exclusions: normalized }, now));
+  return normalized;
+}
+
+/**
+ * Shares one flagged file at the version on disk now, after the person looked at it — or takes that
+ * back. An edit to the file changes its version, and the question is asked again.
+ */
+export async function setAiSharingReview(cwd: string, file: string, share: boolean, locale?: Locale) {
+  const language = normalizeLocale(locale);
+  const snapshot = await getSnapshot(cwd);
+  const reviewed = { ...recallSharing(memory, snapshot.path).reviewed };
+  if (share) {
+    const version = versionsOf(snapshot).get(file);
+    if (!version) throw new Error(localized(language, `${file} ya no es un cambio sin guardar, así que no hay nada que compartir. No se cambió nada.`, `${file} is no longer an unsaved change, so there is nothing to share. Nothing was changed.`));
+    reviewed[file] = version;
+  } else delete reviewed[file];
+  const now = new Date().toISOString();
+  saveMemory(rememberSharing(memory, snapshot.path, { reviewed }, now));
+}
+
+/** Likely credentials among every uncommitted change, for the warning beside the files to save. */
+export async function scanChangesForSecrets(cwd: string): Promise<SecretFinding[]> {
+  const snapshot = await getSnapshot(cwd);
+  return snapshot.isDirty ? saveFindings(await changeChunks(snapshot)) : [];
+}
+
+/** A read-only command that prints a file the assistant may not read keeps its output out of the conversation. */
+function argvShowsWithheld(argv: string[], exclusions: string[]) {
+  return argv.slice(1).some((token) => {
+    if (token.startsWith("-")) return false;
+    const path = token.replace(/^:\([^)]*\)/, "").replace(/^[^:]*:(?=[^:])/, "");
+    return Boolean(path) && (isExcluded(path, exclusions) || isCredentialFile(path));
+  });
+}
+
+/**
  * One commit message read off the real diff. Shared by the manual button and by any planned commit.
  * With `paths`, the model only ever reads the files that will be saved.
  */
-async function describeChanges(snapshot: RepoSnapshot, paths?: string[]) {
-  const diff = await getWorkingTreeDiff(snapshot, paths);
-  const recentSubjects = snapshot.commits.slice(0, 15).map((commit) => commit.subject).filter(Boolean);
+async function describeChanges(snapshot: RepoSnapshot, paths?: string[], locale?: Locale) {
+  const language = normalizeLocale(locale);
+  const { diff, files, withheld } = await modelWorkingTreeDiff(snapshot, paths);
+  // With nothing readable, a message would be a guess from file names; the person writes it instead.
+  if (files.length && files.every(isWithheld)) {
+    throw new Error(localized(language,
+      "GitCat no envió al asistente el contenido de ninguno de estos archivos (están excluidos o parecen contener una credencial), así que no puede describirlos sin adivinar. Escribe tú la descripción —guardar funciona igual— o revisa qué se comparte si quieres que el asistente los lea.",
+      "GitCat did not send the assistant the content of any of these files (they are excluded or look like they hold a credential), so it cannot describe them without guessing. Write the description yourself — saving works the same — or review what is shared if you want the assistant to read them."));
+  }
+  const recentSubjects = snapshot.commits.slice(0, 15).map((commit) => redactText(commit.subject).text).filter(Boolean);
   const instructions = `Write one commit message for the working tree diff below.
 Rules: a single line, ${commitMessageLimit} characters maximum, imperative mood, describing the intent of
 the change. No quotes, no markdown, no prefix, no explanation, nothing but the message itself.
 Write it in the same language as the recent commit subjects of this repository; if there are none, or
-they are mixed, write it in English.`;
+they are mixed, write it in English.
+Some files may appear as a GitCat placeholder instead of their content, because the user withheld them
+or they look like they hold a credential. Describe the change from what you can read, and never guess
+or invent what a withheld file contains.`;
   const input = [
     `Current branch: ${snapshot.currentBranch}`,
     recentSubjects.length ? `Recent commit subjects:\n${recentSubjects.map((subject) => `- ${subject}`).join("\n")}` : "Recent commit subjects: none",
     `Working tree diff:\n${diff}`
   ].join("\n\n");
   const text = await askProvider({ instructions, input }, 180_000);
-  return cleanCommitDescription(text);
+  return { description: cleanCommitDescription(text), withheld };
 }
 
 /**
@@ -1110,15 +1418,20 @@ export async function generateCommitDescription(cwd: string, locale?: Locale, pa
   const language = normalizeLocale(locale);
   if (!isLlmConfigured()) throw new Error(llmRequired(language));
   const snapshot = await getSnapshot(cwd);
+  if (!sharingAcknowledged(snapshot.path)) throw new Error(sharingRequiredText(language));
   if (!snapshot.changes.length) throw new Error(localized(language, "No hay cambios locales que describir.", "There are no local changes to describe."));
   const selection = paths ? currentSelection(snapshot, paths, language) : undefined;
-  const description = await describeChanges(snapshot, selection?.paths);
+  const { description, withheld } = await describeChanges(snapshot, selection?.paths, language);
   const current = await getSnapshot(snapshot.path);
   const moved = selection
     ? selection.selected.some((change) => current.changes.find((item) => item.path === change.path)?.version !== change.version)
     : current.stateId !== snapshot.stateId;
   if (moved) throw new Error(localized(language, "Los cambios variaron durante la generación. Inténtalo de nuevo.", "The changes moved while the description was being generated. Try again."));
-  return { description, stateId: snapshot.stateId, ...(selection ? { selection: selectedVersions(selection.selected) } : {}) };
+  return {
+    description, stateId: snapshot.stateId,
+    ...(selection ? { selection: selectedVersions(selection.selected) } : {}),
+    ...(withheld.length ? { withheld } : {})
+  };
 }
 
 /** Exactly what saving these files would record, for the review before anything is saved. */
@@ -1127,14 +1440,18 @@ export async function getSelectionDiff(cwd: string, paths: string[], locale?: Lo
   const snapshot = await getSnapshot(cwd);
   const selection = currentSelection(snapshot, paths, language);
   const diff = await getWorkingTreeDiff(snapshot, selection.paths, true).catch(() => "");
-  return { hash: "", files: selection.selected, stats: {}, ...cutDiff(diff) };
+  const secrets = saveFindings(await changeChunks(snapshot, selection.paths));
+  return { hash: "", files: selection.selected, stats: {}, ...cutDiff(diff), ...(secrets.length ? { secrets } : {}) };
 }
 
 /** Everything the model is allowed to reason about: verified repository facts, never raw guesses. */
-async function plannerState(snapshot: RepoSnapshot) {
-  const workingTreeDiff = snapshot.isDirty
-    ? await getWorkingTreeDiff(snapshot).catch((error) => `[no se pudo leer el diff de trabajo: ${error instanceof Error ? error.message : "error desconocido"}]`)
-    : null;
+async function plannerState(snapshot: RepoSnapshot, notes: SharingNotes = newNotes()) {
+  const outbound = snapshot.isDirty
+    ? await modelWorkingTreeDiff(snapshot).catch((error) => ({ diff: `[no se pudo leer el diff de trabajo: ${error instanceof Error ? error.message : "error desconocido"}]`, withheld: [] as WithheldFile[] }))
+    : undefined;
+  noteWithheld(notes, outbound?.withheld ?? []);
+  const workingTreeDiff = outbound?.diff ?? null;
+  const subject = (text: string) => redactText(text).text;
   return {
     openRepositoryPath: snapshot.path,
     openRepositoryName: snapshot.name,
@@ -1151,6 +1468,12 @@ async function plannerState(snapshot: RepoSnapshot) {
     // A dirty tree is not part of any branch tip. The model needs the actual diff before deciding
     // whether a merge request should commit it, leave it alone, or ask the user what it belongs to.
     workingTreeDiff,
+    // Files that stand in the diff as a placeholder. The model says so when its answer depends on one.
+    withheldFromModel: (outbound?.withheld ?? []).map((file) => ({
+      path: file.path, reason: file.reason, kinds: [...new Set((file.findings ?? []).map((finding) => finding.kind))]
+    })),
+    // Likely credentials replaced by a marker in the conversation or the request before they were sent.
+    redactedFromConversation: notes.redacted,
     remotes: snapshot.remotes,
     branches: snapshot.branches.map((branch) => ({
       name: branch.name,
@@ -1171,11 +1494,11 @@ async function plannerState(snapshot: RepoSnapshot) {
       ahead: branch.ahead,
       behind: branch.behind,
       lastCommit: branch.lastCommit
-        ? { shortHash: branch.lastCommit.shortHash, subject: branch.lastCommit.subject, author: branch.lastCommit.author, email: branch.lastCommit.email, date: branch.lastCommit.date }
+        ? { shortHash: branch.lastCommit.shortHash, subject: subject(branch.lastCommit.subject), author: branch.lastCommit.author, email: branch.lastCommit.email, date: branch.lastCommit.date }
         : null
     })),
     recentCommits: snapshot.commits.slice(0, 30).map((commit) => ({
-      shortHash: commit.shortHash, subject: commit.subject, author: commit.author, date: commit.date, refs: commit.refs
+      shortHash: commit.shortHash, subject: subject(commit.subject), author: commit.author, date: commit.date, refs: commit.refs
     })),
     staleAfterDays,
     remembered: {
@@ -1187,9 +1510,16 @@ async function plannerState(snapshot: RepoSnapshot) {
   };
 }
 
-async function requestPlan(request: string, snapshot: RepoSnapshot, context: ConversationMessage[], issues: PlanIssue[] = []): Promise<ModelPlan> {
+async function requestPlan(request: string, snapshot: RepoSnapshot, context: ConversationMessage[], issues: PlanIssue[] = [], notes: SharingNotes = newNotes()): Promise<ModelPlan> {
+  // Earlier answers, Git errors and the request itself can carry a credential that was printed or
+  // pasted; each one is replaced by a marker before anything is sent.
+  const counter = { redacted: 0 };
+  context = context.map((message) => ({ role: message.role, content: redactOutgoing(message.content, counter) }));
+  request = redactOutgoing(request, counter);
+  issues = issues.map((issue) => ({ field: issue.field, problem: redactOutgoing(issue.problem, counter) }));
+  notes.redacted = Math.max(notes.redacted, counter.redacted);
   const text = await askProvider({
-    instructions: buildPlannerInstructions(await plannerState(snapshot), issues),
+    instructions: buildPlannerInstructions(await plannerState(snapshot, notes), issues),
     input: [...context, { role: "user", content: request }],
     text: { format: planResponseFormat }
   });
@@ -1219,14 +1549,21 @@ function highestRisk(a: ActionPlan["risk"], b: ActionPlan["risk"]): ActionPlan["
  * each command, its risk and whether the plan needs confirmation. A step the table does not recognise
  * cannot reach Git, so an unknown operation collapses the whole plan into a refusal.
  */
-async function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot, locale: Locale = "es"): Promise<PlanDraft> {
+async function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot, locale: Locale = "es", notes?: SharingNotes): Promise<PlanDraft> {
   const proposed = plan.steps.map((step) => stepFrom(step.operation, operationArgs(step), step.argv, locale));
   if (proposed.some((step) => !step)) return refused(localized(locale, "El plan incluye una operación que no está permitida.", "The plan includes an operation that is not allowed."), "llm", plan.summary);
-  const steps = await writeCommitMessages(proposed as PlanStep[], snapshot, locale);
+  const steps = await writeCommitMessages(proposed as PlanStep[], snapshot, locale, notes);
   if ("blocker" in steps) return asking(steps.blocker, plan.summary);
-  const draft = sequenceDraft(steps, plan.rationale || "", renameEffects(steps, snapshot, locale), locale);
+  // A planned commit saves every change, so whatever looks like a credential among them is named on the card.
+  const secrets = steps.some((step) => step.operation === "commit" && !step.paths) ? saveFindings(await changeChunks(snapshot)) : [];
+  const effects = [
+    ...(renameEffects(steps, snapshot, locale) ?? []),
+    ...(secrets.length ? [savingSecretsEffect(secrets, locale)] : [])
+  ];
+  const draft = sequenceDraft(steps, plan.rationale || "", effects.length ? effects : undefined, locale);
   return {
     ...draft,
+    ...(secrets.length ? { secrets } : {}),
     summary: plan.summary || draft.summary,
     rationale: plan.rationale || draft.rationale,
     risk: highestRisk(draft.risk, plan.risk),
@@ -1292,7 +1629,7 @@ const LAST_RESORT_REFUSAL_EN =
  * to the user in their own language. Retried once; there is no keyword fallback.
  */
 async function draftFromPlan(
-  plan: ModelPlan, snapshot: RepoSnapshot, request: string, context: ConversationMessage[], locale: Locale = "es", retried = false
+  plan: ModelPlan, snapshot: RepoSnapshot, request: string, context: ConversationMessage[], locale: Locale = "es", notes: SharingNotes = newNotes(), retried = false
 ): Promise<PlanDraft> {
   const fallbackRefusal = localized(locale, LAST_RESORT_REFUSAL, LAST_RESORT_REFUSAL_EN);
   if (plan.intent === "answer") return answerDraft(plan);
@@ -1301,12 +1638,12 @@ async function draftFromPlan(
 
   const retry = async (issues: PlanIssue[]) => {
     if (retried) return asking(plan.reply || plan.rationale || fallbackRefusal, plan.summary);
-    return draftFromPlan(await requestPlan(request, snapshot, context, issues), snapshot, request, context, locale, true);
+    return draftFromPlan(await requestPlan(request, snapshot, context, issues, notes), snapshot, request, context, locale, notes, true);
   };
 
   if (plan.intent === "git_operation") {
     const issues = [...planIssues(plan), ...protectedBranchIssues(plan, snapshot)];
-    return issues.length ? retry(issues) : gitOperationDraft(plan, snapshot, locale);
+    return issues.length ? retry(issues) : gitOperationDraft(plan, snapshot, locale, notes);
   }
 
   const preparation = await prepareGithubRepository(snapshot, repositoryFieldsFromPlan(plan), "llm");
@@ -1320,6 +1657,18 @@ async function draftFromPlan(
 
 function bindPlan(snapshot: RepoSnapshot, draft: PlanDraft): ActionPlan {
   return { ...draft, id: randomUUID(), repoPath: snapshot.path, head: snapshot.head, stateId: snapshot.stateId };
+}
+
+/** A plan that says which files the model could not read while preparing it. */
+function withNotes(draft: PlanDraft, notes: SharingNotes): PlanDraft {
+  return notes.withheld.length ? { ...draft, withheld: notes.withheld } : draft;
+}
+
+/** The card line for a save that records something that looks like a credential. */
+function savingSecretsEffect(secrets: SecretFinding[], language: Locale) {
+  return localized(language,
+    `Atención: esto guarda archivos que parecen contener una credencial: ${secretsText(secrets, language)}. Una vez publicada, sacarla del historial es difícil; si es real, conviene cambiarla por una nueva.`,
+    `Heads up: this saves files that look like they hold a credential: ${secretsText(secrets, language)}. Once published it is hard to remove from history; if it is real, it is worth replacing it with a new one.`);
 }
 
 /**
@@ -1367,6 +1716,29 @@ function readIfPresent(absolute: string) {
 }
 
 /**
+ * Every open conflict as the model could read it: the whole file, and the sharing rules applied to it.
+ * A binary file, one too large to review, or one a side deleted has no `file`: there is nothing to send.
+ */
+type ConflictEntry = { conflict: Conflict; raw?: Buffer; file?: OutboundFile };
+
+async function readConflicts(snapshot: RepoSnapshot): Promise<ConflictEntry[]> {
+  const versions = versionsOf(snapshot);
+  return snapshot.conflicts.flatMap((conflict): ConflictEntry[] => {
+    const absolute = resolve(snapshot.path, conflict.path);
+    if (!absolute.startsWith(`${snapshot.path}${sep}`)) return [];
+    try {
+      const raw = readFileSync(absolute);
+      if (raw.includes(0) || raw.length > conflictFileLimit) return [{ conflict, raw }];
+      const text = raw.toString("utf8");
+      const findings = credentialFindings(conflict.path, text, scanText(conflict.path, text));
+      return [{ conflict, raw, file: classifyOutbound(snapshot, conflict.path, text, findings, versions) }];
+    } catch {
+      return [{ conflict }];
+    }
+  });
+}
+
+/**
  * The model's reading of every open conflict, as a proposal and nothing else. The file contents do
  * leave the machine here — that is unavoidable, since settling a conflict means understanding both
  * sides — so it only ever happens because someone pressed the button, never on its own.
@@ -1376,6 +1748,7 @@ export async function proposeConflictResolution(cwd: string, locale?: Locale): P
   if (!isLlmConfigured()) throw new Error(llmRequired(language));
   const snapshot = await getSnapshot(cwd);
   if (!snapshot.conflicts.length) throw new Error(localized(language, "No hay conflictos que resolver.", "There are no conflicts to resolve."));
+  if (!sharingAcknowledged(snapshot.path)) throw new Error(sharingRequiredText(language));
   // Captured before anything is read, so a change made while the model is thinking is caught later.
   const operation = await conflictOperation(snapshot.path);
   const stages = await unmergedStages(snapshot.path);
@@ -1383,29 +1756,31 @@ export async function proposeConflictResolution(cwd: string, locale?: Locale): P
   const current: Record<string, string> = {};
   const files: ConflictBinding["files"] = {};
   const readable: Conflict[] = [];
+  const skipped: ConflictProposal["skipped"] = [];
+  const entries = await readConflicts(snapshot);
+  const withheld = withheldFiles(entries.flatMap((entry) => entry.file ? [entry.file] : []));
   for (const conflict of snapshot.conflicts) {
-    const absolute = resolve(snapshot.path, conflict.path);
-    if (!absolute.startsWith(`${snapshot.path}${sep}`)) continue;
-    try {
-      const raw = readFileSync(absolute);
-      // A binary file has no sides to read, and a huge one nobody is going to review properly.
-      if (raw.includes(0) || raw.length > conflictFileLimit) continue;
-      current[conflict.path] = raw.toString("utf8");
-      files[conflict.path] = { stages: stages.get(conflict.path) ?? "", content: contentVersion(raw) };
-      readable.push(conflict);
-    } catch { /* deleted on one side: there is no content to reason about */ }
+    const entry = entries.find((item) => item.conflict.path === conflict.path);
+    // A binary file has no sides to read, a huge one nobody is going to review properly, and a
+    // file deleted on one side has no content to reason about.
+    if (!entry?.file || !entry.raw) {
+      skipped.push({ path: conflict.path, reason: localized(language,
+        "Es binario, demasiado grande, o uno de los lados lo borró: eso se decide con «quedarse con un lado».",
+        "It is binary, too large, or one side deleted it: settle it by keeping one side.") });
+      continue;
+    }
+    if (isWithheld(entry.file)) {
+      skipped.push({ path: conflict.path, reason: entry.file.status === "excluded"
+        ? localized(language, "No se envió al asistente porque está excluido de lo que puede leer. Puedes quedarte con un lado, editarlo tú o dejar que lo lea desde «Qué ve el asistente».", "Not sent to the assistant because it is excluded from what it may read. You can keep one side, edit it yourself, or let it be read from “What the assistant sees”.")
+        : localized(language, `No se envió al asistente porque parece contener una credencial (${secretsText(entry.file.findings, language)}). Puedes quedarte con un lado, editarlo tú o revisarlo y compartirlo desde «Qué ve el asistente».`, `Not sent to the assistant because it looks like it holds a credential (${secretsText(entry.file.findings, language)}). You can keep one side, edit it yourself, or review and share it from “What the assistant sees”.`) });
+      continue;
+    }
+    current[conflict.path] = entry.file.text;
+    files[conflict.path] = { stages: stages.get(conflict.path) ?? "", content: contentVersion(entry.raw) };
+    readable.push(conflict);
   }
   if (!readable.length) {
-    return {
-      ...issued,
-      resolutions: [],
-      skipped: snapshot.conflicts.map((conflict) => ({
-        path: conflict.path,
-        reason: "Es binario, demasiado grande, o uno de los lados lo borró: eso se decide con «quedarse con un lado»."
-      })),
-      current: {},
-      binding: { operation, files }
-    };
+    return { ...issued, resolutions: [], skipped, current: {}, binding: { operation, files }, ...(withheld.length ? { withheld } : {}) };
   }
 
   // A rebase replays your commits on top of the other branch, so "ours" is the branch underneath.
@@ -1426,7 +1801,11 @@ export async function proposeConflictResolution(cwd: string, locale?: Locale): P
   const text = await askProvider({ instructions, input, text: { format: resolutionResponseFormat } }, 240_000);
   const parsed = parseConflictProposal(text);
   if (!parsed) throw new Error(localized(language, "El proveedor devolvió una respuesta que no cumple el esquema de resolución.", "The provider returned a response that does not match the resolution schema."));
-  return { ...issued, ...validateProposal(parsed, readable.map((conflict) => conflict.path)), current, binding: { operation, files } };
+  const proposal = validateProposal(parsed, readable.map((conflict) => conflict.path));
+  return {
+    ...issued, ...proposal, skipped: [...skipped, ...proposal.skipped], current, binding: { operation, files },
+    ...(withheld.length ? { withheld } : {})
+  };
 }
 
 /**
@@ -1523,13 +1902,15 @@ export async function planRecovery(cwd: string, failure: ExecutionFailure, conte
   const language = normalizeLocale(locale);
   const snapshot = await getSnapshot(cwd);
   if (!isLlmConfigured()) return bindPlan(snapshot, refused(llmRequired(language)));
+  if (!sharingAcknowledged(snapshot.path)) return sharingRequiredPlan(snapshot, language);
   const issues: PlanIssue[] = [
     { field: "execution.command", problem: `"${failure.command}" failed: ${failure.error}` },
     ...(failure.skipped.length ? [{ field: "execution.skipped", problem: `these steps never ran: ${failure.skipped.join("; ")}` }] : [])
   ];
+  const notes = newNotes();
   try {
-    const plan = await requestPlan(RECOVERY_REQUEST, snapshot, context, issues);
-    return bindPlan(snapshot, await draftFromPlan(plan, snapshot, RECOVERY_REQUEST, context, language));
+    const plan = await requestPlan(RECOVERY_REQUEST, snapshot, context, issues, notes);
+    return bindPlan(snapshot, withNotes(await draftFromPlan(plan, snapshot, RECOVERY_REQUEST, context, language, notes), notes));
   } catch (error) {
     return bindPlan(snapshot, refused(localized(language, `No pude consultar el proveedor LLM: ${error instanceof Error ? error.message : "error desconocido"}`, `I could not query the LLM provider: ${error instanceof Error ? error.message : "unknown error"}`), "llm"));
   }
@@ -1544,9 +1925,11 @@ export async function planAction(cwd: string, request: string, context: Conversa
   const snapshot = await getSnapshot(cwd);
   if (!isLlmConfigured()) return bindPlan(snapshot, refused(llmRequired(language)));
   if (!request.trim()) return bindPlan(snapshot, refused(localized(language, "Escribe tu solicitud para el asistente.", "Write your request to the assistant.")));
+  if (!sharingAcknowledged(snapshot.path)) return sharingRequiredPlan(snapshot, language);
+  const notes = newNotes();
   try {
-    const plan = await requestPlan(request, snapshot, context);
-    return bindPlan(snapshot, await draftFromPlan(plan, snapshot, request, context, language));
+    const plan = await requestPlan(request, snapshot, context, [], notes);
+    return bindPlan(snapshot, withNotes(await draftFromPlan(plan, snapshot, request, context, language, notes), notes));
   } catch (error) {
     return bindPlan(snapshot, refused(localized(language, `No pude consultar el proveedor LLM: ${error instanceof Error ? error.message : "error desconocido"}`, `I could not query the LLM provider: ${error instanceof Error ? error.message : "unknown error"}`), "llm"));
   }
@@ -1651,13 +2034,15 @@ function stepFrom(operation: Operation, args: Record<string, string>, argv: stri
  * itself instead of stopping to ask for something it can read, and the card shows what it wrote
  * before anything is committed.
  */
-async function writeCommitMessages(steps: PlanStep[], snapshot: RepoSnapshot, locale: Locale = "es"): Promise<PlanStep[] | { blocker: string }> {
+async function writeCommitMessages(steps: PlanStep[], snapshot: RepoSnapshot, locale: Locale = "es", notes?: SharingNotes): Promise<PlanStep[] | { blocker: string }> {
   const pending = (step: PlanStep) => step.operation === "commit" && !step.args.message?.trim();
   if (!steps.some(pending)) return steps;
   if (!snapshot.changes.length) return { blocker: localized(locale, "No hay cambios locales que confirmar, así que no hay nada de lo que escribir un commit.", "There are no local changes to commit, so there is nothing to write a commit message for.") };
   let message: string;
   try {
-    message = await describeChanges(snapshot);
+    const described = await describeChanges(snapshot, undefined, locale);
+    noteWithheld(notes, described.withheld);
+    message = described.description;
   } catch (error) {
     return { blocker: localized(locale, `No pude escribir el mensaje del commit a partir de los cambios: ${error instanceof Error ? error.message : "error desconocido"}`, `I could not write a commit message from the changes: ${error instanceof Error ? error.message : "unknown error"}`) };
   }
@@ -1820,6 +2205,18 @@ export async function prepareBranchDelivery(cwd: string, request: DeliveryReques
   if (selection && !await selectionHasChanges(snapshot, selection.paths)) fail(
     "Los archivos marcados ya coinciden con la última versión guardada, así que no hay nada que guardar de ellos (pasa, por ejemplo, cuando se deshace en el archivo un cambio que estaba preparado). Marca otros archivos o déjalos como están.",
     "The ticked files already match the last saved version, so there is nothing to save from them (this happens, for example, when a staged edit was undone in the file itself). Tick other files, or leave them as they are.");
+  // Before anything else is prepared: a save that would record what looks like a credential is a
+  // question with choices, and only a person who looked at it can turn it into a plan.
+  const secrets = saveFindings(await changeChunks(snapshot, selection?.paths));
+  if (secrets.length && request.secretsReviewed !== true) {
+    return bindPlan(snapshot, {
+      ...refused(localized(language,
+        `No se guardó nada. Estos archivos parecen contener una contraseña, una clave o un token: ${secretsText(secrets, language)}. Guardarlos los deja en el historial del repositorio, donde es difícil borrarlos una vez publicados. Puedes dejarlos fuera del guardado (desmarcarlos), pedir a Git que ignore los archivos nuevos, o revisarlos y guardarlos de todas formas si sabes que no son secretos reales.`,
+        `Nothing was saved. These files look like they hold a password, a key or a token: ${secretsText(secrets, language)}. Saving puts them in the repository history, where they are hard to remove once published. You can leave them out of the save (untick them), ask Git to ignore the new ones, or review them and save anyway if you know they are not real secrets.`),
+        "guardrail", localized(language, "Revisa los posibles secretos antes de guardar", "Review the likely secrets before saving"), "question"),
+      secrets
+    });
+  }
   const message = request.message?.trim() ?? "";
   const commit = stepFrom("commit", { message }, [], language)!;
   const steps = [selection ? { ...commit, paths: selection.paths, command: selectedCommitCommand(message, selection.paths) } : commit];
@@ -1837,6 +2234,7 @@ export async function prepareBranchDelivery(cwd: string, request: DeliveryReques
   const effects = selection ? selectionEffects(selection, snapshot.currentBranch, language) : [localized(language,
     `Se guardarán todos los ${snapshot.changes.length} archivos listados, incluidos los nuevos, en ${snapshot.currentBranch}.`,
     `All ${snapshot.changes.length} listed files, including new files, will be saved on ${snapshot.currentBranch}.`)];
+  if (secrets.length) effects.push(savingSecretsEffect(secrets, language));
   effects.push(localized(language, "La operación es local: no publica cambios ni elimina tu rama.", "This is local: it does not publish changes or delete your branch."));
   if (request.mergeToDefault) effects.push(localized(language,
     `Al terminar estarás en ${target}. Si hay conflictos, la integración se detendrá y el commit guardado seguirá en ${snapshot.currentBranch}.`,
@@ -1850,7 +2248,7 @@ export async function prepareBranchDelivery(cwd: string, request: DeliveryReques
     : localized(language, `Guardar cambios en ${snapshot.currentBranch}`, `Save changes on ${snapshot.currentBranch}`);
   const reviewed = selection ? selectedVersions(selection.selected) : undefined;
   const bound = reviewed ? { changes: reviewed, binding: await selectionBinding(snapshot, reviewed, request.mergeToDefault ? target : undefined), ...(request.mergeToDefault ? { target } : {}) } : undefined;
-  const plan = bindPlan(snapshot, { ...draft, summary, ...(bound ? { selection: bound } : {}) });
+  const plan = bindPlan(snapshot, { ...draft, summary, ...(bound ? { selection: bound } : {}), ...(secrets.length ? { secrets } : {}) });
   validateExecution(plan, snapshot, language, bound?.binding);
   return plan;
 }
@@ -2296,11 +2694,21 @@ export async function fetchRemotes(cwd: string): Promise<RepoSnapshot> {
 }
 
 /**
+ * Whether what a plan printed is something the assistant may not read: a command aimed at an excluded
+ * or credential file, or output that itself looks like it holds a credential. The person still sees it.
+ */
+function showsWithheld(plan: ActionPlan, outcomes: StepOutcome[]) {
+  const exclusions = recallSharing(memory, plan.repoPath).exclusions;
+  return plan.steps.some((step) => step.operation === "git_command" && argvShowsWithheld(step.argv ?? [], exclusions)) ||
+    outcomes.some((outcome) => redactText(outcome.output).redacted > 0);
+}
+
+/**
  * Runs the approved plan end to end. Each step is validated against the repository the previous step
  * produced, and the first failure stops the sequence: a half-finished merge must never be reported as
  * done, and the steps that never ran are named so the user knows exactly where things stand.
  */
-export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale): Promise<{ snapshot: RepoSnapshot; output: string; error?: string; outcomes: StepOutcome[] }> {
+export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale): Promise<{ snapshot: RepoSnapshot; output: string; error?: string; outcomes: StepOutcome[]; withheldFromAssistant?: boolean }> {
   const language = normalizeLocale(locale);
   let snapshot = await getSnapshot(cwd);
   const selectionNow = plan.selection ? await selectionBinding(snapshot, currentVersions(snapshot, plan.selection.changes), plan.selection.target) : undefined;
@@ -2328,11 +2736,12 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
         snapshot: failedSnapshot,
         output: executionReport(outcomes, language),
         error: failureReport(outcomes, outcomes[index], detail, failedSnapshot, language),
-        outcomes
+        outcomes,
+        ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {})
       };
     }
   }
-  return { snapshot: await getSnapshot(cwd), output: executionReport(outcomes, language), outcomes };
+  return { snapshot: await getSnapshot(cwd), output: executionReport(outcomes, language), outcomes, ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {}) };
 }
 
 function settingsPath() { return join(app.getPath("userData"), "gitcat-settings.json"); }

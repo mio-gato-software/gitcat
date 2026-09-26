@@ -24,6 +24,11 @@ contextBridge.exposeInMainWorld("gitcat", {
   generateCommitDescription: (path, locale, paths) => ipcRenderer.invoke("commit:generate-description", path, locale, paths),
   getSelectionDiff: (path, paths, locale) => ipcRenderer.invoke("commit:selection-diff", path, paths, locale),
   executePlan: (path, planId, locale) => ipcRenderer.invoke("action:execute", path, planId, locale),
+  getAiSharing: (path, purpose, paths, locale) => ipcRenderer.invoke("sharing:get", path, purpose, paths, locale),
+  acknowledgeAiSharing: (path) => ipcRenderer.invoke("sharing:acknowledge", path),
+  setAiSharingExclusions: (path, exclusions, locale) => ipcRenderer.invoke("sharing:set-exclusions", path, exclusions, locale),
+  setAiSharingReview: (path, file, share, locale) => ipcRenderer.invoke("sharing:review", path, file, share, locale),
+  scanChangesForSecrets: (path) => ipcRenderer.invoke("changes:scan-secrets", path),
   getLlmConfig: () => ipcRenderer.invoke("llm:get-config"),
   saveLlmConfig: (config) => ipcRenderer.invoke("llm:save-config", config)
 });

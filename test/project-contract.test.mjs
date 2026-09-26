@@ -461,7 +461,7 @@ test("los defectos vuelven al modelo como datos estructurados, no como texto en 
   assert.match(planner, /Validation issues \(JSON\)/);
   assert.match(repositoryPlan, /export type RepositoryIssue = \{ field: RepositoryFieldName; problem: string \}/);
   assert.match(service, /type RepositoryPreparation = \{ draft: PlanDraft \} \| \{ blockers: PlanIssue\[\] \}/);
-  assert.match(service, /return issues\.length \? retry\(issues\) : gitOperationDraft\(plan, snapshot, locale\)/);
+  assert.match(service, /return issues\.length \? retry\(issues\) : gitOperationDraft\(plan, snapshot, locale, notes\)/);
   assert.match(service, /if \("blockers" in preparation\) return retry\(preparation\.blockers\)/);
 });
 
@@ -531,7 +531,7 @@ test("la descripción de commit usa el diff real y conserva la confirmación", a
   assert.match(main, /ipcMain\.handle\("commit:generate-description"/);
   assert.match(preload, /generateCommitDescription/);
   assert.match(app, /t\(generating \? "generatingSaveDescription" : "generateDescription"\)/);
-  assert.match(app, /window\.gitcat\.prepareBranchDelivery\(path, \{ stateId: snapshot\.stateId, message, mergeToDefault: deliveryMerge, selection \}, locale\)/);
+  assert.match(app, /window\.gitcat\.prepareBranchDelivery\(path, \{ stateId: snapshot\.stateId, message, mergeToDefault: deliveryMerge, selection, secretsReviewed \}, locale\)/);
   assert.match(app, /window\.gitcat\.generateCommitDescription\(repoPath, locale, paths\)/);
   assert.match(preload, /generateCommitDescription: \(path, locale, paths\) => ipcRenderer\.invoke\("commit:generate-description", path, locale, paths\)/);
 });

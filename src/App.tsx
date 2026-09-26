@@ -30,9 +30,9 @@ import type { GraphRow } from "../shared/commit-graph";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
 import type {
-  ActionPlan, Branch, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
+  ActionPlan, AiSharingPreview, AiSharingPurpose, Branch, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
   FileChange, FileStats, HistoryScope, LlmConfig, Locale, Operation, PendingOperationKind, ProjectLocateResult, ProjectUnavailableReason,
-  RepoSnapshot, UnavailableProject
+  RepoSnapshot, SecretFinding, UnavailableProject, WithheldFile
 } from "../shared/types";
 import { localeTag, readLocale, translate, writeLocale, type MessageKey, type Translate } from "./i18n";
 
@@ -69,7 +69,31 @@ type ConversationTurn = {
   plan?: ActionPlan;
   outcome?: string;
   error?: string;
+  /** Files the assistant could not read while answering, so the answer says what it is missing. */
+  withheld?: WithheldFile[];
+  /** The output shows a file the assistant may not read: the person sees it, the conversation sent back does not. */
+  private?: boolean;
 };
+
+/** What goes back to the assistant in place of output it may not read. Model-facing, so it stays in English. */
+const privateOutputNote = "[GitCat kept this output out of the conversation: it shows a file the assistant may not read.]";
+
+/** A finding as a person reads it: the line when there is one and what it looks like, never the value. */
+function findingDetail(finding: SecretFinding, t: Translate) {
+  const kind = t(`secretKind_${finding.kind}` as MessageKey);
+  return finding.line ? t("secretAtLine", { line: finding.line, kind }) : kind;
+}
+
+/** Findings grouped by file: "config/.env (credential file; line 3: AWS access key)". */
+function findingsText(findings: SecretFinding[], t: Translate) {
+  const byPath = new Map<string, SecretFinding[]>();
+  for (const finding of findings) byPath.set(finding.path, [...(byPath.get(finding.path) ?? []), finding]);
+  return [...byPath].map(([path, items]) => `${path} (${items.slice(0, 4).map((item) => findingDetail(item, t)).join("; ")}${items.length > 4 ? "; …" : ""})`).join(", ");
+}
+
+function withheldText(files: WithheldFile[], t: Translate) {
+  return files.map((file) => `${file.path} (${t(file.reason === "excluded" ? "withheldExcluded" : "withheldSecret")})`).join(", ");
+}
 
 type I18nContextValue = { locale: Locale; t: Translate; setLocale: (locale: Locale) => void };
 const I18nContext = createContext<I18nContextValue | undefined>(undefined);
@@ -406,6 +430,16 @@ export default function App() {
   const [selectionDiffOpen, setSelectionDiffOpen] = useState(false);
   const [deliveryReview, setDeliveryReview] = useState<{ turnId: number; plan: ActionPlan }>();
   const [generatingDescription, setGeneratingDescription] = useState(false);
+  /** Ticked files the last generated description could not read, so the form can say so. */
+  const [descriptionWithheld, setDescriptionWithheld] = useState<WithheldFile[]>([]);
+  /** The disclosure on screen. `resolve` answers a request that is waiting for the person's decision. */
+  const [sharingDialog, setSharingDialog] = useState<{ preview: AiSharingPreview; paths?: string[]; resolve?: (accepted: boolean) => void }>();
+  /** Repositories the person already agreed to share with the assistant, so the question is not asked again. */
+  const sharingAcknowledged = useRef(new Set<string>());
+  /** Likely credentials among the uncommitted files, found on this Mac, for the repository on screen. */
+  const [secretScan, setSecretScan] = useState<{ path: string; findings: SecretFinding[] }>();
+  /** The flagged ticked files, at their versions, that the person said they looked at and want to save. */
+  const [secretsReviewedKey, setSecretsReviewedKey] = useState<string>();
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [exploring, setExploring] = useState(false);
   const [panes, setPanes] = useState<PaneWidths | undefined>(readPaneWidths);
@@ -442,6 +476,27 @@ export default function App() {
   excludedRef.current = excludedByRepo;
   const excluded = useMemo(() => new Set(snapshot ? excludedByRepo[snapshot.path] ?? [] : []), [snapshot?.path, excludedByRepo]);
   const selectedChanges = useMemo(() => snapshot?.changes.filter((change) => !excluded.has(change.path)) ?? [], [snapshot, excluded]);
+  const secretFindings = useMemo(() => secretScan && snapshot && secretScan.path === snapshot.path ? secretScan.findings : [], [secretScan, snapshot?.path]);
+  const flaggedTicked = useMemo(() => {
+    const ticked = new Set(selectedChanges.map((change) => change.path));
+    return secretFindings.filter((finding) => ticked.has(finding.path));
+  }, [secretFindings, selectedChanges]);
+  // The review holds for exactly these flagged files at these versions; an edit or another tick asks again.
+  const secretsKey = flaggedTicked.length
+    ? JSON.stringify(selectedChanges.filter((change) => flaggedTicked.some((finding) => finding.path === change.path)).map((change) => [change.path, change.version ?? ""]))
+    : "";
+  const secretsReviewed = Boolean(secretsKey) && secretsReviewedKey === secretsKey;
+
+  // The check runs on this Mac whenever the uncommitted work changes; nothing is sent anywhere.
+  useEffect(() => {
+    if (!snapshot?.isDirty) return;
+    const path = snapshot.path;
+    let live = true;
+    window.gitcat.scanChangesForSecrets(path)
+      .then((findings) => { if (live) setSecretScan({ path, findings }); })
+      .catch(() => { /* the warning is an extra; the save review still runs its own check */ });
+    return () => { live = false; };
+  }, [snapshot?.path, snapshot?.stateId]);
   // Only the ticked files matter: an edit to a file that was left out does not make the review stale.
   const deliveryStale = Boolean(snapshot && deliveryBaseline?.path === snapshot.path
     && selectedChanges.some((change) => deliveryBaseline.versions[change.path] !== change.version));
@@ -582,6 +637,8 @@ export default function App() {
     setSelectionDiffOpen(false);
     setDeliveryMerge(false);
     setGeneratingDescription(false);
+    setDescriptionWithheld([]);
+    setSecretsReviewedKey(undefined);
   }, [activeId]);
 
   useEffect(() => {
@@ -839,7 +896,7 @@ export default function App() {
   };
 
   const conversationContext = (turns: ConversationTurn[]): ConversationMessage[] => turns.flatMap((turn) => {
-    const response = turn.answer ?? turn.error ?? turn.outcome ?? (turn.plan
+    const response = turn.answer ?? (turn.private && (turn.error || turn.outcome) ? privateOutputNote : undefined) ?? turn.error ?? turn.outcome ?? (turn.plan
       ? `${turn.plan.allowed ? t("planWord") : t("refusalWord")}: ${turn.plan.summary}. ${turn.plan.rationale}`
       : undefined);
     return response ? [{ role: "user" as const, content: turn.question }, { role: "assistant" as const, content: response }] : [];
@@ -852,7 +909,7 @@ export default function App() {
       const plan = await loader();
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
       if (plan.answer) {
-        updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, status: "completed" }));
+        updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, withheld: plan.withheld, status: "completed" }));
         addActivity({ label: t("responsePrepared"), detail: plan.summary, tone: "neutral" });
         return;
       }
@@ -878,12 +935,70 @@ export default function App() {
     }
   };
 
+  /** Asks the person on screen before the first request that would send this repository's content. */
+  const askSharing = (preview: AiSharingPreview, paths?: string[]) => new Promise<boolean>((resolve) => setSharingDialog((open) => {
+    // A request still waiting on an older disclosure is answered "not now" rather than left hanging.
+    open?.resolve?.(false);
+    return { preview, paths, resolve };
+  }));
+
+  /**
+   * Whether a request may read this repository. The first time, the disclosure explains what would
+   * leave the Mac and lists the files; declining sends nothing and leaves every Git control working.
+   */
+  const ensureSharing = async (path: string, purpose: AiSharingPurpose, paths?: string[]) => {
+    if (sharingAcknowledged.current.has(path)) return true;
+    try {
+      const preview = await window.gitcat.getAiSharing(path, purpose, paths, locale);
+      if (preview.acknowledged) { sharingAcknowledged.current.add(path); return true; }
+      return await askSharing(preview, paths);
+    } catch (error) {
+      notify({ message: cleanError(error, t("fallbackSharing")), tone: "error" });
+      return false;
+    }
+  };
+
+  /** The same answer without asking: used where a request would otherwise start on its own. */
+  const sharingAgreed = async (path: string) => {
+    if (sharingAcknowledged.current.has(path)) return true;
+    try {
+      const preview = await window.gitcat.getAiSharing(path, "planning", undefined, locale);
+      if (preview.acknowledged) sharingAcknowledged.current.add(path);
+      return preview.acknowledged;
+    } catch { return false; }
+  };
+
+  const openSharingReview = async () => {
+    if (!snapshot) return;
+    try {
+      setSharingDialog({ preview: await window.gitcat.getAiSharing(snapshot.path, "planning", undefined, locale) });
+    } catch (error) {
+      notify({ message: cleanError(error, t("fallbackSharing")), tone: "error" });
+    }
+  };
+
+  const closeSharing = () => {
+    sharingDialog?.resolve?.(false);
+    setSharingDialog(undefined);
+  };
+
+  const acceptSharing = async () => {
+    if (!sharingDialog) return;
+    const path = sharingDialog.preview.repoPath;
+    await window.gitcat.acknowledgeAiSharing(path);
+    sharingAcknowledged.current.add(path);
+    sharingDialog.resolve?.(true);
+    setSharingDialog(undefined);
+  };
+
   const propose = async (text: string) => {
     if (!snapshot || !text.trim()) return;
     const question = text.trim();
     const path = snapshot.path;
     const context = conversationContext(conversations[path] ?? []);
     setRequest("");
+    // Declining keeps what was typed, so nothing the person wrote is lost.
+    if (!(await ensureSharing(path, "planning"))) { setRequest(question); return; }
     await showPlan(question, () => window.gitcat.planAction(path, question, context, locale), path);
   };
 
@@ -919,6 +1034,7 @@ export default function App() {
     // A clean branch can use the verified direct path. Once the working tree is dirty, the model must
     // decide whether those changes belong to this branch and, if so, place a commit before the merge.
     const context = conversationContext(conversations[path] ?? []);
+    if (snapshot.isDirty && !(await ensureSharing(path, "planning"))) return;
     await showPlan(question, snapshot.isDirty
       ? () => window.gitcat.planAction(path, question, context, locale)
       : () => window.gitcat.prepareMergeToDefault(path, name, locale), path);
@@ -936,11 +1052,15 @@ export default function App() {
   const recoverFrom = async (path: string, failure: ExecutionFailure) => {
     const context = conversationContext(conversations[path] ?? []);
     const turnId = addTurn(path, t("actionQuestion"));
+    if (!(await ensureSharing(path, "recovery"))) {
+      updateTurn(path, turnId, (turn) => ({ ...turn, answer: t("recoveryNotShared"), status: "completed" }));
+      return;
+    }
     try {
       const plan = await window.gitcat.planRecovery(path, failure, context, locale);
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
       if (plan.answer) {
-        updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, status: "completed" }));
+        updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, withheld: plan.withheld, status: "completed" }));
         return;
       }
       // Never unattended: a way out of a half-finished operation is always the user's call.
@@ -957,6 +1077,7 @@ export default function App() {
   /** Asks the model to draft every conflicted file. Nothing is written until the user accepts it. */
   const resolveConflicts = async () => {
     if (!snapshot || resolving) return;
+    if (!(await ensureSharing(snapshot.path, "conflicts"))) return;
     setResolving(true);
     setProposal(undefined);
     setProposalResult(undefined);
@@ -1005,7 +1126,7 @@ export default function App() {
       if (result.error) {
         // A sequence that stopped halfway did change the repository: show what ran, not only the failure.
         const progress = plan.steps.length > 1 ? result.output : undefined;
-        updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome: progress, error: result.error, status: "error" }));
+        updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome: progress, error: result.error, private: result.withheldFromAssistant, status: "error" }));
         addActivity({ label: t("gitNeedsAttention"), detail: result.error, tone: "warning" });
         /**
          * The repository is now holding a half-finished job the user did not ask for, and this is
@@ -1026,9 +1147,9 @@ export default function App() {
         }
       } else {
         const outcome = result.output || t("completed", { summary: plan.summary });
-        updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome, status: "completed" }));
+        updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome, private: result.withheldFromAssistant, status: "completed" }));
         addActivity({ label: t("actionExecuted"), detail: outcome, tone: "success" });
-        if (plan.steps.some((step) => step.operation === "commit")) { setCommitMessage(""); setDeliveryBaseline(undefined); }
+        if (plan.steps.some((step) => step.operation === "commit")) { setCommitMessage(""); setDeliveryBaseline(undefined); setDescriptionWithheld([]); setSecretsReviewedKey(undefined); }
       }
     } catch (error) {
       const message = cleanError(error, t("fallbackGitAction"));
@@ -1105,6 +1226,7 @@ export default function App() {
     if (!snapshot?.changes.length || !paths.length || generatingDescription) return;
     const repoPath = snapshot.path;
     const sequence = requestSequence.current;
+    if (!(await ensureSharing(repoPath, "description", paths))) return;
     setGeneratingDescription(true);
     try {
       const result = await window.gitcat.generateCommitDescription(repoPath, locale, paths);
@@ -1115,6 +1237,7 @@ export default function App() {
         && described.every((item) => ticked.some((change) => change.path === item.path && change.version === item.version)));
       if (requestSequence.current === sequence && current) {
         setCommitMessage(result.description);
+        setDescriptionWithheld(result.withheld ?? []);
       }
     } catch (error) {
       notify({ message: cleanError(error, t("fallbackGenerateDescription")), tone: "error" });
@@ -1128,7 +1251,10 @@ export default function App() {
     setDeliveryBaseline({ path: snapshot.path, versions: Object.fromEntries(snapshot.changes.map((change) => [change.path, change.version ?? ""])) });
     if (snapshot.isDirty) {
       openCommitForm();
-      if (config.configured && !commitMessage.trim()) void generateDescription();
+      // Opening the save never sends anything on its own before sharing was agreed: the form stays
+      // manual, and the generate button asks first.
+      const path = snapshot.path;
+      if (config.configured && !commitMessage.trim()) void sharingAgreed(path).then((agreed) => { if (agreed && snapshotRef.current?.path === path) void generateDescription(); });
     } else if (merge) {
       void showPlan(t("integrateInto", { target: snapshot.defaultBranch ?? "" }),
         () => window.gitcat.prepareBranchDelivery(snapshot.path, { stateId: snapshot.stateId, mergeToDefault: true }, locale), snapshot.path, true);
@@ -1139,10 +1265,11 @@ export default function App() {
   const prepareCommit = () => {
     const message = commitMessage.trim();
     if (!snapshot?.changes.length || !selectedChanges.length || !message || message.length > 120) return;
+    if (flaggedTicked.length && !secretsReviewed) return;
     const path = snapshot.path;
     const selection = selectedChanges.map((change) => ({ path: change.path, version: change.version ?? "" }));
     void showPlan(t(deliveryMerge ? "saveAndIntegrate" : "saveChanges", { target: snapshot.defaultBranch ?? "" }),
-      () => window.gitcat.prepareBranchDelivery(path, { stateId: snapshot.stateId, message, mergeToDefault: deliveryMerge, selection }, locale), path, true);
+      () => window.gitcat.prepareBranchDelivery(path, { stateId: snapshot.stateId, message, mergeToDefault: deliveryMerge, selection, secretsReviewed }, locale), path, true);
   };
 
   const setExcluded = (path: string, next: string[]) => setExcludedByRepo((items) => ({ ...items, [path]: next }));
@@ -1367,12 +1494,12 @@ export default function App() {
             </div>
             {inspectorTab === "details" ? <div className="inspector-body">
               {activeFocus?.kind === "wip"
-                ? <ChangesView snapshot={snapshot} merge={deliveryMerge} configured={config.configured} stale={deliveryStale} onReviewAgain={() => beginDelivery(deliveryMerge)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} message={commitMessage} generating={generatingDescription} busy={planning} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit}
+                ? <ChangesView snapshot={snapshot} secrets={secretFindings} secretsReviewed={secretsReviewed} onSecretsReviewed={(reviewed) => setSecretsReviewedKey(reviewed ? secretsKey : undefined)} descriptionWithheld={descriptionWithheld} merge={deliveryMerge} configured={config.configured} stale={deliveryStale} onReviewAgain={() => beginDelivery(deliveryMerge)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} message={commitMessage} generating={generatingDescription} busy={planning} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit}
                     excluded={excluded} onToggle={toggleIncluded} onToggleAll={setAllIncluded} onIgnore={ignoreFile} onShowSelected={() => setSelectionDiffOpen(true)} />
                 : activeFocus
                   ? <CommitInspector key={activeFocus.commit.hash} commit={activeFocus.commit} snapshot={snapshot} known={graphCommits} onFocus={(commit) => focusOn({ kind: "commit", commit }, true)} onOpen={(file) => setModalCommit({ commit: activeFocus.commit, file })} />
                   : <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommitSelected")}</strong><span>{t("noCommitSelectedHint")}</span></div>}
-            </div> : <div className="assistant-body"><p className="assistant-copy">{config.configured ? t("assistantConfiguredCopy") : t("assistantUnconfiguredCopy")}</p>{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div>}
+            </div> : <div className="assistant-body"><p className="assistant-copy">{config.configured ? t("assistantConfiguredCopy") : t("assistantUnconfiguredCopy")}</p>{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => void openSharingReview()} disabled={!config.configured}><Eye size={12} /> {t("sharingOpen")}</button><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div>}
             <div className="chat-compose"><textarea aria-label={t("assistantRequest")} disabled={!config.configured} value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder={config.configured ? t("assistantPlaceholder") : t("configureAssistantPlaceholder")} rows={2} /><button className="send-button" aria-label={t("prepareRequest")} onClick={() => void propose(request)} disabled={planning || !request.trim() || !config.configured}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div>
           </aside>
         </main>
@@ -1384,6 +1511,10 @@ export default function App() {
       {settingsOpen && <SettingsModal config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onSaved={(next) => { setConfig(next); setSettingsOpen(false); notify({ message: t("settingsSaved"), tone: "success" }); }} />}
       {inputDialog && <InputModal dialog={inputDialog} branches={snapshot?.branches ?? []} onChange={(value) => setInputDialog({ ...inputDialog, value })} onClose={() => setInputDialog(undefined)} onSubmit={submitInputDialog} />}
       {menu && snapshot && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu)} label={menu.work ? t("uncommittedHeading") : menu.commit ? t("commitActions", { hash: menu.commit.shortHash }) : t("actionsFor", { name: menu.branch ?? "" })} onClose={() => setMenu(undefined)} />}
+      {sharingDialog && <SharingDialog key={sharingDialog.preview.repoPath} initial={sharingDialog.preview} paths={sharingDialog.paths}
+        repoName={projects.find((project) => project.snapshot.path === sharingDialog.preview.repoPath)?.snapshot.name ?? sharingDialog.preview.repoPath}
+        covered={Boolean(selectedFile)} onAccept={acceptSharing} onClose={closeSharing}
+        onShowFile={(file) => { const change = snapshot?.changes.find((item) => item.path === file || item.from === file); if (change) setSelectedFile(change); }} />}
       {modalCommit && snapshot && <CommitModal commit={modalCommit.commit} initialFile={modalCommit.file} repoPath={snapshot.path} onClose={() => setModalCommit(undefined)} />}
       {selectedFile && snapshot && <FileDiffModal file={selectedFile} repoPath={snapshot.path} onClose={() => setSelectedFile(undefined)} />}
       {selectionDiffOpen && snapshot && <SelectionDiffModal files={selectedChanges} repoPath={snapshot.path} onClose={() => setSelectionDiffOpen(false)} />}
@@ -2292,6 +2423,8 @@ function ChangeSummary({ files, stats }: { files: FileChange[]; stats?: Record<s
 /** The uncommitted list's include/exclude controls. Commit details show the same list without them. */
 type FileSelection = {
   excluded: Set<string>;
+  /** Files the local check found a likely credential in. */
+  flagged?: Set<string>;
   disabled: boolean;
   onToggle: (file: FileChange) => void;
   onToggleAll: (include: boolean) => void;
@@ -2327,6 +2460,7 @@ function FileList({ files, stats, onOpen, selection }: { files: FileChange[]; st
           <span className="change-status"><Icon size={14} /><span className="visually-hidden">{status}</span></span>
           <span className="change-path">{folder && <span className="change-folder">{folder}</span>}<span className="change-name">{label}</span></span>
           {partly && <span className="change-badge">{t("partlyStagedBadge")}</span>}
+          {selection.flagged?.has(file.path) && <span className="change-badge secret" title={t("secretBadgeTitle")}>{t("secretBadge")}</span>}
           {counts && <ChangeStats additions={counts.additions} deletions={counts.deletions} binary={counts.binary} />}
         </button>
         {untracked && <button className="mini-icon change-ignore" onClick={() => selection.onIgnore(file)} disabled={selection.disabled} aria-label={t("ignoreFutureChanges", { path: file.path })} title={t("ignoreFutureChangesTitle")}><EyeOff size={13} /></button>}
@@ -2396,8 +2530,9 @@ function FileList({ files, stats, onOpen, selection }: { files: FileChange[]; st
  * the ticked files into a saved version. Unticked files are listed too, so leaving one out is a
  * visible decision rather than something that happens to it.
  */
-function ChangesView({ snapshot, message, generating, busy, onOpenFile, onMessageChange, onGenerate, onPrepare, merge, configured, stale, onReviewAgain, onMergeChange, excluded, onToggle, onToggleAll, onIgnore, onShowSelected }: {
-  snapshot: RepoSnapshot; message: string; generating: boolean; busy: boolean;
+function ChangesView({ snapshot, secrets, secretsReviewed, onSecretsReviewed, descriptionWithheld, message, generating, busy, onOpenFile, onMessageChange, onGenerate, onPrepare, merge, configured, stale, onReviewAgain, onMergeChange, excluded, onToggle, onToggleAll, onIgnore, onShowSelected }: {
+  snapshot: RepoSnapshot; secrets: SecretFinding[]; secretsReviewed: boolean; onSecretsReviewed: (reviewed: boolean) => void; descriptionWithheld: WithheldFile[];
+  message: string; generating: boolean; busy: boolean;
   onOpenFile: (file: FileChange) => void; onMessageChange: (message: string) => void; onGenerate: () => void; onPrepare: () => void;
   merge: boolean; configured: boolean; stale: boolean; onReviewAgain: () => void; onMergeChange: (value: boolean) => void;
   excluded: Set<string>; onToggle: (file: FileChange) => void; onToggleAll: (include: boolean) => void; onIgnore: (file: FileChange) => void; onShowSelected: () => void;
@@ -2408,23 +2543,39 @@ function ChangesView({ snapshot, message, generating, busy, onOpenFile, onMessag
   const selected = snapshot.changes.filter((change) => !excluded.has(change.path));
   const leftOut = snapshot.changes.length - selected.length;
   const partly = selected.filter(isPartlyStaged).length;
+  const flagged = new Set(secrets.map((finding) => finding.path));
+  // Only the ticked files decide the save; a flagged file left out is already safe from it.
+  const flaggedTicked = selected.filter((change) => flagged.has(change.path));
+  const mustReview = flaggedTicked.length > 0 && !secretsReviewed;
   return <div className="changes-view">
     <div className="detail-head"><span className="detail-kind"><PencilLine size={13} />{t("uncommittedHeading")}</span><span className="detail-branch" title={snapshot.currentBranch}><GitBranch size={12} />{snapshot.currentBranch}</span></div>
     {hasChanges ? <>
       <ChangeSummary files={selected} />
-      <FileList files={snapshot.changes} onOpen={onOpenFile} selection={{ excluded, disabled: busy || generating, onToggle, onToggleAll, onIgnore }} />
+      <FileList files={snapshot.changes} onOpen={onOpenFile} selection={{ excluded, flagged, disabled: busy || generating, onToggle, onToggleAll, onIgnore }} />
       {partly > 0 && <p className="file-inclusion-note partly-staged">{t("partlyStagedNote", { count: partly })}</p>}
+      {flaggedTicked.length > 0 && <div className="secret-warning" role="alert">
+        <strong><AlertTriangle size={13} />{t("secretWarningTitle", { count: flaggedTicked.length })}</strong>
+        <span>{t("secretWarningBody")}</span>
+        <ul>{flaggedTicked.map((change) => <li key={change.path}>
+          <div><code>{change.path}</code><small>{secrets.filter((finding) => finding.path === change.path).slice(0, 4).map((finding) => findingDetail(finding, t)).join("; ")}</small></div>
+          <button className="ghost-button small" onClick={() => onToggle(change)} disabled={busy || generating}>{t("secretLeaveOut")}</button>
+          {isUntracked(change) && <button className="ghost-button small" onClick={() => onIgnore(change)} disabled={busy || generating}><EyeOff size={12} />{t("secretIgnore")}</button>}
+        </li>)}</ul>
+        <label className="delivery-option"><input type="checkbox" checked={secretsReviewed} disabled={busy} onChange={(event) => onSecretsReviewed(event.target.checked)} /><span>{t("secretReviewedSave")}</span></label>
+        <small>{t("secretDetectorLimits")}</small>
+      </div>}
       <div className="commit-form">
         <div className="commit-form-heading"><h3>{t("saveDescription")}</h3><button className="outline-button small" onClick={onGenerate} disabled={!configured || generating || busy || !selected.length}>{generating ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{t(generating ? "generatingSaveDescription" : "generateDescription")}</button></div>
         <label htmlFor="commit-description" className="visually-hidden">{t("commitMessage")}</label><textarea id="commit-description" value={message} onChange={(event) => onMessageChange(event.target.value)} maxLength={120} rows={3} placeholder={t("commitPlaceholder")} disabled={generating || busy} />
         <div className="commit-form-meta"><span>{t(configured ? "editableDescription" : "manualSaveDescription")}</span><span>{message.length}/120</span></div>
+        {descriptionWithheld.length > 0 && <p className="file-inclusion-note withheld-note">{t("descriptionWithheld", { files: withheldText(descriptionWithheld, t) })}</p>}
         {canMerge && <label className="delivery-option"><input type="checkbox" checked={merge} disabled={busy} onChange={(event) => onMergeChange(event.target.checked)} /><span>{t("integrateAfterSave", { target: snapshot.defaultBranch! })}</span></label>}
         {merge && canMerge && leftOut > 0 && <p className="file-inclusion-note">{t("excludedStayForIntegration", { count: leftOut, target: snapshot.defaultBranch! })}</p>}
         {stale && <div className="delivery-stale" role="alert">{t("filesChangedReview")} <button className="outline-button small" onClick={onReviewAgain}>{t("reviewUpdatedFiles")}</button></div>}
         {!selected.length && <p className="file-inclusion-note selection-empty" role="status">{t("tickFilesToSave")}</p>}
         <div className="commit-form-actions">
           <button className="ghost-button" onClick={onShowSelected} disabled={!selected.length}><FileDiff size={14} />{t("showSelectedDiff")}</button>
-          <button className="primary-button" onClick={onPrepare} disabled={stale || !selected.length || !message.trim() || generating || busy}><ShieldCheck size={14} />{t(merge && canMerge ? "reviewSaveAndMerge" : "reviewSave")}</button>
+          <button className="primary-button" onClick={onPrepare} disabled={stale || mustReview || !selected.length || !message.trim() || generating || busy}><ShieldCheck size={14} />{t(merge && canMerge ? "reviewSaveAndMerge" : "reviewSave")}</button>
         </div>
         <p className="file-inclusion-note">{t("selectedFilesNote")}</p>
       </div>
@@ -2521,14 +2672,14 @@ function ConversationEntry({ turn, busy, onApply, onDismiss }: { turn: Conversat
   const { t } = useI18n();
   // A sequence reports itself step by step, marks included, so it needs no outer verdict icon or colour.
   const sequence = (turn.plan?.steps.length ?? 0) > 1;
-  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.answer && <p>{turn.answer}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
+  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.answer && <p>{turn.answer}</p>}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
 }
 
 
 function PlanCard({ plan, onApply, onDismiss, busy }: { plan: ActionPlan; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean }) {
   const { t } = useI18n();
   const asking = plan.kind === "question";
-  return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? t("interpretedByProvider") : t("directAction")}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? t("dismissQuestion") : t("dismissPlan")}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}{plan.repositoryPlan && <pre className="repository-plan-json">{JSON.stringify(plan.repositoryPlan, null, 2)}</pre>}{plan.allowed && (plan.steps.length > 1
+  return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? t("interpretedByProvider") : t("directAction")}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? t("dismissQuestion") : t("dismissPlan")}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.withheld && plan.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(plan.withheld, t) })}</p>}{plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}{plan.repositoryPlan && <pre className="repository-plan-json">{JSON.stringify(plan.repositoryPlan, null, 2)}</pre>}{plan.allowed && (plan.steps.length > 1
       ? <ol className="plan-steps">{plan.steps.map((step, index) => <li key={`${step.command}-${index}`}><span className="step-summary">{step.summary}</span><code><TerminalSquare size={11} />{step.command}</code></li>)}</ol>
       : <div className="command-preview"><TerminalSquare size={14} /><code>{plan.command}</code></div>)}
     {plan.allowed && plan.requiresConfirmation && plan.steps.length > 1 && <p className="plan-hint">{t("planStepsHint", { count: plan.steps.length })}</p>}
@@ -2839,7 +2990,98 @@ function SelectionDiffModal({ files, repoPath, onClose }: { files: FileChange[];
       </div>
       {error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}
       {!detail && !error && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> {t("readingFile")}</div>}
+      {detail?.secrets && detail.secrets.length > 0 && <div className="modal-note attention" role="alert"><AlertTriangle size={15} /><span>{t("selectionSecrets", { files: findingsText(detail.secrets, t) })}</span></div>}
       {detail && (detail.diff.trim() ? <DiffView diff={detail.diff} truncated={detail.truncated} /> : <p className="detail-note">{t("selectedDiffEmpty")}</p>)}
+    </div>
+  </div>;
+}
+
+/**
+ * The disclosure: what leaves this Mac for the configured provider, which files this request reads and
+ * what happens to each, the repository's exclusions, and what the local secret check can and cannot do.
+ * Every change here is saved on this Mac straight away, and the list is read again so it stays true.
+ */
+function SharingDialog({ initial, paths, repoName, covered, onAccept, onClose, onShowFile }: {
+  initial: AiSharingPreview; paths?: string[]; repoName: string; covered: boolean;
+  onAccept: () => Promise<void>; onClose: () => void; onShowFile: (path: string) => void;
+}) {
+  const { t, locale } = useI18n();
+  const [preview, setPreview] = useState(initial);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  useEffect(() => {
+    // A file opened from here sits on top and closes first.
+    const listener = (event: KeyboardEvent) => { if (event.key === "Escape" && !covered) onClose(); };
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, [onClose, covered]);
+  const act = async (change: () => Promise<unknown>) => {
+    setBusy(true); setError(undefined);
+    try {
+      await change();
+      setPreview(await window.gitcat.getAiSharing(preview.repoPath, preview.purpose, paths, locale));
+      return true;
+    } catch (reason) {
+      setError(cleanError(reason, t("fallbackSharing")));
+      return false;
+    } finally { setBusy(false); }
+  };
+  const setExclusions = (next: string[]) => act(() => window.gitcat.setAiSharingExclusions(preview.repoPath, next, locale));
+  const review = (file: string, share: boolean) => act(() => window.gitcat.setAiSharingReview(preview.repoPath, file, share, locale));
+  const addExclusion = async () => {
+    const pattern = draft.trim();
+    if (pattern && await setExclusions([...preview.exclusions, pattern])) setDraft("");
+  };
+  const accept = async () => {
+    setBusy(true); setError(undefined);
+    try { await onAccept(); } catch (reason) { setError(cleanError(reason, t("fallbackSharing"))); setBusy(false); }
+  };
+  return <div className="modal-backdrop">
+    <div className="commit-modal sharing-modal" role="dialog" aria-modal="true" aria-labelledby="sharing-title">
+      <div className="modal-heading">
+        <div><div className="eyebrow">{t("sharingEyebrow")}</div><h2 id="sharing-title">{t(preview.acknowledged ? "sharingReviewTitle" : "sharingTitle", { name: repoName })}</h2></div>
+        <button className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button>
+      </div>
+      <p className="sharing-copy">{t("sharingWhatLeaves", { provider: "OpenAI", model: preview.model, destination: preview.destination })}</p>
+      <p className="sharing-copy">{t(`sharingPurpose_${preview.purpose}` as MessageKey)}</p>
+      <section className="sharing-section" aria-label={t("sharingFilesHeading")}>
+        <span className="eyebrow">{t("sharingFilesHeading")}</span>
+        {preview.files.length ? <ul className="sharing-files">{preview.files.map((file) => <li key={file.path} className={`sharing-file ${file.status}`}>
+          <div>
+            <strong>{file.path}</strong>
+            <span>{t(`sharingStatus_${file.status}` as MessageKey)}{file.findings.length ? ` · ${file.findings.slice(0, 4).map((finding) => findingDetail(finding, t)).join("; ")}` : ""}</span>
+            {file.status === "likely_secret" && <small>{t("sharingSecretHint")}</small>}
+          </div>
+          <div className="sharing-file-actions">
+            {(file.status === "likely_secret" || file.status === "reviewed") && <button className="ghost-button small" onClick={() => onShowFile(file.path)}><FileDiff size={12} />{t("sharingShowFile")}</button>}
+            {file.status === "likely_secret" && <button className="outline-button small" disabled={busy} onClick={() => void review(file.path, true)}>{t("sharingShareVersion")}</button>}
+            {file.status === "reviewed" && <button className="outline-button small" disabled={busy} onClick={() => void review(file.path, false)}>{t("sharingStopSharing")}</button>}
+            {file.status === "sent" && <button className="ghost-button small" disabled={busy} onClick={() => void setExclusions([...preview.exclusions, `/${file.path}`])}><EyeOff size={12} />{t("sharingDontShare")}</button>}
+          </div>
+        </li>)}</ul> : <p className="detail-note">{t("sharingNoFiles")}</p>}
+      </section>
+      <section className="sharing-section" aria-label={t("exclusionsHeading")}>
+        <span className="eyebrow">{t("exclusionsHeading")}</span>
+        {preview.exclusions.length ? <ul className="sharing-exclusions">{preview.exclusions.map((pattern) => <li key={pattern}>
+          <code>{pattern}</code>
+          <button className="mini-icon" onClick={() => void setExclusions(preview.exclusions.filter((item) => item !== pattern))} disabled={busy} aria-label={t("removeExclusion", { pattern })}><X size={12} /></button>
+        </li>)}</ul> : <p className="detail-note">{t("noExclusions")}</p>}
+        <form className="exclusion-form" onSubmit={(event) => { event.preventDefault(); void addExclusion(); }}>
+          <input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={t("exclusionPlaceholder")} aria-label={t("exclusionsHeading")} maxLength={300} />
+          <button className="outline-button small" disabled={busy || !draft.trim()}><Plus size={12} />{t("addExclusion")}</button>
+        </form>
+        <small>{t("exclusionsHelp")}</small>
+      </section>
+      <div className="modal-note"><ShieldCheck size={15} /><span>{t("secretDetectorLimits")} {t("sharingStorage")}</span></div>
+      <p className="file-inclusion-note">{t("sharingManualPath")}</p>
+      {preview.acknowledgedAt && <p className="file-inclusion-note">{t("sharingAgreedOn", { date: formatDateFull(preview.acknowledgedAt, locale) })}</p>}
+      {error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}
+      <div className="modal-actions">
+        {preview.acknowledged
+          ? <button className="primary-button" onClick={onClose}><Check size={14} />{t("sharingDone")}</button>
+          : <><button className="ghost-button" onClick={onClose}>{t("sharingNotNow")}</button><button className="primary-button sharing-accept" onClick={() => void accept()} disabled={busy}><Check size={14} />{t("sharingAccept")}</button></>}
+      </div>
     </div>
   </div>;
 }

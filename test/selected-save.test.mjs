@@ -230,6 +230,7 @@ test('the selected diff and the generated description only read the ticked files
   };
   t.after(() => { globalThis.fetch = original; });
   await service.saveLlmConfig({ apiKey: 'sk-test', model: 'test-model' });
+  await service.acknowledgeAiSharing(path);
   const result = await service.generateCommitDescription(path, 'en', ['a.txt', 'new.txt']);
   assert.equal(result.description, 'Update a and add new file');
   assert.deepEqual(result.selection.map((item) => item.path).sort(), ['a.txt', 'new.txt']);

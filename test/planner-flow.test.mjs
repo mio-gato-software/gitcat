@@ -14,7 +14,14 @@ registerHooks({
     return specifier === "electron" ? { url: electronStub, shortCircuit: true } : nextResolve(specifier, context);
   }
 });
-const service = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
+const gitService = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
+// These tests are about planning, not about the sharing disclosure (see ai-sharing.test.mjs): every
+// repository they plan in has already been shared with the assistant.
+const service = {
+  ...gitService,
+  planAction: async (path, ...rest) => { await gitService.acknowledgeAiSharing(path); return gitService.planAction(path, ...rest); },
+  planRecovery: async (path, ...rest) => { await gitService.acknowledgeAiSharing(path); return gitService.planRecovery(path, ...rest); }
+};
 
 const repo = mkdtempSync(join(tmpdir(), "gitcat-repo-"));
 const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });

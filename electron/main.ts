@@ -6,10 +6,10 @@ import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  applyConflictResolution, executePlan, fetchRemotes, generateCommitDescription, getCommitDetail, getCommitFileDiff, getLlmConfig, getSnapshot,
-  getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
+  acknowledgeAiSharing, applyConflictResolution, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
+  getLlmConfig, getSnapshot, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
   prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, saveLlmConfig,
-  type IssuedConflictProposal
+  scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, type IssuedConflictProposal
 } from "./git-service.js";
 import { localized } from "./i18n.js";
 import {
@@ -17,7 +17,7 @@ import {
   parseWorkspace, relocateProject, restoreProjects, type RepoFingerprint, type WorkspaceRecord
 } from "./workspace-restore.js";
 import type {
-  ActionPlan, ConflictProposal, ConversationMessage, DeliveryRequest, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation, ProjectLocateResult,
+  ActionPlan, AiSharingPurpose, ConflictProposal, ConversationMessage, DeliveryRequest, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation, ProjectLocateResult,
   RepoSnapshot, RepositoryMatch, UnavailableProject
 } from "../shared/types.js";
 
@@ -139,6 +139,8 @@ function assertPathList(paths: unknown) {
   return paths as string[];
 }
 
+const sharingPurposes = new Set<AiSharingPurpose>(["planning", "description", "conflicts", "recovery"]);
+
 function rememberPlan(plan: ActionPlan) {
   if (plan.allowed && !plan.answer) {
     if (issuedPlans.size >= 100) issuedPlans.delete(issuedPlans.keys().next().value ?? "");
@@ -153,7 +155,10 @@ function rememberProposal(proposal: IssuedConflictProposal): ConflictProposal {
   if (issuedProposals.size >= 20) issuedProposals.delete(issuedProposals.keys().next().value ?? "");
   issuedProposals.set(proposal.id, proposal);
   // The binding is the main process's own record; the renderer gets what it needs to show the review.
-  return { id: proposal.id, repoPath: proposal.repoPath, resolutions: proposal.resolutions, skipped: proposal.skipped, current: proposal.current };
+  return {
+    id: proposal.id, repoPath: proposal.repoPath, resolutions: proposal.resolutions, skipped: proposal.skipped, current: proposal.current,
+    ...(proposal.withheld ? { withheld: proposal.withheld } : {})
+  };
 }
 
 async function createWindow() {
@@ -388,7 +393,7 @@ app.whenReady().then(async () => {
       !item || typeof item.path !== "string" || !item.path || typeof item.version !== "string"))) throw new Error("Invalid delivery request.");
     const repoPath = assertOpenedRepository(cwd);
     const delivery: DeliveryRequest = {
-      stateId: request.stateId, mergeToDefault: request.mergeToDefault, message: request.message,
+      stateId: request.stateId, mergeToDefault: request.mergeToDefault, message: request.message, secretsReviewed: request.secretsReviewed === true,
       ...(request.selection ? { selection: request.selection.map((item) => ({ path: item.path, version: item.version })) } : {})
     };
     return rememberPlan(await exclusive(repoPath, () => prepareBranchDelivery(repoPath, delivery, locale)));
@@ -418,6 +423,29 @@ app.whenReady().then(async () => {
     issuedPlans.delete(planId);
     if (plan.repoPath !== repoPath) throw new Error("El plan pertenece a otro repositorio.");
     return exclusive(repoPath, () => executePlan(repoPath, plan, locale));
+  });
+  ipcMain.handle("sharing:get", (event, cwd: string, purpose: unknown, paths?: unknown, locale?: Locale) => {
+    assertTrustedSender(event);
+    if (typeof purpose !== "string" || !sharingPurposes.has(purpose as AiSharingPurpose)) throw new Error("El tipo de petición no es válido.");
+    const selected = paths === undefined ? undefined : assertPathList(paths);
+    return getAiSharing(assertOpenedRepository(cwd), purpose as AiSharingPurpose, selected, locale);
+  });
+  ipcMain.handle("sharing:acknowledge", (event, cwd: string) => {
+    assertTrustedSender(event);
+    return acknowledgeAiSharing(assertOpenedRepository(cwd));
+  });
+  ipcMain.handle("sharing:set-exclusions", (event, cwd: string, exclusions: unknown, locale?: Locale) => {
+    assertTrustedSender(event);
+    return setAiSharingExclusions(assertOpenedRepository(cwd), exclusions, locale);
+  });
+  ipcMain.handle("sharing:review", (event, cwd: string, file: unknown, share: unknown, locale?: Locale) => {
+    assertTrustedSender(event);
+    if (typeof file !== "string" || !file || typeof share !== "boolean") throw new Error("La revisión no es válida.");
+    return setAiSharingReview(assertOpenedRepository(cwd), file, share, locale);
+  });
+  ipcMain.handle("changes:scan-secrets", (event, cwd: string) => {
+    assertTrustedSender(event);
+    return scanChangesForSecrets(assertOpenedRepository(cwd));
   });
   ipcMain.handle("llm:get-config", (event) => { assertTrustedSender(event); return getLlmConfig(); });
   ipcMain.handle("llm:save-config", (event, input: LlmConfigInput) => { assertTrustedSender(event); return saveLlmConfig(input); });

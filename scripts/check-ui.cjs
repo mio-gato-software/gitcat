@@ -62,6 +62,12 @@ app.whenReady().then(async () => {
     return { description: 'Update menu and add a new file', stateId: current.stateId, selection: current.changes.filter((change) => paths.includes(change.path)).map((change) => ({ path: change.path, version: change.version })) };
   });
   ipcMain.handle('commit:selection-diff', (_, p, paths, locale) => service.getSelectionDiff(p, paths, locale));
+  // Sharing decisions and the secret check are the real service's, kept in this disposable profile.
+  ipcMain.handle('sharing:get', (_, p, purpose, paths, locale) => service.getAiSharing(p, purpose, paths, locale));
+  ipcMain.handle('sharing:acknowledge', (_, p) => service.acknowledgeAiSharing(p));
+  ipcMain.handle('sharing:set-exclusions', (_, p, exclusions, locale) => service.setAiSharingExclusions(p, exclusions, locale));
+  ipcMain.handle('sharing:review', (_, p, file, share, locale) => service.setAiSharingReview(p, file, share, locale));
+  ipcMain.handle('changes:scan-secrets', (_, p) => service.scanChangesForSecrets(p));
   ipcMain.handle('action:prepare-delivery', async (_, p, request, locale) => {
     const plan = await service.prepareBranchDelivery(p, request, locale);
     plans.set(plan.id, plan); return plan;
@@ -241,7 +247,21 @@ app.whenReady().then(async () => {
   await waitFor(`!document.querySelector('.delivery-review-modal')`);
   assert.equal(fs.existsSync(path.join(repo, '.gitignore')), false, 'Closing the preview writes nothing');
 
+  // Opening the save sends nothing before sharing is agreed: the form stays manual until asked.
   await js(`document.querySelector('.delivery-actions .primary-button').click()`);
+  await waitFor(`document.querySelector('#commit-description')`);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(described.length, 0, 'No description is requested before the disclosure');
+  assert.equal(await js(`document.querySelector('#commit-description').value`), '');
+  // Asking for one shows what would leave this Mac, file by file, before anything is sent.
+  await js(`document.querySelector('.commit-form-heading button').click()`);
+  await waitFor(`document.querySelector('.sharing-modal')`);
+  const disclosure = await js(`document.querySelector('.sharing-modal').innerText`);
+  for (const entry of [/Antes de que el asistente lea GitCat/, /OpenAI \([^,)]+, api\.openai\.com\)/, /app\.txt/, /Se envía/, /No compartir nunca de este repositorio/, /no demuestra que un repositorio sea seguro/, /No necesitas el asistente/]) assert.match(disclosure, entry);
+  assert.doesNotMatch(disclosure, /new-file\.txt/, 'Only the ticked files are part of the description request');
+  assert.equal(described.length, 0, 'Still nothing sent while the disclosure is open');
+  await capture('sharing-disclosure');
+  await js(`document.querySelector('.sharing-modal .sharing-accept').click()`);
   await waitFor(`document.querySelector('#commit-description')?.value === 'Update menu and add a new file'`);
   assert.deepEqual(described.at(-1), ['app.txt'], 'The description reads only the ticked files');
   await js(`${rowFor('new-file.txt')}.querySelector('.change-include').click()`);
@@ -270,8 +290,17 @@ app.whenReady().then(async () => {
   git('branch', 'outside/terminal');
   // A read is skipped while GitCat is still finishing the checkout, so focus is offered until one lands.
   await waitFor(`document.querySelector('aside.sidebar').textContent.includes('outside') || (window.dispatchEvent(new Event('focus')), false)`);
+  // A new .env with a key is flagged beside the files to save, by file and kind only, before any review.
+  fs.writeFileSync(path.join(repo, '.env'), 'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n');
+  await js(`document.querySelector('.inspector-tabs button').click()`);
+  await waitFor(`document.querySelector('.secret-warning') || (window.dispatchEvent(new Event('focus')), false)`);
+  const warning = await js(`document.querySelector('.secret-warning').innerText`);
+  for (const entry of [/parecen contener una contraseña/, /\.env/, /clave de acceso de AWS/, /Dejar fuera/, /Ignorar archivo/, /Revisé estos archivos/]) assert.match(warning, entry);
+  assert.doesNotMatch(await js(`document.body.innerText`), /AKIAIOSFODNN7EXAMPLE/, 'The secret itself is never shown');
+  assert.match(await js(`document.querySelector('.inspector .change-row .change-badge.secret').textContent`), /posible secreto/);
+  await capture('secret-warning');
   win.destroy();
-  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, per-file include/exclude with selected diff and description, previewed .gitignore rule, reviewed save and integration, double-click checkout, background refresh.');
+  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, double-click checkout, background refresh, local secret warning.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));
