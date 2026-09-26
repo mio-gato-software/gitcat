@@ -5,7 +5,7 @@ import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef,
 import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
   AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Bot, Check, ChevronRight, CircleDot,
-  Clock3, Cloud, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
+  Clock3, Cloud, CloudDownload, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
   FolderOpen, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
   ListTree, LoaderCircle, Maximize2, MessageCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen, Palette, Pencil, PencilLine, Plus,
   RefreshCcw, Search, Send, Settings2, ShieldCheck, Undo2,
@@ -19,6 +19,9 @@ import type { BranchSuggestion } from "../shared/branch-consistency";
 import { isProtectedBranch, lifecycleOf, staleDays } from "../shared/branch-lifecycle";
 import { buildCommitGraph, familyColour, maxLanes, withWorkInProgress, workInProgressHash } from "../shared/commit-graph";
 import { pullRequestReference } from "../shared/repository-activity";
+import { authorAvatarUrl, avatarKey } from "../shared/avatar";
+import { clampGraphColumn, graphColumnRange, parseGraphColumns } from "../shared/graph-columns";
+import type { GraphColumn, GraphColumnWidths } from "../shared/graph-columns";
 import { autoRefreshIntervalMs, backgroundFetchDue, refreshedProject } from "../shared/auto-refresh";
 import type { GraphRow } from "../shared/commit-graph";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
@@ -124,6 +127,17 @@ function readPaneWidths(): PaneWidths | undefined {
 }
 
 function clamp(value: number, min: number, max: number) { return Math.min(Math.max(value, min), max); }
+
+const graphColumnsStorageKey = "gitcat-graph-columns";
+const graphColumnVar: Record<GraphColumn, string> = { refs: "--col-refs", graph: "--track-w", changes: "--col-changes", when: "--col-when" };
+
+function readGraphColumns(): GraphColumnWidths {
+  try { return parseGraphColumns(JSON.parse(localStorage.getItem(graphColumnsStorageKey) ?? "null")); } catch { return {}; }
+}
+
+function writeGraphColumns(widths: GraphColumnWidths) {
+  try { localStorage.setItem(graphColumnsStorageKey, JSON.stringify(widths)); } catch { /* a view preference only */ }
+}
 
 /** Keeps both side panes inside their own range and never lets them squeeze the graph below its floor. */
 function clampPanes({ sidebar, inspector }: PaneWidths, total: number): PaneWidths {
@@ -323,6 +337,8 @@ export default function App() {
   const [request, setRequest] = useState("");
   const [conversations, setConversations] = useState<Record<string, ConversationTurn[]>>({});
   const [refreshingPath, setRefreshingPath] = useState<string>();
+  /** Which toolbar button started the check in flight, so only that one spins. */
+  const [refreshKind, setRefreshKind] = useState<"refresh" | "fetch">("refresh");
   const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [config, setConfig] = useState<LlmConfig>({ provider: "openai", model: "gpt-5.6-luna", configured: false });
@@ -545,15 +561,19 @@ export default function App() {
    * The Refresh button: "am I up to date?". It reads this Mac's copy first, so the answer never waits
    * on the network, then asks the remote for news. Neither step changes a branch or a file. When the
    * remote cannot be reached, the local view is still current and the assistant is asked for a way on.
+   *
+   * The Fetch button is the same check without the local read first. Refresh already covers it, but
+   * people who know Git look for Fetch by name, and a missing verb reads as a missing ability.
    */
-  const refreshEverything = async () => {
+  const refreshEverything = async (kind: "refresh" | "fetch" = "refresh") => {
     const path = snapshot?.path;
-    if (!path || refreshingPath) return;
+    if (!path || !snapshot || refreshingPath) return;
     setRefreshingPath(path);
+    setRefreshKind(kind);
     let failure: string | undefined;
     try {
-      const local = await window.gitcat.getSnapshot(path);
-      updateSnapshot(path, local);
+      const local = kind === "fetch" ? snapshot : await window.gitcat.getSnapshot(path);
+      if (kind === "refresh") updateSnapshot(path, local);
       if (!local.remotes.length) {
         addActivity({ label: t("stateUpdated"), detail: t("refreshedLocal", { branch: local.currentBranch }), tone: "neutral" });
         return;
@@ -1067,9 +1087,11 @@ export default function App() {
           snapshot={snapshot}
           busy={planning}
           deliveryBusy={planning || generatingDescription}
-          refreshing={refreshingPath === snapshot.path}
+          refreshing={refreshingPath === snapshot.path && refreshKind === "refresh"}
+          fetching={refreshingPath === snapshot.path && refreshKind === "fetch"}
           refreshDisabled={Boolean(refreshingPath)}
           onRefresh={() => void refreshEverything()}
+          onFetch={() => void refreshEverything("fetch")}
           onPull={() => void prepare("pull")}
           onPush={() => void prepare("push")}
           onBranch={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
@@ -1517,6 +1539,7 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
   const scroller = useRef<HTMLDivElement>(null);
   const buttons = useRef(new Map<string, HTMLButtonElement>());
   const jumped = useRef(0);
+  const [columns, setColumns] = useState<GraphColumnWidths>(readGraphColumns);
 
   const { byFamily, scope } = prefs;
   const branch = scope === "all" ? undefined : selection;
@@ -1568,6 +1591,73 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
   // A filtered list is a selection of commits, not a graph: the lanes between them no longer connect.
   const lanes = needle ? 0 : Math.min(graph.laneCount, maxLanes);
   const trackWidth = lanes ? Math.max(40, lanes * laneWidth + laneOffset) : 40;
+  const columnStyle = {
+    ...Object.fromEntries(Object.entries(columns).map(([column, width]) => [graphColumnVar[column as GraphColumn], `${width}px`])),
+    "--track-w": `${columns.graph ?? trackWidth}px`
+  } as CSSProperties;
+
+  const setColumn = (column: GraphColumn, width: number | undefined) => setColumns((current) => {
+    const next = { ...current };
+    if (width === undefined) delete next[column]; else next[column] = clampGraphColumn(column, width);
+    writeGraphColumns(next);
+    return next;
+  });
+
+  /**
+   * Dragging writes the width straight onto the scroller, so a long history does not re-render on
+   * every pointer move; the width becomes state, and is remembered, when the drag ends. A grip on a
+   * column's leading edge grows the column leftwards, so its delta is reversed.
+   */
+  const startColumnResize = (column: GraphColumn, side: "start" | "end") => (event: ReactPointerEvent<HTMLSpanElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const grip = event.currentTarget;
+    const cell = grip.parentElement;
+    const target = scroller.current;
+    if (!cell || !target) return;
+    const startX = event.clientX;
+    const startWidth = cell.getBoundingClientRect().width;
+    let width = startWidth;
+    let moved = false;
+    grip.setPointerCapture(event.pointerId);
+    const move = (moveEvent: PointerEvent) => {
+      moved = true;
+      const delta = moveEvent.clientX - startX;
+      width = clamp(startWidth + (side === "end" ? delta : -delta), ...graphColumnRange[column]);
+      target.style.setProperty(graphColumnVar[column], `${width}px`);
+    };
+    const stop = () => {
+      grip.releasePointerCapture(event.pointerId);
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", stop);
+      grip.removeEventListener("pointercancel", stop);
+      if (moved) setColumn(column, width);
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", stop);
+    grip.addEventListener("pointercancel", stop);
+  };
+
+  const columnGrip = (column: GraphColumn, side: "start" | "end", label: string) => <span
+    className={`column-grip ${side}`}
+    role="separator"
+    aria-orientation="vertical"
+    aria-label={t("resizeColumn", { column: label })}
+    aria-valuemin={graphColumnRange[column][0]}
+    aria-valuemax={graphColumnRange[column][1]}
+    tabIndex={0}
+    title={`${t("resizeColumn", { column: label })} · ${t("resizePaneHint")}`}
+    onPointerDown={startColumnResize(column, side)}
+    onDoubleClick={() => setColumn(column, undefined)}
+    onKeyDown={(event) => {
+      const step = ({ ArrowLeft: -16, ArrowRight: 16 } as Record<string, number>)[event.key];
+      const cell = event.currentTarget.parentElement;
+      if (step === undefined || !cell) return;
+      event.preventDefault();
+      setColumn(column, cell.getBoundingClientRect().width + (side === "end" ? step : -step));
+    }}
+  />;
   const markers = useMemo(() => {
     let previous = "";
     return visible.map((commit) => {
@@ -1636,8 +1726,14 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
     </div>
     {needle && <div className="graph-note">{t("filteredHistoryNote", { count: page.commits.length })}</div>}
     {error && <div className="graph-note error" role="alert">{error}</div>}
-    <div className="graph-scroll" ref={scroller} style={{ "--track-w": `${trackWidth}px` } as CSSProperties} onKeyDown={walk}>
-      <div className="graph-columns" aria-hidden="true"><span>{t("branchesAndTags")}</span><span>{t("graphLabel")}</span><span>{t("columnMessage")}</span><span className="col-changes">{t("columnChanges")}</span><span className="col-when">{t("columnWhen")}</span></div>
+    <div className="graph-scroll" ref={scroller} style={columnStyle} onKeyDown={walk}>
+      <div className="graph-columns">
+        <span><span aria-hidden="true">{t("branchesAndTags")}</span>{columnGrip("refs", "end", t("branchesAndTags"))}</span>
+        <span><span aria-hidden="true">{t("graphLabel")}</span>{columnGrip("graph", "end", t("graphLabel"))}</span>
+        <span aria-hidden="true">{t("columnMessage")}</span>
+        <span className="col-changes">{columnGrip("changes", "start", t("columnChanges"))}<span aria-hidden="true">{t("columnChanges")}</span></span>
+        <span className="col-when">{columnGrip("when", "start", t("columnWhen"))}<span aria-hidden="true">{t("columnWhen")}</span></span>
+      </div>
       {visible.length ? visible.map((commit, index) => <CommitRow
         key={commit.hash}
         commit={commit}
@@ -1647,7 +1743,6 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
         marker={markers[index]}
         row={rows.get(commit.hash)}
         lanes={lanes}
-        trackWidth={trackWidth}
         remotes={snapshot.remotes}
         colour={byFamily ? familyColour(rows.get(commit.hash)?.family ?? "") : branchColor(index)}
         byFamily={byFamily}
@@ -1681,7 +1776,8 @@ function GraphLanes({ row, lanes, colour, byFamily, connector, dashed }: { row: 
   const visible = (lane: number) => lane < lanes;
   const tone = (family: string) => byFamily ? familyColour(family) : "#4a4d4b";
   const dash = dashed ? "3 3" : undefined;
-  return <svg className="graph-lanes" viewBox={`0 0 ${width} 100`} preserveAspectRatio="none" aria-hidden="true">
+  // A fixed width, so a graph column dragged wider leaves room beside the lanes instead of stretching them.
+  return <svg className="graph-lanes" viewBox={`0 0 ${width} 100`} preserveAspectRatio="none" style={{ width }} aria-hidden="true">
     {connector && visible(row.lane) && <line className="ref-link" x1={0} y1={50} x2={laneX(row.lane)} y2={50} stroke={colour} />}
     {row.through.filter((line) => visible(line.lane)).map((line) =>
       <line key={`t${line.lane}`} x1={laneX(line.lane)} y1={0} x2={laneX(line.lane)} y2={100} stroke={tone(line.family)} />)}
@@ -1708,8 +1804,37 @@ function initials(name: string) {
   return letters.map((word) => [...word][0] ?? "").join("").toLocaleUpperCase() || "?";
 }
 
+/** Photo answers are kept for the session, and a photo that failed to load is not asked for again. */
+const avatarUrls = new Map<string, string | undefined>();
+const avatarLookups = new Map<string, Promise<string | undefined>>();
+const missingAvatars = new Set<string>();
+
+function lookupAvatar(key: string) {
+  let lookup = avatarLookups.get(key);
+  if (!lookup) {
+    lookup = authorAvatarUrl(key).catch(() => undefined);
+    void lookup.then((url) => avatarUrls.set(key, url));
+    avatarLookups.set(key, lookup);
+  }
+  return lookup;
+}
+
+/** The author's photo laid over their initials, which stay underneath for as long as there is no photo. */
+function AuthorPhoto({ email }: { email: string }) {
+  const key = avatarKey(email);
+  const [url, setUrl] = useState(() => key && !missingAvatars.has(key) ? avatarUrls.get(key) : undefined);
+  useEffect(() => {
+    let live = true;
+    setUrl(key && !missingAvatars.has(key) ? avatarUrls.get(key) : undefined);
+    if (key && !missingAvatars.has(key)) void lookupAvatar(key).then((next) => { if (live) setUrl(next); });
+    return () => { live = false; };
+  }, [key]);
+  if (!url) return null;
+  return <img className="author-photo" src={url} alt="" draggable={false} referrerPolicy="no-referrer" onError={() => { missingAvatars.add(key); setUrl(undefined); }} />;
+}
+
 function Avatar({ name, email, size }: { name: string; email: string; size: number }) {
-  return <span className="avatar-chip" style={{ ...authorTone(email || name), width: size, height: size, fontSize: Math.round(size * 0.4) }} title={email ? `${name} <${email}>` : name} aria-hidden="true">{initials(name)}</span>;
+  return <span className="avatar-chip" style={{ ...authorTone(email || name), width: size, height: size, fontSize: Math.round(size * 0.4) }} title={email ? `${name} <${email}>` : name} aria-hidden="true">{initials(name)}<AuthorPhoto email={email} /></span>;
 }
 
 /** Small counts stay exact; past a thousand lines the scale matters more than the last digit. */
@@ -1769,8 +1894,8 @@ function refChips(refs: string[], remotes: string[]): RefChip[] {
   });
 }
 
-function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, selected, head, marker, work, register, onSelect, onOpen, onCheckout, onMenu }: {
-  commit: Commit; row?: GraphRow; lanes: number; trackWidth: number; remotes: string[]; colour: string; byFamily: boolean;
+function CommitRow({ commit, row, lanes, remotes, colour, byFamily, selected, head, marker, work, register, onSelect, onOpen, onCheckout, onMenu }: {
+  commit: Commit; row?: GraphRow; lanes: number; remotes: string[]; colour: string; byFamily: boolean;
   selected: boolean; head: boolean; marker: string;
   work?: { summary: string; count: number; branch: string };
   register: (node: HTMLButtonElement | null) => void; onSelect: () => void; onOpen: () => void;
@@ -1807,10 +1932,10 @@ function CommitRow({ commit, row, lanes, trackWidth, remotes, colour, byFamily, 
       {rest.length > 0 && <span className="ref-tag more" title={rest.map(chipTitle).join("\n")}>+{rest.length}</span>}
       {first && <span className="ref-connector" />}
     </div>
-    <div className="graph-track" style={{ width: trackWidth }}>
+    <div className="graph-track">
       {row && lanes > 0 ? <GraphLanes row={row} lanes={lanes} colour={colour} byFamily={byFamily} connector={Boolean(first)} dashed={Boolean(work)} /> : <span className="track-line" />}
       <span className={`commit-node ${node}`} style={{ left: laneX(lane) - size / 2, borderColor: colour, ...(node === "avatar" ? authorTone(commit.email || commit.author) : node === "merge" ? { background: colour } : {}) }} title={work ? undefined : `${commit.author} · ${formatDateFull(commit.date, locale)}`}>
-        {node === "avatar" ? initials(commit.author) : node === "wip" ? <PencilLine size={10} /> : null}
+        {node === "avatar" ? <>{initials(commit.author)}<AuthorPhoto email={commit.email} /></> : node === "wip" ? <PencilLine size={10} /> : null}
       </span>
     </div>
     <button className="commit-content" ref={register} aria-pressed={selected} aria-label={work ? t("inspectWork", { branch: work.branch }) : t("inspectCommit", { hash: commit.shortHash, subject: commit.subject })}>
@@ -1846,9 +1971,9 @@ function changeStatus(code: string, t: Translate) {
  * The repository bar: where you are, the everyday Git verbs, and the next step for this branch. The
  * verbs still go through a plan, so a click here explains itself before anything changes.
  */
-function RepoToolbar({ snapshot, busy, deliveryBusy, refreshing, refreshDisabled, onRefresh, onPull, onPush, onBranch, onSave, onIntegrate }: {
-  snapshot: RepoSnapshot; busy: boolean; deliveryBusy: boolean; refreshing: boolean; refreshDisabled: boolean;
-  onRefresh: () => void; onPull: () => void; onPush: () => void; onBranch: () => void;
+function RepoToolbar({ snapshot, busy, deliveryBusy, refreshing, fetching, refreshDisabled, onRefresh, onFetch, onPull, onPush, onBranch, onSave, onIntegrate }: {
+  snapshot: RepoSnapshot; busy: boolean; deliveryBusy: boolean; refreshing: boolean; fetching: boolean; refreshDisabled: boolean;
+  onRefresh: () => void; onFetch: () => void; onPull: () => void; onPush: () => void; onBranch: () => void;
   onSave: () => void; onIntegrate: () => void;
 }) {
   const { t } = useI18n();
@@ -1873,6 +1998,7 @@ function RepoToolbar({ snapshot, busy, deliveryBusy, refreshing, refreshDisabled
     </div>
     <div className="toolbar-tools">
       {tool(RefreshCcw, t("refresh"), onRefresh, refreshDisabled, t("refreshTitle"), refreshing)}
+      {tool(CloudDownload, t("fetch"), onFetch, refreshDisabled || !snapshot.remotes.length, snapshot.remotes.length ? t("fetchTitle") : t("noRemoteFetchTitle"), fetching)}
       {tool(ArrowDownToLine, t("pull"), onPull, busy, t("pullTitle"))}
       {tool(ArrowUpFromLine, t("push"), onPush, busy, t("pushTitle"))}
       <span className="tool-divider" aria-hidden="true" />

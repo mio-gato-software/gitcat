@@ -139,8 +139,31 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('[aria-label="Mostrar el panel de ramas"]').click()`);
   await waitFor(`document.querySelector('.sidebar')`);
   assert.equal(git('status', '--porcelain'), before, 'Reading the graph and its details never mutates Git');
-  // Refresh answers "am I up to date?" on its own, so there is no separate Fetch button beside it.
-  assert.deepEqual(JSON.parse(await js(`JSON.stringify([...document.querySelectorAll('.toolbar-tools .tool-button')].map((node) => node.innerText.trim()))`)), ['Actualizar', 'Pull', 'Push', 'Rama']);
+  // Refresh answers "am I up to date?" on its own; Fetch stays beside it because people look for it by name.
+  assert.deepEqual(JSON.parse(await js(`JSON.stringify([...document.querySelectorAll('.toolbar-tools .tool-button')].map((node) => node.innerText.trim()))`)), ['Actualizar', 'Fetch', 'Pull', 'Push', 'Rama']);
+  // Graph columns resize from their header edges, remember the width, and reset on a double click.
+  const refsCell = () => js(`Math.round(document.querySelector('.graph-columns > span').getBoundingClientRect().width)`);
+  const rowRefs = () => js(`Math.round(document.querySelector('.commit-row .commit-refs').getBoundingClientRect().width)`);
+  const refsBefore = await refsCell();
+  await js(`document.querySelector('.graph-columns > span:first-child .column-grip').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))`);
+  await waitFor(`Math.round(document.querySelector('.graph-columns > span').getBoundingClientRect().width) === ${refsBefore + 16}`);
+  assert.equal(await rowRefs(), refsBefore + 16, 'Every row follows the header width');
+  assert.equal(JSON.parse(await js(`localStorage.getItem('gitcat-graph-columns')`)).refs, refsBefore + 16);
+  await js(`document.querySelector('.graph-columns > span:first-child .column-grip').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await waitFor(`Math.round(document.querySelector('.graph-columns > span').getBoundingClientRect().width) === ${refsBefore}`);
+  assert.equal(JSON.parse(await js(`localStorage.getItem('gitcat-graph-columns')`)).refs, undefined);
+  // A real pointer drag on the leading edge of Changes widens that column leftwards.
+  const changesCell = () => js(`Math.round(document.querySelector('.graph-columns .col-changes').getBoundingClientRect().width)`);
+  const changesBefore = await changesCell();
+  const grip = JSON.parse(await js(`JSON.stringify(document.querySelector('.graph-columns .col-changes .column-grip').getBoundingClientRect())`));
+  const gx = Math.round(grip.x + grip.width / 2); const gy = Math.round(grip.y + grip.height / 2);
+  win.webContents.sendInputEvent({ type: 'mouseDown', x: gx, y: gy, button: 'left', clickCount: 1 });
+  for (const step of [10, 20, 30, 40]) win.webContents.sendInputEvent({ type: 'mouseMove', x: gx - step, y: gy, button: 'left', modifiers: ['leftButtonDown'] });
+  win.webContents.sendInputEvent({ type: 'mouseUp', x: gx - 40, y: gy, button: 'left', clickCount: 1 });
+  await waitFor(`JSON.parse(localStorage.getItem('gitcat-graph-columns') ?? '{}').changes === ${changesBefore + 40}`);
+  assert.equal(await changesCell(), changesBefore + 40);
+  await js(`document.querySelector('.graph-columns .col-changes .column-grip').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await waitFor(`Math.round(document.querySelector('.graph-columns .col-changes').getBoundingClientRect().width) === ${changesBefore}`);
   await assertFits(); await capture('overview');
 
   // A long error must stay in the reserved footer, with no layout movement.
