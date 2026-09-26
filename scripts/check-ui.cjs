@@ -43,17 +43,34 @@ app.whenReady().then(async () => {
   const movedPath = path.join(scratch, 'Moved project');
   const moved = () => ({ path: movedPath, name: 'Moved project', reason: 'missing', detail: `ENOENT: ${movedPath}`, checkedAt: new Date().toISOString() });
   let retries = 0;
-  ipcMain.handle('workspace:restore', () => ({ projects: [snapshot], unavailable: [moved()], order: [snapshot.path, movedPath], activePath: snapshot.path }));
+  // The last scenario swaps in a repository stopped in a merge, with no assistant configured.
+  let restored = null;
+  let configured = true;
+  ipcMain.handle('workspace:restore', () => restored ?? ({ projects: [snapshot], unavailable: [moved()], order: [snapshot.path, movedPath], activePath: snapshot.path }));
   ipcMain.handle('workspace:retry', () => { retries += 1; return { unavailable: moved() }; });
   ipcMain.handle('workspace:save', () => {});
-  ipcMain.handle('llm:get-config', () => ({ provider: 'openai', model: 'ui-test', configured: true }));
+  ipcMain.handle('llm:get-config', () => ({ provider: 'openai', model: 'ui-test', configured }));
   ipcMain.handle('history:load', (_, p, request) => service.loadHistory(p, request));
   ipcMain.handle('commit:detail', (_, p, hash) => service.getCommitDetail(p, hash));
   ipcMain.handle('commit:file-diff', (_, p, file) => service.getWorkingFileDiff(p, file));
-  ipcMain.handle('repo:snapshot', () => {
+  ipcMain.handle('repo:snapshot', (_, p) => {
     if (refreshError) throw new Error('A long example error for notification layout. '.repeat(30));
-    return service.getSnapshot(repo);
+    return service.getSnapshot(p || repo);
   });
+  // The guided resolver runs on the real service; guides are kept here the way the main process keeps them.
+  const guides = new Map();
+  const opened = [];
+  let proposals = 0;
+  ipcMain.handle('conflicts:describe', async (_, p, locale) => {
+    const guide = await service.describeConflicts(p, locale);
+    guides.set(guide.id, guide);
+    const shown = { ...guide };
+    delete shown.binding;
+    return shown;
+  });
+  ipcMain.handle('conflicts:choose', (_, p, id, choices, locale) => service.applyConflictChoices(p, guides.get(id), choices, locale));
+  ipcMain.handle('conflicts:open', async (_, p, file, locale) => { opened.push(await service.conflictFileToOpen(p, file, locale)); });
+  ipcMain.handle('conflicts:propose', () => { proposals += 1; throw new Error('no provider in this scenario'); });
   // The description is written from the ticked files only; the stub records which ones it was asked about.
   const described = [];
   ipcMain.handle('commit:generate-description', async (_, p, locale, paths) => {
@@ -99,6 +116,7 @@ app.whenReady().then(async () => {
       if (await js(expression)) return;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
+    if (process.env.GITCAT_UI_DEBUG) console.error((await js(`document.body.innerText`)).slice(0, 3000));
     throw new Error(`UI did not become ready: ${expression}`);
   };
   const capture = async name => {
@@ -331,8 +349,82 @@ app.whenReady().then(async () => {
   assert.doesNotMatch(await js(`document.body.innerText`), /AKIAIOSFODNN7EXAMPLE/, 'The secret itself is never shown');
   assert.match(await js(`document.querySelector('.inspector .change-row .change-badge.secret').textContent`), /posible secreto/);
   await capture('secret-warning');
+
+  // A merge that stopped on a text conflict, a modify/delete and a binary file, with no assistant
+  // configured: the resolver explains both versions by name and settles everything on its own.
+  const conflictRepo = path.join(scratch, 'Conflicts');
+  fs.mkdirSync(conflictRepo);
+  const cgit = (...args) => execFileSync('git', args, { cwd: conflictRepo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const cwrite = (file, content) => fs.writeFileSync(path.join(conflictRepo, file), content);
+  cgit('init', '-q', '-b', 'main'); cgit('config', 'user.name', 'GitCat QA'); cgit('config', 'user.email', 'qa@example.test');
+  cwrite('text.txt', 'uno\ndos\n'); cwrite('gone.txt', 'base\n'); cwrite('logo.png', Buffer.from([0x89, 0x50, 0, 1, 2]));
+  cgit('add', '.'); cgit('commit', '-qm', 'Base');
+  cgit('switch', '-qc', 'otra');
+  cwrite('text.txt', 'uno\nDOS de otra\n'); cgit('rm', '-q', 'gone.txt'); cwrite('logo.png', Buffer.from([0x89, 0x50, 0, 3, 4]));
+  cgit('add', '-A'); cgit('commit', '-qm', 'Cambios en otra');
+  cgit('switch', '-q', 'main');
+  cwrite('text.txt', 'uno\nDOS de main\n'); cwrite('gone.txt', 'cambiado en main\n'); cwrite('logo.png', Buffer.from([0x89, 0x50, 0, 5, 6]));
+  cgit('add', '-A'); cgit('commit', '-qm', 'Cambios en main');
+  try { cgit('merge', 'otra'); } catch { /* the conflict is the point */ }
+  const conflicted = await service.getSnapshot(conflictRepo);
+  restored = { projects: [conflicted], unavailable: [], order: [conflicted.path], activePath: conflicted.path };
+  configured = false;
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  // Without a provider GitCat first says so, and offers to go on without one.
+  await waitFor(`[...document.querySelectorAll('button')].some((node) => node.innerText.includes('Ver la interfaz sin configurar'))`);
+  await js(`[...document.querySelectorAll('button')].find((node) => node.innerText.includes('Ver la interfaz sin configurar')).click()`);
+  await waitFor(`document.querySelector('.rebase-banner .guide-open')`);
+  const banner = await js(`document.querySelector('.rebase-banner').innerText`);
+  assert.match(banner, /Fusión en curso/); assert.match(banner, /3 archivos en conflicto/);
+  assert.doesNotMatch(banner, /Proponer resolución/, 'No assistant, no draft button');
+  await js(`document.querySelector('.rebase-banner .guide-open').click()`);
+  await waitFor(`document.querySelector('.conflict-guide .guide-file')`);
+  const guideText = await js(`document.querySelector('.conflict-guide').innerText`);
+  for (const entry of [/Fusionando otra en main/, /La rama en la que estás/, /La rama que se está fusionando/, /Cambios en otra/, /Git: «theirs»/,
+    /main cambió este archivo; otra lo borró/, /No es texto plano/, /No hay asistente configurado/, /Continuar crea el commit de fusión/, /Abortar vuelve exactamente/]) assert.match(guideText, entry);
+  assert.doesNotMatch(guideText, /Pedir un borrador/);
+  const fileCard = (file) => `document.querySelector('.guide-file[data-path="${file}"]')`;
+  const choose = (file, label) => js(`[...${fileCard(file)}.querySelectorAll('.guide-choices label')].find((node) => node.innerText.includes(${JSON.stringify(label)})).querySelector('input').click()`);
+  const labels = (file) => js(`[...${fileCard(file)}.querySelectorAll('.guide-choices label')].map((node) => node.innerText.trim())`);
+  assert.deepEqual(await labels('logo.png'), ['Conservar la versión de main', 'Conservar la versión de otra'], 'A binary file is taken whole');
+  assert.deepEqual(await labels('gone.txt'), ['Conservar la versión de main', 'Mantenerlo borrado', 'Lo edité yo']);
+  await js(`[...${fileCard('text.txt')}.querySelectorAll('button')].find((node) => node.innerText.includes('Comparar versiones')).click()`);
+  await waitFor(`${fileCard('text.txt')}.querySelector('.guide-versions')`);
+  const versions = await js(`${fileCard('text.txt')}.querySelector('.guide-versions').innerText`);
+  assert.match(versions, /DOS de main/); assert.match(versions, /DOS de otra/);
+  await js(`[...${fileCard('text.txt')}.querySelectorAll('button')].find((node) => node.innerText.includes('Abrir en el editor')).click()`);
+  for (let attempt = 0; attempt < 100 && !opened.length; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.deepEqual(opened, [fs.realpathSync(path.join(conflictRepo, 'text.txt'))]);
+  await choose('text.txt', 'Conservar la versión de otra');
+  await choose('gone.txt', 'Mantenerlo borrado');
+  await choose('logo.png', 'Conservar la versión de main');
+  assert.match(await js(`${fileCard('text.txt')}.querySelector('.guide-effect').innerText`), /exactamente como en otra\. Lo que main cambió/);
+  await capture('conflict-guide');
+  // The file is edited in the editor after the versions were shown: taking a side must not overwrite it.
+  cwrite('text.txt', 'uno\nDOS de main y de otra\n');
+  await js(`document.querySelector('.conflict-guide .guide-apply').click()`);
+  await waitFor(`document.querySelector('.conflict-guide .guide-outcome')?.innerText.includes('cambiaron después de mostrarse')`);
+  assert.equal(fs.readFileSync(path.join(conflictRepo, 'text.txt'), 'utf8'), 'uno\nDOS de main y de otra\n', 'The edit is kept');
+  assert.match(cgit('ls-files', '-u'), /gone\.txt/, 'Nothing was written');
+  await waitFor(`${fileCard('text.txt')}?.querySelector('.guide-clean') && !${fileCard('text.txt')}.querySelector('.guide-effect')`);
+  await choose('text.txt', 'Lo edité yo');
+  await waitFor(`document.querySelector('.conflict-guide .guide-apply')?.innerText.includes('3 archivos')`);
+  await js(`document.querySelector('.conflict-guide .guide-apply').click()`);
+  await waitFor(`document.querySelector('.conflict-guide')?.innerText.includes('Todos los conflictos están resueltos')`);
+  assert.equal(cgit('ls-files', '-u'), '');
+  assert.equal(fs.existsSync(path.join(conflictRepo, 'gone.txt')), false);
+  assert.match(await js(`document.querySelector('.conflict-guide .guide-outcome').innerText`), /Marcados como resueltos: gone\.txt, logo\.png, text\.txt/);
+  // Continuing is still a plan that says what it does and waits for confirmation.
+  await js(`[...document.querySelectorAll('.conflict-guide .guide-next-actions button')].find((node) => node.innerText.trim() === 'Continuar').click()`);
+  await waitFor(`document.querySelector('.plan-card .plan-effects')?.innerText.includes('Crea el commit de fusión')`);
+  await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
+  for (let attempt = 0; attempt < 100 && cgit('rev-list', '--count', 'HEAD') !== '4'; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(cgit('rev-list', '--parents', '-n', '1', 'HEAD').split(' ').length, 3, 'The merge commit was created');
+  assert.equal(cgit('status', '--porcelain'), '');
+  await waitFor(`!document.querySelector('.rebase-banner') && !document.querySelector('.plan-card .plan-actions .primary-button')`);
+  assert.equal(proposals, 0, 'No provider was needed at any point');
   win.destroy();
-  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning.');
+  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning, guided conflict resolution without an assistant.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));

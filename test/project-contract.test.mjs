@@ -746,7 +746,36 @@ test("resolver un conflicto con el modelo se propone, se revisa y solo entonces 
   assert.match(app, /window\.gitcat\.applyConflictResolution\(path, proposal\.id, accepted, locale\)/);
   // La duda del propio modelo se enseña en vez de enterrarse.
   assert.match(app, /resolution\.confidence === "low" && <span className="resolution-doubt"/);
-  assert.match(app, /proposal\.resolutions\.filter\(\(item\) => item\.confidence === "high"\)\.map/);
+  // Confidence is shown, never used to accept: nothing starts ticked.
+  assert.doesNotMatch(app, /proposal\.resolutions\.filter\(\(item\) => item\.confidence === "high"\)/);
+  assert.match(app, /const \[accepted, setAccepted\] = useState<string\[\]>\(\[\]\)/);
+  assert.match(app, /t\("proposalReviewEach"\)/);
+});
+
+test("the guided resolver works from repository facts, with the assistant as an optional extra", async () => {
+  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
+  const preload = await readFile(join(root, "electron/preload.cjs"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  // Choices are bound in the main process like proposals: the renderer sends an id and choices, never content.
+  assert.match(main, /const issuedGuides = new Map<string, IssuedConflictGuide>\(\)/);
+  assert.match(main, /exclusive\(repoPath, \(\) => describeConflicts\(repoPath, locale\)\)/);
+  assert.match(main, /exclusive\(repoPath, \(\) => applyConflictChoices\(repoPath, guide, requested, locale\)\)/);
+  assert.match(main, /shell\.openPath\(absolute\)/);
+  // Something the system would run instead of show is only revealed in its folder.
+  assert.match(main, /if \(!opensSafely\(absolute\)\) \{\n\s+shell\.showItemInFolder\(absolute\);/);
+  assert.match(preload, /chooseConflictResolutions: \(path, guideId, choices, locale\) => ipcRenderer\.invoke\("conflicts:choose"/);
+  assert.match(service, /if \(await conflictOperation\(repoRoot\) !== guide\.binding\.operation\)/);
+  assert.doesNotMatch(service.slice(service.indexOf("export async function describeConflicts"), service.indexOf("export async function applyConflictChoices")), /askProvider|isLlmConfigured/);
+  // The banner always offers the resolver; the assistant's draft only when one is configured.
+  assert.match(app, /onGuide=\{\(\) => void openGuide\(\)\}/);
+  assert.match(app, /blocked > 0 && configured && <button className="outline-button small" onClick=\{onResolve\}/);
+  assert.match(app, /case "resolve_conflicts": await openGuide\(\); return;/);
+  assert.match(app, /function ConflictResolverModal/);
+  assert.match(app, /t\("guideNoAssistant"\)/);
+  // Every way on is explained before it is prepared, and still confirmed as a plan.
+  assert.match(app, /onNext=\{\(operation\) => \{ closeGuide\(\); void prepare\(operation\); \}\}/);
+  assert.match(service, /async function pendingEffects/);
 });
 
 test("el error crudo de Electron no llega nunca a la interfaz", async () => {

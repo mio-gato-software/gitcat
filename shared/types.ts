@@ -267,6 +267,108 @@ export type ConflictApplyResult = {
   outcomes: ConflictFileOutcome[];
 };
 
+/**
+ * Git's own names for the two versions of a conflicted file. "ours" is always index stage 2 and
+ * "theirs" stage 3, whatever the operation; what each one *means* depends on the operation, which is
+ * why the guide names them with real branches and commits instead of these words.
+ */
+export type ConflictSideId = "ours" | "theirs";
+
+/**
+ * What a side of the operation is, in the terms a person recognises. During a rebase the branch
+ * underneath is "ours" and the person's own commit being replayed is "theirs", the reverse of what
+ * most people expect; the role carries that so the interface can say it plainly.
+ */
+export type ConflictSideRole =
+  | "current_branch" | "incoming_branch" | "rebase_base" | "replayed_commit" | "picked_commit" | "reverted_commit";
+
+export type ConflictSideIdentity = {
+  id: ConflictSideId;
+  role: ConflictSideRole;
+  /** A branch name when one is known; otherwise the short commit hash. */
+  name: string;
+  /** The commit this side's content comes from. */
+  commit?: { shortHash: string; subject: string };
+};
+
+/** One side's copy of a conflicted file, read from the index stage Git is holding. */
+export type ConflictFileVersion = {
+  /** Whether this side has the file at all. A side that deleted or renamed it away does not. */
+  present: boolean;
+  binary: boolean;
+  size?: number;
+  /** The text itself, for a readable file, so the choice is made looking at it. */
+  preview?: string;
+  previewTruncated?: boolean;
+};
+
+/** A path one side renamed, when the conflict is about a rename rather than an edit. */
+export type ConflictRename = { side: ConflictSideId; from: string; to: string };
+
+/**
+ * What a person can decide for one file without any assistant. Keeping a side checks out that side's
+ * version (or removes the file when that side deleted it); "delete" keeps the deletion; "edited"
+ * marks the file resolved exactly as it is on disk, and is refused while conflict markers remain.
+ */
+export type ConflictChoice = "ours" | "theirs" | "delete" | "edited";
+
+export type ConflictGuideFile = {
+  path: string;
+  kind: ConflictKind;
+  /** Any version is binary, a symlink or a submodule: only whole-version choices make sense. */
+  binary: boolean;
+  renames: ConflictRename[];
+  ours: ConflictFileVersion;
+  theirs: ConflictFileVersion;
+  /** The common ancestor's copy, when there is one. */
+  base: { present: boolean };
+  /** What the file on disk holds right now. */
+  working: { present: boolean; binary: boolean; markers: boolean };
+  /** The only choices this file's shape supports, in the order they are offered. */
+  choices: ConflictChoice[];
+};
+
+/**
+ * Every open conflict explained from the repository alone: which job holds them, what each side is,
+ * and the choices each file supports. Issued by the main process, which keeps what it was read
+ * against; choosing names this id, never file content.
+ */
+export type ConflictGuide = {
+  id: string;
+  repoPath: string;
+  operation?: PendingOperationKind;
+  /** Which commit of how many, for a sequence. */
+  step?: number;
+  total?: number;
+  /** Commits still waiting after the current one; each of them may stop with new conflicts. */
+  remaining: number;
+  branch?: string;
+  sides: { ours: ConflictSideIdentity; theirs: ConflictSideIdentity };
+  files: ConflictGuideFile[];
+};
+
+export type ConflictChoiceRequest = { path: string; choice: ConflictChoice };
+
+/**
+ * What happened to one chosen file. "refused" means the choice itself cannot be applied to the file
+ * as it is — conflict markers are still in it, or it is not on disk — and nothing was written.
+ */
+export type ConflictChoiceOutcome = {
+  path: string;
+  choice: ConflictChoice;
+  status: "applied" | "changed" | "not_applied" | "failed" | "refused";
+  reason?: "markers" | "missing";
+  restored?: boolean;
+  detail?: string;
+};
+
+export type ConflictChoiceResult = {
+  snapshot: RepoSnapshot;
+  complete: boolean;
+  stale?: "files" | "operation" | "repository";
+  outcomes: ConflictChoiceOutcome[];
+};
+
 export type Operation =
   | "status"
   | "checkout"
@@ -582,6 +684,15 @@ export type GitlineApi = {
   getCommitFileDiff: (path: string, hash: string, file: string) => Promise<CommitDetail>;
   proposeConflictResolution: (path: string, locale?: Locale) => Promise<ConflictProposal>;
   applyConflictResolution: (path: string, proposalId: string, accepted: string[], locale?: Locale) => Promise<ConflictApplyResult>;
+  /** Every open conflict explained from the repository alone. Never contacts the assistant. */
+  describeConflicts: (path: string, locale?: Locale) => Promise<ConflictGuide>;
+  /** Applies explicit per-file choices, bound to the guide they were made in. */
+  chooseConflictResolutions: (path: string, guideId: string, choices: ConflictChoiceRequest[], locale?: Locale) => Promise<ConflictChoiceResult>;
+  /**
+   * Opens one conflicted file in the app the system uses for it, or only shows it in its folder when
+   * opening would run it (a script or an installer).
+   */
+  openConflictFile: (path: string, file: string, locale?: Locale) => Promise<"opened" | "revealed">;
   planRecovery: (path: string, failure: ExecutionFailure, context?: ConversationMessage[], locale?: Locale) => Promise<ActionPlan>;
   /** Explains a failure from facts alone. Never contacts the assistant. */
   describeFailure: (path: string, failure: ExecutionFailure) => Promise<RecoveryReport>;

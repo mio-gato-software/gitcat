@@ -1,15 +1,16 @@
 import { legacyAppName, migrateProfileFiles, profilePath } from "./app-identity.js";
 import { exclusive } from "./repository-queue.js";
-import { app, BrowserWindow, dialog, ipcMain, Menu } from "electron";
+import { opensSafely } from "./conflict-guide.js";
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  acknowledgeAiSharing, applyConflictResolution, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
+  acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
   getLlmConfig, getSnapshot, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
   prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, saveLlmConfig,
-  scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictProposal
+  scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictGuide, type IssuedConflictProposal
 } from "./git-service.js";
 import { localized } from "./i18n.js";
 import {
@@ -17,7 +18,7 @@ import {
   parseWorkspace, relocateProject, restoreProjects, type RepoFingerprint, type WorkspaceRecord
 } from "./workspace-restore.js";
 import type {
-  ActionPlan, AiSharingPurpose, ConflictProposal, ConversationMessage, DeliveryRequest, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation, ProjectLocateResult,
+  ActionPlan, AiSharingPurpose, ConflictChoiceRequest, ConflictGuide, ConflictProposal, ConversationMessage, DeliveryRequest, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation, ProjectLocateResult,
   RepoSnapshot, RepositoryMatch, UnavailableProject
 } from "../shared/types.js";
 
@@ -37,6 +38,8 @@ const issuedPlans = new Map<string, ActionPlan>();
 const failedPlans = new Map<string, FailedPlanRecord>();
 /** Conflict proposals keep their reviewed content and state binding here; the renderer only holds the id. */
 const issuedProposals = new Map<string, IssuedConflictProposal>();
+/** Conflict guides keep what each file was read against here; choosing names the id and the choices, never content. */
+const issuedGuides = new Map<string, IssuedConflictGuide>();
 let persistedWorkspace: WorkspaceRecord = emptyWorkspace();
 /** Saved projects that could not be opened. Their paths stay saved and only accept a retry, a new location or removal. */
 const unavailableProjects = new Map<string, UnavailableProject>();
@@ -187,6 +190,17 @@ function rememberProposal(proposal: IssuedConflictProposal): ConflictProposal {
     id: proposal.id, repoPath: proposal.repoPath, resolutions: proposal.resolutions, skipped: proposal.skipped, current: proposal.current,
     ...(proposal.withheld ? { withheld: proposal.withheld } : {})
   };
+}
+
+/** One open guide per repository: a fresh read replaces the older one. */
+function rememberGuide(guide: IssuedConflictGuide): ConflictGuide {
+  for (const [id, issued] of issuedGuides) if (issued.repoPath === guide.repoPath) issuedGuides.delete(id);
+  if (issuedGuides.size >= 20) issuedGuides.delete(issuedGuides.keys().next().value ?? "");
+  issuedGuides.set(guide.id, guide);
+  // The binding is the main process's own record; the renderer gets what it needs to decide.
+  const shown: ConflictGuide & { binding?: unknown } = { ...guide };
+  delete shown.binding;
+  return shown;
 }
 
 async function createWindow() {
@@ -391,6 +405,43 @@ app.whenReady().then(async () => {
       if (applied.size) issuedProposals.set(proposalId, { ...proposal, resolutions: proposal.resolutions.filter((item) => !applied.has(item.path)) });
     }
     return result;
+  });
+  ipcMain.handle("conflicts:describe", async (event, cwd: string, locale?: Locale) => {
+    assertTrustedSender(event);
+    const repoPath = assertOpenedRepository(cwd);
+    return rememberGuide(await exclusive(repoPath, () => describeConflicts(repoPath, locale)));
+  });
+  ipcMain.handle("conflicts:choose", async (event, cwd: string, guideId: unknown, choices: unknown, locale?: Locale) => {
+    assertTrustedSender(event);
+    if (typeof guideId !== "string" || !Array.isArray(choices) || choices.length > 20_000 ||
+        choices.some((item) => !item || typeof item !== "object" || typeof item.path !== "string" || typeof item.choice !== "string")) {
+      throw new Error(localized(locale, "Las elecciones no son válidas.", "The choices are invalid."));
+    }
+    const repoPath = assertOpenedRepository(cwd);
+    const guide = issuedGuides.get(guideId);
+    if (!guide) {
+      throw new Error(localized(locale,
+        "Esta revisión ya no está disponible y no se escribió nada. Vuelve a leer los conflictos para elegir sobre lo que hay ahora.",
+        "This review is no longer available and nothing was written. Read the conflicts again to choose from what is there now."));
+    }
+    const requested: ConflictChoiceRequest[] = (choices as ConflictChoiceRequest[]).map((item) => ({ path: item.path, choice: item.choice }));
+    const result = await exclusive(repoPath, () => applyConflictChoices(repoPath, guide, requested, locale));
+    // Whatever happened, the repository moved or was proven different: the next choice starts from a fresh read.
+    if (result.outcomes.some((outcome) => outcome.status === "applied") || result.stale) issuedGuides.delete(guideId);
+    return result;
+  });
+  ipcMain.handle("conflicts:open", async (event, cwd: string, file: unknown, locale?: Locale) => {
+    assertTrustedSender(event);
+    const repoPath = assertOpenedRepository(cwd);
+    const absolute = await conflictFileToOpen(repoPath, file as string, locale);
+    // A file that the system would run rather than show is only revealed in its folder.
+    if (!opensSafely(absolute)) {
+      shell.showItemInFolder(absolute);
+      return "revealed";
+    }
+    const problem = await shell.openPath(absolute);
+    if (problem) throw new Error(localized(locale, `No se pudo abrir ${file as string}: ${problem}`, `Could not open ${file as string}: ${problem}`));
+    return "opened";
   });
   ipcMain.handle("action:recover", async (event, cwd: string, reported: unknown, context?: ConversationMessage[], locale?: Locale) => {
     assertTrustedSender(event);

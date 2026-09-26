@@ -31,6 +31,7 @@ import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefau
 import type { BranchOrder } from "../shared/branch-order";
 import type {
   ActionPlan, AiSharingPreview, AiSharingPurpose, AssistantUnavailable, Branch, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
+  ConflictChoice, ConflictChoiceRequest, ConflictChoiceResult, ConflictGuide, ConflictGuideFile, ConflictSideId, ConflictSideIdentity,
   FileChange, FileStats, HistoryScope, LlmConfig, Locale, Operation, PendingOperationKind, ProjectLocateResult, ProjectUnavailableReason,
   RecoveryAction, RecoveryReport, RepoSnapshot, SecretFinding, UnavailableProject, WithheldFile
 } from "../shared/types";
@@ -429,6 +430,10 @@ export default function App() {
   const [proposalResult, setProposalResult] = useState<ConflictApplyResult>();
   const [applyingResolution, setApplyingResolution] = useState(false);
   const [resolving, setResolving] = useState(false);
+  /** The guided resolver: every conflict explained from the repository, decided file by file without any assistant. */
+  const [guide, setGuide] = useState<ConflictGuide>();
+  const [guideResult, setGuideResult] = useState<ConflictChoiceResult>();
+  const [guideBusy, setGuideBusy] = useState(false);
   const [inputDialog, setInputDialog] = useState<InputDialog>();
   const [identityDialog, setIdentityDialog] = useState<IdentityDialog>();
   const [commitMessage, setCommitMessage] = useState("");
@@ -1140,10 +1145,8 @@ export default function App() {
       case "inspect_changes": setFocus({ kind: "wip" }); setInspectorTab("details"); return;
       case "configure_identity": setIdentityDialog({ user: "", email: "" }); return;
       case "configure_remote": setInputDialog({ operation: "add_remote", title: t("connectRemoteTitle"), label: t("remoteAddress"), value: "" }); return;
-      case "resolve_conflicts":
-        if (config.configured) await resolveConflicts();
-        else { setFocus({ kind: "wip" }); setInspectorTab("details"); }
-        return;
+      // The guided resolver works without the assistant; a draft from it stays one optional button inside.
+      case "resolve_conflicts": await openGuide(); return;
       case "keep": updateTurn(path, turnId, (item) => ({ ...item, kept: true })); return;
       case "prepare":
         if (action.operation) await prepare(action.operation, action.args ?? {}, recoveryActionLabel(action, facts, t, config.configured));
@@ -1165,7 +1168,70 @@ export default function App() {
     } finally { setResolving(false); }
   };
 
-  const closeProposal = () => { setProposal(undefined); setProposalResult(undefined); };
+  const closeProposal = () => {
+    setProposal(undefined); setProposalResult(undefined);
+    // Back to the guide it was asked from, read again: the draft may have settled some files.
+    if (guide) void openGuide();
+  };
+
+  /** Reads every open conflict from the repository. Nothing is sent anywhere and nothing is written. */
+  const openGuide = async (keepResult = false) => {
+    const path = snapshotRef.current?.path;
+    if (!path) return;
+    setGuideBusy(true);
+    if (!keepResult) setGuideResult(undefined);
+    try {
+      const next = await window.gitcat.describeConflicts(path, locale);
+      if (next.repoPath !== path) throw new Error(t("planOtherRepository"));
+      setGuide(next);
+    } catch (error) {
+      // Nothing left to decide (the operation finished elsewhere) is not an error worth a dialog.
+      setGuide(undefined);
+      notify({ message: cleanError(error, t("fallbackReadConflicts")), tone: "error" });
+      await refreshProject(path, false);
+    } finally { setGuideBusy(false); }
+  };
+
+  const closeGuide = () => { setGuide(undefined); setGuideResult(undefined); };
+
+  /**
+   * Sends the guide id and the explicit per-file choices; the main process checks them against the
+   * repository before writing anything. Whatever happened, the conflicts are read again, so the next
+   * decision is made on what is there now, and the outcome of each file stays on screen.
+   */
+  const applyGuideChoices = async (choices: ConflictChoiceRequest[]) => {
+    if (!snapshot || !guide || !choices.length || guideBusy) return;
+    const path = snapshot.path;
+    setGuideBusy(true);
+    try {
+      const result = await window.gitcat.chooseConflictResolutions(path, guide.id, choices, locale);
+      updateSnapshot(path, result.snapshot);
+      setGuideResult(result);
+      // Conflicts left by something other than a merge, rebase, cherry-pick or revert end here, with nothing to continue.
+      if (!result.snapshot.pending && !result.snapshot.conflicts.length) {
+        addActivity({ label: t("conflictsResolved"), detail: counted(t, choices.length, "file", "files"), tone: "success" });
+        closeGuide();
+        return;
+      }
+      const applied = result.outcomes.filter((outcome) => outcome.status === "applied").map((outcome) => outcome.path);
+      if (applied.length) {
+        addActivity({ label: t(result.complete ? "conflictsResolved" : "conflictsPartlyResolved"), detail: counted(t, applied.length, "file", "files"), tone: result.complete ? "success" : "warning" });
+      }
+    } catch (error) {
+      notify({ message: cleanError(error, t("fallbackChooseConflicts")), tone: "error" });
+    } finally { setGuideBusy(false); }
+    await openGuide(true);
+  };
+
+  const openConflictFile = async (file: string) => {
+    if (!snapshot) return;
+    try {
+      const how = await window.gitcat.openConflictFile(snapshot.path, file, locale);
+      if (how === "revealed") notify({ message: t("conflictFileRevealed", { path: file }), tone: "success" });
+    } catch (error) {
+      notify({ message: cleanError(error, t("fallbackOpenFile")), tone: "error" });
+    }
+  };
 
   /**
    * Sends only the proposal id and the accepted paths: the reviewed content stays in the main process,
@@ -1545,12 +1611,14 @@ export default function App() {
           </aside>}
 
           <section className={`graph-area ${sidebarHidden ? "full-width" : ""}`}>
-            {snapshot.pending && <PendingBanner
+            {(snapshot.pending || snapshot.conflicts.length > 0) && <PendingBanner
               snapshot={snapshot}
               busy={planning}
+              configured={config.configured}
               onContinue={() => void prepare("continue_operation")}
               onSkip={() => void prepare("skip_operation")}
               onAbort={() => void prepare("abort_operation")}
+              onGuide={() => void openGuide()}
               onResolve={() => void resolveConflicts()}
             />}
             <HistoryView
@@ -1604,6 +1672,11 @@ export default function App() {
       {selectedFile && snapshot && <FileDiffModal file={selectedFile} repoPath={snapshot.path} onClose={() => setSelectedFile(undefined)} />}
       {selectionDiffOpen && snapshot && <SelectionDiffModal files={selectedChanges} repoPath={snapshot.path} onClose={() => setSelectionDiffOpen(false)} />}
       {proposal && snapshot?.path === proposal.repoPath && <ConflictProposalModal key={proposal.id} proposal={proposal} result={proposalResult} busy={planning || applyingResolution || resolving} onApply={(accepted) => void applyResolutions(accepted)} onReviewAgain={() => void resolveConflicts()} onClose={closeProposal} />}
+      {guide && snapshot?.path === guide.repoPath && !proposal && <ConflictResolverModal guide={guide} result={guideResult} snapshot={snapshot} busy={guideBusy || planning || resolving} configured={config.configured}
+        onApply={(choices) => void applyGuideChoices(choices)} onReadAgain={() => void openGuide()} onOpenFile={(file) => void openConflictFile(file)}
+        onAskAssistant={() => void resolveConflicts()} onClose={closeGuide}
+        onNext={(operation) => { closeGuide(); void prepare(operation); }} />}
+      {guideBusy && !guide && <div className="resolving-overlay" role="status"><LoaderCircle className="spin" size={22} /><span>{t("guideLoading")}</span></div>}
       {resolving && <div className="resolving-overlay" role="status"><LoaderCircle className="spin" size={22} /><span>{t("readConflictSides")}</span></div>}
     </div>
     </I18nContext.Provider>
@@ -2908,31 +2981,198 @@ function pendingLabel(kind: PendingOperationKind, t: Translate) {
  * the way, because "a rebase is happening" is not enough to decide anything — and every way out is
  * spelled out in terms of what it costs, since aborting and skipping both throw work away.
  */
-function PendingBanner({ snapshot, busy, onContinue, onSkip, onAbort, onResolve }: {
-  snapshot: RepoSnapshot; busy: boolean;
-  onContinue: () => void; onSkip: () => void; onAbort: () => void; onResolve: () => void;
+function PendingBanner({ snapshot, busy, configured, onContinue, onSkip, onAbort, onGuide, onResolve }: {
+  snapshot: RepoSnapshot; busy: boolean; configured: boolean;
+  onContinue: () => void; onSkip: () => void; onAbort: () => void; onGuide: () => void; onResolve: () => void;
 }) {
   const { t } = useI18n();
-  const pending = snapshot.pending!;
-  const progress = pending.step && pending.total ? t("pendingProgress", { step: pending.step, total: pending.total }) : "";
-  const target = pending.branch && pending.onto ? t("pendingTargetBoth", { branch: pending.branch, onto: pending.onto }) : pending.onto ? t("pendingTarget", { onto: pending.onto }) : "";
+  const pending = snapshot.pending;
+  const progress = pending?.step && pending.total ? t("pendingProgress", { step: pending.step, total: pending.total }) : "";
+  const target = pending?.branch && pending.onto ? t("pendingTargetBoth", { branch: pending.branch, onto: pending.onto }) : pending?.onto ? t("pendingTarget", { onto: pending.onto }) : "";
   const blocked = snapshot.conflicts.length;
   return <div className="rebase-banner">
     <AlertTriangle size={16} />
     <div>
-      <strong>{pendingLabel(pending.kind, t)}{progress}</strong>
+      <strong>{pending ? `${pendingLabel(pending.kind, t)}${progress}` : t("guideTitle_none")}</strong>
       <span>{blocked
         ? `${counted(t, blocked, "conflictFile", "conflictFiles")}${target}. ${t("conflictsBlock")}`
         : t("noOpenConflicts", { target })}</span>
     </div>
-    {blocked > 0 && <button className="outline-button small" onClick={onResolve} disabled={busy} title={t("proposeResolutionTitle")}><Sparkles size={13} /> {t("proposeResolution")}</button>}
-    <button className="outline-button small" onClick={onContinue} disabled={busy || blocked > 0} title={blocked ? t("conflictsRemain") : t("continueTitle")}>{t("continue")}</button>
-    {canSkipPending(pending.kind) && <button className="danger-link" onClick={onSkip} disabled={busy} title={t("skipTitle")}>{t("skipCommit")}</button>}
-    <button className="danger-link" onClick={onAbort} disabled={busy} title={t("abortTitle")}>{t("abort")}</button>
+    <button className="outline-button small guide-open" onClick={onGuide} disabled={busy} title={t("resolveConflictsTitle")}><ListTree size={13} /> {t("resolveConflictsButton")}</button>
+    {blocked > 0 && configured && <button className="outline-button small" onClick={onResolve} disabled={busy} title={t("proposeResolutionTitle")}><Sparkles size={13} /> {t("proposeResolution")}</button>}
+    {pending && <button className="outline-button small" onClick={onContinue} disabled={busy || blocked > 0} title={blocked ? t("conflictsRemain") : t("continueTitle")}>{t("continue")}</button>}
+    {pending && canSkipPending(pending.kind) && <button className="danger-link" onClick={onSkip} disabled={busy} title={t("skipTitle")}>{t("skipCommit")}</button>}
+    {pending && <button className="danger-link" onClick={onAbort} disabled={busy} title={t("abortTitle")}>{t("abort")}</button>}
   </div>;
 }
 
 function canSkipPending(kind: PendingOperationKind) { return kind === "rebase" || kind === "cherry_pick"; }
+
+/** Seven conflict kinds, written as message keys: "both-modified" → "conflictShape_both_modified". */
+function conflictShapeKey(kind: ConflictGuideFile["kind"]) {
+  return `conflictShape_${kind.replace(/-/g, "_")}` as MessageKey;
+}
+
+function sideName(side: ConflictSideIdentity, t: Translate) {
+  return side.name || side.commit?.shortHash || t("sideUnknown");
+}
+
+function formatSize(bytes: number | undefined) {
+  if (bytes === undefined) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  return bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * The guided resolver. Every conflict is explained from the repository alone — which job holds it,
+ * what each version is called in real branch and commit names, and during a rebase why Git's words
+ * point the other way — and each file gets only the choices its shape supports. Nothing is written
+ * until the person presses the button, and the main process checks every choice against the files
+ * as they are then. The assistant is one optional button here, never the way in.
+ */
+function ConflictResolverModal({ guide, result, snapshot, busy, configured, onApply, onReadAgain, onOpenFile, onAskAssistant, onNext, onClose }: {
+  guide: ConflictGuide; result?: ConflictChoiceResult; snapshot: RepoSnapshot; busy: boolean; configured: boolean;
+  onApply: (choices: ConflictChoiceRequest[]) => void; onReadAgain: () => void; onOpenFile: (file: string) => void;
+  onAskAssistant: () => void; onNext: (operation: "continue_operation" | "skip_operation" | "abort_operation") => void; onClose: () => void;
+}) {
+  const { t } = useI18n();
+  const [chosen, setChosen] = useState<Record<string, ConflictChoice>>({});
+  const [compared, setCompared] = useState<string[]>([]);
+  useEscape(onClose);
+  // A fresh read keeps a choice only where it still fits and the file did not move on under it.
+  const lastGuide = useRef(guide.id);
+  useEffect(() => {
+    if (lastGuide.current === guide.id) return;
+    lastGuide.current = guide.id;
+    const unsettled = new Set(result?.outcomes.filter((outcome) => ["changed", "refused", "failed"].includes(outcome.status)).map((outcome) => outcome.path));
+    setChosen((current) => result?.stale === "operation" || result?.stale === "repository" ? {} : Object.fromEntries(Object.entries(current).filter(([path, choice]) =>
+      !unsettled.has(path) && guide.files.find((file) => file.path === path)?.choices.includes(choice))));
+  }, [guide, result]);
+
+  const ours = sideName(guide.sides.ours, t);
+  const theirs = sideName(guide.sides.theirs, t);
+  const nameOf = (side: ConflictSideId) => side === "ours" ? ours : theirs;
+  const title = guide.operation === "merge" ? t("guideTitle_merge", { ours, theirs })
+    : guide.operation === "rebase" ? t("guideTitle_rebase", { branch: guide.branch ?? theirs, onto: ours })
+    : guide.operation === "cherry_pick" ? t("guideTitle_cherry_pick", { ours })
+    : guide.operation === "revert" ? t("guideTitle_revert", { ours })
+    : t("guideTitle_none");
+  const requests = guide.files.flatMap((file) => chosen[file.path] ? [{ path: file.path, choice: chosen[file.path] }] : []);
+  const applied = result?.outcomes.filter((outcome) => outcome.status === "applied") ?? [];
+  const notReached = result?.outcomes.filter((outcome) => outcome.status === "not_applied") ?? [];
+  const current = guide.sides.theirs.commit ? `${guide.sides.theirs.commit.shortHash} “${guide.sides.theirs.commit.subject}”` : t("theCurrentCommit");
+  const operationNoun = guide.operation ? t(`opNoun_${guide.operation}` as MessageKey) : "";
+  const unresolved = snapshot.conflicts.length;
+
+  const effect = (file: ConflictGuideFile, choice: ConflictChoice) => {
+    if (choice === "edited") return t("choiceEffect_edited");
+    if (choice === "delete") {
+      const holder = file.ours.present ? "ours" : file.theirs.present ? "theirs" : undefined;
+      return holder ? t("choiceEffect_delete", { holder: nameOf(holder) }) : t("choiceEffect_deleteBoth");
+    }
+    const other: ConflictSideId = choice === "ours" ? "theirs" : "ours";
+    return file[other].present ? t("choiceEffect_keep", { name: nameOf(choice), other: nameOf(other) }) : t("choiceEffect_keepOnly", { name: nameOf(choice) });
+  };
+  const choiceLabel = (choice: ConflictChoice) => choice === "edited" ? t("choiceEdited") : choice === "delete" ? t("choiceDelete") : t("choiceKeep", { name: nameOf(choice) });
+
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="commit-modal wide conflict-guide" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+      <div className="modal-heading">
+        <div><div className="eyebrow">{t("guideEyebrow")}{guide.step && guide.total ? ` · ${t("guideProgress", { step: guide.step, total: guide.total })}` : ""}</div><h2 id="guide-title">{title}</h2></div>
+        <button className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button>
+      </div>
+
+      <div className="guide-sides" aria-label={t("guideSidesHeading")}>
+        {(["ours", "theirs"] as const).map((id) => {
+          const side = guide.sides[id];
+          return <div className={`guide-side ${id}`} key={id}>
+            <strong>{nameOf(id)}</strong>
+            <span>{t(`sideRole_${side.role}` as MessageKey)}</span>
+            {side.commit && <code>{t("sideCommit", { hash: side.commit.shortHash, subject: side.commit.subject })}</code>}
+            <small>{t(id === "ours" ? "gitWordOurs" : "gitWordTheirs")}</small>
+          </div>;
+        })}
+      </div>
+
+      {result && <div className="modal-note attention guide-outcome" role="alert"><AlertTriangle size={15} /><div>
+        {applied.length > 0 && <span>{t("guideApplied", { files: applied.map((outcome) => outcome.path).join(", ") })}</span>}
+        {result.stale === "files" && <span>{t("guideStaleFiles")}</span>}
+        {result.stale === "operation" && <span>{t("guideStaleOperation")}</span>}
+        {result.stale === "repository" && <span>{t("guideStaleRepository")}</span>}
+        {result.outcomes.filter((outcome) => outcome.status === "refused").map((outcome) => <span key={outcome.path}>{t(outcome.reason === "missing" ? "guideRefusedMissing" : "guideRefusedMarkers", { path: outcome.path })}</span>)}
+        {result.outcomes.filter((outcome) => outcome.status === "failed").map((outcome) => <span key={outcome.path}>{t(outcome.restored ? "guideFailedRestored" : "guideFailedNotRestored", { path: outcome.path })}{outcome.detail ? ` (${outcome.detail})` : ""}</span>)}
+        {notReached.length > 0 && <span>{t("guideNotReached", { files: notReached.map((outcome) => outcome.path).join(", ") })}</span>}
+      </div></div>}
+
+      {guide.files.length > 0
+        ? <div className="modal-note"><ShieldCheck size={15} /><span>{t("guideIntro")}</span></div>
+        : <div className="modal-note"><Check size={15} /><span>{t("guideNoConflicts")}</span></div>}
+
+      {guide.files.map((file) => {
+        const open = compared.includes(file.path);
+        return <div className={`resolution guide-file ${chosen[file.path] ? "accepted" : ""}`} key={file.path} data-path={file.path}>
+          <div className="resolution-heading guide-file-heading">
+            <div>
+              <strong>{file.path}</strong>
+              <span>{t(conflictShapeKey(file.kind), { ours, theirs })}{file.binary ? ` ${t("conflictBinary")}` : ""}</span>
+              {file.renames.map((rename) => <span key={`${rename.side}:${rename.from}:${rename.to}`}>{t("conflictRenamed", { side: nameOf(rename.side), from: rename.from, to: rename.to })}</span>)}
+              {file.working.present && !file.binary && <span className={file.working.markers ? "guide-markers" : "guide-clean"}>{t(file.working.markers ? "stillHasMarkers" : "noMarkersLeft")}</span>}
+              {!file.working.present && <span>{t("notOnDisk")}</span>}
+            </div>
+            <div className="guide-file-tools">
+              {(file.ours.present || file.theirs.present) && <button className="ghost-button small" onClick={() => setCompared((items) => open ? items.filter((item) => item !== file.path) : [...items, file.path])}>{t(open ? "hideVersions" : "compareVersions")}</button>}
+              {file.working.present && !file.binary && <button className="outline-button small" onClick={() => onOpenFile(file.path)} disabled={busy}><Pencil size={12} /> {t("openInEditor")}</button>}
+            </div>
+          </div>
+          {open && <div className="guide-versions">
+            {(["ours", "theirs"] as const).map((id) => <div key={id}>
+              <span className="eyebrow">{nameOf(id)}</span>
+              {!file[id].present ? <div className="diff-empty">{t("versionAbsent", { name: nameOf(id) })}</div>
+                : file[id].preview === undefined ? <div className="diff-empty">{t("versionBinary", { size: formatSize(file[id].size) })}</div>
+                : <pre>{file[id].preview}</pre>}
+              {file[id].previewTruncated && <small>{t("previewTruncated")}</small>}
+            </div>)}
+          </div>}
+          <div className="guide-choices" role="radiogroup" aria-label={file.path}>
+            {file.choices.map((choice) => <label key={choice} className={chosen[file.path] === choice ? "selected" : ""}>
+              <input type="radio" name={`choice-${guide.id}-${file.path}`} value={choice} checked={chosen[file.path] === choice} disabled={busy}
+                onChange={() => setChosen((items) => ({ ...items, [file.path]: choice }))} />
+              <span>{choiceLabel(choice)}</span>
+            </label>)}
+          </div>
+          {chosen[file.path] && <p className="guide-effect">{effect(file, chosen[file.path])}</p>}
+        </div>;
+      })}
+
+      <div className="guide-assistant">
+        {configured
+          ? <><span>{t("guideAssistantOptional")}</span>{unresolved > 0 && <button className="outline-button small" onClick={onAskAssistant} disabled={busy}><Sparkles size={13} /> {t("guideAskAssistant")}</button>}</>
+          : <span>{t("guideNoAssistant")}</span>}
+      </div>
+
+      {guide.operation && <div className="guide-next">
+        <span className="eyebrow">{t("nextStepsHeading")}</span>
+        <p>{guide.operation === "merge" ? t("nextContinue_merge") : t("nextContinue_sequence", { commit: current })}{" "}
+          {guide.operation !== "merge" && (guide.remaining ? t("nextLater", { count: counted(t, guide.remaining, "commit", "commits") }) : t("nextLast"))}</p>
+        {canSkipPending(guide.operation) && <p>{t("nextSkip", { commit: current })}</p>}
+        <p>{t("nextAbort", { operation: operationNoun })}</p>
+        <small>{t("nextConfirm")}{unresolved > 0 ? ` ${t("nextBlocked")}` : ""}</small>
+        <div className="guide-next-actions">
+          <button className="outline-button small" onClick={() => onNext("continue_operation")} disabled={busy || unresolved > 0} title={unresolved ? t("conflictsRemain") : t("continueTitle")}>{t("continue")}</button>
+          {canSkipPending(guide.operation) && <button className="danger-link" onClick={() => onNext("skip_operation")} disabled={busy} title={t("skipTitle")}>{t("skipCommit")}</button>}
+          <button className="danger-link" onClick={() => onNext("abort_operation")} disabled={busy} title={t("abortTitle")}>{t("abort")}</button>
+        </div>
+      </div>}
+
+      <div className="modal-actions">
+        <button className="ghost-button" onClick={onReadAgain} disabled={busy} title={t("guideReadAgainTitle")}><RefreshCcw size={13} /> {t("guideReadAgain")}</button>
+        <button className="primary-button guide-apply" onClick={() => onApply(requests)} disabled={busy || !requests.length} title={requests.length ? undefined : t("guideNothingChosen")}>
+          {busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {t("guideApply", { count: counted(t, requests.length, "file", "files") })}
+        </button>
+      </div>
+    </div>
+  </div>;
+}
 
 /**
  * The proposal, file by file, as a diff against what is on disk right now. This is the review the
@@ -2944,7 +3184,8 @@ function ConflictProposalModal({ proposal, result, busy, onApply, onReviewAgain,
   onApply: (accepted: string[]) => void; onReviewAgain: () => void; onClose: () => void;
 }) {
   const { t } = useI18n();
-  const [accepted, setAccepted] = useState<string[]>(() => proposal.resolutions.filter((item) => item.confidence === "high").map((item) => item.path));
+  // Nothing starts ticked: the model's confidence is shown, but only a person's review accepts a file.
+  const [accepted, setAccepted] = useState<string[]>([]);
   useEscape(onClose);
   const outcomeOf = (path: string) => result?.outcomes.find((outcome) => outcome.path === path);
   // A file that moved on since the review can never be written from this proposal; neither can any
@@ -2972,7 +3213,7 @@ function ConflictProposalModal({ proposal, result, busy, onApply, onReviewAgain,
           {result.outcomes.some((outcome) => outcome.status === "changed") && !failed && result.stale === undefined && <span>{t("proposalChangedDuringApply")}</span>}
           <button className="outline-button small" onClick={onReviewAgain} disabled={busy}><Sparkles size={13} /> {t("reviewConflictsAgain")}</button>
         </div></div>
-        : <div className="modal-note"><ShieldCheck size={15} /><span>{t("nothingWritten")}</span></div>}
+        : <div className="modal-note"><ShieldCheck size={15} /><span>{t("nothingWritten")} {t("proposalReviewEach")}</span></div>}
       {proposal.resolutions.map((resolution) => <div className={`resolution ${accepted.includes(resolution.path) && !blocked(resolution.path) ? "accepted" : ""}`} key={resolution.path}>
         <label className="resolution-heading">
           <input type="checkbox" checked={accepted.includes(resolution.path) && !blocked(resolution.path)} disabled={blocked(resolution.path)} onChange={() => toggle(resolution.path)} />

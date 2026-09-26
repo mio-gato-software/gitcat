@@ -16,6 +16,10 @@ import {
 import {
   buildResolutionInstructions, conflictFileLimit, parseConflictProposal, resolutionResponseFormat, validateProposal
 } from "./conflict-resolution.js";
+import {
+  choicesFor, commandFor, hasConflictMarkers, isBinaryContent, isSpecialMode, parseRenames, parseUnmerged, remainingSteps, renamesFor,
+  sideRoles, sideStage, type UnmergedEntry
+} from "./conflict-guide.js";
 import { isProtectedBranch, lifecycleOf, staleAfterDays } from "../shared/branch-lifecycle.js";
 import {
   findAccount, isSshAuthenticated, parseGhAccounts, parseSshGreeting, parseSshResolvedHostName, sshConfigHostAliases
@@ -31,7 +35,8 @@ import {
 import type {
   ActionPlan, AiSharingFile, AiSharingPreview, AiSharingPurpose, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource,
   DeliveryRequest, FileChange, GitProtocol, SecretFinding, SecretKind, SelectedChange, WithheldFile,
-  ConflictApplyResult, ConflictFileOutcome, ConflictProposal, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput,
+  ConflictApplyResult, ConflictFileOutcome, ConflictProposal, ConflictChoice, ConflictChoiceOutcome, ConflictChoiceRequest, ConflictChoiceResult,
+  ConflictFileVersion, ConflictGuide, ConflictGuideFile, ConflictSideIdentity, ConflictSideId, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput,
   Locale, Operation, PendingOperation, PlanStep, RepoSnapshot, StepOutcome, AssistantUnavailable, RecoveryReport
 } from "../shared/types.js";
 import { classifyFailure, operationFromCommand, recoveryActions, recoveryFacts, type FailureEvidence } from "./failure-recovery.js";
@@ -1921,6 +1926,344 @@ export async function applyConflictResolution(
 }
 
 /**
+ * What a conflict guide was read against. Like a proposal's binding: the job holding the conflicts,
+ * and per file its unmerged index stages, the bytes that were on disk, and the choices its shape
+ * supports. Taking a side overwrites the file, so it needs the very bytes the person looked at;
+ * "I edited it myself" needs the same conflict, since the edit is the point.
+ */
+export type ConflictGuideBinding = {
+  operation: string;
+  files: Record<string, { stages: string; content: string; choices: ConflictChoice[] }>;
+};
+
+export type IssuedConflictGuide = ConflictGuide & { binding: ConflictGuideBinding };
+
+/** Enough of a side to choose it by looking. Bigger than this, the preview is cut and says so. */
+const guidePreviewLimit = 60_000;
+
+/**
+ * The first bytes of a blob, never more than `limit`. A version can be a large binary, and reading
+ * it whole just to learn that it is binary would be wasted work.
+ */
+async function blobHead(repoRoot: string, oid: string, limit: number): Promise<{ bytes: Buffer; complete: boolean } | undefined> {
+  const executable = await resolveTool("git");
+  const searchPath = (await toolDirectories()).join(delimiter);
+  return new Promise((done) => {
+    const child = spawn(executable, ["cat-file", "blob", oid], {
+      cwd: repoRoot, env: { ...process.env, PATH: searchPath, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0" }, stdio: ["ignore", "pipe", "ignore"]
+    });
+    const chunks: Buffer[] = [];
+    let length = 0;
+    let cut = false;
+    const timer = setTimeout(() => child.kill("SIGKILL"), 30_000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (cut) return;
+      chunks.push(chunk);
+      length += chunk.length;
+      if (length > limit) { cut = true; child.kill("SIGTERM"); }
+    });
+    child.on("error", () => { clearTimeout(timer); done(undefined); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (!cut && code !== 0) return done(undefined);
+      const bytes = Buffer.concat(chunks);
+      done({ bytes: bytes.subarray(0, limit), complete: !cut && bytes.length <= limit });
+    });
+  });
+}
+
+async function versionFrom(repoRoot: string, entry: UnmergedEntry | undefined): Promise<ConflictFileVersion> {
+  if (!entry) return { present: false, binary: false };
+  const size = Number(await optionalGit(repoRoot, ["cat-file", "-s", entry.oid])) || undefined;
+  // A symlink's content is where it points and a submodule has no content here: one or the other, whole.
+  if (isSpecialMode(entry.mode)) return { present: true, binary: true, size };
+  const head = await blobHead(repoRoot, entry.oid, guidePreviewLimit);
+  if (!head) return { present: true, binary: false, size };
+  if (isBinaryContent(head.bytes)) return { present: true, binary: true, size };
+  return { present: true, binary: false, size, preview: head.bytes.toString("utf8"), ...(head.complete ? {} : { previewTruncated: true }) };
+}
+
+async function commitLine(repoRoot: string, revision: string | undefined) {
+  if (!revision) return undefined;
+  const line = await optionalGit(repoRoot, ["log", "-1", "--format=%h%x1f%s", revision, "--"]);
+  const [shortHash, subject = ""] = line.split("\x1f");
+  return shortHash ? { shortHash, subject } : undefined;
+}
+
+/** A branch that points exactly at a commit, preferring a local one and never the branch being replayed. */
+async function branchAt(repoRoot: string, commit: string, except?: string) {
+  const names = (await optionalGit(repoRoot, ["for-each-ref", "--points-at", commit, "--format=%(refname)", "refs/heads", "refs/remotes"]))
+    .split("\n").filter(Boolean).filter((ref) => ref !== `refs/heads/${except}` && !ref.endsWith("/HEAD"));
+  const local = names.find((ref) => ref.startsWith("refs/heads/"));
+  return (local ?? names[0])?.replace(/^refs\/(heads|remotes)\//, "");
+}
+
+/**
+ * Which commits the two sides and their common ancestor come from. Each operation builds the
+ * conflict from a different triple, and a revert even applies a commit backwards.
+ */
+async function conflictCommits(repoRoot: string, kind: PendingOperation["kind"] | undefined) {
+  const verify = (ref: string) => optionalGit(repoRoot, ["rev-parse", "-q", "--verify", `${ref}^{commit}`]);
+  const ours = await verify("HEAD");
+  if (kind === "merge") {
+    const theirs = await verify("MERGE_HEAD");
+    const base = ours && theirs ? (await optionalGit(repoRoot, ["merge-base", ours, theirs])).split("\n")[0] : "";
+    return { ours, theirs, theirsTree: theirs, base };
+  }
+  if (kind === "rebase" || kind === "cherry_pick") {
+    const theirs = await verify(kind === "rebase" ? "REBASE_HEAD" : "CHERRY_PICK_HEAD");
+    return { ours, theirs, theirsTree: theirs, base: theirs ? await verify(`${theirs}^`) : "" };
+  }
+  if (kind === "revert") {
+    const theirs = await verify("REVERT_HEAD");
+    // Undoing a commit applies the change from it back to its parent.
+    return { ours, theirs, theirsTree: theirs ? await verify(`${theirs}^`) : "", base: theirs };
+  }
+  return { ours, theirs: "", theirsTree: "", base: "" };
+}
+
+async function renamesBetween(repoRoot: string, from: string, to: string) {
+  if (!from || !to) return [];
+  return parseRenames(await optionalGit(repoRoot, ["diff", "--name-status", "-z", "-M", "--diff-filter=R", from, to, "--"]));
+}
+
+async function sideIdentities(repoRoot: string, snapshot: RepoSnapshot, commits: { ours: string; theirs: string }): Promise<Record<ConflictSideId, ConflictSideIdentity>> {
+  const pending = snapshot.pending;
+  const roles = sideRoles(pending?.kind);
+  const ours = await commitLine(repoRoot, commits.ours);
+  const theirs = await commitLine(repoRoot, commits.theirs);
+  const current = snapshot.currentBranch !== "HEAD" ? snapshot.currentBranch : undefined;
+  let oursName = current ?? ours?.shortHash ?? "HEAD";
+  let theirsName = theirs?.shortHash ?? "";
+  if (pending?.kind === "rebase") {
+    const onto = ((await readGitFile(repoRoot, "rebase-merge/onto")) ?? (await readGitFile(repoRoot, "rebase-apply/onto")) ?? "").trim();
+    oursName = (onto && await branchAt(repoRoot, onto, pending.branch)) || (onto ? onto.slice(0, 7) : ours?.shortHash ?? "HEAD");
+    theirsName = pending.branch ?? theirsName;
+  } else if (pending?.kind === "merge") {
+    theirsName = pending.onto ?? theirsName;
+  }
+  return {
+    ours: { id: "ours", role: roles.ours, name: oursName, ...(ours ? { commit: ours } : {}) },
+    theirs: { id: "theirs", role: roles.theirs, name: theirsName, ...(theirs ? { commit: theirs } : {}) }
+  };
+}
+
+/**
+ * Every open conflict explained from the repository alone, for a person to decide file by file.
+ * Nothing here is sent anywhere: the assistant is an optional second opinion, not the way in.
+ */
+export async function describeConflicts(cwd: string, locale?: Locale): Promise<IssuedConflictGuide> {
+  const language = normalizeLocale(locale);
+  const snapshot = await getSnapshot(cwd);
+  const repoRoot = snapshot.path;
+  if (!snapshot.conflicts.length && !snapshot.pending) {
+    throw new Error(localized(language, "No hay conflictos que resolver.", "There are no conflicts to resolve."));
+  }
+  // Captured before anything is read, so a change made while the person decides is caught later.
+  const operation = await conflictOperation(repoRoot);
+  const stages = await unmergedStages(repoRoot);
+  const entries = parseUnmerged(await checkedGit(repoRoot, ["ls-files", "-u", "-z"], true));
+  const pending = snapshot.pending;
+  const commits = await conflictCommits(repoRoot, pending?.kind);
+  const renames = {
+    ours: await renamesBetween(repoRoot, commits.base, commits.ours),
+    theirs: await renamesBetween(repoRoot, commits.base, commits.theirsTree)
+  };
+  const binding: ConflictGuideBinding = { operation, files: {} };
+  const files: ConflictGuideFile[] = [];
+  for (const conflict of snapshot.conflicts) {
+    const absolute = resolve(repoRoot, conflict.path);
+    if (!absolute.startsWith(`${repoRoot}${sep}`)) continue;
+    const held = entries.get(conflict.path) ?? [];
+    const at = (stage: number) => held.find((entry) => entry.stage === stage);
+    const [ours, theirs] = await Promise.all([versionFrom(repoRoot, at(sideStage.ours)), versionFrom(repoRoot, at(sideStage.theirs))]);
+    let working: ConflictGuideFile["working"] = { present: false, binary: false, markers: false };
+    let raw: Buffer | undefined;
+    try {
+      const stat = lstatSync(absolute);
+      if (stat.isSymbolicLink() || !stat.isFile()) working = { present: true, binary: true, markers: false };
+      else {
+        raw = readFileSync(absolute);
+        const binary = isBinaryContent(raw);
+        working = { present: true, binary, markers: !binary && hasConflictMarkers(raw.toString("utf8")) };
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const binary = ours.binary || theirs.binary || working.binary;
+    const choices = choicesFor({ ours: ours.present, theirs: theirs.present, binary, working: working.present });
+    binding.files[conflict.path] = { stages: stages.get(conflict.path) ?? "", content: working.binary && !raw ? "special" : contentVersion(raw), choices };
+    files.push({
+      path: conflict.path, kind: conflict.kind, binary, renames: renamesFor(conflict.path, renames),
+      ours, theirs, base: { present: Boolean(at(1)) }, working, choices
+    });
+  }
+  const sequencer = pending && (pending.kind === "cherry_pick" || pending.kind === "revert") ? await readGitFile(repoRoot, "sequencer/todo") : undefined;
+  return {
+    id: randomUUID(),
+    repoPath: repoRoot,
+    ...(pending ? { operation: pending.kind } : {}),
+    ...(pending?.step ? { step: pending.step } : {}),
+    ...(pending?.total ? { total: pending.total } : {}),
+    ...(pending?.branch ? { branch: pending.branch } : {}),
+    remaining: remainingSteps(pending?.kind, pending ?? {}, sequencer),
+    sides: await sideIdentities(repoRoot, snapshot, commits),
+    files,
+    binding
+  };
+}
+
+/** The bytes a file holds now, in the same terms the guide recorded them. */
+function workingVersion(absolute: string) {
+  try {
+    const stat = lstatSync(absolute);
+    if (stat.isSymbolicLink() || !stat.isFile()) return "special";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw error;
+  }
+  return contentVersion(readIfPresent(absolute));
+}
+
+/** Why a hand edit cannot be marked resolved as it is, or nothing when it can. */
+function editProblem(absolute: string): ConflictChoiceOutcome["reason"] | undefined {
+  const raw = readIfPresent(absolute);
+  if (!raw) return "missing";
+  return !isBinaryContent(raw) && hasConflictMarkers(raw.toString("utf8")) ? "markers" : undefined;
+}
+
+const conflictChoices = new Set<ConflictChoice>(["ours", "theirs", "delete", "edited"]);
+
+/**
+ * Applies the choices a person made in the guide, and only those. The whole set is checked against
+ * the repository as it is now before anything is written — the same repository, the same operation,
+ * the same conflict stages, and for a side choice the very bytes that were on screen — because taking
+ * a side overwrites the file, and an edit made meanwhile must never be lost to it. Files are then
+ * settled one at a time; the first failure stops the run and is reported exactly, with the file put
+ * back as it was.
+ */
+export async function applyConflictChoices(
+  cwd: string, guide: IssuedConflictGuide, requested: ConflictChoiceRequest[], locale?: Locale
+): Promise<ConflictChoiceResult> {
+  const language = normalizeLocale(locale);
+  const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
+  if (!Array.isArray(requested) || !requested.length) throw new Error(localized(language, "No hay ninguna elección que aplicar.", "There is no choice to apply."));
+  if (requested.some((item) => !item || typeof item.path !== "string" || !conflictChoices.has(item.choice)) ||
+      new Set(requested.map((item) => item.path)).size !== requested.length) {
+    throw new Error(localized(language, "Las elecciones no son válidas.", "The choices are invalid."));
+  }
+  for (const item of requested) {
+    const bound = guide.binding.files[item.path];
+    if (!bound) throw new Error(localized(language, `${item.path} no forma parte de esta revisión.`, `${item.path} is not part of this review.`));
+    if (!bound.choices.includes(item.choice)) throw new Error(localized(language, `Esa elección no vale para ${item.path}.`, `That choice does not apply to ${item.path}.`));
+    const absolute = resolve(repoRoot, item.path);
+    if (!absolute.startsWith(`${repoRoot}${sep}`)) throw new Error(localized(language, "La ruta no pertenece a este repositorio.", "The path does not belong to this repository."));
+  }
+  const report = (status: (item: ConflictChoiceRequest) => Pick<ConflictChoiceOutcome, "status" | "reason">) =>
+    requested.map((item) => ({ path: item.path, choice: item.choice, ...status(item) }));
+
+  if (guide.repoPath !== repoRoot) {
+    return { snapshot: await getSnapshot(repoRoot), complete: false, stale: "repository", outcomes: report(() => ({ status: "not_applied" })) };
+  }
+  if (await conflictOperation(repoRoot) !== guide.binding.operation) {
+    return { snapshot: await getSnapshot(repoRoot), complete: false, stale: "operation", outcomes: report(() => ({ status: "changed" })) };
+  }
+  const stages = await unmergedStages(repoRoot);
+  const changed = new Set<string>();
+  const refused = new Map<string, ConflictChoiceOutcome["reason"]>();
+  for (const item of requested) {
+    const bound = guide.binding.files[item.path];
+    const absolute = resolve(repoRoot, item.path);
+    if (!bound.stages || stages.get(item.path) !== bound.stages) { changed.add(item.path); continue; }
+    if (item.choice === "edited") {
+      const problem = editProblem(absolute);
+      if (problem) refused.set(item.path, problem);
+    } else if (workingVersion(absolute) !== bound.content) changed.add(item.path);
+  }
+  if (changed.size || refused.size) {
+    return {
+      snapshot: await getSnapshot(repoRoot), complete: false, ...(changed.size ? { stale: "files" as const } : {}),
+      outcomes: report((item) => changed.has(item.path) ? { status: "changed" }
+        : refused.has(item.path) ? { status: "refused", reason: refused.get(item.path) } : { status: "not_applied" })
+    };
+  }
+
+  const entries = parseUnmerged(await checkedGit(repoRoot, ["ls-files", "-u", "-z"], true));
+  const outcomes: ConflictChoiceOutcome[] = [];
+  for (const item of requested) {
+    const bound = guide.binding.files[item.path];
+    const absolute = resolve(repoRoot, item.path);
+    // The last look before writing: an editor can still save between the check above and here.
+    if (item.choice === "edited") {
+      const problem = editProblem(absolute);
+      if (problem) { outcomes.push({ path: item.path, choice: item.choice, status: "refused", reason: problem }); break; }
+    } else if (workingVersion(absolute) !== bound.content) {
+      outcomes.push({ path: item.path, choice: item.choice, status: "changed" });
+      break;
+    }
+    const original = readIfPresent(absolute);
+    const before = workingVersion(absolute);
+    const action = commandFor(item.choice, new Set((entries.get(item.path) ?? []).map((entry) => entry.stage)));
+    let failure: string | undefined;
+    const step = async (args: string[]) => {
+      if (failure !== undefined) return;
+      const result = await runGit(repoRoot, args);
+      if (result.code !== 0) failure = result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")}`;
+    };
+    if (action === "remove") await step(["rm", "-q", "--", item.path]);
+    else {
+      if (action === "checkout") await step(["checkout", `--${item.choice}`, "--", item.path]);
+      await step(["add", "--", item.path]);
+    }
+    if (failure === undefined) {
+      outcomes.push({ path: item.path, choice: item.choice, status: "applied" });
+      continue;
+    }
+    let restored = false;
+    try {
+      if (workingVersion(absolute) !== before) {
+        if (original) writeFileSync(absolute, original);
+        else if (before === "missing") unlinkSync(absolute);
+      }
+      restored = workingVersion(absolute) === before;
+    } catch { /* reported below: the file may now hold the chosen side */ }
+    outcomes.push({ path: item.path, choice: item.choice, status: "failed", restored, detail: failure });
+    break;
+  }
+  for (const item of requested.slice(outcomes.length)) outcomes.push({ path: item.path, choice: item.choice, status: "not_applied" });
+  return {
+    snapshot: await getSnapshot(repoRoot),
+    complete: outcomes.every((outcome) => outcome.status === "applied"),
+    outcomes
+  };
+}
+
+/**
+ * The file to hand to the system's editor. Only a path that is in conflict right now, inside this
+ * repository once links are followed, and a regular file: opening is harmless, but opening something
+ * outside the repository because a path said so is not.
+ */
+export async function conflictFileToOpen(cwd: string, file: string, locale?: Locale) {
+  const language = normalizeLocale(locale);
+  const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
+  if (typeof file !== "string" || !file) throw new Error(localized(language, "El archivo solicitado no es válido.", "The requested file is invalid."));
+  const conflicted = parseUnmerged(await checkedGit(repoRoot, ["ls-files", "-u", "-z"], true));
+  if (!conflicted.has(file)) throw new Error(localized(language, `${file} ya no está en conflicto.`, `${file} is no longer in conflict.`));
+  const absolute = resolve(repoRoot, file);
+  let real: string;
+  try {
+    real = realpathSync(absolute);
+  } catch {
+    throw new Error(localized(language, `${file} no está en el disco: uno de los lados lo borró. Elige qué versión conservar o mantén el borrado.`, `${file} is not on disk: one side deleted it. Choose which version to keep, or keep the deletion.`));
+  }
+  const realRoot = realpathSync(repoRoot);
+  if (!real.startsWith(`${realRoot}${sep}`) || !statSync(real).isFile()) {
+    throw new Error(localized(language, "La ruta no pertenece a este repositorio.", "The path does not belong to this repository."));
+  }
+  return real;
+}
+
+/**
  * A plan that stopped part-way used to be the end of the conversation: the repository was left holding
  * a half-finished job and the model never heard about it. Now the failure goes back as structured
  * detail so it can plan from where the repository actually is.
@@ -2123,7 +2466,48 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
     : args;
   const draft = operationDraft(operation, normalized, snapshot, [], language);
   if (draft.allowed) validateExecution(bindPlan(snapshot, draft), snapshot, language);
-  return bindPlan(snapshot, draft);
+  const effects = draft.allowed ? await pendingEffects(snapshot, operation, language) : [];
+  return bindPlan(snapshot, effects.length ? { ...draft, effects: [...(draft.effects ?? []), ...effects] } : draft);
+}
+
+/**
+ * Exactly what continuing, skipping or aborting a half-finished job does to this repository, read
+ * from its own state, so the confirmation says what is kept, what is dropped and whether more
+ * conflicts can still come.
+ */
+async function pendingEffects(snapshot: RepoSnapshot, operation: Operation, language: Locale): Promise<string[]> {
+  const pending = snapshot.pending;
+  if (!pending || !["continue_operation", "skip_operation", "abort_operation"].includes(operation)) return [];
+  const sequencer = pending.kind === "cherry_pick" || pending.kind === "revert" ? await readGitFile(snapshot.path, "sequencer/todo") : undefined;
+  const remaining = remainingSteps(pending.kind, pending, sequencer);
+  const later = remaining
+    ? localized(language,
+      `Después quedan ${remaining} commit${remaining === 1 ? "" : "s"} por aplicar, y cualquiera de ellos puede volver a detenerse con conflictos nuevos.`,
+      `${remaining} more commit${remaining === 1 ? "" : "s"} will be applied afterwards, and any of them can stop again with new conflicts.`)
+    : localized(language, "Es el último paso: no quedan más commits por aplicar.", "This is the last step: no more commits are waiting.");
+  const current = await commitLine(snapshot.path, pending.kind === "rebase" ? "REBASE_HEAD" : pending.kind === "cherry_pick" ? "CHERRY_PICK_HEAD" : pending.kind === "revert" ? "REVERT_HEAD" : undefined);
+  const named = current ? `${current.shortHash} “${current.subject}”` : localized(language, "el commit en el que se detuvo", "the commit it stopped on");
+  if (operation === "continue_operation") {
+    if (pending.kind === "merge") {
+      return [localized(language,
+        "Crea el commit de fusión con los archivos tal como están resueltos ahora. No queda nada más por aplicar.",
+        "Creates the merge commit with the files exactly as they are resolved now. Nothing else is waiting.")];
+    }
+    return [localized(language,
+      `Guarda los archivos resueltos como el commit ${named} y sigue.`,
+      `Records the resolved files as commit ${named} and moves on.`), later];
+  }
+  if (operation === "skip_operation") {
+    return [localized(language,
+      `Deja fuera el commit ${named}: sus cambios no estarán en el resultado, y lo que ya resolviste para él se descarta.`,
+      `Leaves out commit ${named}: its changes will not be in the result, and what you already resolved for it is discarded.`), later];
+  }
+  return [localized(language,
+    "Vuelve al commit y la rama en los que estabas antes de empezar. Las resoluciones que hayas hecho hasta ahora se descartan.",
+    "Returns to the commit and branch you were on before it started. Any resolutions made so far are discarded."),
+  ...(pending.kind === "rebase" && pending.step && pending.step > 1 ? [localized(language,
+    "Los commits que ya se habían vuelto a aplicar en este rebase también se deshacen: la rama queda como antes del rebase.",
+    "Commits already replayed in this rebase are undone as well: the branch is left as it was before the rebase.")] : [])];
 }
 
 function selectionProblemText(problem: SelectionProblem, language: Locale) {
