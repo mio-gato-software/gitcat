@@ -424,3 +424,54 @@
 .account-row strong { color: var(--text); }
 .account-row span { color: var(--muted); line-height: 1.5; }
 .account-row button { align-self: flex-start; margin-top: 4px; margin-left: -8px; }
+
+/* Getting a first project in: three ways to start, and a preview before anything is written. */
+.start-options { display: grid; gap: 8px; text-align: left; }
+.start-option { display: flex; align-items: flex-start; gap: 12px; width: 100%; padding: 12px 14px; color: var(--secondary); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; text-align: left; cursor: pointer; }
+.start-option:hover { background: var(--raised); border-color: var(--muted); }
+.start-option > svg { flex: none; margin-top: 1px; color: var(--mint); }
+.start-option > span { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.start-option strong { color: var(--text); font-size: 12px; }
+.start-option small { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.start-option.primary { border-color: #3f7d74; background: #1a2b29; }
+.start-option.primary > svg { color: #6be0cf; }
+.setup-modal { width: min(520px, 100%); max-height: calc(100vh - 36px); overflow: auto; padding: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 25px 90px #000c; }
+.setup-modal h2 { overflow-wrap: anywhere; }
+.setup-copy { margin: 0 0 14px; color: var(--secondary); font-size: 12px; line-height: 1.6; }
+.setup-location { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; color: var(--muted); }
+.setup-location svg { flex: none; }
+.setup-location code, .setup-parent code, .setup-preview code { flex: 1; min-width: 0; padding: 7px 9px; color: var(--secondary); background: var(--raised); border: 1px solid var(--border); border-radius: 6px; font: 10.5px var(--mono, ui-monospace, Menlo, monospace); overflow-wrap: anywhere; }
+.setup-subtitle { display: block; margin-bottom: 8px; color: var(--secondary); font-size: 11px; }
+.setup-facts { display: grid; gap: 7px; margin: 0 0 14px; padding: 0; list-style: none; }
+.setup-facts li { display: flex; align-items: flex-start; gap: 8px; color: var(--secondary); font-size: 11px; line-height: 1.5; }
+.setup-facts li svg { flex: none; margin-top: 2px; color: var(--mint); }
+.setup-facts li.warning svg, .setup-preview .warning { color: var(--amber, #e3b35f); }
+.setup-suggestions { display: grid; gap: 7px; margin-bottom: 14px; padding: 11px 12px; background: var(--raised); border: 1px solid var(--border); border-radius: 8px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.setup-suggestions > strong { display: flex; align-items: center; gap: 6px; color: var(--text); }
+.setup-suggestions ul { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.setup-suggestions li { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.setup-suggestions li code { color: var(--secondary); font: 10.5px var(--mono, ui-monospace, Menlo, monospace); }
+.setup-gitignore { margin: 0; padding: 8px 10px; color: var(--secondary); background: var(--surface); border: 1px dashed var(--border); border-radius: 6px; font: 10.5px var(--mono, ui-monospace, Menlo, monospace); white-space: pre-wrap; }
+.setup-problem { margin: 0 0 12px; padding: 9px 11px; color: var(--secondary); background: var(--coral-soft); border: 1px solid #6b3f35; border-radius: 8px; font-size: 11px; line-height: 1.55; }
+.setup-problem p { margin: 0 0 6px; }
+.setup-problem strong { display: block; margin-bottom: 4px; color: var(--text); }
+.setup-problem .outline-button { margin-top: 4px; }
+.setup-notice { margin: 0 0 12px; padding: 9px 11px; color: var(--secondary); background: var(--raised); border: 1px solid var(--border); border-radius: 8px; font-size: 11px; line-height: 1.55; }
+.setup-hint { display: block; margin: 6px 0 12px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.clone-form label { display: flex; flex-direction: column; gap: 7px; color: var(--secondary); font-size: 10px; font-weight: 700; }
+.clone-form label + .setup-problem { margin-top: 6px; }
+.clone-form input { padding: 10px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; outline: none; font: 11px var(--mono, ui-monospace, Menlo, monospace); }
+.clone-form input:focus { border-color: #62bbb3; }
+.setup-field { display: grid; gap: 7px; margin-bottom: 12px; color: var(--secondary); font-size: 10px; font-weight: 700; }
+.setup-parent { display: flex; align-items: center; gap: 8px; }
+.setup-parent button { flex: none; }
+.setup-preview { display: grid; gap: 6px; margin-top: 12px; padding: 10px 12px; color: var(--muted); background: var(--raised); border: 1px solid var(--border); border-radius: 8px; font-size: 11px; }
+.setup-preview p { margin: 0; line-height: 1.5; }
+.setup-note { display: flex; align-items: flex-start; gap: 7px; margin: 14px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.5; }
+.setup-note svg { flex: none; margin-top: 2px; }
+.setup-running { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 12px; background: var(--raised); border: 1px solid var(--border); border-radius: 8px; }
+.setup-running div { display: grid; gap: 3px; }
+.setup-running strong { color: var(--text); font-size: 11px; }
+.setup-running span { color: var(--muted); font-size: 10.5px; }
+.graph-empty.first-save code { max-width: 100%; margin-top: 4px; color: var(--secondary); font: 10.5px var(--mono, ui-monospace, Menlo, monospace); overflow-wrap: anywhere; }
+.first-save-note { margin: 0 0 8px; }

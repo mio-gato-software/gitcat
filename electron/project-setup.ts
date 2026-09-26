@@ -339,7 +339,6 @@ export async function cloneRepository(request: CloneRequest, options: CloneOptio
     let stop: "cancelled" | "timeout" | undefined;
     let settled = false;
     let idle: NodeJS.Timeout | undefined;
-    let total: NodeJS.Timeout | undefined;
     let child: Awaited<ReturnType<typeof spawnGit>> | undefined;
     const finish = (value: { code: number | null; error?: string }) => {
       if (settled) return;
@@ -362,7 +361,7 @@ export async function cloneRepository(request: CloneRequest, options: CloneOptio
       idle = setTimeout(() => halt("timeout"), options.idleTimeoutMs ?? 120_000);
     };
     options.signal?.addEventListener("abort", onAbort, { once: true });
-    total = setTimeout(() => halt("timeout"), options.totalTimeoutMs ?? 60 * 60_000);
+    const total = setTimeout(() => halt("timeout"), options.totalTimeoutMs ?? 60 * 60_000);
     touch();
     spawnGit(preview.parent, [...guard, "clone", "--progress", "--", preview.url, staging], { group: true }).then((spawned) => {
       child = spawned;

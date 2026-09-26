@@ -4,7 +4,7 @@ import { opensSafely } from "./conflict-guide.js";
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
@@ -13,13 +13,14 @@ import {
   scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictGuide, type IssuedConflictProposal
 } from "./git-service.js";
 import { localized } from "./i18n.js";
+import { cloneRepository, inspectFolder, previewClone, startTracking, type FolderInspection } from "./project-setup.js";
 import {
   classifyFailure, compareFingerprints, emptyWorkspace, errorText, fingerprintFrom, inspectProject, keepFingerprints, nearestExistingFolder,
   parseWorkspace, relocateProject, restoreProjects, type RepoFingerprint, type WorkspaceRecord
 } from "./workspace-restore.js";
 import type {
-  ActionPlan, AiSharingPurpose, ConflictChoiceRequest, ConflictGuide, ConflictProposal, ConversationMessage, DeliveryRequest, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, ProviderPage, Operation, ProjectLocateResult,
-  RepoSnapshot, RepositoryMatch, UnavailableProject
+  ActionPlan, AiSharingPurpose, CloneParentResult, ClonePreview, CloneResult, ConflictChoiceRequest, ConflictGuide, ConflictProposal, ConversationMessage, DeliveryRequest, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, ProviderPage, Operation, ProjectLocateResult,
+  ProjectSelectResult, RepoSnapshot, RepositoryMatch, StartTrackingResult, UnavailableProject
 } from "../shared/types.js";
 
 // Electron captures the encryption identity before app-ready. Keep the existing Keychain
@@ -122,6 +123,80 @@ function adoptLocation(from: string, project: RepoSnapshot, fingerprint: RepoFin
   if (match === "same") relocateRepositoryMemory(from, project.path);
   saveWorkspaceQuietly();
   return { status: "relocated", previousPath: from, project, match, carriedOver: match !== "different" };
+}
+
+/** Makes a validated repository one of the open projects, saved in the workspace and in front. */
+function adoptProject(snapshot: RepoSnapshot) {
+  openedRepositories.add(snapshot.path);
+  // Opening a saved project that was unavailable brings it back; it is not listed twice.
+  unavailableProjects.delete(snapshot.path);
+  if (!persistedWorkspace.paths.includes(snapshot.path)) persistedWorkspace.paths = [...persistedWorkspace.paths, snapshot.path];
+  persistedWorkspace.activePath = snapshot.path;
+  saveWorkspace();
+  void rememberFingerprints([snapshot]);
+  return snapshot;
+}
+
+/** A folder picked in a dialog and waiting for the person's answer: start tracking it, or open the repository around it. */
+type PendingSetup = { kind: "track"; path: string; branch: string } | { kind: "parent"; path: string };
+const pendingSetups = new Map<string, PendingSetup>();
+/** Parent folders picked for a clone. The renderer names the id; the path is only ever the dialog's answer. */
+const cloneParents = new Map<string, string>();
+let lastCloneParent: string | undefined;
+let activeClone: AbortController | undefined;
+
+function rememberSetup(setup: PendingSetup) {
+  for (const [id, pending] of pendingSetups) if (pending.path === setup.path && pending.kind === setup.kind) pendingSetups.delete(id);
+  if (pendingSetups.size >= 20) pendingSetups.delete(pendingSetups.keys().next().value ?? "");
+  const id = randomUUID();
+  pendingSetups.set(id, setup);
+  return id;
+}
+
+function takeSetup<K extends PendingSetup["kind"]>(setupId: unknown, kind: K): Extract<PendingSetup, { kind: K }> {
+  const pending = typeof setupId === "string" ? pendingSetups.get(setupId) : undefined;
+  if (!pending || pending.kind !== kind) throw new Error("That folder is no longer waiting for a decision. Choose it again.");
+  pendingSetups.delete(setupId as string);
+  return pending as Extract<PendingSetup, { kind: K }>;
+}
+
+function dialogLabels(labels: unknown) {
+  const text = (value: unknown) => typeof value === "string" ? value.slice(0, 200) : undefined;
+  const label = (labels && typeof labels === "object" ? labels : {}) as Record<string, unknown>;
+  return { title: text(label.title), button: text(label.button) };
+}
+
+/** Turns what a folder turned out to be into the answer the interface shows. Only a repository is opened. */
+function inspectionResult(inspection: FolderInspection, intent: "open" | "track"): ProjectSelectResult {
+  if (inspection.kind === "invalid") return { status: "invalid", path: inspection.path, problem: inspection.problem, detail: inspection.detail };
+  if (inspection.kind === "inside_repository") {
+    return { status: "inside_repository", setupId: rememberSetup({ kind: "parent", path: inspection.root }), path: inspection.path, root: inspection.root, rootName: basename(inspection.root) || inspection.root };
+  }
+  if (inspection.kind === "folder") {
+    const setupId = rememberSetup({ kind: "track", path: inspection.preview.path, branch: inspection.preview.branch });
+    return { status: "not_repository", setupId, preview: inspection.preview, intent };
+  }
+  throw new Error("A repository is opened, not described.");
+}
+
+async function selectFolder(path: string, intent: "open" | "track"): Promise<ProjectSelectResult> {
+  const inspection = await inspectFolder(path);
+  if (inspection.kind !== "repository") return inspectionResult(inspection, intent);
+  let snapshot: RepoSnapshot;
+  try {
+    snapshot = await getSnapshot(inspection.root);
+  } catch (error) {
+    return { status: "invalid", path, problem: "tool", detail: errorText(error) };
+  }
+  return { status: "opened", project: adoptProject(snapshot), ...(intent === "track" ? { alreadyTracked: true } : {}) };
+}
+
+/** Shape only for the address and name; the service checks both again. The parent must be one a dialog returned. */
+function cloneRequest(url: unknown, parentId: unknown, name: unknown) {
+  const parent = typeof parentId === "string" ? cloneParents.get(parentId) : undefined;
+  if (!parent) throw new Error("Choose the folder to put the copy in again.");
+  if (typeof url !== "string" || typeof name !== "string") throw new Error("The address or folder name is not valid.");
+  return { url, parent, name };
 }
 
 function isTrustedFrame(url: string) {
@@ -279,20 +354,68 @@ app.whenReady().then(async () => {
     for (const [id, proposal] of issuedProposals) if (!normalized.includes(proposal.repoPath)) issuedProposals.delete(id);
     saveWorkspace();
   });
-  ipcMain.handle("project:select", async (event) => {
+  ipcMain.handle("project:select", async (event, intent: unknown, labels: unknown): Promise<ProjectSelectResult> => {
     assertTrustedSender(event);
-    if (!mainWindow) return null;
-    const result = await dialog.showOpenDialog(mainWindow, { properties: ["openDirectory"] });
-    if (result.canceled || !result.filePaths[0]) return null;
-    const snapshot = await getSnapshot(result.filePaths[0]);
-    openedRepositories.add(snapshot.path);
-    // Opening a saved project that was unavailable brings it back; it is not listed twice.
-    unavailableProjects.delete(snapshot.path);
-    if (!persistedWorkspace.paths.includes(snapshot.path)) persistedWorkspace.paths = [...persistedWorkspace.paths, snapshot.path];
-    persistedWorkspace.activePath = snapshot.path;
-    saveWorkspace();
-    void rememberFingerprints([snapshot]);
-    return snapshot;
+    if (!mainWindow) return { status: "canceled" };
+    const label = dialogLabels(labels);
+    const result = await dialog.showOpenDialog(mainWindow, { title: label.title, buttonLabel: label.button, properties: ["openDirectory", "createDirectory"] });
+    if (result.canceled || !result.filePaths[0]) return { status: "canceled" };
+    return selectFolder(resolve(result.filePaths[0]), intent === "track" ? "track" : "open");
+  });
+  ipcMain.handle("project:open-parent", async (event, setupId: unknown): Promise<ProjectSelectResult> => {
+    assertTrustedSender(event);
+    const pending = takeSetup(setupId, "parent");
+    // Checked again: the repository around the folder is opened only if it is still there.
+    return selectFolder(pending.path, "open");
+  });
+  ipcMain.handle("project:start-tracking", async (event, setupId: unknown): Promise<StartTrackingResult> => {
+    assertTrustedSender(event);
+    const pending = takeSetup(setupId, "track");
+    const outcome = await startTracking(pending.path, { branch: pending.branch });
+    // A folder that became a repository meanwhile is simply opened; anything else is explained again.
+    if (outcome.status === "changed") {
+      return { status: "changed", result: outcome.inspection.kind === "repository" ? await selectFolder(pending.path, "track") : inspectionResult(outcome.inspection, "track") };
+    }
+    if (outcome.status === "failed") return outcome;
+    return { status: "started", project: adoptProject(await getSnapshot(outcome.root)) };
+  });
+  ipcMain.handle("clone:choose-parent", async (event, labels: unknown): Promise<CloneParentResult> => {
+    assertTrustedSender(event);
+    if (!mainWindow) return { status: "canceled" };
+    const label = dialogLabels(labels);
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: label.title, buttonLabel: label.button, defaultPath: lastCloneParent ?? app.getPath("documents"), properties: ["openDirectory", "createDirectory"]
+    });
+    if (result.canceled || !result.filePaths[0]) return { status: "canceled" };
+    const path = resolve(result.filePaths[0]);
+    lastCloneParent = path;
+    if (cloneParents.size >= 20) cloneParents.delete(cloneParents.keys().next().value ?? "");
+    const parentId = randomUUID();
+    cloneParents.set(parentId, path);
+    return { status: "chosen", parentId, path };
+  });
+  ipcMain.handle("clone:preview", async (event, url: unknown, parentId: unknown, name: unknown): Promise<ClonePreview> => {
+    assertTrustedSender(event);
+    return previewClone(cloneRequest(url, parentId, name));
+  });
+  ipcMain.handle("clone:start", async (event, url: unknown, parentId: unknown, name: unknown): Promise<CloneResult> => {
+    assertTrustedSender(event);
+    const request = cloneRequest(url, parentId, name);
+    if (activeClone) throw new Error("A copy is already in progress. Wait for it or cancel it first.");
+    const controller = activeClone = new AbortController();
+    try {
+      const outcome = await cloneRepository(request, { signal: controller.signal });
+      if (outcome.status !== "cloned") return outcome;
+      return { status: "cloned", project: adoptProject(await getSnapshot(outcome.path)), empty: outcome.empty };
+    } finally {
+      if (activeClone === controller) activeClone = undefined;
+    }
+  });
+  ipcMain.handle("clone:cancel", (event) => {
+    assertTrustedSender(event);
+    if (!activeClone) return false;
+    activeClone.abort();
+    return true;
   });
   ipcMain.handle("workspace:retry", async (event, path: unknown) => {
     assertTrustedSender(event);
@@ -567,5 +690,8 @@ app.whenReady().then(async () => {
   await createWindow();
   app.on("activate", async () => { if (BrowserWindow.getAllWindows().length === 0) await createWindow(); });
 });
+
+// A copy in progress is stopped with the app, so its partial folder is cleaned up instead of left behind.
+app.on("before-quit", () => { activeClone?.abort(); });
 
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });

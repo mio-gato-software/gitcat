@@ -6,7 +6,7 @@ import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent, Poi
 import {
   AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronRight, CircleDot,
   Clock3, Cloud, CloudDownload, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
-  FolderOpen, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
+  FolderOpen, FolderPlus, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
   ListTree, LoaderCircle, Maximize2, MessageCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen, Palette, Pencil, PencilLine, Plus,
   RefreshCcw, Search, Send, Settings2, ShieldCheck, Undo2,
   Sparkles, Tag, TerminalSquare, Trash2, UserRound, X
@@ -31,12 +31,13 @@ import type { GraphRow } from "../shared/commit-graph";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
 import type {
-  ActionPlan, AiConnectionProblem, AiSharingPreview, AiSharingPurpose, AssistantUnavailable, Branch, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
+  ActionPlan, AiConnectionProblem, AiSharingPreview, AiSharingPurpose, AssistantUnavailable, Branch, ClonePreview, CloneResult, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
   ConflictChoice, ConflictChoiceRequest, ConflictChoiceResult, ConflictGuide, ConflictGuideFile, ConflictSideId, ConflictSideIdentity,
-  FileChange, FileStats, HistoryScope, LlmConfig, LlmConnectResult, Locale, Operation, PendingOperationKind, ProjectLocateResult, ProjectUnavailableReason,
+  FileChange, FileStats, FolderPreview, FolderProblem, HistoryScope, LlmConfig, LlmConnectResult, Locale, Operation, PendingOperationKind, ProjectLocateResult, ProjectSelectResult, ProjectUnavailableReason,
   RecoveryAction, RecoveryReport, RepoSnapshot, SecretFinding, UnavailableProject, WithheldFile
 } from "../shared/types";
 import { localeTag, readLocale, translate, writeLocale, type MessageKey, type Translate } from "./i18n";
+import { folderNameProblem, parseCloneUrl, suggestedFolderName } from "../shared/clone-source";
 
 type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string; fetchedAt?: string };
 /** One tab in the saved order: a project that opened, or a saved one that could not be opened this time. Its id is its saved path. */
@@ -46,6 +47,16 @@ type LocateNotice =
   | { kind: "invalid"; result: Extract<ProjectLocateResult, { status: "invalid" }> }
   | { kind: "confirm"; result: Extract<ProjectLocateResult, { status: "confirm" }> };
 type GraphFocus = { kind: "wip" } | { kind: "commit"; commit: Commit };
+/**
+ * Getting a project in: the three ways to start, and the answer to a folder that was picked. Each
+ * waiting choice holds only the id the main process issued for that folder, never a path to act on.
+ */
+type SetupState =
+  | { kind: "choose" }
+  | { kind: "track"; setupId: string; preview: FolderPreview; intent: "open" | "track"; changed?: boolean; busy?: boolean; error?: string; failure?: { detail: string; cleaned: boolean } }
+  | { kind: "parent"; setupId: string; path: string; root: string; rootName: string; busy?: boolean; error?: string }
+  | { kind: "invalid"; path: string; problem: FolderProblem; detail?: string }
+  | { kind: "clone" };
 type InspectorTab = "details" | "assistant";
 /** What was right-clicked: a commit, the branch label on it, both, or the uncommitted work. */
 type MenuTarget = { x: number; y: number; commit?: Commit; branch?: string; work?: boolean };
@@ -436,6 +447,7 @@ export default function App() {
   const [guideResult, setGuideResult] = useState<ConflictChoiceResult>();
   const [guideBusy, setGuideBusy] = useState(false);
   const [inputDialog, setInputDialog] = useState<InputDialog>();
+  const [setup, setSetup] = useState<SetupState>();
   const [identityDialog, setIdentityDialog] = useState<IdentityDialog>();
   const [commitMessage, setCommitMessage] = useState("");
   const [deliveryMerge, setDeliveryMerge] = useState(false);
@@ -691,21 +703,68 @@ export default function App() {
       : project));
   };
 
-  const openProject = async () => {
+  /** Puts a project the main process validated and saved in front, in its existing tab when it has one. */
+  const showProject = (next: RepoSnapshot, activity: { label: string; detail: string } = { label: t("projectOpen"), detail: next.name }) => {
+    setSetup(undefined);
+    addActivity({ ...activity, tone: "success" });
+    const existing = projects.find((project) => project.snapshot.path === next.path);
+    if (existing) { updateSnapshot(next.path, next); setActiveId(existing.id); return; }
+    // A saved project that was unavailable and is opened again by hand comes back in its own tab.
+    const returning = unavailable.some((project) => project.path === next.path);
+    const id = returning ? next.path : `${next.path}-${Date.now()}`;
+    if (returning) setUnavailable((items) => items.filter((project) => project.path !== next.path));
+    setProjects((items) => [...items, { id, snapshot: next, loadedAt: new Date().toISOString() }]);
+    setActiveId(id);
+  };
+
+  /** A folder that is not a project yet, or sits inside one, is explained and waits for the person's choice. */
+  const handleSelection = (result: ProjectSelectResult, changed = false) => {
+    switch (result.status) {
+      case "canceled": return;
+      case "opened":
+        showProject(result.project, result.alreadyTracked ? { label: t("projectOpen"), detail: t("alreadyTracked", { name: result.project.name }) } : undefined);
+        return;
+      case "not_repository": setSetup({ kind: "track", setupId: result.setupId, preview: result.preview, intent: result.intent, changed }); return;
+      case "inside_repository": setSetup({ kind: "parent", setupId: result.setupId, path: result.path, root: result.root, rootName: result.rootName }); return;
+      case "invalid": setSetup({ kind: "invalid", path: result.path, problem: result.problem, detail: result.detail });
+    }
+  };
+
+  const openProject = async (intent: "open" | "track" = "open") => {
     try {
-      const next = await window.gitcat.selectProject();
-      if (!next) return;
-      const existing = projects.find((project) => project.snapshot.path === next.path);
-      if (existing) { updateSnapshot(next.path, next); setActiveId(existing.id); return; }
-      // A saved project that was unavailable and is opened again by hand comes back in its own tab.
-      const returning = unavailable.some((project) => project.path === next.path);
-      const id = returning ? next.path : `${next.path}-${Date.now()}`;
-      if (returning) setUnavailable((items) => items.filter((project) => project.path !== next.path));
-      setProjects((items) => [...items, { id, snapshot: next, loadedAt: new Date().toISOString() }]);
-      setActiveId(id);
-      addActivity({ label: t("projectOpen"), detail: next.name, tone: "success" });
+      const labels = intent === "track" ? { title: t("trackDialogTitle"), button: t("trackDialogButton") } : { title: t("openDialogTitle"), button: t("openDialogButton") };
+      handleSelection(await window.gitcat.selectProject(intent, labels));
     } catch (error) {
       notify({ message: cleanError(error, t("fallbackOpenProject")), tone: "error" });
+    }
+  };
+
+  /** Runs the preview the person confirmed. The main process checks the folder again and writes nothing if it changed. */
+  const startTracking = async () => {
+    if (setup?.kind !== "track" || setup.busy) return;
+    const current = setup;
+    setSetup({ ...current, busy: true, error: undefined });
+    try {
+      const result = await window.gitcat.startTracking(current.setupId);
+      if (result.status === "started") {
+        showProject(result.project, { label: t("trackStarted", { name: result.project.name }), detail: t("trackStartedDetail") });
+      } else if (result.status === "changed") {
+        if (result.result.status === "canceled") setSetup(undefined);
+        else handleSelection(result.result, true);
+      } else setSetup({ ...current, busy: false, failure: { detail: result.detail, cleaned: result.cleaned } });
+    } catch (error) {
+      setSetup({ ...current, busy: false, error: cleanError(error, t("fallbackOpenProject")) });
+    }
+  };
+
+  const openParentProject = async () => {
+    if (setup?.kind !== "parent" || setup.busy) return;
+    const current = setup;
+    setSetup({ ...current, busy: true, error: undefined });
+    try {
+      handleSelection(await window.gitcat.openParentProject(current.setupId));
+    } catch (error) {
+      setSetup({ ...current, busy: false, error: cleanError(error, t("fallbackOpenProject")) });
     }
   };
 
@@ -1470,7 +1529,8 @@ export default function App() {
   const headCommit = snapshot?.head ? graphCommits.find((commit) => commit.hash === snapshot.head) ?? snapshot.commits.find((commit) => commit.hash === snapshot.head) : undefined;
   const activeFocus: GraphFocus | undefined = !snapshot ? undefined
     : focus?.kind === "commit" ? { kind: "commit", commit: richer(focus.commit) }
-    : snapshot.isDirty ? { kind: "wip" }
+    // A project with nothing saved yet has only its working folder to show, and the way to its first save.
+    : snapshot.isDirty || !snapshot.head ? { kind: "wip" }
     : headCommit ? { kind: "commit", commit: headCommit } : undefined;
   const waiting = conversation.filter((turn) => turn.status === "ready").length;
 
@@ -1560,7 +1620,7 @@ export default function App() {
             <button role="tab" aria-selected={tab.id === activeId} onClick={() => setActiveId(tab.id)}>{tab.unavailable ? <AlertTriangle size={14} /> : <GitBranch size={14} />}<span>{tab.name}</span></button>
             <button className="tab-close" onClick={() => closeProject(tab.id)} aria-label={t(tab.unavailable ? "removeFromRecentNamed" : "closeProject", { name: tab.name })}><X size={13} /></button>
           </div>)}
-          <button className="icon-button tab-add" onClick={() => void openProject()} aria-label={t("openProject")}><Plus size={16} /></button>
+          <button className="icon-button tab-add" onClick={() => setSetup({ kind: "choose" })} aria-label={t("addProjectTitle")} title={t("addProjectTitle")}><Plus size={16} /></button>
         </div>
         <div className="top-actions"><button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
       </header>
@@ -1576,7 +1636,7 @@ export default function App() {
         onConfirm={(candidateId) => void confirmLocation(activeUnavailable.path, candidateId)}
         onDismissNotice={() => setLocateNotice(undefined)}
         onRemove={() => closeProject(activeUnavailable.path)}
-      /> : !snapshot ? <Welcome openProject={openProject} config={config} onConnect={openSettings} /> : <>
+      /> : !snapshot ? <Welcome onOpen={() => void openProject()} onClone={() => setSetup({ kind: "clone" })} onTrack={() => void openProject("track")} config={config} onConnect={openSettings} /> : <>
 
 
         <RepoToolbar
@@ -1665,6 +1725,9 @@ export default function App() {
       {deliveryReview && <DeliveryReviewModal review={deliveryReview} busy={planning}
         onClose={() => { updateTurn(deliveryReview.plan.repoPath, deliveryReview.turnId, (turn) => ({ ...turn, status: "cancelled", outcome: t("planDiscarded") })); setDeliveryReview(undefined); }}
         onApply={async () => { const review = deliveryReview; setDeliveryReview(undefined); await applyPlan(review.turnId, review.plan); }} />}
+      {setup && <SetupModal setup={setup} onClose={() => setSetup(undefined)} onChoose={(intent) => void openProject(intent)} onClone={() => setSetup({ kind: "clone" })}
+        onStartTracking={() => void startTracking()} onOpenParent={() => void openParentProject()} onRemoteLogin={openSettings}
+        onCloned={(project, empty) => showProject(project, { label: t("cloneDone", { name: project.name }), detail: empty ? t("cloneDoneEmpty", { name: project.name }) : project.path })} />}
       {settingsOpen && <SettingsModal config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onConfigChange={setConfig}
         onNotice={(message) => notify({ message, tone: "success" })}
         repoName={snapshot?.name} onSetAuthor={snapshot ? () => { setSettingsOpen(false); setIdentityDialog({ user: "", email: "" }); } : undefined} />}
@@ -1745,12 +1808,220 @@ function UnavailableProjectPanel({ project, busy, notice, onRetry, onLocate, onC
  * The first screen needs nothing configured: opening a project and every Git button work on their
  * own. The AI assistant is offered as help that can be connected later, never as a gate.
  */
-function Welcome({ openProject, config, onConnect }: { openProject: () => Promise<void>; config: LlmConfig; onConnect: () => void }) {
+function Welcome({ onOpen, onClone, onTrack, config, onConnect }: { onOpen: () => void; onClone: () => void; onTrack: () => void; config: LlmConfig; onConnect: () => void }) {
   const { t } = useI18n();
-  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card first-run"><div className="welcome-mark"><CatMark size={42} /></div><div className="eyebrow">{t("branchWorkspace")}</div><h1>{t("yourGitClearer")}</h1><p>{t("welcomeCopy")}</p><button className="primary-button welcome-button" onClick={() => void openProject()}><FolderOpen size={16} /> {t("openProject")}</button>
+  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card first-run"><div className="welcome-mark"><CatMark size={42} /></div><div className="eyebrow">{t("branchWorkspace")}</div><h1>{t("yourGitClearer")}</h1><p>{t("welcomeCopy")}</p><ProjectStartOptions onOpen={onOpen} onClone={onClone} onTrack={onTrack} />
     <div className="welcome-direct"><strong>{t("welcomeDirectTitle")}</strong><div className="welcome-features"><span><GitCommitHorizontal size={14} /> {t("welcomeDirectSave")}</span><span><GitBranch size={14} /> {t("welcomeDirectBranches")}</span><span><ArrowUpFromLine size={14} /> {t("welcomeDirectSync")}</span><span><GitMerge size={14} /> {t("welcomeDirectConflicts")}</span></div></div>
     <div className={`welcome-ai ${config.configured ? "connected" : ""}`}><Sparkles size={15} /><div><strong>{config.configured ? t("welcomeAiConnected", { model: config.model }) : t("welcomeAiTitle")}</strong><span>{t("welcomeAiCopy")}</span></div>{!config.configured && <button className="outline-button small" onClick={onConnect}>{t("connectAssistant")}</button>}</div>
   </div></div>;
+}
+
+/**
+ * The three ways a project gets into GitCat, each said in terms of what the person has: a folder
+ * that already uses Git, an address, or an ordinary folder. None of them asks for Git words first.
+ */
+function ProjectStartOptions({ onOpen, onClone, onTrack }: { onOpen: () => void; onClone: () => void; onTrack: () => void }) {
+  const { t } = useI18n();
+  const options: { key: string; icon: LucideIcon; title: string; copy: string; onClick: () => void }[] = [
+    { key: "open", icon: FolderOpen, title: t("startOpenTitle"), copy: t("startOpenCopy"), onClick: onOpen },
+    { key: "clone", icon: CloudDownload, title: t("startCloneTitle"), copy: t("startCloneCopy"), onClick: onClone },
+    { key: "track", icon: FolderPlus, title: t("startTrackTitle"), copy: t("startTrackCopy"), onClick: onTrack }
+  ];
+  return <div className="start-options" role="group" aria-label={t("startOptionsTitle")}>
+    {options.map((option) => <button key={option.key} type="button" data-option={option.key} className={`start-option ${option.key === "open" ? "primary" : ""}`} onClick={option.onClick}>
+      <option.icon size={18} /><span><strong>{option.title}</strong><small>{option.copy}</small></span>
+    </button>)}
+  </div>;
+}
+
+function trackFilesText(preview: FolderPreview, t: Translate) {
+  if (preview.files === undefined) return t("trackFilesUnknown");
+  if (preview.filesCapped) return t("trackFilesCapped", { count: preview.files });
+  if (preview.files === 0) return t("trackFilesNone");
+  return preview.files === 1 ? t("trackFilesOne") : t("trackFiles", { count: preview.files });
+}
+
+/**
+ * Everything about adding a project that needs a decision: which way to start, what starting to
+ * track a folder will do, a folder picked inside another project, a folder that cannot be used, and
+ * copying from an address. Nothing is written until the person presses the button that says so.
+ */
+function SetupModal({ setup, onClose, onChoose, onClone, onStartTracking, onOpenParent, onRemoteLogin, onCloned }: {
+  setup: SetupState; onClose: () => void; onChoose: (intent: "open" | "track") => void; onClone: () => void;
+  onStartTracking: () => void; onOpenParent: () => void; onRemoteLogin: () => void; onCloned: (project: RepoSnapshot, empty: boolean) => void;
+}) {
+  const { t } = useI18n();
+  if (setup.kind === "clone") return <CloneModal onClose={onClose} onRemoteLogin={onRemoteLogin} onCloned={onCloned} />;
+  return <SetupFrame onClose={onClose} eyebrow={setup.kind === "track" ? t("trackEyebrow") : t("addProjectTitle")}
+    title={setup.kind === "choose" ? t("startOptionsTitle")
+      : setup.kind === "track" ? (setup.intent === "open" ? t("notRepositoryTitle") : t("trackTitle", { name: setup.preview.name }))
+      : setup.kind === "parent" ? t("insideRepositoryTitle") : t("folderProblemTitle")}>
+    {setup.kind === "choose" && <ProjectStartOptions onOpen={() => onChoose("open")} onClone={onClone} onTrack={() => onChoose("track")} />}
+    {setup.kind === "track" && <TrackPreview setup={setup} />}
+    {setup.kind === "parent" && <>
+      <p className="setup-copy">{t("insideRepositoryCopy", { path: setup.path, rootName: setup.rootName, root: setup.root })}</p>
+      <div className="setup-location"><FolderGit2 size={14} /><code>{setup.root}</code></div>
+      {setup.error && <p className="setup-problem" role="alert">{setup.error}</p>}
+    </>}
+    {setup.kind === "invalid" && <>
+      <p className="setup-problem" role="alert">{t(`folderProblem_${setup.problem}` as MessageKey)}</p>
+      <div className="setup-location"><FolderOpen size={14} /><code>{setup.path}</code></div>
+      {setup.detail && <details className="unavailable-detail"><summary>{t("systemDetail")}</summary><code>{setup.detail}</code></details>}
+    </>}
+    {setup.kind !== "choose" && <div className="modal-actions">
+      <button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button>
+      <button type="button" className={setup.kind === "invalid" || (setup.kind === "track" && (setup.preview.blocked || setup.failure)) ? "primary-button" : "outline-button"}
+        onClick={() => onChoose(setup.kind === "track" && setup.intent === "track" ? "track" : "open")}><FolderOpen size={14} /> {t("chooseAnotherFolder")}</button>
+      {setup.kind === "track" && !setup.preview.blocked && !setup.failure && <button type="button" className="primary-button" onClick={onStartTracking} disabled={setup.busy}>
+        {setup.busy ? <LoaderCircle className="spin" size={14} /> : <FolderPlus size={14} />} {t("startTrackingButton")}</button>}
+      {setup.kind === "parent" && <button type="button" className="primary-button" onClick={onOpenParent} disabled={setup.busy}>
+        {setup.busy ? <LoaderCircle className="spin" size={14} /> : <FolderGit2 size={14} />} {t("openParentButton", { rootName: setup.rootName })}</button>}
+    </div>}
+  </SetupFrame>;
+}
+
+function SetupFrame({ eyebrow, title, onClose, children }: { eyebrow: string; title: string; onClose: () => void; children: ReactNode }) {
+  const { t } = useI18n();
+  useEscape(onClose);
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-modal-title">
+      <div className="modal-heading"><div><div className="eyebrow">{eyebrow}</div><h2 id="setup-modal-title">{title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div>
+      {children}
+    </div>
+  </div>;
+}
+
+/** What starting to track a folder will do, read from the folder. The .gitignore lines are only ever shown. */
+function TrackPreview({ setup }: { setup: Extract<SetupState, { kind: "track" }> }) {
+  const { t } = useI18n();
+  const { preview } = setup;
+  const many = preview.filesCapped || (preview.files ?? 0) > 5_000;
+  return <div className="track-preview">
+    {setup.intent === "open" && <p className="setup-copy">{t("notRepositoryCopy")}</p>}
+    {setup.changed && <p className="setup-notice" role="status">{t("trackChanged")}</p>}
+    <div className="setup-location"><FolderOpen size={14} /><code>{preview.path}</code></div>
+    {preview.blocked ? <p className="setup-problem" role="alert">{t(`trackBlocked_${preview.blocked}` as MessageKey, { name: preview.name })}</p> : <>
+      <strong className="setup-subtitle">{t("trackWhatHappens")}</strong>
+      <ul className="setup-facts">
+        <li data-fact="files"><FilePlus size={13} /><span>{trackFilesText(preview, t)}</span></li>
+        {many && <li className="warning"><AlertTriangle size={13} /><span>{t("trackManyFiles")}</span></li>}
+        <li><Laptop size={13} /><span>{t("trackNothingUploaded")}</span></li>
+        <li><ShieldCheck size={13} /><span>{t("trackFilesUnchanged")}</span></li>
+        <li><FolderGit2 size={13} /><span>{t("trackGitFolder")}</span></li>
+        <li><GitBranch size={13} /><span>{t("trackBranch", { branch: preview.branch })}</span></li>
+        {preview.hasGitignore && <li><EyeOff size={13} /><span>{t("trackGitignoreRespected")}</span></li>}
+      </ul>
+      {preview.suggestions.length > 0 && <div className="setup-suggestions">
+        <strong><Lightbulb size={13} /> {t("trackSuggestionsTitle")}</strong>
+        <span>{t("trackSuggestionsCopy")}</span>
+        <ul>{preview.suggestions.map((item) => <li key={item.pattern}><code>{item.pattern}</code><span>{t(`suggestionKind_${item.kind}` as MessageKey)} · {counted(t, item.files, "file", "files")}</span></li>)}</ul>
+        <pre className="setup-gitignore" aria-label=".gitignore">{preview.suggestions.map((item) => item.pattern).join("\n")}</pre>
+        <small>{t("trackSuggestionsLater")}</small>
+      </div>}
+    </>}
+    {setup.failure && <div className="setup-problem" role="alert">
+      <p>{t("trackFailed")} {t(setup.failure.cleaned ? "trackFailedCleaned" : "trackFailedLeft")}</p>
+      <details className="unavailable-detail"><summary>{t("systemDetail")}</summary><code>{setup.failure.detail}</code></details>
+    </div>}
+    {setup.error && <p className="setup-problem" role="alert">{setup.error}</p>}
+  </div>;
+}
+
+type CloneOutcomeShown = Exclude<CloneResult, { status: "cloned" }>;
+
+/**
+ * Copying a project from an address. The address is checked here as it is typed and again in the
+ * main process; the place is always one the person picked in the system's folder dialog, and the
+ * destination is previewed, never guessed. A copy can be stopped, and stopping removes it.
+ */
+function CloneModal({ onClose, onRemoteLogin, onCloned }: { onClose: () => void; onRemoteLogin: () => void; onCloned: (project: RepoSnapshot, empty: boolean) => void }) {
+  const { t } = useI18n();
+  const [url, setUrl] = useState("");
+  const [name, setName] = useState("");
+  const [nameEdited, setNameEdited] = useState(false);
+  const [parent, setParent] = useState<{ id: string; path: string }>();
+  const [preview, setPreview] = useState<ClonePreview>();
+  const [running, setRunning] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [outcome, setOutcome] = useState<CloneOutcomeShown>();
+  const [error, setError] = useState<string>();
+  const [attempt, setAttempt] = useState(0);
+  const check = useMemo(() => parseCloneUrl(url), [url]);
+  const host = check.ok ? check.source.host : "";
+  const nameProblem = folderNameProblem(name);
+
+  useEffect(() => { if (!nameEdited) setName(check.ok ? suggestedFolderName(url) : ""); }, [url, check.ok, nameEdited]);
+  useEffect(() => {
+    setPreview(undefined);
+    if (!check.ok || !parent || nameProblem) return;
+    let live = true;
+    const timer = setTimeout(() => {
+      window.gitcat.previewClone(url, parent.id, name).then((next) => { if (live) setPreview(next); }).catch((reason) => { if (live) setError(cleanError(reason, t("fallbackOpenProject"))); });
+    }, 200);
+    return () => { live = false; clearTimeout(timer); };
+  }, [url, name, parent?.id, check.ok, nameProblem, attempt]);
+
+  const cancel = async () => {
+    setCancelling(true);
+    try { await window.gitcat.cancelClone(); } catch { /* the copy's own answer says how it ended */ }
+  };
+  const close = () => { if (running) void cancel(); else onClose(); };
+  const chooseParent = async () => {
+    setError(undefined);
+    try {
+      const chosen = await window.gitcat.chooseCloneParent({ title: t("cloneParentDialogTitle"), button: t("cloneParentDialogButton") });
+      if (chosen.status === "chosen") setParent({ id: chosen.parentId, path: chosen.path });
+    } catch (reason) { setError(cleanError(reason, t("fallbackOpenProject"))); }
+  };
+  const start = async () => {
+    if (!parent || !preview?.ok || running) return;
+    setRunning(true); setCancelling(false); setOutcome(undefined); setError(undefined);
+    try {
+      const result = await window.gitcat.startClone(url, parent.id, name);
+      if (result.status === "cloned") { onCloned(result.project, result.empty); return; }
+      setOutcome(result);
+    } catch (reason) {
+      setError(cleanError(reason, t("fallbackOpenProject")));
+    } finally {
+      setRunning(false); setCancelling(false); setAttempt((value) => value + 1);
+    }
+  };
+
+  const problemText = (problem: string) => t((problem in { name_invalid: 1, parent_missing: 1, parent_not_writable: 1, destination_not_empty: 1, destination_is_file: 1 } ? `cloneProblem_${problem}` : `cloneUrlProblem_${problem}`) as MessageKey, { name: name.trim() });
+  const failed = outcome?.status === "failed";
+  return <SetupFrame onClose={close} eyebrow={t("cloneEyebrow")} title={t("cloneTitle")}>
+    <form className="clone-form" onSubmit={(event) => { event.preventDefault(); void start(); }}>
+      <p className="setup-copy">{t("cloneCopy")}</p>
+      <label>{t("cloneUrlLabel")}<input autoFocus value={url} spellCheck={false} autoCapitalize="off" autoCorrect="off" disabled={running} placeholder={t("cloneUrlPlaceholder")} onChange={(event) => { setUrl(event.target.value); setOutcome(undefined); }} maxLength={1100} /></label>
+      {url.trim() && !check.ok ? <p className="setup-problem" role="alert" data-problem={check.problem}>{problemText(check.problem)}</p> : <small className="setup-hint">{t("cloneUrlHint")}</small>}
+      <div className="setup-field"><span>{t("cloneParentLabel")}</span><div className="setup-parent"><code>{parent?.path ?? t("cloneParentNone")}</code><button type="button" className="outline-button small" onClick={() => void chooseParent()} disabled={running}><FolderOpen size={13} /> {t("chooseFolder")}</button></div></div>
+      <label>{t("cloneNameLabel")}<input value={name} spellCheck={false} disabled={running} onChange={(event) => { setName(event.target.value); setNameEdited(true); }} maxLength={255} /></label>
+      {name && nameProblem && <p className="setup-problem" role="alert">{t("cloneProblem_name_invalid")}</p>}
+      {preview && (preview.ok ? <div className="setup-preview" role="status">
+        <span>{t("cloneDestination")}</span><code>{preview.destination}</code>
+        {preview.destinationState === "empty" && <p>{t("cloneDestinationEmpty", { name: preview.name })}</p>}
+        <p>{t("cloneDestinationSafe", { parent: preview.parent })}</p>
+        {preview.insideRepository && <p className="warning">{t("cloneInsideRepository", { root: preview.insideRepository })}</p>}
+      </div> : <p className="setup-problem" role="alert" data-problem={preview.problem}>{problemText(preview.problem)}</p>)}
+      <p className="setup-note"><Cloud size={13} /> <span>{t("cloneLogin")}</span></p>
+      {running && <div className="setup-running" role="status"><LoaderCircle className="spin" size={16} /><div><strong>{t("cloneRunning", { host })}</strong><span>{t("cloneRunningHint")}</span></div></div>}
+      {outcome?.status === "cancelled" && <p className="setup-notice" role="status">{outcome.cleaned ? t("cloneCancelled") : t("cloneLeftBehind", { path: outcome.leftAt ?? "" })}</p>}
+      {outcome?.status === "invalid" && <p className="setup-problem" role="alert" data-problem={outcome.problem}>{problemText(outcome.problem)}</p>}
+      {outcome?.status === "failed" && <div className="setup-problem clone-failure" role="alert" data-reason={outcome.reason}>
+        <strong>{t("cloneFailedTitle")}</strong>
+        <p>{t(`cloneFailed_${outcome.reason}` as MessageKey, { host })} {outcome.cleaned ? t("cloneFailedClean") : outcome.leftAt ? t("cloneLeftBehind", { path: outcome.leftAt }) : ""}</p>
+        {outcome.reason === "auth" && <button type="button" className="outline-button small" onClick={onRemoteLogin}><Cloud size={13} /> {t("openRemoteLogin")}</button>}
+        {outcome.detail && <details className="unavailable-detail"><summary>{t("systemDetail")}</summary><code>{outcome.detail}</code></details>}
+      </div>}
+      {error && <p className="setup-problem" role="alert">{error}</p>}
+      <div className="modal-actions">
+        {running ? <button type="button" className="outline-button" onClick={() => void cancel()} disabled={cancelling}>{cancelling ? <LoaderCircle className="spin" size={14} /> : <X size={14} />} {t(cancelling ? "cloneCancelling" : "cloneCancel")}</button> : <>
+          <button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button>
+          <button type="submit" className="primary-button" disabled={!preview?.ok}>{failed ? <RefreshCcw size={14} /> : <CloudDownload size={14} />} {t(failed ? "tryAgain" : "cloneButton")}</button>
+        </>}
+      </div>
+    </form>
+  </SetupFrame>;
 }
 
 /**
@@ -2324,7 +2595,9 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
           focusCommit(commit);
           onMenu(commit.hash === workInProgressHash ? { x, y, work: true } : { x, y, commit, branch });
         }}
-      />) : !loading && <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommits")}</strong><span>{needle ? t("filterNoCommits") : scope === "branch-only" ? t("branchNoUniqueCommits", { branch: selection, base: page.comparedTo ?? t("primary") }) : t("branchNoHistory")}</span></div>}
+      />) : !loading && (!snapshot.head && !needle
+        ? <div className="graph-empty first-save" role="status"><GitCommitHorizontal size={26} /><strong>{t("firstSaveTitle")}</strong><span>{t(snapshot.isDirty ? "firstSaveWithFiles" : "firstSaveEmpty")}</span>{!snapshot.isDirty && <code>{snapshot.path}</code>}</div>
+        : <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommits")}</strong><span>{needle ? t("filterNoCommits") : scope === "branch-only" ? t("branchNoUniqueCommits", { branch: selection, base: page.comparedTo ?? t("primary") }) : t("branchNoHistory")}</span></div>)}
       {loading && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> {t("readHistory")}</div>}
       {!loading && page.hasMore && !needle && <button className="load-more" onClick={() => fetchPage(page.commits.length)}>{t("loadMoreCommits")}</button>}
     </div>
@@ -2722,6 +2995,7 @@ function ChangesView({ snapshot, secrets, secretsReviewed, onSecretsReviewed, de
   return <div className="changes-view">
     <div className="detail-head"><span className="detail-kind"><PencilLine size={13} />{t("uncommittedHeading")}</span><span className="detail-branch" title={snapshot.currentBranch}><GitBranch size={12} />{snapshot.currentBranch}</span></div>
     {hasChanges ? <>
+      {!snapshot.head && <p className="file-inclusion-note first-save-note" role="note">{t("firstSaveNote")}</p>}
       <ChangeSummary files={selected} />
       <FileList files={snapshot.changes} onOpen={onOpenFile} selection={{ excluded, flagged, disabled: busy || generating, onToggle, onToggleAll, onIgnore }} />
       {partly > 0 && <p className="file-inclusion-note partly-staged">{t("partlyStagedNote", { count: partly })}</p>}
@@ -2751,7 +3025,8 @@ function ChangesView({ snapshot, secrets, secretsReviewed, onSecretsReviewed, de
         </div>
         <p className="file-inclusion-note">{t("selectedFilesNote")}</p>
       </div>
-    </> : <div className="graph-empty"><Check size={26} /><strong>{t("noUncommittedChanges")}</strong><span>{t("savedNextStep")}</span></div>}
+    </> : snapshot.head ? <div className="graph-empty"><Check size={26} /><strong>{t("noUncommittedChanges")}</strong><span>{t("savedNextStep")}</span></div>
+      : <div className="graph-empty first-save"><FolderPlus size={26} /><strong>{t("firstSaveTitle")}</strong><span>{t("firstSaveEmpty")}</span></div>}
   </div>;
 }
 
