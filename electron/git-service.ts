@@ -9,6 +9,10 @@ import { parseWorktrees } from "./worktrees.js";
 import { stackCandidates } from "./stacked-branches.js";
 import { parseNameStatus, parseNumstat, parseShortstat } from "./diff-status.js";
 import { parseRemoteUrls } from "./remotes.js";
+import {
+  accountReadiness, authorReadiness, classifyAccess, credentialHelperKind, displayUrl, gitToolState, parseIdentityConfig, parseRemoteAddress,
+  redactSecrets, selectRemote
+} from "./readiness.js";
 import { changePaths, gitignoreLine, isPartlyStaged, isUntracked, resolveSelection, type SelectionProblem } from "../shared/selected-changes.js";
 import {
   canSkip, conflictLabels, conflictsFrom, parseRebaseProgress, pendingCommands, resolutionFor
@@ -37,7 +41,8 @@ import type {
   DeliveryRequest, FileChange, GitProtocol, SecretFinding, SecretKind, SelectedChange, WithheldFile,
   ConflictApplyResult, ConflictFileOutcome, ConflictProposal, ConflictChoice, ConflictChoiceOutcome, ConflictChoiceRequest, ConflictChoiceResult,
   ConflictFileVersion, ConflictGuide, ConflictGuideFile, ConflictSideIdentity, ConflictSideId, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput, LlmConnectResult, AiConnectionProblem,
-  Locale, Operation, PendingOperation, PlanStep, RepoSnapshot, StepOutcome, AssistantUnavailable, RecoveryReport
+  Locale, Operation, PendingOperation, PlanStep, RepoSnapshot, StepOutcome, AssistantUnavailable, RecoveryReport,
+  AuthorReadiness, CredentialHelper, IdentityValues, ReadinessReport, ReadinessRequest, RemoteAccess, RemoteProtocol, RemoteReadiness
 } from "../shared/types.js";
 import { classifyProviderFailure, maskKeys, recommendedModel } from "../shared/ai-connection.js";
 import { classifyFailure, operationFromCommand, recoveryActions, recoveryFacts, type FailureEvidence } from "./failure-recovery.js";
@@ -703,7 +708,10 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
     case "push": return args.setUpstream
       ? `git push${args.noVerify === "true" ? " --no-verify" : ""} --set-upstream ${args.setUpstream} ${args.branch ?? ""}`.trimEnd()
       : `git push${args.noVerify === "true" ? " --no-verify" : ""}`;
-    case "set_identity": return `git config user.name ${JSON.stringify(args.user ?? "")} && git config user.email ${JSON.stringify(args.email ?? "")}`;
+    case "set_identity": {
+      const where = args.scope === "global" ? " --global" : "";
+      return `git config${where} user.name ${JSON.stringify(args.user ?? "")} && git config${where} user.email ${JSON.stringify(args.email ?? "")}`;
+    }
     case "add_remote": return `git remote add ${args.name ?? ""} ${quoteToken(args.url ?? "")}`;
     case "merge": return `git merge --no-edit ${args.name}`;
     case "rebase": return `git rebase ${args.onto}`;
@@ -873,6 +881,117 @@ async function checkedGh(args: string[], cwd: string, host?: string) {
   });
   if (result.code !== 0) throw new Error(result.stderr.trim() || result.stdout.trim() || `gh ${args[0] ?? ""} falló.`);
   return result.stdout.trim();
+}
+
+/** The settings files user.name and user.email come from, read the way Git reads them. Without a repository, only this Mac's. */
+async function readAuthor(cwd: string | undefined): Promise<AuthorReadiness> {
+  const result = await runGit(cwd ?? homedir(), ["config", "--show-scope", "--get-regexp", "^user\\.(name|email)$"], 10_000).catch(() => undefined);
+  return authorReadiness(parseIdentityConfig(result?.stdout ?? ""), { repository: Boolean(cwd) });
+}
+
+/** Every value of a multi-valued setting, in order. An empty value is kept: for a helper list it means "forget the ones before". */
+async function configValues(cwd: string, key: string) {
+  const result = await runGit(cwd, ["config", "--get-all", key], 10_000).catch(() => undefined);
+  return result?.code === 0 && result.stdout ? result.stdout.replace(/\n$/, "").split("\n") : [];
+}
+
+const accessTimeoutMs = 15_000;
+
+/**
+ * Reads the remote's branch list with the sign-in this Mac already has, and nothing else: no prompt
+ * can appear, a first-time SSH host is not trusted on the person's behalf, and a hang ends as
+ * "could not reach". What Git answered is kept with anything shaped like a credential masked.
+ */
+async function remoteAccess(repoRoot: string, remote: string): Promise<{ access: RemoteAccess; detail?: string }> {
+  const ownSsh = (await optionalGit(repoRoot, ["config", "--get", "core.sshCommand"])) || process.env.GIT_SSH_COMMAND || process.env.GIT_SSH;
+  const env: NodeJS.ProcessEnv = {
+    GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", SSH_ASKPASS_REQUIRE: "never", GCM_INTERACTIVE: "never",
+    // A person's own ssh command decides which key is used, so it is left exactly as configured.
+    ...(ownSsh ? {} : { GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o ConnectTimeout=10" })
+  };
+  try {
+    const result = await runCommand("git", ["-c", "protocol.ext.allow=never", "ls-remote", "--heads", remote], repoRoot, accessTimeoutMs, env);
+    const said = redactSecrets(result.stderr.trim());
+    return { access: classifyAccess({ code: result.code, output: said }), ...(result.code !== 0 && said ? { detail: said.slice(-800) } : {}) };
+  } catch (error) {
+    return { access: classifyAccess({ timedOut: true }), detail: redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 400) };
+  }
+}
+
+/** GitHub accounts behind a remote: every gh account, and who the SSH key signs in as. Nothing is switched. */
+async function remoteAccount(repoRoot: string, sshHost: string | undefined, protocol: RemoteProtocol, helper: CredentialHelper | undefined, access: RemoteAccess) {
+  const ghInstalled = Boolean(findExecutable("gh", await toolDirectories(), isExecutableFile));
+  const accounts = ghInstalled ? await ghAccounts("github.com", repoRoot) : [];
+  const sshLogin = protocol === "ssh" && sshHost && access === "ok" ? (await sshIdentity(sshHost, repoRoot)).login : undefined;
+  return accountReadiness({ ghInstalled, accounts, protocol, sshLogin, helper, access });
+}
+
+async function readRemote(snapshot: RepoSnapshot, request: ReadinessRequest): Promise<RemoteReadiness> {
+  const choice = selectRemote(snapshot.branches, snapshot.remotes, request.remote);
+  if (!choice) return { status: "none", remotes: [...snapshot.remotes] };
+  const pushUrl = (await optionalGit(snapshot.path, ["remote", "get-url", "--push", choice.name])) || snapshot.remoteUrls?.[choice.name] || "";
+  const address = parseRemoteAddress(pushUrl);
+  // A host that could read as an option is never handed to ssh.
+  const sshHost = address.protocol === "ssh" && address.host && !address.host.startsWith("-") && !address.port ? address.host : undefined;
+  let resolvedHost: string | undefined;
+  if (sshHost) {
+    const resolved = await runCommand("ssh", ["-G", sshHost], snapshot.path, 10_000).catch(() => undefined);
+    const name = resolved?.code === 0 ? parseSshResolvedHostName(resolved.stdout) : undefined;
+    if (name && name !== sshHost) resolvedHost = name;
+  }
+  const host = resolvedHost ?? address.host;
+  const helper = address.protocol === "https" && address.host
+    ? credentialHelperKind([...await configValues(snapshot.path, "credential.helper"), ...await configValues(snapshot.path, `credential.https://${address.host}.helper`)])
+    : undefined;
+  const checked = request.access ? await remoteAccess(snapshot.path, choice.name) : { access: "not_checked" as const };
+  // gh verifies each token online, so accounts are only read when the person asked for a check.
+  const account = request.access && host === "github.com" && (address.protocol === "https" || address.protocol === "ssh")
+    ? await remoteAccount(snapshot.path, sshHost, address.protocol, helper, checked.access)
+    : undefined;
+  return {
+    status: "found", name: choice.name, url: displayUrl(pushUrl), protocol: address.protocol,
+    ...(address.host ? { host: address.host } : {}), ...(resolvedHost ? { resolvedHost } : {}), ...(address.path ? { path: address.path } : {}),
+    source: choice.source, ...(choice.upstream ? { upstream: choice.upstream } : {}), remotes: [...snapshot.remotes],
+    access: checked.access, ...("detail" in checked && checked.detail ? { detail: checked.detail } : {}),
+    ...(helper ? { helper } : {}), ...(account ? { account } : {})
+  };
+}
+
+/**
+ * What Git needs before a first save or a publish: Git itself, who saves are attributed to, and where
+ * a publish goes with the access this Mac has. It only reads; a recheck is always safe.
+ */
+export async function checkReadiness(cwd: string | undefined, request: ReadinessRequest = {}): Promise<ReadinessReport> {
+  const checkedAt = new Date().toISOString();
+  const directories = await toolDirectories();
+  const gitPath = findExecutable("git", directories, isExecutableFile);
+  const version = gitPath
+    ? await runCommand("git", ["--version"], cwd ?? homedir(), 10_000).catch((error) => ({ code: 1, stdout: "", stderr: error instanceof Error ? error.message : String(error) }))
+    : undefined;
+  const git = gitToolState(gitPath, version, directories.length);
+  if (git.status !== "ok") return { checkedAt, git, author: authorReadiness([]), remote: { status: "none", remotes: [] } };
+  if (!cwd) return { checkedAt, git, author: await readAuthor(undefined), remote: { status: "none", remotes: [] } };
+  const snapshot = await getSnapshot(cwd);
+  const [author, remote] = await Promise.all([readAuthor(snapshot.path), readRemote(snapshot, request)]);
+  return { repoPath: snapshot.path, checkedAt, git, author, remote };
+}
+
+/** What changing the identity replaces and what keeps its own, said before anything is written. */
+async function identityEffects(snapshot: RepoSnapshot, args: Record<string, string>, language: Locale): Promise<string[]> {
+  const author = await readAuthor(snapshot.path);
+  const shown = (values: IdentityValues) => values.name || values.email ? `${values.name ?? "—"} <${values.email ?? "—"}>` : undefined;
+  const global = args.scope === "global";
+  const current = shown(global ? author.global : author.repository);
+  const repositoryOwn = shown(author.repository);
+  const globalOwn = shown(author.global);
+  return [
+    current
+      ? localized(language, `Sustituye ${global ? "la identidad global" : "la identidad de este repositorio"}: ${current}.`, `Replaces the ${global ? "global identity" : "identity set for this repository"}: ${current}.`)
+      : localized(language, global ? "Todavía no hay una identidad global en este Mac; esto la crea." : "Este repositorio todavía no tiene una identidad propia; esto la crea.", global ? "No global identity is set on this Mac yet; this creates one." : "This repository has no identity of its own yet; this creates one."),
+    ...(global && repositoryOwn ? [localized(language, `Este repositorio tiene su propia identidad (${repositoryOwn}) y la seguirá usando: la del repositorio tiene prioridad.`, `This repository has its own identity (${repositoryOwn}) and keeps using it: a repository's own setting takes precedence.`)] : []),
+    ...(!global && globalOwn ? [localized(language, `Los demás repositorios de este Mac siguen usando ${globalOwn}.`, `Other repositories on this Mac keep using ${globalOwn}.`)] : []),
+    localized(language, "Solo afecta a los próximos commits: los que ya existen conservan su autor. No es un inicio de sesión y no se envía nada.", "Only future commits use it: existing commits keep their author. It is not a sign-in and nothing is sent anywhere.")
+  ];
 }
 
 async function prepareGithubRepository(snapshot: RepoSnapshot, input: RepositoryFields, source: ActionPlan["source"]): Promise<RepositoryPreparation> {
@@ -2418,7 +2537,9 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     skip_operation: [localized(locale, `Saltar el commit atascado de ${args.pendingLabel ?? "la operación"}`, `Skip the stuck commit from ${args.pendingLabel ?? "the operation"}`), localized(locale, "Descarta el commit en el que se atascó y sigue con el resto.", "Discards the stuck commit and continues with the rest."), "high"],
     resolve_conflict: [localized(locale, `Resolver ${args.path} quedándose con ${args.side === "theirs" ? "el otro lado" : args.side === "ours" ? "nuestro lado" : "el archivo tal cual está"}`, `Resolve ${args.path} by keeping ${args.side === "theirs" ? "the other side" : args.side === "ours" ? "our side" : "the file as it is"}`), localized(locale, "Marca el conflicto de un archivo como resuelto. No modifica el contenido de ningún archivo.", "Marks a file conflict as resolved. It does not change file content."), "medium"],
     commit: [localized(locale, `Crear commit “${args.message ?? ""}”`, `Create commit “${args.message ?? ""}”`), localized(locale, "Añade todos los cambios y crea un commit.", "Stages all changes and creates a commit."), "high"],
-    set_identity: [localized(locale, `Firmar los commits de este repositorio como ${args.user} <${args.email}>`, `Sign commits in this repository as ${args.user} <${args.email}>`), localized(locale, "Guarda el nombre y el correo que Git anota en cada commit, solo para este repositorio. Tus archivos y tu historial no cambian.", "Saves the name and email Git records with each commit, for this repository only. Your files and history do not change."), "medium"],
+    set_identity: args.scope === "global"
+      ? [localized(locale, `Firmar los commits de todos los repositorios de este Mac como ${args.user} <${args.email}>`, `Sign commits in every repository on this Mac as ${args.user} <${args.email}>`), localized(locale, "Guarda el nombre y el correo que Git anota en cada commit en tu configuración global de Git, para todos los repositorios de este Mac que no tengan los suyos. Tus archivos y tu historial no cambian.", "Saves the name and email Git records with each commit in your global Git settings, for every repository on this Mac that does not set its own. Your files and history do not change."), "high"]
+      : [localized(locale, `Firmar los commits de este repositorio como ${args.user} <${args.email}>`, `Sign commits in this repository as ${args.user} <${args.email}>`), localized(locale, "Guarda el nombre y el correo que Git anota en cada commit, solo para este repositorio. Tus archivos y tu historial no cambian.", "Saves the name and email Git records with each commit, for this repository only. Your files and history do not change."), "medium"],
     add_remote: [localized(locale, `Conectar este repositorio con ${args.url} como ${args.name}`, `Connect this repository to ${args.url} as ${args.name}`), localized(locale, "Añade la dirección donde se puede publicar este repositorio. Todavía no se envía nada: publicar es otro paso que confirmas aparte.", "Adds the address where this repository can be published. Nothing is sent yet: publishing is a separate step you confirm."), "medium"],
     ignore_path: [localized(locale, `Ignorar los cambios futuros de ${args.path}`, `Ignore future changes to ${args.path}`), localized(locale, "Añade una línea a .gitignore para que Git deje de listar este archivo nuevo. El archivo se queda en tu disco tal como está.", "Adds one line to .gitignore so Git stops listing this new file. The file stays on your disk exactly as it is."), "medium"],
     git_command: [
@@ -2523,12 +2644,14 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
   // Only what each direct control needs reaches the step: a publish names the active branch as Git
   // reads it now, and an identity or a remote address is trimmed of stray spaces.
   const normalized = operation === "push" && args.setUpstream ? { setUpstream: args.setUpstream, branch: snapshot.currentBranch, ...(args.noVerify === "true" ? { noVerify: "true" } : {}) }
-    : operation === "set_identity" ? { user: (args.user ?? "").trim(), email: (args.email ?? "").trim() }
+    : operation === "set_identity" ? { user: (args.user ?? "").trim(), email: (args.email ?? "").trim(), scope: typeof args.scope === "string" ? args.scope : "local" }
     : operation === "add_remote" ? { name: (args.name ?? "origin").trim() || "origin", url: (args.url ?? "").trim() }
     : args;
   const draft = operationDraft(operation, normalized, snapshot, [], language);
   if (draft.allowed) validateExecution(bindPlan(snapshot, draft), snapshot, language);
-  const effects = draft.allowed ? await pendingEffects(snapshot, operation, language) : [];
+  const effects = draft.allowed
+    ? [...await pendingEffects(snapshot, operation, language), ...(operation === "set_identity" ? await identityEffects(snapshot, normalized, language) : [])]
+    : [];
   return bindPlan(snapshot, effects.length ? { ...draft, effects: [...(draft.effects ?? []), ...effects] } : draft);
 }
 
@@ -2979,6 +3102,8 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
     const user = args.user?.trim() ?? "";
     if (!user || user.length > 100 || /[\p{Cc}<>]/u.test(user)) throw new Error(localized(language, "Escribe el nombre con el que quieres firmar tus commits.", "Type the name you want your commits signed with."));
     if (!args.email || args.email.length > 254 || !/^[^\s<>@]+@[^\s<>@]+$/.test(args.email)) throw new Error(localized(language, "Escribe un correo con la forma nombre@dominio.", "Type an email in the form name@domain."));
+    // Only the two places a person can pick: this repository, or every repository on this Mac.
+    if (args.scope !== undefined && args.scope !== "local" && args.scope !== "global") throw new Error(localized(language, "Elige si el nombre y el correo son para este repositorio o para todos.", "Choose whether the name and email are for this repository or for all of them."));
   }
   if (operation === "add_remote") {
     if (!remoteNamePattern.test(args.name ?? "")) throw new Error(localized(language, "El nombre del remoto no es válido.", "The remote name is invalid."));
@@ -3143,10 +3268,14 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     case "push": return reportedGit(cwd, [
       "push", ...(args.noVerify === "true" ? ["--no-verify"] : []), ...(args.setUpstream ? ["--set-upstream", args.setUpstream, args.branch] : [])
     ]);
-    case "set_identity":
-      await checkedGit(cwd, ["config", "--local", "user.name", args.user]);
-      await checkedGit(cwd, ["config", "--local", "user.email", args.email]);
-      return localized(locale, `Los commits de este repositorio se firmarán como ${args.user} <${args.email}>.`, `Commits in this repository will be signed as ${args.user} <${args.email}>.`);
+    case "set_identity": {
+      const global = args.scope === "global";
+      await checkedGit(cwd, ["config", global ? "--global" : "--local", "user.name", args.user]);
+      await checkedGit(cwd, ["config", global ? "--global" : "--local", "user.email", args.email]);
+      return global
+        ? localized(locale, `Los commits de los repositorios de este Mac sin identidad propia se firmarán como ${args.user} <${args.email}>.`, `Commits in repositories on this Mac without their own identity will be signed as ${args.user} <${args.email}>.`)
+        : localized(locale, `Los commits de este repositorio se firmarán como ${args.user} <${args.email}>.`, `Commits in this repository will be signed as ${args.user} <${args.email}>.`);
+    }
     case "add_remote": return reportedGit(cwd, ["remote", "add", args.name, args.url]);
     case "merge": return reportedGit(cwd, ["merge", "--no-edit", "--", args.name]);
     case "rebase": return reportedGit(cwd, ["rebase", args.onto]);

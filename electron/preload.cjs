@@ -43,5 +43,7 @@ contextBridge.exposeInMainWorld("gitcat", {
   getLlmConfig: () => ipcRenderer.invoke("llm:get-config"),
   saveLlmConfig: (config) => ipcRenderer.invoke("llm:save-config", config),
   verifyLlmConfig: () => ipcRenderer.invoke("llm:verify"),
-  openProviderPage: (page) => ipcRenderer.invoke("llm:open-provider-page", page)
+  openProviderPage: (page) => ipcRenderer.invoke("llm:open-provider-page", page),
+  checkReadiness: (path, request) => ipcRenderer.invoke("readiness:check", path, request),
+  openHelpPage: (page) => ipcRenderer.invoke("help:open-page", page)
 });

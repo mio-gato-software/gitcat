@@ -9,17 +9,18 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
   getLlmConfig, getSnapshot, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
-  prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig,
+  prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
   scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictGuide, type IssuedConflictProposal
 } from "./git-service.js";
 import { localized } from "./i18n.js";
+import { remoteNamePattern } from "./repository-plan.js";
 import { cloneRepository, inspectFolder, previewClone, startTracking, type FolderInspection } from "./project-setup.js";
 import {
   classifyFailure, compareFingerprints, emptyWorkspace, errorText, fingerprintFrom, inspectProject, keepFingerprints, nearestExistingFolder,
   parseWorkspace, relocateProject, restoreProjects, type RepoFingerprint, type WorkspaceRecord
 } from "./workspace-restore.js";
 import type {
-  ActionPlan, AiSharingPurpose, CloneParentResult, ClonePreview, CloneResult, ConflictChoiceRequest, ConflictGuide, ConflictProposal, ConversationMessage, DeliveryRequest, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, ProviderPage, Operation, ProjectLocateResult,
+  ActionPlan, AiSharingPurpose, CloneParentResult, HelpPage, ReadinessRequest, ClonePreview, CloneResult, ConflictChoiceRequest, ConflictGuide, ConflictProposal, ConversationMessage, DeliveryRequest, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, ProviderPage, Operation, ProjectLocateResult,
   ProjectSelectResult, RepoSnapshot, RepositoryMatch, StartTrackingResult, UnavailableProject
 } from "../shared/types.js";
 
@@ -223,6 +224,12 @@ function assertPathList(paths: unknown) {
 const providerPages: Record<ProviderPage, string> = {
   api_keys: "https://platform.openai.com/api-keys",
   billing: "https://platform.openai.com/settings/organization/billing/overview"
+};
+/** Setup pages the readiness checks point to. Nothing else is opened from them, and never with anything added. */
+const helpPages: Record<HelpPage, string> = {
+  github_ssh_keys: "https://github.com/settings/keys",
+  git_download: "https://git-scm.com/downloads",
+  gh_install: "https://cli.github.com/"
 };
 const sharingPurposes = new Set<AiSharingPurpose>(["planning", "description", "conflicts", "recovery"]);
 
@@ -685,6 +692,22 @@ app.whenReady().then(async () => {
     assertTrustedSender(event);
     const url = typeof page === "string" && Object.hasOwn(providerPages, page) ? providerPages[page as ProviderPage] : undefined;
     if (!url) throw new Error("Página del proveedor no reconocida.");
+    await shell.openExternal(url);
+  });
+  // Read-only: Git, the author identity and, when asked, whether the remote can be reached. It never changes configuration.
+  ipcMain.handle("readiness:check", (event, cwd: unknown, request: unknown) => {
+    assertTrustedSender(event);
+    const asked = request && typeof request === "object" ? request as ReadinessRequest : {};
+    if (asked.remote !== undefined && (typeof asked.remote !== "string" || !remoteNamePattern.test(asked.remote))) throw new Error("El remoto solicitado no es válido.");
+    const checked: ReadinessRequest = { ...(asked.remote ? { remote: asked.remote } : {}), access: asked.access === true };
+    if (cwd === undefined || cwd === null) return checkReadiness(undefined, checked);
+    if (typeof cwd !== "string") throw new Error("El repositorio no es válido.");
+    return checkReadiness(assertOpenedRepository(cwd), checked);
+  });
+  ipcMain.handle("help:open-page", async (event, page: unknown) => {
+    assertTrustedSender(event);
+    const url = typeof page === "string" && Object.hasOwn(helpPages, page) ? helpPages[page as HelpPage] : undefined;
+    if (!url) throw new Error("Página de ayuda no reconocida.");
     await shell.openExternal(url);
   });
   await createWindow();

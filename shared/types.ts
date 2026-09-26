@@ -389,7 +389,7 @@ export type Operation =
   | "github_create_repo"
   /** Adds one anchored line to .gitignore for an untracked file. Only a direct control prepares it; the model never can. */
   | "ignore_path"
-  /** Sets the name and email commits are signed with, for this repository only. Direct control only. */
+  /** Sets the name and email commits are signed with, for this repository or globally (`scope`). Direct control only. */
   | "set_identity"
   /** Connects this repository to a remote address the person typed. Direct control only. */
   | "add_remote"
@@ -518,6 +518,99 @@ export type LlmConnectResult =
 
 /** Provider pages GitCat may open in the browser. The main process holds the only addresses. */
 export type ProviderPage = "api_keys" | "billing";
+
+/** Setup pages GitCat may open in the browser from the readiness checks. The main process holds the only addresses. */
+export type HelpPage = "github_ssh_keys" | "git_download" | "gh_install";
+
+/** Where a Git setting comes from, as `git config --show-scope` names it. */
+export type ConfigScope = "local" | "worktree" | "global" | "system" | "command";
+
+/** Which settings file `set_identity` writes: this repository's, or the one every repository on this Mac reads. */
+export type IdentityScope = "local" | "global";
+
+export type GitToolReadiness =
+  | { status: "ok"; path: string; version: string }
+  /** Found, but it does not run: on a Mac, usually Apple's developer tools still need installing. */
+  | { status: "unusable"; path: string; detail: string }
+  | { status: "missing"; searched: number };
+
+export type IdentityValues = { name?: string; email?: string };
+
+/**
+ * Who a save is attributed to. This is a label written into each commit, never a login: publishing
+ * uses a separate sign-in, reported under the remote.
+ */
+export type AuthorReadiness = {
+  status: "ok" | "partial" | "missing";
+  /** The values Git will actually use, and the settings file each one comes from. */
+  name?: { value: string; scope: ConfigScope };
+  email?: { value: string; scope: ConfigScope };
+  /** What this repository sets for itself, and what every repository on this Mac falls back to. */
+  repository: IdentityValues;
+  global: IdentityValues;
+  /** The repository sets its own values and they differ from the global ones. */
+  overridesGlobal: boolean;
+};
+
+/** Whether this Mac can reach and read the remote with the sign-in it already has, from Git's own answer. */
+export type RemoteAccess = "ok" | "denied" | "not_found" | "credentials" | "offline" | "host_key" | "unknown" | "not_checked";
+export type RemoteProtocol = "https" | "ssh" | "local" | "other";
+/** What keeps an HTTPS sign-in on this Mac, by kind only. Its contents are never read. */
+export type CredentialHelper = "gh" | "osxkeychain" | "manager" | "store" | "cache" | "other" | "none";
+
+export type AccountReadiness = {
+  /** GitHub CLI is not installed, is installed with nobody signed in, or has accounts. */
+  gh: "missing" | "signed_out" | "signed_in";
+  accounts: { login: string; active: boolean }[];
+  /** Who the SSH key on this Mac signs in as, from the host's own greeting. */
+  sshLogin?: string;
+  /** The account this remote is proven to use, when GitCat could tell, and how it knows. */
+  verified?: string;
+  verifiedBy?: "ssh" | "gh";
+  /** The SSH key and GitHub CLI's active account belong to different accounts. */
+  differs: boolean;
+};
+
+export type RemoteReadiness =
+  | { status: "none"; remotes: string[] }
+  | {
+    status: "found";
+    name: string;
+    /** Where a push goes, with any user name or token removed. */
+    url: string;
+    protocol: RemoteProtocol;
+    host?: string;
+    /** The real host behind an SSH alias from ~/.ssh/config. */
+    resolvedHost?: string;
+    /** owner/repository, as the address writes it. */
+    path?: string;
+    /** Why this remote: the one asked for, the branch's upstream, origin, the only one, or the first of several. */
+    source: "requested" | "upstream" | "origin" | "only" | "first";
+    upstream?: string;
+    remotes: string[];
+    access: RemoteAccess;
+    /** What Git answered, with anything shaped like a credential masked. */
+    detail?: string;
+    helper?: CredentialHelper;
+    /** Accounts on GitHub, when the remote is there. */
+    account?: AccountReadiness;
+  };
+
+/** What Git needs before a first save or a publish, read from this Mac. Checking never changes anything. */
+export type ReadinessReport = {
+  repoPath?: string;
+  checkedAt: string;
+  git: GitToolReadiness;
+  author: AuthorReadiness;
+  remote: RemoteReadiness;
+};
+
+export type ReadinessRequest = {
+  /** A remote to check instead of the one GitCat would pick. */
+  remote?: string;
+  /** Contact the remote to check access. Without it, only this Mac is read. */
+  access?: boolean;
+};
 
 export type LlmConfigInput = {
   apiKey: string;
@@ -842,4 +935,7 @@ export type GitlineApi = {
   /** Checks the saved key and model again, without changing them. */
   verifyLlmConfig: () => Promise<LlmConnectResult>;
   openProviderPage: (page: ProviderPage) => Promise<void>;
+  /** Reads what Git needs to save and publish, without a repository or for the open one. Never changes configuration. */
+  checkReadiness: (path: string | undefined, request?: ReadinessRequest) => Promise<ReadinessReport>;
+  openHelpPage: (page: HelpPage) => Promise<void>;
 };
