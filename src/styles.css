@@ -263,11 +263,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
-.provider-banner { display: flex; align-items: center; gap: 10px; padding: 9px 27px; color: #d8c79a; background: #241f16; border-bottom: 1px solid #4b3f26; font-size: 10px; line-height: 1.45; }
-.provider-banner > svg { flex: none; color: #e0b264; }
-.provider-banner span { flex: 1; min-width: 0; }
-.provider-banner strong { color: #f0dcae; }
-.provider-banner .outline-button { flex: none; }
 .welcome-card .ghost-button.welcome-button { margin-top: 8px; }
 
 .workspace-loading { flex: 1; display: grid; place-content: center; justify-items: center; gap: 12px; color: var(--muted); font-size: 11px; }

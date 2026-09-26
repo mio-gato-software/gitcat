@@ -4,7 +4,7 @@ import { addNotification, type Notification } from "../shared/notifications";
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
-  AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Bot, Check, ChevronRight, CircleDot,
+  AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronRight, CircleDot,
   Clock3, Cloud, CloudDownload, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
   FolderOpen, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
   ListTree, LoaderCircle, Maximize2, MessageCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen, Palette, Pencil, PencilLine, Plus,
@@ -21,6 +21,7 @@ import { buildCommitGraph, familyColour, maxLanes, withWorkInProgress, workInPro
 import { pullRequestReference } from "../shared/repository-activity";
 import { refChips } from "../shared/ref-chips";
 import { isPartlyStaged, isUntracked } from "../shared/selected-changes";
+import { isSupportedModel, recommendedModel } from "../shared/ai-connection";
 import type { RefChip } from "../shared/ref-chips";
 import { authorAvatarUrl, avatarKey } from "../shared/avatar";
 import { clampGraphColumn, graphColumnRange, parseGraphColumns } from "../shared/graph-columns";
@@ -30,9 +31,9 @@ import type { GraphRow } from "../shared/commit-graph";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
 import type {
-  ActionPlan, AiSharingPreview, AiSharingPurpose, AssistantUnavailable, Branch, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
+  ActionPlan, AiConnectionProblem, AiSharingPreview, AiSharingPurpose, AssistantUnavailable, Branch, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
   ConflictChoice, ConflictChoiceRequest, ConflictChoiceResult, ConflictGuide, ConflictGuideFile, ConflictSideId, ConflictSideIdentity,
-  FileChange, FileStats, HistoryScope, LlmConfig, Locale, Operation, PendingOperationKind, ProjectLocateResult, ProjectUnavailableReason,
+  FileChange, FileStats, HistoryScope, LlmConfig, LlmConnectResult, Locale, Operation, PendingOperationKind, ProjectLocateResult, ProjectUnavailableReason,
   RecoveryAction, RecoveryReport, RepoSnapshot, SecretFinding, UnavailableProject, WithheldFile
 } from "../shared/types";
 import { localeTag, readLocale, translate, writeLocale, type MessageKey, type Translate } from "./i18n";
@@ -415,7 +416,7 @@ export default function App() {
   const [refreshKind, setRefreshKind] = useState<"refresh" | "fetch">("refresh");
   const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [config, setConfig] = useState<LlmConfig>({ provider: "openai", model: "gpt-5.6-luna", configured: false });
+  const [config, setConfig] = useState<LlmConfig>({ provider: "openai", model: recommendedModel, configured: false, secureStorage: true });
   /** What the details pane is about: the uncommitted work, or one commit picked in the graph. */
   const [focus, setFocus] = useState<GraphFocus>();
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
@@ -456,7 +457,6 @@ export default function App() {
   /** The flagged ticked files, at their versions, that the person said they looked at and want to save. */
   const [secretsReviewedKey, setSecretsReviewedKey] = useState<string>();
   const [workspaceReady, setWorkspaceReady] = useState(false);
-  const [exploring, setExploring] = useState(false);
   const [panes, setPanes] = useState<PaneWidths | undefined>(readPaneWidths);
   const requestSequence = useRef(0);
   /** Counts every deliberate snapshot update, so a slower background read never overwrites a newer one. */
@@ -544,7 +544,7 @@ export default function App() {
     if (panes || sidebarHidden || !layoutRef.current) return;
     const columns = getComputedStyle(layoutRef.current).gridTemplateColumns.split(" ").map(Number.parseFloat);
     if (columns.length === 3 && columns.every(Number.isFinite)) setPanes({ sidebar: columns[0], inspector: columns[2] });
-  }, [panes, snapshot, workspaceReady, exploring, config.configured, sidebarHidden]);
+  }, [panes, snapshot, workspaceReady, config.configured, sidebarHidden]);
 
   useEffect(() => {
     if (panes) try { localStorage.setItem(paneStorageKey, JSON.stringify(panes)); } catch { /* a full quota must not break resizing */ }
@@ -675,6 +675,12 @@ export default function App() {
 
   const dismissAllActivity = () => {
     setActivity([]);
+  };
+
+  /** Settings open on the connection as it is now: a request since the last read may have failed or recovered. */
+  const openSettings = () => {
+    setSettingsOpen(true);
+    window.gitcat.getLlmConfig().then(setConfig).catch(() => undefined);
   };
 
   const updateSnapshot = (path: string, next: RepoSnapshot, fetched = false) => {
@@ -1490,7 +1496,7 @@ export default function App() {
     const current = snapshot.currentBranch;
     const base = snapshot.defaultBranch;
     const ask = (question: string) => { void propose(question); };
-    const assistantHint = config.configured ? undefined : t("llmNotConfigured");
+    const assistantHint = config.configured ? undefined : t("assistantNeededHint");
     const entries: MenuEntry[] = [];
 
     if (target.work) {
@@ -1556,11 +1562,11 @@ export default function App() {
           </div>)}
           <button className="icon-button tab-add" onClick={() => void openProject()} aria-label={t("openProject")}><Plus size={16} /></button>
         </div>
-        <div className="top-actions"><button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label={t("settings")}><Settings2 size={17} /></button></div>
+        <div className="top-actions"><button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
       </header>
       <NotificationCenter items={activity} onDismiss={dismissActivity} onClear={dismissAllActivity} t={t} />
 
-      {!workspaceReady ? <div className="workspace-loading"><LoaderCircle className="spin" size={24} /><span>{t("restoringProjects")}</span></div> : !config.configured && !exploring ? <ProviderRequired onConfigure={() => setSettingsOpen(true)} onExplore={() => setExploring(true)} /> : activeUnavailable ? <UnavailableProjectPanel
+      {!workspaceReady ? <div className="workspace-loading"><LoaderCircle className="spin" size={24} /><span>{t("restoringProjects")}</span></div> : activeUnavailable ? <UnavailableProjectPanel
         key={activeUnavailable.path}
         project={activeUnavailable}
         busy={recoveringPath === activeUnavailable.path}
@@ -1570,8 +1576,7 @@ export default function App() {
         onConfirm={(candidateId) => void confirmLocation(activeUnavailable.path, candidateId)}
         onDismissNotice={() => setLocateNotice(undefined)}
         onRemove={() => closeProject(activeUnavailable.path)}
-      /> : !snapshot ? <Welcome openProject={openProject} /> : <>
-        {!config.configured && <div className="provider-banner" role="status"><Eye size={14} /><span><strong>{t("noProviderBanner")}</strong> {t("noProviderBannerDetail")}</span><button className="outline-button small" onClick={() => setSettingsOpen(true)}><Settings2 size={13} /> {t("configure")}</button></div>}
+      /> : !snapshot ? <Welcome openProject={openProject} config={config} onConnect={openSettings} /> : <>
 
 
         <RepoToolbar
@@ -1651,16 +1656,18 @@ export default function App() {
                 : activeFocus
                   ? <CommitInspector key={activeFocus.commit.hash} commit={activeFocus.commit} snapshot={snapshot} known={graphCommits} onFocus={(commit) => focusOn({ kind: "commit", commit }, true)} onOpen={(file) => setModalCommit({ commit: activeFocus.commit, file })} />
                   : <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommitSelected")}</strong><span>{t("noCommitSelectedHint")}</span></div>}
-            </div> : <div className="assistant-body"><p className="assistant-copy">{config.configured ? t("assistantConfiguredCopy") : t("assistantUnconfiguredCopy")}</p>{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => void openSharingReview()} disabled={!config.configured}><Eye size={12} /> {t("sharingOpen")}</button><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} configured={config.configured} onRecoveryAction={(action) => void runRecoveryAction(turn.id, turn, action)} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div>}
+            </div> : <div className="assistant-body">{config.configured ? <p className="assistant-copy">{t("assistantConfiguredCopy")}</p> : <AssistantSetupCard onConnect={openSettings} />}{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => void openSharingReview()} disabled={!config.configured}><Eye size={12} /> {t("sharingOpen")}</button><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} configured={config.configured} onRecoveryAction={(action) => void runRecoveryAction(turn.id, turn, action)} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div>}
             <div className="chat-compose"><textarea aria-label={t("assistantRequest")} disabled={!config.configured} value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder={config.configured ? t("assistantPlaceholder") : t("configureAssistantPlaceholder")} rows={2} /><button className="send-button" aria-label={t("prepareRequest")} onClick={() => void propose(request)} disabled={planning || !request.trim() || !config.configured}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div>
           </aside>
         </main>
-        <footer className="statusbar"><div className="status-left"><span className={`status-good ${snapshot.isDirty ? "has-changes" : ""}`}><CircleDot size={12} /> {snapshot.isDirty ? counted(t, snapshot.changes.length, "change", "changes") : t("noUncommittedChanges")}</span><span className="status-separator" /><span>{counted(t, branchCount.local, "localBranch", "localBranches")}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} ${t("remoteOnly")}` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> {t("lastRead", { date: formatDate(active.loadedAt, locale) })}</span><span className="remote-status" title={snapshot.remotes.length ? `${remoteTitle(snapshot, t)}\n${active.fetchedAt ? t("remoteCheckedAt", { date: formatDate(active.fetchedAt, locale) }) : t("remoteNotChecked")}` : remoteTitle(snapshot, t)}><Cloud size={12} /> {remoteLabel(snapshot, t)}</span><span className="provider-status"><Sparkles size={12} /> {config.configured ? `${config.provider} · ${config.model}` : t("llmNotConfigured")}</span></div></footer>
+        <footer className="statusbar"><div className="status-left"><span className={`status-good ${snapshot.isDirty ? "has-changes" : ""}`}><CircleDot size={12} /> {snapshot.isDirty ? counted(t, snapshot.changes.length, "change", "changes") : t("noUncommittedChanges")}</span><span className="status-separator" /><span>{counted(t, branchCount.local, "localBranch", "localBranches")}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} ${t("remoteOnly")}` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> {t("lastRead", { date: formatDate(active.loadedAt, locale) })}</span><span className="remote-status" title={snapshot.remotes.length ? `${remoteTitle(snapshot, t)}\n${active.fetchedAt ? t("remoteCheckedAt", { date: formatDate(active.fetchedAt, locale) }) : t("remoteNotChecked")}` : remoteTitle(snapshot, t)}><Cloud size={12} /> {remoteLabel(snapshot, t)}</span><button className={`provider-status ${config.lastProblem ? "attention" : ""}`} onClick={openSettings} title={t("aiStatusTitle")}><Sparkles size={12} /> {config.configured ? t(config.lastProblem ? "statusAiAttention" : "statusAiConnected", { model: config.model }) : t("llmNotConfigured")}</button></div></footer>
       </>}
       {deliveryReview && <DeliveryReviewModal review={deliveryReview} busy={planning}
         onClose={() => { updateTurn(deliveryReview.plan.repoPath, deliveryReview.turnId, (turn) => ({ ...turn, status: "cancelled", outcome: t("planDiscarded") })); setDeliveryReview(undefined); }}
         onApply={async () => { const review = deliveryReview; setDeliveryReview(undefined); await applyPlan(review.turnId, review.plan); }} />}
-      {settingsOpen && <SettingsModal config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onSaved={(next) => { setConfig(next); setSettingsOpen(false); notify({ message: t("settingsSaved"), tone: "success" }); }} />}
+      {settingsOpen && <SettingsModal config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onConfigChange={setConfig}
+        onNotice={(message) => notify({ message, tone: "success" })}
+        repoName={snapshot?.name} onSetAuthor={snapshot ? () => { setSettingsOpen(false); setIdentityDialog({ user: "", email: "" }); } : undefined} />}
       {identityDialog && <IdentityModal dialog={identityDialog} onChange={setIdentityDialog} onClose={() => setIdentityDialog(undefined)} onSubmit={() => { const identity = identityDialog; setIdentityDialog(undefined); void prepare("set_identity", { user: identity.user.trim(), email: identity.email.trim() }); }} />}
       {inputDialog && <InputModal dialog={inputDialog} branches={snapshot?.branches ?? []} onChange={(value) => setInputDialog({ ...inputDialog, value })} onClose={() => setInputDialog(undefined)} onSubmit={submitInputDialog} />}
       {menu && snapshot && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu)} label={menu.work ? t("uncommittedHeading") : menu.commit ? t("commitActions", { hash: menu.commit.shortHash }) : t("actionsFor", { name: menu.branch ?? "" })} onClose={() => setMenu(undefined)} />}
@@ -1734,18 +1741,25 @@ function UnavailableProjectPanel({ project, busy, notice, onRetry, onLocate, onC
   </div>;
 }
 
-function Welcome({ openProject }: { openProject: () => Promise<void> }) {
+/**
+ * The first screen needs nothing configured: opening a project and every Git button work on their
+ * own. The AI assistant is offered as help that can be connected later, never as a gate.
+ */
+function Welcome({ openProject, config, onConnect }: { openProject: () => Promise<void>; config: LlmConfig; onConnect: () => void }) {
   const { t } = useI18n();
-  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card"><div className="welcome-mark"><CatMark size={42} /></div><div className="eyebrow">{t("branchWorkspace")}</div><h1>{t("yourGitClearer")}</h1><p>{t("welcomeCopy")}</p><button className="primary-button welcome-button" onClick={() => void openProject()}><FolderOpen size={16} /> {t("openProject")}</button><div className="welcome-features"><span><GitMerge size={14} /> {t("safeRebase")}</span><span><MessageCircle size={14} /> {t("naturalLanguage")}</span><span><ShieldCheck size={14} /> {t("protectedCommands")}</span></div><div className="welcome-footnote">{t("configuredLlmProvider")}</div></div></div>;
+  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card first-run"><div className="welcome-mark"><CatMark size={42} /></div><div className="eyebrow">{t("branchWorkspace")}</div><h1>{t("yourGitClearer")}</h1><p>{t("welcomeCopy")}</p><button className="primary-button welcome-button" onClick={() => void openProject()}><FolderOpen size={16} /> {t("openProject")}</button>
+    <div className="welcome-direct"><strong>{t("welcomeDirectTitle")}</strong><div className="welcome-features"><span><GitCommitHorizontal size={14} /> {t("welcomeDirectSave")}</span><span><GitBranch size={14} /> {t("welcomeDirectBranches")}</span><span><ArrowUpFromLine size={14} /> {t("welcomeDirectSync")}</span><span><GitMerge size={14} /> {t("welcomeDirectConflicts")}</span></div></div>
+    <div className={`welcome-ai ${config.configured ? "connected" : ""}`}><Sparkles size={15} /><div><strong>{config.configured ? t("welcomeAiConnected", { model: config.model }) : t("welcomeAiTitle")}</strong><span>{t("welcomeAiCopy")}</span></div>{!config.configured && <button className="outline-button small" onClick={onConnect}>{t("connectAssistant")}</button>}</div>
+  </div></div>;
 }
 
 /**
- * GitCat interprets every request with the configured model — there is no keyword fallback — so
- * the provider is a hard requirement rather than an optional extra.
+ * The assistant tab without a provider. Interpreting what someone writes is the model's job only —
+ * there is no keyword fallback — so the box says how to connect one and what already works without it.
  */
-function ProviderRequired({ onConfigure, onExplore }: { onConfigure: () => void; onExplore: () => void }) {
+function AssistantSetupCard({ onConnect }: { onConnect: () => void }) {
   const { t } = useI18n();
-  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card"><div className="welcome-mark"><CatMark size={42} /></div><div className="eyebrow">{t("requiredLlmProvider")}</div><h1>{t("connectModel")}</h1><p>{t("requiredProviderCopy")}</p><button className="primary-button welcome-button" onClick={onConfigure}><Settings2 size={16} /> {t("configureProvider")}</button><button className="ghost-button welcome-button" onClick={onExplore}><Eye size={15} /> {t("viewWithoutProvider")}</button><div className="welcome-features"><span><MessageCircle size={14} /> {t("anyLanguage")}</span><span><ShieldCheck size={14} /> {t("verifiedPlans")}</span><span><Bot size={14} /> {t("noKeywords")}</span></div><div className="welcome-footnote">{t("encryptedApiKey")}</div></div></div>;
+  return <div className="assistant-setup" role="note"><div className="assistant-setup-title"><Sparkles size={15} /><strong>{t("assistantUnconfiguredTitle")}</strong></div><p>{t("assistantUnconfiguredCopy")}</p><button className="outline-button small" onClick={onConnect}><Sparkles size={13} /> {t("connectAssistant")}</button></div>;
 }
 
 /**
@@ -2930,22 +2944,111 @@ function PlanCard({ plan, onApply, onDismiss, busy }: { plan: ActionPlan; onAppl
       : <button className="ghost-button plan-close" onClick={onDismiss}>{t("understood")}</button>}</div>;
 }
 
-function SettingsModal({ config, locale, onLocaleChange, onClose, onSaved }: { config: LlmConfig; locale: Locale; onLocaleChange: (locale: Locale) => void; onClose: () => void; onSaved: (config: LlmConfig) => void }) {
+type AiConnectionState = "none" | "verifying" | "connected" | "attention" | "failed";
+
+/**
+ * Settings: language, the optional AI assistant as a guided connection, and a plain explanation of
+ * the three sign-ins people mix up. Connecting verifies the key and model with the provider before
+ * anything is saved; a failure says why in plain words and can be retried from the same place.
+ */
+function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange, onNotice, repoName, onSetAuthor }: {
+  config: LlmConfig; locale: Locale; onLocaleChange: (locale: Locale) => void; onClose: () => void;
+  onConfigChange: (config: LlmConfig) => void; onNotice: (message: string) => void; repoName?: string; onSetAuthor?: () => void;
+}) {
   const { t } = useI18n();
   const [apiKey, setApiKey] = useState("");
-  const [model, setModel] = useState(config.model || "gpt-5.6-luna");
-  const [clearApiKey, setClearApiKey] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [modelChoice, setModelChoice] = useState<"recommended" | "custom">(isSupportedModel(config.model) ? "recommended" : "custom");
+  const [customModel, setCustomModel] = useState(isSupportedModel(config.model) ? "" : config.model);
+  const [busy, setBusy] = useState<"connect" | "verify" | "disconnect">();
+  /** The last attempt from this window that did not connect. The saved connection's own trouble lives in `config`. */
+  const [attempt, setAttempt] = useState<AiConnectionProblem>();
   const [error, setError] = useState<string>();
   useEscape(onClose);
-  const save = async () => {
-    if (!model.trim()) { setError(t("indicateModel")); return; }
-    setSaving(true); setError(undefined);
-    try { onSaved(await window.gitcat.saveLlmConfig({ apiKey, model, clearApiKey })); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : t("fallbackSaveConfig")); }
-    finally { setSaving(false); }
+  const model = modelChoice === "recommended" ? recommendedModel : customModel.trim();
+  const storageLocked = config.secureStorage === false || Boolean(config.storedKeyUnreadable);
+  const problem = attempt ?? config.lastProblem ?? (storageLocked && !config.configured ? { kind: "storage_unavailable" as const, detail: "", at: "" } : undefined);
+  const state: AiConnectionState = busy === "connect" || busy === "verify" ? "verifying" : attempt ? "failed" : config.configured ? (config.lastProblem ? "attention" : "connected") : problem ? "failed" : "none";
+  const changed = Boolean(apiKey.trim()) || (config.configured && model !== config.model);
+
+  const settle = (result: LlmConnectResult, success?: string) => {
+    onConfigChange(result.config);
+    if (result.ok) { setAttempt(undefined); setApiKey(""); if (success) onNotice(success); }
+    else setAttempt(result.problem);
   };
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="modal-heading"><div><div className="eyebrow">{t("llmProvider")}</div><h2 id="settings-title">{t("settings")}</h2></div><button className="icon-button soft" onClick={onClose} aria-label={t("closeSettings")}><X size={17} /></button></div><div className="provider-card"><div className="provider-logo">AI</div><div><strong>OpenAI</strong><span>{t("apiKeyLocal")}</span></div><span className={`connected-dot ${config.configured ? "on" : ""}`} /></div><label>{t("language")}<select value={locale} onChange={(event) => onLocaleChange(event.target.value as Locale)}><option value="en">{t("english")}</option><option value="es">{t("spanish")}</option></select><small>{t("languageHelp")}</small></label><label>{t("apiKey")}<input autoFocus type="password" value={apiKey} onChange={(event) => { setApiKey(event.target.value); setClearApiKey(false); }} placeholder={config.configured ? t("savedApiKeyPlaceholder") : "sk-…"} autoComplete="off" /></label>{config.configured && <label className="checkbox-label"><input type="checkbox" checked={clearApiKey} onChange={(event) => { setClearApiKey(event.target.checked); if (event.target.checked) setApiKey(""); }} /> {t("removeSavedApiKey")}</label>}<label>{t("model")}<input value={model} onChange={(event) => setModel(event.target.value)} placeholder={t("modelPlaceholder")} /><small>{t("modelHelp")}</small></label><div className="modal-note"><ShieldCheck size={15} /><span>{t("settingsNote")}</span></div>{error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}<div className="modal-actions"><button className="ghost-button" onClick={onClose}>{t("cancel")}</button><button className="primary-button" onClick={() => void save()} disabled={saving}>{saving ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />} {t("save")}</button></div></div></div>;
+  const run = async (kind: "connect" | "verify" | "disconnect", request: () => Promise<LlmConnectResult>, success?: string) => {
+    setBusy(kind); setError(undefined);
+    try { settle(await request(), success); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : t("fallbackSaveConfig")); }
+    finally { setBusy(undefined); }
+  };
+  const connect = () => {
+    if (!model) { setError(t("indicateModel")); return; }
+    // A key saved earlier but locked away is tried again before asking for a new one.
+    if (!apiKey.trim() && !config.configured && config.storedKeyUnreadable) { void run("verify", () => window.gitcat.verifyLlmConfig(), t("aiConnectedNotice")); return; }
+    if (!apiKey.trim() && !config.configured) { setError(t("keyRequired")); return; }
+    void run("connect", () => window.gitcat.saveLlmConfig({ apiKey, model }), t("aiConnectedNotice"));
+  };
+  /** Try again does what failed: the same attempt, a check of the saved connection, or a fresh look at secure storage. */
+  const retry = () => {
+    if (attempt && attempt.kind !== "storage_unavailable" && (apiKey.trim() || changed)) { connect(); return; }
+    if (config.configured || config.storedKeyUnreadable) { void run("verify", () => window.gitcat.verifyLlmConfig()); return; }
+    setAttempt(undefined); setError(undefined);
+    window.gitcat.getLlmConfig().then(onConfigChange).catch(() => undefined);
+  };
+  const disconnect = () => void run("disconnect", () => window.gitcat.saveLlmConfig({ apiKey: "", model: config.model, clearApiKey: true }), t("aiDisconnectedNotice"));
+  const openPage = (page: "api_keys" | "billing") => { window.gitcat.openProviderPage(page).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason))); };
+
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="settings-modal guided" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div className="modal-heading"><div><div className="eyebrow">{t("settingsEyebrow")}</div><h2 id="settings-title">{t("settings")}</h2></div><button className="icon-button soft" onClick={onClose} aria-label={t("closeSettings")}><X size={17} /></button></div>
+    <label>{t("language")}<select value={locale} onChange={(event) => onLocaleChange(event.target.value as Locale)}><option value="en">{t("english")}</option><option value="es">{t("spanish")}</option></select><small>{t("languageHelp")}</small></label>
+
+    <section className="settings-section ai-section" aria-labelledby="ai-section-title">
+      <div className="settings-section-heading"><h3 id="ai-section-title">{t("aiSectionTitle")}</h3>
+        <span className="ai-status" data-state={state} role="status">{state === "verifying" ? <LoaderCircle className="spin" size={12} /> : <span className="ai-status-dot" />}{t(`aiState_${state}` as MessageKey, { model: config.model })}</span></div>
+      <p className="settings-intro">{t("aiSectionIntro")}</p>
+      <details className="ai-guide" open={!config.configured}>
+        <summary>{t("aiGuideSummary")}</summary>
+        <ol className="ai-steps">
+          <li><strong>{t("aiStepNeedsTitle")}</strong><span>{t("aiStepNeeds")}</span><button type="button" className="ghost-button small" onClick={() => openPage("billing")}>{t("openBillingPage")}</button></li>
+          <li><strong>{t("aiStepKeyTitle")}</strong><span>{t("aiStepKey")}</span><button type="button" className="ghost-button small" onClick={() => openPage("api_keys")}>{t("openKeyPage")}</button></li>
+          <li><strong>{t("aiStepConnectTitle")}</strong><span>{t("aiStepConnect")}</span></li>
+        </ol>
+      </details>
+      <label>{t("aiKeyLabel")}<input type="password" value={apiKey} disabled={config.secureStorage === false} onChange={(event) => { setApiKey(event.target.value); setAttempt(undefined); }} placeholder={config.configured ? t("savedApiKeyPlaceholder") : "sk-…"} autoComplete="off" spellCheck={false} /><small>{t("aiKeyHelp")}</small></label>
+      <fieldset className="model-choice"><legend>{t("aiModelTitle")}</legend>
+        <label className="model-option"><input type="radio" name="ai-model" checked={modelChoice === "recommended"} onChange={() => { setModelChoice("recommended"); setAttempt(undefined); }} /><span><strong>{t("modelRecommended", { model: recommendedModel })}</strong><small>{t("modelRecommendedHelp")}</small></span></label>
+        <label className="model-option"><input type="radio" name="ai-model" checked={modelChoice === "custom"} onChange={() => { setModelChoice("custom"); setAttempt(undefined); }} /><span><strong>{t("modelCustom")}</strong><small>{t("modelCustomHelp")}</small></span></label>
+        {modelChoice === "custom" && <input className="model-custom" aria-label={t("modelCustom")} value={customModel} onChange={(event) => { setCustomModel(event.target.value); setAttempt(undefined); }} placeholder={t("modelPlaceholder")} spellCheck={false} />}
+      </fieldset>
+      {problem && state !== "verifying" && <div className="ai-problem" role="alert" data-kind={problem.kind}><AlertTriangle size={14} /><div>
+        <strong>{t(`aiProblemTitle_${problem.kind}` as MessageKey)}</strong>
+        <span>{t(`aiProblemHelp_${problem.kind}` as MessageKey)}</span>
+        {attempt && config.configured && <span>{t("aiPreviousKept", { model: config.model })}</span>}
+        {config.storedKeyUnreadable && problem.kind === "storage_unavailable" && <span>{t("storedKeyUnreadable")}</span>}
+        <div className="ai-problem-actions"><button type="button" className="outline-button small" onClick={retry} disabled={Boolean(busy)}><RefreshCcw size={12} /> {t("tryAgain")}</button>
+          {problem.kind === "invalid_key" && <button type="button" className="ghost-button small" onClick={() => openPage("api_keys")}>{t("openKeyPage")}</button>}
+          {problem.kind === "billing" && <button type="button" className="ghost-button small" onClick={() => openPage("billing")}>{t("openBillingPage")}</button>}
+          {problem.kind === "unknown_model" && modelChoice === "custom" && <button type="button" className="ghost-button small" onClick={() => { setModelChoice("recommended"); setAttempt(undefined); }}>{t("useRecommendedModel")}</button>}</div>
+        {problem.detail && <details className="recovery-detail"><summary>{t("technicalDetails")}</summary><pre>{problem.detail}</pre></details>}
+      </div></div>}
+      <div className="modal-note"><ShieldCheck size={15} /><span>{t("aiVerifyNote")}</span></div>
+      {error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}
+      <div className="ai-actions">
+        {config.configured && <button type="button" className="ghost-button small danger-text" onClick={disconnect} disabled={Boolean(busy)}>{t("disconnectAssistant")}</button>}
+        {config.configured && !changed && <button type="button" className="outline-button" onClick={() => void run("verify", () => window.gitcat.verifyLlmConfig())} disabled={Boolean(busy)}>{busy === "verify" ? <LoaderCircle className="spin" size={14} /> : <RefreshCcw size={14} />} {t("checkAgain")}</button>}
+        {(!config.configured || changed) && <button type="button" className="primary-button" onClick={connect} disabled={Boolean(busy) || config.secureStorage === false}>{busy === "connect" ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />} {t(config.configured ? "saveAndVerify" : "connectAndVerify")}</button>}
+      </div>
+    </section>
+
+    <section className="settings-section accounts-explainer" aria-labelledby="accounts-title">
+      <h3 id="accounts-title">{t("accountsTitle")}</h3>
+      <p className="settings-intro">{t("accountsIntro")}</p>
+      <div className="account-row"><Sparkles size={14} /><div><strong>{t("accountAiTitle")}</strong><span>{t("accountAiCopy")}</span></div></div>
+      <div className="account-row"><UserRound size={14} /><div><strong>{t("accountAuthorTitle")}</strong><span>{t("accountAuthorCopy")}</span>{onSetAuthor && repoName && <button type="button" className="ghost-button small" onClick={onSetAuthor}>{t("setAuthorForRepo", { name: repoName })}</button>}</div></div>
+      <div className="account-row"><Cloud size={14} /><div><strong>{t("accountRemoteTitle")}</strong><span>{t("accountRemoteCopy")}</span></div></div>
+    </section>
+    <div className="modal-actions"><button className="ghost-button" onClick={onClose}>{t("close")}</button></div>
+  </div></div>;
 }
 
 /** The name and email Git records with each commit here. Submitting prepares a plan; nothing is written until it is confirmed. */

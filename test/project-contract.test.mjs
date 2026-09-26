@@ -383,19 +383,52 @@ test("ninguna decisión sobre el mensaje del usuario se toma con palabras clave"
   assert.match(app, /const askSuggestion/);
 });
 
-test("el proveedor LLM es obligatorio y no hay plan local de reserva", async () => {
+test("el asistente es opcional: interpretar sigue siendo del modelo y Git funciona sin él", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  const i18n = await readFile(join(root, "src/i18n.ts"), "utf8");
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
   assert.match(service, /const LLM_REQUIRED =/);
   assert.match(service, /if \(!isLlmConfigured\(\)\) return bindPlan\(snapshot, refused\(llmRequired\(language\)\)\)/);
   assert.match(service, /configured: isLlmConfigured\(\)/);
   assert.match(service, /await verifyLlmAccess\(\{ apiKey: nextApiKey, model: nextModel \}\)/);
   assert.doesNotMatch(service, /local-fallback/);
-  // Se puede mirar la interfaz sin proveedor, pero el asistente queda inerte y lo dice.
-  assert.match(app, /!config\.configured && !exploring \? <ProviderRequired/);
-  assert.match(app, /provider-banner/);
+  // No first-run gate: Welcome opens a project and the repository view works without a provider.
+  assert.doesNotMatch(app, /ProviderRequired|exploring|provider-banner/);
+  assert.match(app, /!snapshot \? <Welcome openProject=\{openProject\} config=\{config\} onConnect=\{openSettings\} \/>/);
+  assert.doesNotMatch(i18n, /LLM PROVIDER REQUIRED|PROVEEDOR LLM REQUERIDO/);
+  // The assistant box explains how to connect instead of blocking; natural language still needs the model.
+  assert.match(app, /config\.configured \? <p className="assistant-copy">\{t\("assistantConfiguredCopy"\)\}<\/p> : <AssistantSetupCard onConnect=\{openSettings\} \/>/);
   assert.match(app, /conversation\.length === 0 && config\.configured &&/);
   assert.match(app, /disabled=\{planning \|\| !request\.trim\(\) \|\| !config\.configured\}/);
+  // Guided connection: a supported model or an advanced override, verified, with a reason and a retry.
+  assert.match(app, /isSupportedModel\(config\.model\) \? "recommended" : "custom"/);
+  assert.match(app, /t\("modelCustom"\)/);
+  assert.match(app, /aiProblemTitle_\$\{problem\.kind\}/);
+  assert.match(app, /t\("tryAgain"\)/);
+  assert.match(service, /export async function connectLlm\(input: LlmConfigInput\): Promise<LlmConnectResult>/);
+  assert.match(service, /export async function verifyLlmConfig\(\): Promise<LlmConnectResult>/);
+  // A key is never kept without encryption.
+  assert.match(service, /if \(nextApiKey && !secureStorageAvailable\(\)\)/);
+  // Only the provider's own pages are opened, by name, from the main process.
+  assert.match(main, /api_keys: "https:\/\/platform\.openai\.com\/api-keys"/);
+  assert.match(main, /Object\.hasOwn\(providerPages, page\)/);
+  // The three sign-ins are told apart where settings show them.
+  for (const key of ["accountAiTitle", "accountAuthorTitle", "accountRemoteTitle"]) assert.match(app, new RegExp(`t\\("${key}"\\)`));
+});
+
+test("cada motivo de conexión tiene título y ayuda en todos los idiomas", async () => {
+  const types = await readFile(join(root, "shared/types.ts"), "utf8");
+  const i18n = await readFile(join(root, "src/i18n.ts"), "utf8");
+  const kinds = [...types.match(/export type AiProblemKind =([^;]+);/)[1].matchAll(/"(\w+)"/g)].map((match) => match[1]);
+  assert.ok(kinds.length >= 10);
+  const es = i18n.slice(i18n.indexOf("\nconst es"));
+  const en = i18n.slice(0, i18n.indexOf("\nconst es"));
+  for (const kind of kinds) for (const block of [en, es]) {
+    assert.match(block, new RegExp(`aiProblemTitle_${kind}:`));
+    assert.match(block, new RegExp(`aiProblemHelp_${kind}:`));
+  }
+  for (const state of ["none", "verifying", "connected", "attention", "failed"]) for (const block of [en, es]) assert.match(block, new RegExp(`aiState_${state}:`));
 });
 
 test("los fallos del proveedor se reportan, nunca se disfrazan de rechazo", async () => {
