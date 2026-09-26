@@ -81,7 +81,9 @@ function publishRemote(remotes: string[]) {
 
 function publishState(branch: Branch | undefined, snapshot: RepoSnapshot, detached: boolean): WorkOverview["published"] {
   if (detached || !snapshot.head) {
-    return { state: snapshot.remotes.length ? "not_applicable" : "no_remote", ahead: 0, behind: 0 };
+    return snapshot.remotes.length
+      ? { state: "not_applicable", remote: publishRemote(snapshot.remotes), ahead: 0, behind: 0 }
+      : { state: "no_remote", ahead: 0, behind: 0 };
   }
   if (!snapshot.remotes.length) return { state: "no_remote", ahead: 0, behind: 0 };
   if (!branch?.upstream) return { state: "no_upstream", remote: publishRemote(snapshot.remotes), ahead: 0, behind: 0 };

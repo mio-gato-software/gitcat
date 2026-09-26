@@ -45,6 +45,7 @@ Los artefactos aparecen en `release/`. El build local no usa una identidad de de
 
 - Proyectos abiertos en pestañas independientes.
 - Ramas locales, rama actual, ahead/behind y remotos.
+- Resumen de dónde está el trabajo, bajo la barra del repositorio: cambios en este equipo, guardados locales, integración en la rama principal y lo publicado en el remoto (con cuándo se comprobó), más un único siguiente paso con su término de Git como ayuda. Guardar no se presenta como copia de seguridad ni una fusión local como publicada.
 - Historial de commits con autor, correo, fecha y referencias.
 - Acciones esenciales: switch, crear/borrar rama, fetch, pull fast-forward only, push, merge, commit y rebase.
 - Rebase en curso: continuar o abortar.

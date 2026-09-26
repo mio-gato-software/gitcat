@@ -19,6 +19,7 @@ import type { BranchSuggestion } from "../shared/branch-consistency";
 import { isProtectedBranch, lifecycleOf, staleDays } from "../shared/branch-lifecycle";
 import { buildCommitGraph, familyColour, maxLanes, withWorkInProgress, workInProgressHash } from "../shared/commit-graph";
 import { pullRequestReference } from "../shared/repository-activity";
+import { workOverview } from "../shared/work-overview";
 import { refChips } from "../shared/ref-chips";
 import { isPartlyStaged, isUntracked } from "../shared/selected-changes";
 import { isSupportedModel, recommendedModel } from "../shared/ai-connection";
@@ -1685,6 +1686,22 @@ export default function App() {
           onSave={() => beginDelivery(false)}
           onIntegrate={() => beginDelivery(true)}
         />
+        <WorkOverviewStrip
+          key={`overview:${snapshot.path}`}
+          snapshot={snapshot}
+          fetchedAt={active?.fetchedAt}
+          busy={planning || generatingDescription}
+          handlers={{
+            onGuide: () => void openGuide(),
+            onNewBranch: () => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" }),
+            onSave: () => beginDelivery(false),
+            onIntegrate: () => beginDelivery(true),
+            onPull: () => void prepare("pull"),
+            onFetch: () => void refreshEverything("fetch"),
+            onConnectRemote: () => setInputDialog({ operation: "add_remote", title: t("connectRemoteTitle"), label: t("remoteAddress"), value: "" }),
+            onPrepare: (operation, args) => void prepare(operation, args)
+          }}
+        />
         <main className="main-layout" ref={layoutRef} style={paneStyle}>
           {panes && !sidebarHidden && <PaneDivider edge="sidebar" width={panes.sidebar} onPointerDown={startResize("sidebar")} onNudge={(delta) => nudgePane("sidebar", delta)} onReset={() => resetPane("sidebar")} />}
           {panes && <PaneDivider edge="inspector" width={panes.inspector} onPointerDown={startResize("inspector")} onNudge={(delta) => nudgePane("inspector", delta)} onReset={() => resetPane("inspector")} />}
@@ -2134,6 +2151,8 @@ function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, o
 
   const dismissed = saved?.dismissed ?? noDismissals;
   const suggestions = useMemo(() => branchSuggestions(snapshot.branches, dismissed), [snapshot.branches, dismissed]);
+  // Naming remarks are tidying, not work: they wait behind a disclosure so the beginner path stays on the work itself.
+  const [showSuggestions, setShowSuggestions] = useState(false);
   // Both spellings share a header; the rows keep the name Git actually has.
   const aliases = useMemo(() => prefixAliases(suggestions), [suggestions]);
   const variants = useMemo(
@@ -2260,7 +2279,10 @@ function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, o
       >{hideMerged ? <EyeOff size={12} /> : <Eye size={12} />}<span>{t("mergedBranches")}</span><span className="merged-count">{merged.length}</span></button>}
     </div>
     {/* Sugerencias, nunca acciones: cada renombrado se confirma por separado y con su comando delante. */}
-    {!filtering && suggestions.map((suggestion) => <NamingSuggestion
+    {!filtering && suggestions.length > 0 && <button className="more-suggestions" aria-expanded={showSuggestions} onClick={() => setShowSuggestions((value) => !value)}>
+      <Lightbulb size={12} /><span>{showSuggestions ? t("fewerSuggestions") : t("moreSuggestions", { count: suggestions.length })}</span><ChevronRight size={12} className={`branch-chevron ${showSuggestions ? "open" : ""}`} />
+    </button>}
+    {!filtering && showSuggestions && suggestions.map((suggestion) => <NamingSuggestion
       key={suggestion.id}
       suggestion={suggestion}
       busy={busy}
@@ -2883,6 +2905,127 @@ function RepoToolbar({ snapshot, busy, deliveryBusy, refreshing, fetching, refre
       </div>
     </div>
   </div>;
+}
+
+type OverviewHandlers = {
+  onGuide: () => void; onNewBranch: () => void; onSave: () => void; onIntegrate: () => void;
+  onPull: () => void; onFetch: () => void; onConnectRemote: () => void;
+  onPrepare: (operation: Operation, args?: Record<string, string>) => void;
+};
+
+const overviewStorageKey = "gitcat-work-overview";
+
+function readOverviewCollapsed() {
+  try { return localStorage.getItem(overviewStorageKey) === "collapsed"; } catch { return false; }
+}
+
+/**
+ * Where the work is, in the four places it can be, and the one step that moves it on. Edits, saves,
+ * integration and publishing are separate facts here, so a save is never mistaken for a backup and a
+ * merge on this computer is never mistaken for a published one. Every button opens an existing flow
+ * that still shows its plan before Git runs; the Git term is offered underneath, never required.
+ */
+function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers }: { snapshot: RepoSnapshot; fetchedAt?: string; busy: boolean; handlers: OverviewHandlers }) {
+  const { t, locale } = useI18n();
+  const [collapsed, setCollapsed] = useState(readOverviewCollapsed);
+  const toggle = () => setCollapsed((value) => {
+    try { localStorage.setItem(overviewStorageKey, value ? "open" : "collapsed"); } catch { /* only a preference */ }
+    return !value;
+  });
+  const overview = workOverview(snapshot, { fetchedAt });
+  const { edited, integration, published, freshness, next } = overview;
+  const files = (count: number) => counted(t, count, "file", "files");
+  const commits = (count: number) => counted(t, count, "commit", "commits");
+  const target = integration.target;
+  const remote = published.remote ?? t("theRemote");
+
+  const editedCell = overview.conflicts
+    ? { value: t("overviewConflicts", { files: files(overview.conflicts) }), note: t("overviewEditedNote"), tone: "attention" }
+    : edited.count ? { value: t("overviewEditedSome", { files: files(edited.count) }), note: t("overviewEditedNote"), tone: "attention" }
+    : { value: t("overviewEditedNone"), tone: "calm" };
+  const localOnly = published.state === "no_remote" || published.state === "no_upstream";
+  const savedCell = overview.detached ? { value: t("overviewSavedDetached"), tone: "attention" }
+    : !overview.saved.hasCommits ? { value: t("overviewSavedNone"), tone: "muted" }
+    : published.ahead ? { value: t("overviewSavedLocal", { commits: commits(published.ahead) }), note: t("overviewNotBackup"), tone: "attention" }
+    : localOnly ? { value: t("overviewSavedAllLocal"), note: t("overviewNotBackup"), tone: "attention" }
+    : published.state === "behind" ? { value: t("overviewSavedBehind"), tone: "calm" }
+    : { value: t("overviewSavedPublished"), tone: "calm" };
+  const integratedNote = integration.state !== "integrated" ? undefined
+    : !integration.targetTracked ? t("overviewTargetLocal", { target: target! })
+    : integration.targetUnpublished ? t("overviewTargetUnpublished", { target: target!, commits: commits(integration.targetUnpublished) })
+    : t("overviewTargetPublished", { target: target! });
+  const integrationCell = integration.state === "on_target" ? { value: t("overviewOnTarget", { target: target! }), tone: "calm" }
+    : integration.state === "integrated" ? { value: t(integration.targetTracked && !integration.targetUnpublished ? "overviewIncluded" : "overviewIncludedHere"), note: integratedNote, tone: integration.targetTracked && !integration.targetUnpublished ? "calm" : "attention" }
+    : integration.state === "not_integrated" ? { value: integration.notIntegrated ? t("overviewNotIntegratedCount", { commits: commits(integration.notIntegrated), target: target! }) : t("overviewNotIntegrated", { target: target! }), tone: "attention" }
+    : integration.state === "no_target" ? { value: t("overviewNoTarget"), tone: "muted" }
+    : { value: t("overviewNothingToCompare"), tone: "muted" };
+  const freshnessNote = freshness.state === "unknown" ? t("overviewFreshUnknown")
+    : freshness.state === "checked" ? t("overviewFreshChecked", { when: relativeTime(freshness.checkedAt!, locale) })
+    : freshness.state === "stale" ? t("overviewFreshStale", { when: relativeTime(freshness.checkedAt!, locale) }) : undefined;
+  const publishedCell = published.state === "no_remote" ? { value: t("overviewNoRemote"), tone: "attention" }
+    : published.state === "no_upstream" ? { value: t("overviewNoUpstream"), tone: "attention" }
+    : published.state === "in_sync" ? { value: t("overviewInSync"), tone: freshness.state === "checked" ? "calm" : "muted" }
+    : published.state === "ahead" ? { value: t("overviewAhead", { commits: commits(published.ahead) }), tone: "attention" }
+    : published.state === "behind" ? { value: t("overviewBehind", { commits: counted(t, published.behind, "newCommitWord", "newCommits") }), tone: "attention" }
+    : published.state === "diverged" ? { value: t("overviewDiverged", { ahead: commits(published.ahead), behind: commits(published.behind) }), tone: "attention" }
+    : { value: t("overviewNothingToPublish"), tone: "muted" };
+  const cells = [
+    { key: "edited", icon: Laptop, caption: t("overviewEdited"), ...editedCell },
+    { key: "saved", icon: GitCommitHorizontal, caption: t("overviewSaved"), ...savedCell },
+    { key: "integrated", icon: GitMerge, caption: target ? t("overviewIn", { target }) : t("overviewInNoTarget"), ...integrationCell },
+    { key: "published", icon: Cloud, caption: published.remote ? t("overviewPublishedTo", { remote: published.remote }) : t("overviewPublished"), ...publishedCell, note: freshnessNote }
+  ];
+
+  const values = {
+    operation: overview.pending ? pendingLabel(overview.pending, t) : t("guideTitle_none"),
+    files: files(edited.count), remote, target: next.target ?? target ?? "",
+    commits: commits(next.action === "get_latest" ? published.behind : next.action === "publish_target" ? integration.targetUnpublished ?? 0 : published.ahead),
+    ahead: commits(published.ahead), behind: commits(published.behind)
+  };
+  const key = (suffix: string) => `next_${next.action}${suffix}` as MessageKey;
+  const button = (label: string, onClick: () => void, primary = true) =>
+    <button key={label} className={primary ? "primary-button" : "outline-button"} disabled={busy} onClick={onClick}>{label}</button>;
+  const actions: ReactNode[] = [];
+  switch (next.action) {
+    case "finish_pending": actions.push(button(t(key("_button")), handlers.onGuide)); break;
+    case "return_to_branch": actions.push(button(t(key("_button")), handlers.onNewBranch)); break;
+    case "save_changes": case "first_save": actions.push(button(t("next_save_changes_button"), handlers.onSave)); break;
+    case "combine_diverged":
+      if (next.upstream) {
+        actions.push(button(t("next_combine_merge_button"), () => handlers.onPrepare("merge", { name: next.upstream! })));
+        actions.push(button(t("next_combine_rebase_button"), () => handlers.onPrepare("rebase", { onto: next.upstream! }), false));
+      }
+      break;
+    case "get_latest": actions.push(button(t(key("_button")), handlers.onPull)); break;
+    case "connect_remote": actions.push(button(t(key("_button")), handlers.onConnectRemote)); break;
+    case "publish_branch": actions.push(button(t("next_publish_button"), () => handlers.onPrepare("push", next.remote ? { setUpstream: next.remote } : {}))); break;
+    case "publish_saved": actions.push(button(t("next_publish_button"), () => handlers.onPrepare("push"))); break;
+    case "integrate": actions.push(button(t(key("_button")), handlers.onIntegrate)); break;
+    case "publish_target": actions.push(button(t(key("_button"), values), () => handlers.onPrepare("checkout", { name: next.target! }))); break;
+    case "check_remote": actions.push(button(t(key("_button")), handlers.onFetch, false)); break;
+    default: break;
+  }
+  const detail = t(key("_detail"), values);
+  const title = t(`next_${next.action}` as MessageKey, values);
+  return <section className={`work-overview ${collapsed ? "collapsed" : ""}`} aria-label={t("overviewLabel")} data-next={next.action}>
+    {!collapsed && <ol className="overview-stages">
+      {cells.map((cell) => <li key={cell.key} className={`overview-stage tone-${cell.tone}`} data-stage={cell.key} title={cell.note ? `${cell.value}. ${cell.note}` : cell.value}>
+        <span className="overview-caption"><cell.icon size={12} />{cell.caption}</span>
+        <strong>{cell.value}</strong>
+        {cell.note && <small>{cell.note}</small>}
+      </li>)}
+    </ol>}
+    <div className="overview-next" title={detail}>
+      <div className="overview-next-text">
+        <span className="overview-caption">{t("overviewNext")}</span>
+        <strong>{title}</strong>
+        {!collapsed && <small>{detail}</small>}
+        <code className="overview-git" title={t("overviewGitHint", { command: next.git })}>{t("overviewGitHint", { command: next.git })}</code>
+      </div>
+      {actions.length > 0 && <div className="overview-actions">{actions}</div>}
+      <button className="mini-icon overview-toggle" onClick={toggle} aria-expanded={!collapsed} aria-label={t(collapsed ? "overviewShow" : "overviewHide")} title={t(collapsed ? "overviewShow" : "overviewHide")}><ChevronRight size={13} className={collapsed ? "" : "open"} /></button>
+    </div>
+  </section>;
 }
 
 type FileListMode = "path" | "tree";

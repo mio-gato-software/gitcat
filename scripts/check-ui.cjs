@@ -216,6 +216,17 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.window-tab:not(.unavailable) [role="tab"]').click()`);
   await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
   const before = git('status', '--porcelain');
+  // The overview keeps edited, saved, integrated and published apart, and names one next step by intent.
+  await waitFor(`document.querySelector('.work-overview')?.dataset.next === 'save_changes'`);
+  const stage = (name) => js(`document.querySelector('.work-overview [data-stage="${name}"]').innerText`);
+  assert.match(await stage('edited'), /En este equipo[\s\S]*2 archivos sin guardar/);
+  assert.match(await stage('integrated'), /En main[\s\S]*Falta integrar en main: 1 commit/);
+  assert.match(await stage('published'), /Sin remoto conectado/);
+  const nextStep = await js(`document.querySelector('.work-overview .overview-next').innerText`);
+  for (const entry of [/Siguiente paso/, /Guarda tus cambios/, /En términos de Git: git add \+ git commit/, /Revisar y guardar/]) assert.match(nextStep, entry);
+  // Naming remarks wait behind a disclosure instead of sitting on the beginner path.
+  assert.equal(await js(`document.querySelectorAll('.naming-suggestion').length`), 0);
+  await capture('work-overview');
   assert.equal(await js(`document.querySelector('.commit-row').classList.contains('wip')`), true);
   assert.match(await js(`document.querySelector('.commit-row.wip').innerText`), /WIP/);
   // Every commit says how much it changed, without opening it.
@@ -381,6 +392,12 @@ app.whenReady().then(async () => {
   assert.equal(git('branch', '--show-current'), 'main');
   assert.equal(git('status', '--porcelain'), '');
   assert.equal(git('show', 'main:new-file.txt'), 'new file');
+  // Saved and integrated here is still not published anywhere, and the overview says so.
+  await waitFor(`document.querySelector('.work-overview')?.dataset.next === 'connect_remote'`);
+  assert.match(await stage('saved'), /Solo en este equipo[\s\S]*no es una copia de seguridad hasta que se publica/);
+  assert.match(await stage('integrated'), /Estás en main/);
+  assert.match(await js(`document.querySelector('.work-overview .overview-next').innerText`), /Conecta un sitio donde publicar[\s\S]*git remote add/);
+  assert.match(await js(`document.querySelector('.toolbar-delivery').innerText`), /Guardado en este equipo/, 'A save is described as local, never as a backup');
   // A push with nowhere to go is explained from the repository itself, with the way on, and the
   // assistant is not needed for it: no provider request is made.
   const headBeforePush = git('rev-parse', 'HEAD');
@@ -453,7 +470,10 @@ app.whenReady().then(async () => {
   const banner = await js(`document.querySelector('.rebase-banner').innerText`);
   assert.match(banner, /Fusión en curso/); assert.match(banner, /3 archivos en conflicto/);
   assert.doesNotMatch(banner, /Proponer resolución/, 'No assistant, no draft button');
-  await js(`document.querySelector('.rebase-banner .guide-open').click()`);
+  // A half-finished merge outranks every other step, and the overview's button opens the same guide.
+  await waitFor(`document.querySelector('.work-overview')?.dataset.next === 'finish_pending'`);
+  assert.match(await js(`document.querySelector('.work-overview .overview-next').innerText`), /Termina la operación en curso[\s\S]*Fusión en curso[\s\S]*git merge --continue/);
+  await js(`document.querySelector('.work-overview .overview-actions .primary-button').click()`);
   await waitFor(`document.querySelector('.conflict-guide .guide-file')`);
   const guideText = await js(`document.querySelector('.conflict-guide').innerText`);
   for (const entry of [/Fusionando otra en main/, /La rama en la que estás/, /La rama que se está fusionando/, /Cambios en otra/, /Git: «theirs»/,
@@ -704,7 +724,11 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.changes-view').innerText`), /Todavía no hay versiones guardadas/);
   assert.match(await js(`document.querySelector('.window-tab.active').innerText`), /empty-start/);
   assert.match(await js(`document.querySelector('.branch-list').innerText`), /está lista\. Aparecerá aquí después del primer guardado/, 'An unborn branch is explained, not reported as a filter miss');
-  assert.doesNotMatch(await js(`document.querySelector('.toolbar-delivery').innerText`), /Trabajo guardado/, 'Nothing is called saved before the first save');
+  assert.doesNotMatch(await js(`document.querySelector('.toolbar-delivery').innerText`), /Guardado en este equipo/, 'Nothing is called saved before the first save');
+  // An empty clone has a remote but nothing to publish, and nothing is claimed about it.
+  await waitFor(`document.querySelector('.work-overview')?.dataset.next === 'add_first_files'`);
+  assert.match(await js(`document.querySelector('.work-overview [data-stage="saved"]').innerText`), /Aún no hay guardados/);
+  assert.match(await js(`document.querySelector('.work-overview [data-stage="published"]').innerText`), /Publicado en origin[\s\S]*Aún no hay nada que publicar/);
   await capture('cloned-empty');
   // With a remote, Settings says where a publish goes and checks access read-only; this one is a
   // folder on this Mac, so nothing reaches a network.
@@ -716,7 +740,7 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.settings-modal .readiness-section').scrollIntoView()`);
   await capture('settings-readiness-remote');
   win.destroy();
-  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');
+  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, a work overview separating edited, saved, integrated and published work with one next step, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));
