@@ -199,15 +199,22 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         const branch = args.branch ?? on;
         const remote = args.setUpstream ?? upstreamRemote;
         const ahead = !walked.some((item) => item.step !== step && writesHistory.has(item.step.operation) && item.on === branch) ? branchNamed(branch)?.ahead : undefined;
+        if (!remote) {
+          // Nowhere to send it: saying the branch would match a remote would promise something Git cannot do.
+          summary.remote.effects.push(remotes.length
+            ? say(`${branch} has no destination on a remote yet, so Git has nowhere to send it.`, `${branch} todavía no tiene destino en un remoto, así que Git no tiene adónde enviarla.`)
+            : say(`This project is not connected to a remote yet, so there is nowhere to send ${branch}.`, `Este proyecto todavía no está conectado a un remoto, así que no hay adónde enviar ${branch}.`));
+          break;
+        }
         summary.remote.name ??= remote;
         summary.remote.effects.push(args.setUpstream
           ? say(`Publishes ${branch} to ${remote} for the first time and remembers it as its destination.`, `Publica ${branch} en ${remote} por primera vez y la recuerda como su destino.`)
           : ahead
-            ? say(`Sends ${commits(say, ahead)} of ${branch} to ${remote ?? "the remote"}.`, `Envía ${commits(say, ahead)} de ${branch} a ${remote ?? "el remoto"}.`)
-            : say(`Sends the saved commits of ${branch} to ${remote ?? "the remote"}.`, `Envía los commits guardados de ${branch} a ${remote ?? "el remoto"}.`));
-        summary.irreversible.push(say(`Once on ${remote ?? "the remote"}, anyone with access can fetch these commits; taking them back means rewriting the remote.`, `Una vez en ${remote ?? "el remoto"}, cualquiera con acceso puede descargar estos commits; retirarlos obliga a reescribir el remoto.`));
+            ? say(`Sends ${commits(say, ahead)} of ${branch} to ${remote}.`, `Envía ${commits(say, ahead)} de ${branch} a ${remote}.`)
+            : say(`Sends the saved commits of ${branch} to ${remote}.`, `Envía los commits guardados de ${branch} a ${remote}.`));
+        summary.irreversible.push(say(`Once on ${remote}, anyone with access can fetch these commits; taking them back means rewriting the remote.`, `Una vez en ${remote}, cualquiera con acceso puede descargar estos commits; retirarlos obliga a reescribir el remoto.`));
         if (args.noVerify === "true") summary.irreversible.push(say("The checks this project runs before publishing (pre-push hooks) are skipped.", "Se saltan las comprobaciones que este proyecto ejecuta antes de publicar (hooks pre-push)."));
-        published.set(branch, remote ?? say("the remote", "el remoto"));
+        published.set(branch, remote);
         unpublished.delete(branch);
         break;
       }
@@ -236,7 +243,7 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
   const endsOn = walked.at(-1)?.after;
   summary.endsOn = endsOn && endsOn !== "HEAD" ? endsOn : undefined;
   if (summary.noop) summary.finalState.push(say("Your files, commits and branches stay exactly as they are.", "Tus archivos, commits y ramas se quedan exactamente como están."));
-  else if (summary.endsOn) summary.finalState.push(say(`You end up on ${summary.endsOn}.`, `Terminas en ${summary.endsOn}.`));
+  else if (summary.endsOn && (summary.endsOn !== start || walked.some(({ step }) => writesHistory.has(step.operation)))) summary.finalState.push(say(`You end up on ${summary.endsOn}.`, `Terminas en ${summary.endsOn}.`));
   if (saved) summary.finalState.push(edited
     ? say(`${files(say, edited)} stay uncommitted, exactly as they are.`, `${files(say, edited)} siguen sin guardar, tal como están.`)
     : say("No uncommitted changes are left.", "No quedan cambios sin guardar."));

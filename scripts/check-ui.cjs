@@ -408,9 +408,15 @@ app.whenReady().then(async () => {
   const publishReadiness = await js(`document.querySelector('.plan-card .readiness-checklist').innerText`);
   for (const entry of [/Adónde va esto/i, /Todavía no está conectado a un remoto/, /Guardar funciona sin él/, /Conectar un remoto…/]) assert.match(publishReadiness, entry);
   assert.ok(readinessRequests.some((entry) => entry.path === snapshot.path && entry.access), 'A publish checks access before it is confirmed');
+  // The plan leads with the goal; the command waits, closed, in the technical details.
+  assert.match(await js(`document.querySelector('.plan-card .plan-goal').innerText`), /Proyecto[\s\S]*no está conectado a un remoto, así que no hay adónde enviar main/);
+  assert.equal(await js(`document.querySelector('.plan-card .plan-technical').open`), false, 'Commands stay folded away until asked for');
+  assert.match(await js(`document.querySelector('.plan-card .plan-technical').textContent`), /Comandos Git[\s\S]*git push/);
   await capture('publish-readiness');
   await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
   await waitFor(`document.querySelector('.recovery-card[data-kind="no_remote"]')`);
+  // The stopped push is never told as a success: its step is shown as stopped, with Git's words folded away.
+  assert.match(await js(`document.querySelector('.completion-card[data-status="failed"]').innerText`), /no se completó[\s\S]*Se detuvo aquí/);
   const recoveryText = await js(`document.querySelector('.recovery-card[data-kind="no_remote"]').innerText`);
   for (const entry of [/aún no tiene dónde publicarse/, /Comprobado en este Mac/, /Se detuvo aquí/, /Tus commits están a salvo/, /Conectar un remoto/]) assert.match(recoveryText, entry);
   assert.equal(recoverCalls, 0, 'A failure GitCat can prove needs no assistant');
@@ -518,6 +524,7 @@ app.whenReady().then(async () => {
   assert.equal(cgit('rev-list', '--parents', '-n', '1', 'HEAD').split(' ').length, 3, 'The merge commit was created');
   assert.equal(cgit('status', '--porcelain'), '');
   await waitFor(`!document.querySelector('.rebase-banner') && !document.querySelector('.plan-card .plan-actions .primary-button')`);
+  await waitFor(`document.querySelector('.completion-card[data-status="completed"]')?.innerText.includes('Qué cambió')`);
   assert.equal(proposals, 0, 'No provider was needed at any point');
   // The assistant tab explains how to connect instead of pretending to work, and nothing is interpreted locally.
   await js(`[...document.querySelectorAll('.inspector-tabs button')][1].click()`);
@@ -659,7 +666,7 @@ app.whenReady().then(async () => {
   await capture('identity-review');
   await js(`document.querySelector('.identity-modal .primary-button').click()`);
   await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
-  const identityPlan = await js(`document.querySelector('.plan-card').innerText`);
+  const identityPlan = await js(`document.querySelector('.plan-card').textContent`);
   for (const entry of [/todos los repositorios de este Mac como QA Recetas <recetas@example\.test>/, /Todavía no hay una identidad global/, /conservan su autor/, /git config --global user\.name/]) assert.match(identityPlan, entry);
   assert.equal(fs.readFileSync(globalGitConfig, 'utf8'), '', 'Nothing is written before the confirmation');
   await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);

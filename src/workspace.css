@@ -549,3 +549,33 @@
 .identity-modal .identity-scope:has(input:checked) { border-color: #4b8180; }
 .identity-modal .identity-scope input { width: 14px; height: 14px; flex: none; margin: 2px 0 0; padding: 0; accent-color: #68d9ca; }
 .identity-modal .identity-now { color: var(--secondary); }
+
+/* A plan told by its goal first; the commands wait in the technical details. */
+.plan-goal { display: flex; flex-direction: column; gap: 7px; margin: 9px 0; font-size: 9.5px; line-height: 1.45; }
+.plan-facts { display: grid; gap: 3px; margin: 0; }
+.plan-facts > div { display: grid; grid-template-columns: minmax(70px, auto) 1fr; gap: 8px; min-width: 0; }
+.plan-facts dt { color: var(--muted); }
+.plan-facts dd { display: flex; flex-direction: column; gap: 2px; margin: 0; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.plan-facts dd small { color: var(--muted); font-size: 9px; }
+.plan-place strong, .plan-irreversible strong, .plan-partial strong, .completion-section strong { display: flex; align-items: center; gap: 4px; color: var(--text); font-size: 9.5px; }
+.plan-place ul, .plan-irreversible ul, .plan-partial ul, .completion-section ul { margin: 2px 0 0; padding-left: 16px; color: var(--secondary); overflow-wrap: anywhere; }
+.plan-irreversible { padding: 6px 8px; border: 1px solid #644b2c; border-radius: 6px; background: #2b241a; }
+.plan-irreversible strong, .plan-irreversible svg { color: #eac58e; }
+.plan-partial ul { color: var(--muted); }
+.plan-card .plan-stale { display: flex; align-items: flex-start; gap: 5px; margin: 0; color: #eac58e; }
+.plan-stale svg { flex: none; margin-top: 2px; }
+.technical-details { margin: 8px 0 0; font-size: 9px; }
+.technical-details summary { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: var(--muted); font-size: 9.5px; }
+.technical-details summary:focus-visible { outline: 2px solid #4b8180; outline-offset: 2px; border-radius: 3px; }
+.technical-label { display: block; margin: 6px 0 3px; color: var(--muted); }
+.technical-commands { display: flex; flex-direction: column; gap: 3px; margin: 0; padding-left: 16px; color: var(--mint); }
+.technical-commands code, .technical-details pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; overflow-wrap: anywhere; }
+.technical-details pre { max-height: 160px; margin: 0; padding: 7px; overflow: auto; color: var(--secondary); background: var(--canvas); border-radius: 5px; white-space: pre-wrap; }
+.completion-card { display: flex; flex-direction: column; gap: 6px; padding: 8px 9px; color: var(--secondary); background: var(--surface); border: 1px solid var(--hover); border-radius: 6px; font-size: 9.5px; line-height: 1.45; }
+.completion-card .recovery-steps { margin: 0; }
+.completion-header { display: flex; align-items: flex-start; gap: 6px; }
+.completion-header svg { flex: none; margin-top: 1px; color: var(--mint); }
+.completion-header strong { min-width: 0; color: var(--text); font-size: 10px; overflow-wrap: anywhere; }
+.completion-card.status-partial, .completion-card.status-failed, .completion-card.status-not_run { border-color: #644b2c; }
+.completion-card.status-partial .completion-header svg, .completion-card.status-failed .completion-header svg, .completion-card.status-not_run .completion-header svg { color: #e6a64f; }
+.completion-next { margin: 0; color: var(--text); }

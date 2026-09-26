@@ -104,6 +104,12 @@ test("a publication says what goes to the remote and that it cannot simply be ta
   assert.deepEqual(result.remaining, []);
   has(completionSummary({ plan: publish, outcomes: done(publish.steps, ["completed"]), before, after }, "es").changed, /feature\/menu ya está publicada en origin/);
 
+  const nowhere = planSummary(plan([step("push", {}, "Publish")]), snapshot({ remotes: [], branches: [branch("main", { isCurrent: true, presence: "local" })], currentBranch: "main" }), "en");
+  has(nowhere.remote.effects, /not connected to a remote yet, so there is nowhere to send main/);
+  assert.deepEqual(nowhere.irreversible, [], "a push with nowhere to go promises nothing it cannot do");
+  assert.ok(!nowhere.finalState.some((line) => /matches/.test(line)));
+  has(planSummary(plan([step("push", {}, "Publish")]), snapshot({ remotes: [], branches: [branch("main", { isCurrent: true, presence: "local" })], currentBranch: "main" }), "es").remote.effects, /no hay adónde enviar main/);
+
   const noVerify = planSummary(plan([step("push", { noVerify: "true" }, "Publish")]), snapshot({ branches: [branch("feature/menu", { isCurrent: true, upstream: "origin/feature/menu", ahead: 2 })] }), "en");
   has(noVerify.remote.effects, /Sends 2 commits of feature\/menu to origin/);
   has(noVerify.irreversible, /pre-push hooks\) are skipped/);

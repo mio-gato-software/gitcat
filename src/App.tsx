@@ -20,6 +20,7 @@ import { isProtectedBranch, lifecycleOf, staleDays } from "../shared/branch-life
 import { buildCommitGraph, familyColour, maxLanes, withWorkInProgress, workInProgressHash } from "../shared/commit-graph";
 import { pullRequestReference } from "../shared/repository-activity";
 import { workOverview } from "../shared/work-overview";
+import { completionSummary, planSummary, type CompletionSummary } from "../shared/plan-summary";
 import { refChips } from "../shared/ref-chips";
 import { isPartlyStaged, isUntracked } from "../shared/selected-changes";
 import { isSupportedModel, recommendedModel } from "../shared/ai-connection";
@@ -85,6 +86,10 @@ type ConversationTurn = {
   answer?: string;
   plan?: ActionPlan;
   outcome?: string;
+  /** What actually changed, read from the repository before and after, told in terms of the goal. */
+  completion?: CompletionSummary;
+  /** What Git printed, kept for the technical details; never the summary itself. */
+  output?: string;
   error?: string;
   /** Files the assistant could not read while answering, so the answer says what it is missing. */
   withheld?: WithheldFile[];
@@ -1357,14 +1362,17 @@ export default function App() {
 
   const runPlan = async (turnId: number, plan: ActionPlan) => {
     updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, status: "executing" }));
+    const project = projects.find((item) => item.snapshot.path === plan.repoPath);
+    const before = project?.snapshot;
     try {
       const result = await window.gitcat.executePlan(plan.repoPath, plan.id, locale);
+      const completion = completionSummary({ plan, outcomes: result.outcomes, before, after: result.snapshot, error: result.error, fetchedAt: project?.fetchedAt }, locale);
       updateSnapshot(plan.repoPath, result.snapshot);
       setReadinessEpoch((epoch) => epoch + 1);
       if (result.error) {
         // A sequence that stopped halfway did change the repository: show what ran, not only the failure.
         const progress = plan.steps.length > 1 ? result.output : undefined;
-        updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome: progress, error: result.error, private: result.withheldFromAssistant, status: "error" }));
+        updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome: progress, completion, output: result.output, error: result.error, private: result.withheldFromAssistant, status: "error" }));
         addActivity({ label: t("gitNeedsAttention"), detail: result.error, tone: "warning" });
         /**
          * The repository is now holding a half-finished job the user did not ask for, and this is
@@ -1386,15 +1394,16 @@ export default function App() {
           });
         }
       } else {
-        const outcome = result.output || t("completed", { summary: plan.summary });
-        updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome, private: result.withheldFromAssistant, status: "completed" }));
-        addActivity({ label: t("actionExecuted"), detail: outcome, tone: "success" });
+        // The model still reads what Git printed; the person reads what changed and what is left.
+        const outcome = result.output || completion.headline;
+        updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome, completion, output: result.output, private: result.withheldFromAssistant, status: "completed" }));
+        addActivity({ label: t("actionExecuted"), detail: completion.headline, tone: "success" });
         if (plan.steps.some((step) => step.operation === "commit")) { setCommitMessage(""); setDeliveryBaseline(undefined); setDescriptionWithheld([]); setSecretsReviewedKey(undefined); }
       }
     } catch (error) {
       const message = cleanError(error, t("fallbackGitAction"));
       setReadinessEpoch((epoch) => epoch + 1);
-      updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
+      updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, completion: completionSummary({ plan, error: message }, locale), error: message, status: "error" }));
       notify({ message, tone: "error" });
       await refreshProject(plan.repoPath, false);
       // The main process kept what happened to this plan, including whether the repository moved under it.
@@ -1764,13 +1773,13 @@ export default function App() {
                 : activeFocus
                   ? <CommitInspector key={activeFocus.commit.hash} commit={activeFocus.commit} snapshot={snapshot} known={graphCommits} onFocus={(commit) => focusOn({ kind: "commit", commit }, true)} onOpen={(file) => setModalCommit({ commit: activeFocus.commit, file })} />
                   : <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommitSelected")}</strong><span>{t("noCommitSelectedHint")}</span></div>}
-            </div> : <div className="assistant-body">{config.configured ? <p className="assistant-copy">{t("assistantConfiguredCopy")}</p> : <AssistantSetupCard onConnect={openSettings} />}{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => void openSharingReview()} disabled={!config.configured}><Eye size={12} /> {t("sharingOpen")}</button><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} configured={config.configured} onRecoveryAction={(action) => void runRecoveryAction(turn.id, turn, action)} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div>}
+            </div> : <div className="assistant-body">{config.configured ? <p className="assistant-copy">{t("assistantConfiguredCopy")}</p> : <AssistantSetupCard onConnect={openSettings} />}{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => void openSharingReview()} disabled={!config.configured}><Eye size={12} /> {t("sharingOpen")}</button><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} snapshot={snapshot} busy={planning} configured={config.configured} onRecoveryAction={(action) => void runRecoveryAction(turn.id, turn, action)} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div>}
             <div className="chat-compose"><textarea aria-label={t("assistantRequest")} disabled={!config.configured} value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder={config.configured ? t("assistantPlaceholder") : t("configureAssistantPlaceholder")} rows={2} /><button className="send-button" aria-label={t("prepareRequest")} onClick={() => void propose(request)} disabled={planning || !request.trim() || !config.configured}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div>
           </aside>
         </main>
         <footer className="statusbar"><div className="status-left"><span className={`status-good ${snapshot.isDirty ? "has-changes" : ""}`}><CircleDot size={12} /> {snapshot.isDirty ? counted(t, snapshot.changes.length, "change", "changes") : t("noUncommittedChanges")}</span><span className="status-separator" /><span>{counted(t, branchCount.local, "localBranch", "localBranches")}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} ${t("remoteOnly")}` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> {t("lastRead", { date: formatDate(active.loadedAt, locale) })}</span><span className="remote-status" title={snapshot.remotes.length ? `${remoteTitle(snapshot, t)}\n${active.fetchedAt ? t("remoteCheckedAt", { date: formatDate(active.fetchedAt, locale) }) : t("remoteNotChecked")}` : remoteTitle(snapshot, t)}><Cloud size={12} /> {remoteLabel(snapshot, t)}</span><button className={`provider-status ${config.lastProblem ? "attention" : ""}`} onClick={openSettings} title={t("aiStatusTitle")}><Sparkles size={12} /> {config.configured ? t(config.lastProblem ? "statusAiAttention" : "statusAiConnected", { model: config.model }) : t("llmNotConfigured")}</button></div></footer>
       </>}
-      {deliveryReview && <DeliveryReviewModal review={deliveryReview} busy={planning}
+      {deliveryReview && <DeliveryReviewModal review={deliveryReview} snapshot={projects.find((item) => item.snapshot.path === deliveryReview.plan.repoPath)?.snapshot} busy={planning}
         onClose={() => { updateTurn(deliveryReview.plan.repoPath, deliveryReview.turnId, (turn) => ({ ...turn, status: "cancelled", outcome: t("planDiscarded") })); setDeliveryReview(undefined); }}
         onApply={async () => { const review = deliveryReview; setDeliveryReview(undefined); await applyPlan(review.turnId, review.plan); }} />}
       {setup && <SetupModal setup={setup} onClose={() => setSetup(undefined)} onChoose={(intent) => void openProject(intent)} onClone={() => setSetup({ kind: "clone" })}
@@ -3280,8 +3289,8 @@ function CommitInspector({ commit, snapshot, known, onFocus, onOpen }: {
   </div>;
 }
 
-function DeliveryReviewModal({ review, busy, onClose, onApply }: {
-  review: { turnId: number; plan: ActionPlan }; busy: boolean; onClose: () => void; onApply: () => Promise<void>;
+function DeliveryReviewModal({ review, snapshot, busy, onClose, onApply }: {
+  review: { turnId: number; plan: ActionPlan }; snapshot?: RepoSnapshot; busy: boolean; onClose: () => void; onApply: () => Promise<void>;
 }) {
   const { t } = useI18n();
   const container = useRef<HTMLElement>(null);
@@ -3299,17 +3308,17 @@ function DeliveryReviewModal({ review, busy, onClose, onApply }: {
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     }} role="dialog" aria-modal="true" aria-label={t("reviewDeliveryTitle")}>
     <div className="modal-heading"><h2>{t("reviewDeliveryTitle")}</h2><button className="icon-button" onClick={onClose} aria-label={t("cancel")}><X size={18} /></button></div>
-    <PlanCard plan={review.plan} busy={busy} onApply={onApply} onDismiss={onClose} />
+    <PlanCard plan={review.plan} snapshot={snapshot} busy={busy} onApply={onApply} onDismiss={onClose} />
   </section></div>;
 }
 
-function ConversationEntry({ turn, busy, configured, onRecoveryAction, onApply, onDismiss }: {
-  turn: ConversationTurn; busy: boolean; configured: boolean; onRecoveryAction: (action: RecoveryAction) => void; onApply: (plan: ActionPlan) => void; onDismiss: () => void;
+function ConversationEntry({ turn, snapshot, busy, configured, onRecoveryAction, onApply, onDismiss }: {
+  turn: ConversationTurn; snapshot?: RepoSnapshot; busy: boolean; configured: boolean; onRecoveryAction: (action: RecoveryAction) => void; onApply: (plan: ActionPlan) => void; onDismiss: () => void;
 }) {
   const { t } = useI18n();
   // A sequence reports itself step by step, marks included, so it needs no outer verdict icon or colour.
   const sequence = (turn.plan?.steps.length ?? 0) > 1;
-  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && <p>{turn.answer}</p>}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
+  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && <p>{turn.answer}</p>}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} snapshot={snapshot} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.completion ? <CompletionCard summary={turn.completion} output={turn.output} /> : turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
 }
 
 
@@ -3399,20 +3408,76 @@ function PublishReadiness({ repoPath, remote }: { repoPath: string; remote?: str
   return <ReadinessChecklist readiness={readiness} items={["remote"]} t={t} compact title={t("readinessPublishTitle")} />;
 }
 
-function PlanCard({ plan, onApply, onDismiss, busy }: { plan: ActionPlan; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean }) {
+/** A path list that stays short: the first few names and how many more. */
+function fileList(paths: string[], t: Translate) {
+  const shown = paths.slice(0, 5).join(", ");
+  return paths.length > 5 ? `${shown} ${t("planGoalMoreFiles", { count: paths.length - 5 })}` : shown;
+}
+
+/**
+ * The plan in terms of the goal: which project, from where to where, which files, what changes on this
+ * computer and what on a remote, where things end up, and what cannot simply be undone. The commands
+ * and raw structured details stay in a disclosure for whoever wants them; nobody needs them to decide.
+ */
+function PlanGoal({ plan, snapshot }: { plan: ActionPlan; snapshot?: RepoSnapshot }) {
+  const { t, locale } = useI18n();
+  const summary = planSummary(plan, snapshot, locale);
+  const list = (lines: string[]) => <ul>{lines.map((line) => <li key={line}>{line}</li>)}</ul>;
+  return <div className="plan-goal">
+    <dl className="plan-facts">
+      <div><dt>{t("planGoalProject")}</dt><dd>{summary.project}</dd></div>
+      {summary.from && summary.to && <div><dt>{t("planGoalBranches")}</dt><dd>{summary.from} → {summary.to}</dd></div>}
+      {summary.files && summary.files.paths.length > 0 && <div><dt>{t(summary.files.selected ? "planGoalSelectedFiles" : "planGoalFiles")}</dt><dd>{fileList(summary.files.paths, t)}{summary.files.selected && summary.files.left > 0 && <small>{t("planGoalFilesLeft", { count: summary.files.left })}</small>}</dd></div>}
+    </dl>
+    {summary.local.length > 0 && <section className="plan-place" data-place="local"><strong><Laptop size={11} /> {t("planOnThisComputer")}</strong>{list(summary.local)}</section>}
+    {summary.remote.effects.length > 0 && <section className="plan-place" data-place="remote"><strong><Cloud size={11} /> {summary.remote.name ? t("planOnRemote", { remote: summary.remote.name }) : t("planOnRemoteUnnamed")}</strong>{list(summary.remote.effects)}</section>}
+    {summary.finalState.length > 0 && <section className="plan-place" data-place="final"><strong><Check size={11} /> {t("planFinalState")}</strong>{list(summary.finalState)}</section>}
+    {summary.irreversible.length > 0 && <section className="plan-irreversible" role="note"><strong><AlertTriangle size={11} /> {t("planCannotUndo")}</strong>{list(summary.irreversible)}</section>}
+    {summary.partial.length > 0 && <section className="plan-partial" role="note"><strong>{t("planIfItStops")}</strong>{list(summary.partial)}</section>}
+    {summary.stale && <p className="plan-stale" role="status"><RefreshCcw size={11} /> {t("planStaleNote")}</p>}
+  </div>;
+}
+
+function PlanCard({ plan, snapshot, onApply, onDismiss, busy }: { plan: ActionPlan; snapshot?: RepoSnapshot; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean }) {
   const { t } = useI18n();
   const asking = plan.kind === "question";
   const push = plan.allowed && plan.requiresConfirmation ? plan.steps.find((step) => step.operation === "push") : undefined;
-  return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? t("interpretedByProvider") : t("directAction")}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? t("dismissQuestion") : t("dismissPlan")}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.withheld && plan.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(plan.withheld, t) })}</p>}{plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}{plan.repositoryPlan && <pre className="repository-plan-json">{JSON.stringify(plan.repositoryPlan, null, 2)}</pre>}{push && <PublishReadiness repoPath={plan.repoPath} remote={push.args.setUpstream} />}{plan.allowed && (plan.steps.length > 1
-      ? <ol className="plan-steps">{plan.steps.map((step, index) => <li key={`${step.command}-${index}`}><span className="step-summary">{step.summary}</span><code><TerminalSquare size={11} />{step.command}</code></li>)}</ol>
-      : <div className="command-preview"><TerminalSquare size={14} /><code>{plan.command}</code></div>)}
-    {plan.allowed && plan.requiresConfirmation && plan.steps.length > 1 && <p className="plan-hint">{t("planStepsHint", { count: plan.steps.length })}</p>}
+  return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? t("interpretedByProvider") : t("directAction")}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? t("dismissQuestion") : t("dismissPlan")}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.withheld && plan.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(plan.withheld, t) })}</p>}
+    {plan.allowed && <PlanGoal plan={plan} snapshot={snapshot} />}
+    {plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}
+    {push && <PublishReadiness repoPath={plan.repoPath} remote={push.args.setUpstream} />}
+    {plan.allowed && plan.steps.length > 1 && <ol className="plan-steps">{plan.steps.map((step, index) => <li key={`${step.command}-${index}`}><span className="step-summary">{step.summary}</span></li>)}</ol>}
+    {(plan.allowed || plan.repositoryPlan) && <details className="technical-details plan-technical">
+      <summary><TerminalSquare size={11} /> {t("technicalDetails")}</summary>
+      {plan.allowed && <><span className="technical-label">{t("technicalCommands")}</span><ol className="technical-commands">{plan.steps.map((step, index) => <li key={`${step.command}-${index}`}><code>{step.command}</code></li>)}</ol></>}
+      {plan.repositoryPlan && <><span className="technical-label">{t("technicalRepositoryPlan")}</span><pre className="repository-plan-json">{JSON.stringify(plan.repositoryPlan, null, 2)}</pre></>}
+    </details>}
     {/* A plan with nothing to confirm is already running, so it offers no button that could decide otherwise. */}
     {plan.allowed && !plan.requiresConfirmation
       ? <p className="plan-running"><LoaderCircle className="spin" size={12} /> {t("runningWithoutConfirmation")}</p>
       : plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>{t("cancel")}</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {t("confirmAction")}</button></div>
       : asking ? <p className="plan-hint">{t("answerBelow")}</p>
       : <button className="ghost-button plan-close" onClick={onDismiss}>{t("understood")}</button>}</div>;
+}
+
+/**
+ * What a plan actually did, read from the repository before and after: every step with its status, what
+ * changed, what is still only here or unsaved, and the one next step when it finished. A stop is never
+ * dressed as success; what Git printed stays in the technical details.
+ */
+function CompletionCard({ summary, output }: { summary: CompletionSummary; output?: string }) {
+  const { t } = useI18n();
+  const finished = summary.status === "completed" || summary.status === "no_change";
+  const list = (lines: string[]) => <ul>{lines.map((line) => <li key={line}>{line}</li>)}</ul>;
+  const showSteps = !finished || summary.steps.length > 1;
+  return <div className={`completion-card status-${summary.status}`} data-status={summary.status} role="status">
+    <div className="completion-header">{finished ? <Check size={13} /> : <AlertTriangle size={13} />}<strong>{summary.headline}</strong></div>
+    {showSteps && <ol className="recovery-steps">{summary.steps.map((step, index) => <li key={`${step.summary}-${index}`} className={step.status === "completed" ? "done" : step.status === "failed" ? "failed" : "skipped"}>{step.status === "completed" ? <Check size={12} /> : step.status === "failed" ? <X size={12} /> : <CircleDot size={12} />}<span>{step.summary}</span><em>{t(step.status === "completed" ? "recoveryCompleted" : step.status === "failed" ? "recoveryFailedStep" : "recoveryNotRunStep")}</em></li>)}</ol>}
+    {summary.changed.length > 0 && <section className="completion-section"><strong>{t("completionChanged")}</strong>{list(summary.changed)}</section>}
+    {summary.remaining.length > 0 && <section className="completion-section"><strong>{t("completionRemaining")}</strong>{list(summary.remaining)}</section>}
+    {summary.next && <p className="completion-next"><strong>{t("completionNext")}:</strong> {summary.next.label}</p>}
+    {output?.trim() && <details className="technical-details"><summary><TerminalSquare size={11} /> {t("technicalDetails")}</summary><span className="technical-label">{t("technicalOutput")}</span><pre>{output}</pre></details>}
+  </div>;
 }
 
 type AiConnectionState = "none" | "verifying" | "connected" | "attention" | "failed";
