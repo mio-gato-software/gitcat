@@ -108,3 +108,14 @@ export function rememberRepository(memory: Memory, path: string, patch: Omit<Rep
   if (Object.keys(merged).length <= 1) return memory;
   return { ...memory, repositories: prune({ ...memory.repositories, [path]: merged }) };
 }
+
+/** A project found at a new location keeps what was confirmed about it; the old path is forgotten. */
+export function relocateRepository(memory: Memory, from: string, to: string): Memory {
+  const entry = memory.repositories[from];
+  if (!entry || from === to) return memory;
+  const repositories = { ...memory.repositories };
+  delete repositories[from];
+  // Whatever was already confirmed at the new location is the more recent truth.
+  repositories[to] = repositories[to] ?? entry;
+  return { ...memory, repositories };
+}

@@ -267,3 +267,22 @@
 .menu-heading { overflow: hidden; padding: 6px 9px 4px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
 .menu-separator { height: 1px; margin: 5px 4px; background: var(--border); }
 .ref-tag:not(.tag):not(.more) { cursor: pointer; }
+
+/* A saved project that could not be opened: its tab stays, quieter, and its panel says why and what to do. */
+.window-tab.unavailable > button:first-child { color: var(--muted); }
+.window-tab.unavailable > button:first-child svg { color: var(--amber); }
+.window-tab.unavailable.active > button:first-child span { color: var(--secondary); }
+.unavailable-project .welcome-card { width: min(520px, calc(100vw - 48px)); max-height: calc(100% - 32px); overflow-y: auto; text-align: left; }
+.unavailable-project .welcome-mark { color: var(--amber); background: #4a3b2455; }
+.unavailable-project .eyebrow, .unavailable-project h1 { text-align: center; overflow-wrap: anywhere; }
+.unavailable-project .welcome-card p.unavailable-reason { margin-bottom: 16px; }
+.unavailable-location { display: grid; gap: 5px; margin-bottom: 18px; color: var(--muted); font-size: 10px; }
+.unavailable-location code, .unavailable-notice code, .unavailable-detail code { display: block; padding: 7px 9px; color: var(--secondary); background: var(--raised); border: 1px solid var(--border); border-radius: 6px; font: 10.5px var(--mono); overflow-wrap: anywhere; white-space: pre-wrap; }
+.unavailable-notice { display: grid; gap: 8px; margin-bottom: 16px; padding: 11px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.unavailable-notice.warning { border-color: #6b5530; }
+.unavailable-project .welcome-card .unavailable-notice p { margin: 0; color: var(--secondary); }
+.unavailable-notice-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.unavailable-project .welcome-button + .welcome-button { margin-top: 8px; }
+.unavailable-project .welcome-footnote { line-height: 1.5; text-align: center; }
+.unavailable-detail { margin-top: 12px; color: var(--muted); font-size: 10px; }
+.unavailable-detail summary { cursor: pointer; margin-bottom: 6px; }

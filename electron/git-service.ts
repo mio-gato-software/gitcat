@@ -20,7 +20,7 @@ import {
   findAccount, isSshAuthenticated, parseGhAccounts, parseSshGreeting, parseSshResolvedHostName, sshConfigHostAliases
 } from "./host-identity.js";
 import {
-  emptyMemory, forgetSshHost, recallIdentity, recallRepository, rememberIdentity, rememberRepository,
+  emptyMemory, forgetSshHost, recallIdentity, recallRepository, relocateRepository, rememberIdentity, rememberRepository,
   sanitizeMemory, type Memory
 } from "./memory.js";
 import type {
@@ -345,6 +345,17 @@ function parseCommit(raw: string): Commit | undefined {
     refs: refs.split(",").map((ref) => ref.trim()).filter(Boolean),
     parents: parents.split(" ").map((parent) => parent.trim()).filter(Boolean)
   };
+}
+
+/** The commits a history starts from. They never change, so they identify a repository wherever it is moved. */
+export async function rootCommits(cwd: string): Promise<string[]> {
+  return (await optionalGit(cwd, ["rev-list", "--max-parents=0", "HEAD"])).split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+/** A project confirmed to be the same repository at a new location keeps its remembered choices. */
+export function relocateRepositoryMemory(from: string, to: string) {
+  const next = relocateRepository(memory, from, to);
+  if (next !== memory) saveMemory(next);
 }
 
 export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {

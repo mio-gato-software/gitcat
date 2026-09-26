@@ -1,16 +1,25 @@
 import { legacyAppName, migrateProfileFiles, profilePath } from "./app-identity.js";
 import { exclusive } from "./repository-queue.js";
 import { app, BrowserWindow, dialog, ipcMain, Menu } from "electron";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   applyConflictResolution, executePlan, fetchRemotes, generateCommitDescription, getCommitDetail, getCommitFileDiff, getLlmConfig, getSnapshot,
   getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
-  prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, saveLlmConfig, type IssuedConflictProposal
+  prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, saveLlmConfig,
+  type IssuedConflictProposal
 } from "./git-service.js";
 import { localized } from "./i18n.js";
-import type { ActionPlan, ConflictProposal, ConversationMessage, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation } from "../shared/types.js";
+import {
+  classifyFailure, compareFingerprints, emptyWorkspace, errorText, fingerprintFrom, inspectProject, keepFingerprints, nearestExistingFolder,
+  parseWorkspace, relocateProject, restoreProjects, type RepoFingerprint, type WorkspaceRecord
+} from "./workspace-restore.js";
+import type {
+  ActionPlan, ConflictProposal, ConversationMessage, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation, ProjectLocateResult,
+  RepoSnapshot, RepositoryMatch, UnavailableProject
+} from "../shared/types.js";
 
 // Electron captures the encryption identity before app-ready. Keep the existing Keychain
 // identity for upgrades, then use the new display name once startup has initialized it.
@@ -26,19 +35,24 @@ const openedRepositories = new Set<string>();
 const issuedPlans = new Map<string, ActionPlan>();
 /** Conflict proposals keep their reviewed content and state binding here; the renderer only holds the id. */
 const issuedProposals = new Map<string, IssuedConflictProposal>();
-let persistedWorkspace: { paths: string[]; activePath?: string } = { paths: [] };
+let persistedWorkspace: WorkspaceRecord = emptyWorkspace();
+/** Saved projects that could not be opened. Their paths stay saved and only accept a retry, a new location or removal. */
+const unavailableProjects = new Map<string, UnavailableProject>();
+/** A folder offered as a project's new location that GitCat could not vouch for, waiting for the person's answer. */
+const pendingLocations = new Map<string, { from: string; to: string; match: RepositoryMatch; fingerprint: RepoFingerprint }>();
 
 function workspacePath() { return join(app.getPath("userData"), "gitcat-workspace.json"); }
 
 function loadWorkspace() {
   try {
-    const value = JSON.parse(readFileSync(workspacePath(), "utf8")) as { paths?: unknown; activePath?: unknown };
-    const paths = Array.isArray(value.paths)
-      ? [...new Set(value.paths.filter((path): path is string => typeof path === "string").map((path) => resolve(path)))]
-      : [];
-    const activePath = typeof value.activePath === "string" && paths.includes(resolve(value.activePath)) ? resolve(value.activePath) : undefined;
-    persistedWorkspace = { paths, activePath };
-  } catch { /* first launch or an unreadable workspace */ }
+    persistedWorkspace = parseWorkspace(JSON.parse(readFileSync(workspacePath(), "utf8")));
+  } catch (error) {
+    // Nothing saved yet is normal. A file that exists but cannot be read is copied aside first, so the
+    // next save cannot silently replace the only record of the saved projects.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      try { copyFileSync(workspacePath(), `${workspacePath()}.unreadable`); } catch { /* nothing more can be kept */ }
+    }
+  }
 }
 
 function saveWorkspace() {
@@ -49,21 +63,60 @@ function saveWorkspace() {
   renameSync(temporary, target);
 }
 
+/** For saves that follow a change already made in memory: the renderer's next save tries again and reports a failure. */
+function saveWorkspaceQuietly() {
+  try { saveWorkspace(); } catch (error) { console.error("No se pudo guardar el workspace.", error); }
+}
+
+/**
+ * Records what identifies each opened repository, so a later "it moved, here it is" can be checked
+ * against it. First commits are asked for once, in the background; remotes are refreshed each time.
+ */
+async function rememberFingerprints(projects: RepoSnapshot[]) {
+  let changed = false;
+  for (const project of projects) {
+    const saved = persistedWorkspace.fingerprints[project.path];
+    const roots = saved?.roots.length ? saved.roots : await rootCommits(project.path).catch(() => []);
+    const next = fingerprintFrom(roots, project.remoteUrls);
+    // The workspace may have changed while Git was answering; only projects still saved are recorded.
+    if (!persistedWorkspace.paths.includes(project.path) || JSON.stringify(next) === JSON.stringify(saved)) continue;
+    persistedWorkspace.fingerprints[project.path] = next;
+    changed = true;
+  }
+  if (changed) saveWorkspaceQuietly();
+}
+
 async function restoreWorkspace() {
-  const projects = [];
-  for (const path of persistedWorkspace.paths) {
-    try {
-      const snapshot = await getSnapshot(path);
-      openedRepositories.add(snapshot.path);
-      projects.push(snapshot);
-    } catch { /* moved, deleted, or no longer a Git repository */ }
-  }
-  persistedWorkspace.paths = projects.map((project) => project.path);
-  if (!persistedWorkspace.activePath || !persistedWorkspace.paths.includes(persistedWorkspace.activePath)) {
-    persistedWorkspace.activePath = persistedWorkspace.paths[0];
-  }
-  saveWorkspace();
-  return { projects, activePath: persistedWorkspace.activePath };
+  const before = JSON.stringify(persistedWorkspace);
+  const restored = await restoreProjects(persistedWorkspace, getSnapshot);
+  unavailableProjects.clear();
+  for (const project of restored.projects) openedRepositories.add(project.path);
+  for (const project of restored.unavailable) unavailableProjects.set(project.path, project);
+  persistedWorkspace = restored.record;
+  // A project that could not be opened keeps its saved reference; the file only changes when a path was normalized.
+  if (JSON.stringify(persistedWorkspace) !== before) saveWorkspaceQuietly();
+  void rememberFingerprints(restored.projects);
+  return { projects: restored.projects, unavailable: restored.unavailable, order: restored.record.paths, activePath: restored.activePath };
+}
+
+function assertUnavailableProject(path: unknown) {
+  if (typeof path !== "string" || !unavailableProjects.has(resolve(path))) throw new Error("El proyecto no está en la lista de proyectos no disponibles.");
+  return resolve(path);
+}
+
+/**
+ * Puts a validated repository in the place of a saved project that went missing. Remembered choices
+ * about pushing and identity move only when the repository is proven to be the same one.
+ */
+function adoptLocation(from: string, project: RepoSnapshot, fingerprint: RepoFingerprint, match: RepositoryMatch): ProjectLocateResult {
+  unavailableProjects.delete(from);
+  unavailableProjects.delete(project.path);
+  for (const [id, pending] of pendingLocations) if (pending.from === from) pendingLocations.delete(id);
+  openedRepositories.add(project.path);
+  persistedWorkspace = relocateProject(persistedWorkspace, from, project.path, fingerprint);
+  if (match === "same") relocateRepositoryMemory(from, project.path);
+  saveWorkspaceQuietly();
+  return { status: "relocated", previousPath: from, project, match, carriedOver: match !== "different" };
 }
 
 function isTrustedFrame(url: string) {
@@ -153,13 +206,17 @@ app.whenReady().then(async () => {
     assertTrustedSender(event);
     if (!Array.isArray(paths) || paths.some((path) => typeof path !== "string")) throw new Error("El estado del workspace no es válido.");
     const normalized = [...new Set(paths.map((path) => resolve(path)))];
-    if (normalized.some((path) => !openedRepositories.has(path))) throw new Error("El workspace contiene un repositorio no autorizado.");
+    // A saved project that could not be opened is still a saved project; anything else must have been opened here.
+    if (normalized.some((path) => !openedRepositories.has(path) && !unavailableProjects.has(path))) throw new Error("El workspace contiene un repositorio no autorizado.");
     const normalizedActivePath = typeof activePath === "string" ? resolve(activePath) : undefined;
     persistedWorkspace = {
       paths: normalized,
-      activePath: normalizedActivePath && normalized.includes(normalizedActivePath) ? normalizedActivePath : normalized[0]
+      activePath: normalizedActivePath && normalized.includes(normalizedActivePath) ? normalizedActivePath : normalized[0],
+      fingerprints: keepFingerprints(persistedWorkspace.fingerprints, normalized)
     };
     for (const path of openedRepositories) if (!normalized.includes(path)) openedRepositories.delete(path);
+    for (const path of unavailableProjects.keys()) if (!normalized.includes(path)) unavailableProjects.delete(path);
+    for (const [id, pending] of pendingLocations) if (!normalized.includes(pending.from)) pendingLocations.delete(id);
     for (const [id, plan] of issuedPlans) if (!normalized.includes(plan.repoPath)) issuedPlans.delete(id);
     for (const [id, proposal] of issuedProposals) if (!normalized.includes(proposal.repoPath)) issuedProposals.delete(id);
     saveWorkspace();
@@ -171,10 +228,71 @@ app.whenReady().then(async () => {
     if (result.canceled || !result.filePaths[0]) return null;
     const snapshot = await getSnapshot(result.filePaths[0]);
     openedRepositories.add(snapshot.path);
-    persistedWorkspace.paths = [...persistedWorkspace.paths.filter((path) => path !== snapshot.path), snapshot.path];
+    // Opening a saved project that was unavailable brings it back; it is not listed twice.
+    unavailableProjects.delete(snapshot.path);
+    if (!persistedWorkspace.paths.includes(snapshot.path)) persistedWorkspace.paths = [...persistedWorkspace.paths, snapshot.path];
     persistedWorkspace.activePath = snapshot.path;
     saveWorkspace();
+    void rememberFingerprints([snapshot]);
     return snapshot;
+  });
+  ipcMain.handle("workspace:retry", async (event, path: unknown) => {
+    assertTrustedSender(event);
+    const saved = assertUnavailableProject(path);
+    const outcome = await inspectProject(saved, getSnapshot);
+    if ("unavailable" in outcome) {
+      unavailableProjects.set(saved, outcome.unavailable);
+      return outcome;
+    }
+    unavailableProjects.delete(saved);
+    openedRepositories.add(outcome.project.path);
+    if (outcome.project.path !== saved) {
+      persistedWorkspace = relocateProject(persistedWorkspace, saved, outcome.project.path, persistedWorkspace.fingerprints[saved]);
+      saveWorkspaceQuietly();
+    }
+    void rememberFingerprints([outcome.project]);
+    return outcome;
+  });
+  ipcMain.handle("workspace:locate", async (event, path: unknown, labels: unknown): Promise<ProjectLocateResult> => {
+    assertTrustedSender(event);
+    const from = assertUnavailableProject(path);
+    if (!mainWindow) return { status: "canceled" };
+    const text = (value: unknown) => typeof value === "string" ? value.slice(0, 200) : undefined;
+    const label = (labels && typeof labels === "object" ? labels : {}) as Record<string, unknown>;
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: text(label.title),
+      buttonLabel: text(label.button),
+      defaultPath: nearestExistingFolder(from),
+      properties: ["openDirectory"]
+    });
+    if (result.canceled || !result.filePaths[0]) return { status: "canceled" };
+    const chosen = resolve(result.filePaths[0]);
+    // The folder is checked as a repository before anything about the saved project changes.
+    const outcome = await inspectProject(chosen, getSnapshot, { exactRoot: false });
+    if ("unavailable" in outcome) return { status: "invalid", path: chosen, reason: outcome.unavailable.reason, detail: outcome.unavailable.detail };
+    const project = outcome.project;
+    const fingerprint = fingerprintFrom(await rootCommits(project.path).catch(() => []), project.remoteUrls);
+    const match = compareFingerprints(persistedWorkspace.fingerprints[from], fingerprint);
+    if (match === "same") return adoptLocation(from, project, fingerprint, match);
+    for (const [id, pending] of pendingLocations) if (pending.from === from) pendingLocations.delete(id);
+    const candidateId = randomUUID();
+    pendingLocations.set(candidateId, { from, to: project.path, match, fingerprint });
+    return { status: "confirm", candidateId, path: project.path, name: project.name, match };
+  });
+  ipcMain.handle("workspace:confirm-locate", async (event, candidateId: unknown): Promise<ProjectLocateResult> => {
+    assertTrustedSender(event);
+    const pending = typeof candidateId === "string" ? pendingLocations.get(candidateId) : undefined;
+    if (pending) pendingLocations.delete(candidateId as string);
+    if (!pending || !unavailableProjects.has(pending.from)) throw new Error("Esa carpeta ya no está pendiente de confirmar.");
+    // Validated again: the folder may have changed while the question was on screen.
+    let project: RepoSnapshot;
+    try {
+      project = await getSnapshot(pending.to);
+    } catch (error) {
+      return { status: "invalid", path: pending.to, reason: classifyFailure(pending.to, error), detail: errorText(error) };
+    }
+    if (project.path !== pending.to) return { status: "invalid", path: pending.to, reason: "not_repository", detail: `git rev-parse --show-toplevel: ${project.path}` };
+    return adoptLocation(pending.from, project, pending.fingerprint, pending.match);
   });
   ipcMain.handle("repo:snapshot", (event, cwd: string) => {
     assertTrustedSender(event);

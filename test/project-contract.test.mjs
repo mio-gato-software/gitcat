@@ -477,6 +477,28 @@ test("el workspace persiste y restaura los proyectos abiertos", async () => {
   assert.match(app, /saveWorkspace\(paths, activePath\)/);
 });
 
+test("un proyecto que no se pudo abrir sigue guardado y solo se quita a petición", async () => {
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
+  const preload = await readFile(join(root, "electron/preload.cjs"), "utf8");
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  // Restoration reports what failed instead of dropping it from the saved list.
+  assert.doesNotMatch(main, /catch \{ \/\* moved, deleted, or no longer a Git repository \*\/ \}/);
+  assert.match(main, /const restored = await restoreProjects\(persistedWorkspace, getSnapshot\)/);
+  assert.match(main, /!openedRepositories\.has\(path\) && !unavailableProjects\.has\(path\)/);
+  // Retry, locate and confirm only act on a saved project that is unavailable, from the trusted renderer.
+  for (const channel of ["workspace:retry", "workspace:locate", "workspace:confirm-locate"]) {
+    assert.match(main, new RegExp(`ipcMain\\.handle\\("${channel}", async \\(event[^)]*\\)(?:: Promise<ProjectLocateResult>)? => \\{\\n    assertTrustedSender\\(event\\);`));
+  }
+  assert.match(main, /const from = assertUnavailableProject\(path\);/);
+  assert.match(main, /inspectProject\(chosen, getSnapshot, \{ exactRoot: false \}\)/);
+  assert.match(main, /if \(match === "same"\) return adoptLocation/);
+  assert.match(preload, /retryProject: \(path\) => ipcRenderer\.invoke\("workspace:retry", path\)/);
+  assert.match(preload, /locateProject: \(path, labels\) => ipcRenderer\.invoke\("workspace:locate", path, labels\)/);
+  assert.match(preload, /confirmLocateProject: \(candidateId\) => ipcRenderer\.invoke\("workspace:confirm-locate", candidateId\)/);
+  assert.match(app, /<UnavailableProjectPanel/);
+  assert.match(app, /if \(result\.carriedOver\) moveRepositoryViewState\(from, next\.path\)/);
+});
+
 test("macOS reserva espacio para los controles de ventana", async () => {
   const main = await readFile(join(root, "electron/main.ts"), "utf8");
   const styles = await readFile(join(root, "src/styles.css"), "utf8");

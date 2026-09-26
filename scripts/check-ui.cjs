@@ -39,7 +39,12 @@ app.whenReady().then(async () => {
   const snapshot = await service.getSnapshot(repo);
   const plans = new Map();
   let refreshError = false;
-  ipcMain.handle('workspace:restore', () => ({ projects: [snapshot], activePath: repo }));
+  // A second saved project whose folder is gone: it must stay listed and explain itself instead of vanishing.
+  const movedPath = path.join(scratch, 'Moved project');
+  const moved = () => ({ path: movedPath, name: 'Moved project', reason: 'missing', detail: `ENOENT: ${movedPath}`, checkedAt: new Date().toISOString() });
+  let retries = 0;
+  ipcMain.handle('workspace:restore', () => ({ projects: [snapshot], unavailable: [moved()], order: [snapshot.path, movedPath], activePath: snapshot.path }));
+  ipcMain.handle('workspace:retry', () => { retries += 1; return { unavailable: moved() }; });
   ipcMain.handle('workspace:save', () => {});
   ipcMain.handle('llm:get-config', () => ({ provider: 'openai', model: 'ui-test', configured: true }));
   ipcMain.handle('history:load', (_, p, request) => service.loadHistory(p, request));
@@ -83,6 +88,20 @@ app.whenReady().then(async () => {
   await js(`localStorage.setItem('gitcat-locale', 'es')`);
   await win.loadFile(path.join(root, 'dist/index.html'));
   // Five commits plus the uncommitted work, drawn as its own row above HEAD.
+  await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
+  // The unavailable project keeps its tab, says what happened and offers every way on.
+  assert.equal(await js(`document.querySelectorAll('.window-tab.unavailable').length`), 1);
+  await js(`document.querySelector('.window-tab.unavailable [role="tab"]').click()`);
+  await waitFor(`document.querySelector('.unavailable-project')`);
+  const unavailableText = await js(`document.querySelector('.unavailable-project').innerText`);
+  for (const entry of [/No hay ninguna carpeta/, /Moved project/, /Localizar carpeta movida/, /Reintentar/, /Quitar de proyectos recientes/, /No se cambió ni se borró nada/]) assert.match(unavailableText, entry);
+  await capture('unavailable-project');
+  await js(`[...document.querySelectorAll('.unavailable-project button')].find((node) => node.innerText.includes('Reintentar')).click()`);
+  for (let attempt = 0; attempt < 100 && retries === 0; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(retries, 1);
+  await waitFor(`document.querySelector('.notification-preview.warning')`);
+  assert.equal(await js(`Boolean(document.querySelector('.unavailable-project'))`), true, 'A failed retry keeps the project listed');
+  await js(`document.querySelector('.window-tab:not(.unavailable) [role="tab"]').click()`);
   await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
   const before = git('status', '--porcelain');
   assert.equal(await js(`document.querySelector('.commit-row').classList.contains('wip')`), true);
@@ -217,7 +236,7 @@ app.whenReady().then(async () => {
   // A read is skipped while GitCat is still finishing the checkout, so focus is offered until one lands.
   await waitFor(`document.querySelector('aside.sidebar').textContent.includes('outside') || (window.dispatchEvent(new Event('focus')), false)`);
   win.destroy();
-  console.log('PASS: graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, reviewed save and integration, double-click checkout, background refresh.');
+  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, reviewed save and integration, double-click checkout, background refresh.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));

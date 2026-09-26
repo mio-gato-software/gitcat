@@ -30,11 +30,18 @@ import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefau
 import type { BranchOrder } from "../shared/branch-order";
 import type {
   ActionPlan, Branch, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
-  FileChange, FileStats, HistoryScope, LlmConfig, Locale, Operation, PendingOperationKind, RepoSnapshot
+  FileChange, FileStats, HistoryScope, LlmConfig, Locale, Operation, PendingOperationKind, ProjectLocateResult, ProjectUnavailableReason,
+  RepoSnapshot, UnavailableProject
 } from "../shared/types";
 import { localeTag, readLocale, translate, writeLocale, type MessageKey, type Translate } from "./i18n";
 
 type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string; fetchedAt?: string };
+/** One tab in the saved order: a project that opened, or a saved one that could not be opened this time. Its id is its saved path. */
+type WorkspaceTab = { id: string; path: string; name: string; unavailable?: UnavailableProject };
+/** What the panel of an unavailable project is showing besides its reason: a folder that did not fit, or one waiting for an answer. */
+type LocateNotice =
+  | { kind: "invalid"; result: Extract<ProjectLocateResult, { status: "invalid" }> }
+  | { kind: "confirm"; result: Extract<ProjectLocateResult, { status: "confirm" }> };
 type GraphFocus = { kind: "wip" } | { kind: "commit"; commit: Commit };
 type InspectorTab = "details" | "assistant";
 /** What was right-clicked: a commit, the branch label on it, both, or the uncommitted work. */
@@ -244,6 +251,29 @@ function writeBranchView(path: string, view: BranchView) {
   catch { /* a full quota must not break the panel */ }
 }
 
+/**
+ * View choices remembered for a project follow it to its new location, but only once the new folder
+ * has been validated as that project. Choices already saved at the new location win.
+ */
+function moveRepositoryViewState(from: string, to: string) {
+  if (from === to) return;
+  for (const key of [historyPrefsStorageKey, legacyHistoryPrefsStorageKey, branchViewStorageKey]) {
+    try {
+      const value = localStorage.getItem(key(from));
+      if (value !== null && localStorage.getItem(key(to)) === null) localStorage.setItem(key(to), value);
+      localStorage.removeItem(key(from));
+    } catch { /* view preferences only */ }
+  }
+}
+
+const unavailableReasonKeys: Record<ProjectUnavailableReason, { reason: MessageKey; next: MessageKey; short: MessageKey }> = {
+  storage: { reason: "unavailableStorage", next: "unavailableStorageNext", short: "reasonShortStorage" },
+  missing: { reason: "unavailableMissing", next: "unavailableMissingNext", short: "reasonShortMissing" },
+  permission: { reason: "unavailablePermission", next: "unavailablePermissionNext", short: "reasonShortPermission" },
+  tool: { reason: "unavailableTool", next: "unavailableToolNext", short: "reasonShortTool" },
+  not_repository: { reason: "unavailableNotRepository", next: "unavailableNotRepositoryNext", short: "reasonShortNotRepository" }
+};
+
 const baseBranchNames = ["main", "master", "develop", "trunk"];
 
 /**
@@ -333,6 +363,13 @@ export default function App() {
   const t = useMemo(() => translate(locale), [locale]);
   const setLocale = (next: Locale) => { setLocaleState(next); writeLocale(next); };
   const [projects, setProjects] = useState<ProjectTab[]>([]);
+  /** Saved projects that could not be opened. They keep their tab and their saved place until removed explicitly. */
+  const [unavailable, setUnavailable] = useState<UnavailableProject[]>([]);
+  /** The saved order of the workspace, so a project that is back, or found elsewhere, keeps its place. */
+  const [workspaceOrder, setWorkspaceOrder] = useState<string[]>([]);
+  /** The unavailable project being retried or located, so its buttons wait for the answer. */
+  const [recoveringPath, setRecoveringPath] = useState<string>();
+  const [locateNotice, setLocateNotice] = useState<{ path: string; notice: LocateNotice }>();
   const [activeId, setActiveId] = useState<string>();
   const [selectedBranch, setSelectedBranch] = useState<string>();
   const [commitFilter, setCommitFilter] = useState("");
@@ -384,7 +421,16 @@ export default function App() {
   useEffect(() => { document.documentElement.lang = locale; }, [locale]);
 
   const active = projects.find((project) => project.id === activeId);
+  const activeUnavailable = active ? undefined : unavailable.find((project) => project.path === activeId);
   const snapshot = active?.snapshot;
+  const tabs = useMemo<WorkspaceTab[]>(() => {
+    const all: WorkspaceTab[] = [
+      ...projects.map((project) => ({ id: project.id, path: project.snapshot.path, name: project.snapshot.name })),
+      ...unavailable.map((project) => ({ id: project.path, path: project.path, name: project.name, unavailable: project }))
+    ];
+    const rank = (path: string) => { const index = workspaceOrder.indexOf(path); return index < 0 ? Number.MAX_SAFE_INTEGER : index; };
+    return all.map((tab, index) => ({ tab, index })).sort((a, b) => rank(a.tab.path) - rank(b.tab.path) || a.index - b.index).map(({ tab }) => tab);
+  }, [projects, unavailable, workspaceOrder]);
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
   const conversation = snapshot ? conversations[snapshot.path] ?? [] : [];
@@ -473,8 +519,14 @@ export default function App() {
     window.gitcat.restoreWorkspace().then((workspace) => {
       const loadedAt = new Date().toISOString();
       const restored = workspace.projects.map((project) => ({ id: project.path, snapshot: project, loadedAt }));
+      const missing = workspace.unavailable ?? [];
       setProjects(restored);
-      setActiveId(restored.find((project) => project.snapshot.path === workspace.activePath)?.id ?? restored[0]?.id);
+      setUnavailable(missing);
+      setWorkspaceOrder(workspace.order ?? [...restored.map((project) => project.snapshot.path), ...missing.map((project) => project.path)]);
+      // The project that was in front stays in front, even when it has to explain why it cannot open.
+      setActiveId(restored.find((project) => project.snapshot.path === workspace.activePath)?.id
+        ?? missing.find((project) => project.path === workspace.activePath)?.path
+        ?? restored[0]?.id ?? missing[0]?.path);
     }).catch((error) => {
       notify({ message: error instanceof Error ? error.message : t("fallbackRestoreProjects"), tone: "error" });
     }).finally(() => {
@@ -485,12 +537,12 @@ export default function App() {
 
   useEffect(() => {
     if (!workspaceRestored.current || !workspaceReady) return;
-    const paths = projects.map((project) => project.snapshot.path);
-    const activePath = projects.find((project) => project.id === activeId)?.snapshot.path;
+    const paths = tabs.map((tab) => tab.path);
+    const activePath = tabs.find((tab) => tab.id === activeId)?.path;
     window.gitcat.saveWorkspace(paths, activePath).catch((error) => {
       notify({ message: error instanceof Error ? error.message : t("fallbackSaveWorkspace"), tone: "error" });
     });
-  }, [projects, activeId, workspaceReady, t]);
+  }, [tabs, activeId, workspaceReady, t]);
 
 
   useEffect(() => {
@@ -544,7 +596,10 @@ export default function App() {
       if (!next) return;
       const existing = projects.find((project) => project.snapshot.path === next.path);
       if (existing) { updateSnapshot(next.path, next); setActiveId(existing.id); return; }
-      const id = `${next.path}-${Date.now()}`;
+      // A saved project that was unavailable and is opened again by hand comes back in its own tab.
+      const returning = unavailable.some((project) => project.path === next.path);
+      const id = returning ? next.path : `${next.path}-${Date.now()}`;
+      if (returning) setUnavailable((items) => items.filter((project) => project.path !== next.path));
       setProjects((items) => [...items, { id, snapshot: next, loadedAt: new Date().toISOString() }]);
       setActiveId(id);
       addActivity({ label: t("projectOpen"), detail: next.name, tone: "success" });
@@ -554,12 +609,83 @@ export default function App() {
   };
 
   const closeProject = (id: string) => {
-    setProjects((items) => {
-      const index = items.findIndex((project) => project.id === id);
-      const remaining = items.filter((project) => project.id !== id);
-      if (activeId === id) setActiveId(remaining[Math.min(index, remaining.length - 1)]?.id);
-      return remaining;
-    });
+    const index = tabs.findIndex((tab) => tab.id === id);
+    const remaining = tabs.filter((tab) => tab.id !== id);
+    if (activeId === id) setActiveId(remaining[Math.min(index, remaining.length - 1)]?.id);
+    setProjects((items) => items.filter((project) => project.id !== id));
+    setUnavailable((items) => items.filter((project) => project.path !== id));
+    if (locateNotice?.path === id) setLocateNotice(undefined);
+  };
+
+  /** Asks again whether an unavailable project can be opened. A project that is back keeps its tab and its place. */
+  const retryUnavailable = async (project: UnavailableProject) => {
+    if (recoveringPath) return;
+    setRecoveringPath(project.path);
+    setLocateNotice(undefined);
+    try {
+      const outcome = await window.gitcat.retryProject(project.path);
+      if ("project" in outcome) {
+        const next = outcome.project;
+        setUnavailable((items) => items.filter((item) => item.path !== project.path));
+        setWorkspaceOrder((order) => order.map((path) => path === project.path ? next.path : path));
+        setProjects((items) => [...items.filter((item) => item.snapshot.path !== next.path), { id: project.path, snapshot: next, loadedAt: new Date().toISOString() }]);
+        addActivity({ label: t("projectOpen"), detail: t("projectRecovered", { name: next.name }), tone: "success" });
+      } else {
+        setUnavailable((items) => items.map((item) => item.path === project.path ? outcome.unavailable : item));
+        addActivity({ label: t("gitNeedsAttention"), detail: t("stillUnavailable", { name: project.name, reason: t(unavailableReasonKeys[outcome.unavailable.reason].short) }), tone: "warning" });
+      }
+    } catch (error) {
+      notify({ message: cleanError(error, t("fallbackRetryProject")), tone: "error" });
+    } finally { setRecoveringPath(undefined); }
+  };
+
+  /** Takes a validated new location in place of the unavailable entry, moving view choices only when it is that project. */
+  const adoptLocation = (from: string, result: Extract<ProjectLocateResult, { status: "relocated" }>) => {
+    const next = result.project;
+    if (result.carriedOver) moveRepositoryViewState(from, next.path);
+    const existing = projects.find((project) => project.snapshot.path === next.path);
+    // The folder may also be another saved entry that was waiting; it is the same project now, listed once.
+    setUnavailable((items) => items.filter((item) => item.path !== from && item.path !== next.path));
+    setLocateNotice(undefined);
+    if (existing) {
+      // The folder was already open in another tab: that tab is the project, and the old entry goes.
+      updateSnapshot(next.path, next);
+      setWorkspaceOrder((order) => order.filter((path) => path !== from));
+      if (activeId === from) setActiveId(existing.id);
+    } else {
+      setWorkspaceOrder((order) => order.map((path) => path === from ? next.path : path));
+      setProjects((items) => [...items, { id: from, snapshot: next, loadedAt: new Date().toISOString() }]);
+    }
+    addActivity({ label: t("projectOpen"), detail: t(result.carriedOver ? "projectRelocated" : "projectRelocatedFresh", { name: next.name, path: next.path }), tone: "success" });
+  };
+
+  const handleLocateResult = (from: string, result: ProjectLocateResult) => {
+    if (result.status === "canceled") return;
+    if (result.status === "relocated") adoptLocation(from, result);
+    else setLocateNotice({ path: from, notice: result.status === "invalid" ? { kind: "invalid", result } : { kind: "confirm", result } });
+  };
+
+  /** Lets the person point at the folder's new place. The main process checks it is a repository before anything changes. */
+  const locateUnavailable = async (project: UnavailableProject) => {
+    if (recoveringPath) return;
+    setRecoveringPath(project.path);
+    setLocateNotice(undefined);
+    try {
+      handleLocateResult(project.path, await window.gitcat.locateProject(project.path, { title: t("locateDialogTitle", { name: project.name }), button: t("locateDialogButton") }));
+    } catch (error) {
+      notify({ message: cleanError(error, t("fallbackLocateProject")), tone: "error" });
+    } finally { setRecoveringPath(undefined); }
+  };
+
+  const confirmLocation = async (from: string, candidateId: string) => {
+    if (recoveringPath) return;
+    setRecoveringPath(from);
+    setLocateNotice(undefined);
+    try {
+      handleLocateResult(from, await window.gitcat.confirmLocateProject(candidateId));
+    } catch {
+      notify({ message: t("locateExpired"), tone: "error" });
+    } finally { setRecoveringPath(undefined); }
   };
 
   /**
@@ -1092,9 +1218,10 @@ export default function App() {
       <header className="topbar">
         <div className="brand-lockup"><div className="brand-mark"><CatMark size={28} /></div><span>GitCat</span></div>
         <div className="window-tabs" role="tablist" aria-label={t("openProjects")}>
-          {projects.map((project) => <div key={project.id} className={`window-tab ${project.id === activeId ? "active" : ""}`}>
-            <button role="tab" aria-selected={project.id === activeId} onClick={() => setActiveId(project.id)}><GitBranch size={14} /><span>{project.snapshot.name}</span></button>
-            <button className="tab-close" onClick={() => closeProject(project.id)} aria-label={t("closeProject", { name: project.snapshot.name })}><X size={13} /></button>
+          {tabs.map((tab) => <div key={tab.id} className={`window-tab ${tab.id === activeId ? "active" : ""} ${tab.unavailable ? "unavailable" : ""}`}
+            title={tab.unavailable ? t("unavailableTab", { name: tab.name, reason: t(unavailableReasonKeys[tab.unavailable.reason].short) }) : undefined}>
+            <button role="tab" aria-selected={tab.id === activeId} onClick={() => setActiveId(tab.id)}>{tab.unavailable ? <AlertTriangle size={14} /> : <GitBranch size={14} />}<span>{tab.name}</span></button>
+            <button className="tab-close" onClick={() => closeProject(tab.id)} aria-label={t(tab.unavailable ? "removeFromRecentNamed" : "closeProject", { name: tab.name })}><X size={13} /></button>
           </div>)}
           <button className="icon-button tab-add" onClick={() => void openProject()} aria-label={t("openProject")}><Plus size={16} /></button>
         </div>
@@ -1102,7 +1229,17 @@ export default function App() {
       </header>
       <NotificationCenter items={activity} onDismiss={dismissActivity} onClear={dismissAllActivity} t={t} />
 
-      {!workspaceReady ? <div className="workspace-loading"><LoaderCircle className="spin" size={24} /><span>{t("restoringProjects")}</span></div> : !config.configured && !exploring ? <ProviderRequired onConfigure={() => setSettingsOpen(true)} onExplore={() => setExploring(true)} /> : !snapshot ? <Welcome openProject={openProject} /> : <>
+      {!workspaceReady ? <div className="workspace-loading"><LoaderCircle className="spin" size={24} /><span>{t("restoringProjects")}</span></div> : !config.configured && !exploring ? <ProviderRequired onConfigure={() => setSettingsOpen(true)} onExplore={() => setExploring(true)} /> : activeUnavailable ? <UnavailableProjectPanel
+        key={activeUnavailable.path}
+        project={activeUnavailable}
+        busy={recoveringPath === activeUnavailable.path}
+        notice={locateNotice?.path === activeUnavailable.path ? locateNotice.notice : undefined}
+        onRetry={() => void retryUnavailable(activeUnavailable)}
+        onLocate={() => void locateUnavailable(activeUnavailable)}
+        onConfirm={(candidateId) => void confirmLocation(activeUnavailable.path, candidateId)}
+        onDismissNotice={() => setLocateNotice(undefined)}
+        onRemove={() => closeProject(activeUnavailable.path)}
+      /> : !snapshot ? <Welcome openProject={openProject} /> : <>
         {!config.configured && <div className="provider-banner" role="status"><Eye size={14} /><span><strong>{t("noProviderBanner")}</strong> {t("noProviderBannerDetail")}</span><button className="outline-button small" onClick={() => setSettingsOpen(true)}><Settings2 size={13} /> {t("configure")}</button></div>}
 
 
@@ -1199,6 +1336,57 @@ export default function App() {
     </div>
     </I18nContext.Provider>
   );
+}
+
+/**
+ * A saved project that could not be opened. It says what happened in plain words, keeps the last
+ * known path in view, and offers the ways on that fit: try again, point at the new folder, or let
+ * it go. Removing is always a separate, explicit choice.
+ */
+function UnavailableProjectPanel({ project, busy, notice, onRetry, onLocate, onConfirm, onDismissNotice, onRemove }: {
+  project: UnavailableProject;
+  busy: boolean;
+  notice?: LocateNotice;
+  onRetry: () => void;
+  onLocate: () => void;
+  onConfirm: (candidateId: string) => void;
+  onDismissNotice: () => void;
+  onRemove: () => void;
+}) {
+  const { t, locale } = useI18n();
+  const keys = unavailableReasonKeys[project.reason];
+  const checked = new Date(project.checkedAt);
+  // A folder that moved or stopped being a repository is found, not waited for; the rest usually comes back.
+  const locateFirst = project.reason === "missing" || project.reason === "not_repository";
+  const retry = <button key="retry" className={`${locateFirst ? "ghost-button" : "primary-button"} welcome-button`} disabled={busy} onClick={onRetry}>{busy ? <LoaderCircle className="spin" size={15} /> : <RefreshCcw size={15} />} {t("retryProject")}</button>;
+  const locate = <button key="locate" className={`${locateFirst ? "primary-button" : "ghost-button"} welcome-button`} disabled={busy} onClick={onLocate}><FolderOpen size={15} /> {t("locateMovedFolder")}</button>;
+  return <div className="welcome unavailable-project" role="region" aria-label={t("unavailableTab", { name: project.name, reason: t(keys.short) })}>
+    <div className="welcome-glow" />
+    <div className="welcome-card">
+      <div className="welcome-mark"><AlertTriangle size={30} /></div>
+      <div className="eyebrow">{t("unavailableEyebrow")}</div>
+      <h1>{project.name}</h1>
+      <p className="unavailable-reason">{t(keys.reason)} {t(keys.next)}</p>
+      <div className="unavailable-location"><span>{t("lastKnownLocation")}</span><code>{project.path}</code></div>
+      {notice?.kind === "invalid" && <div className="unavailable-notice warning" role="alert">
+        <p>{t("locateInvalid", { path: notice.result.path, reason: t(unavailableReasonKeys[notice.result.reason].short) })}</p>
+        {notice.result.detail && <code>{notice.result.detail}</code>}
+      </div>}
+      {notice?.kind === "confirm" && <div className="unavailable-notice" role="alert">
+        <p>{t(notice.result.match === "different" ? "locateConfirmDifferent" : "locateConfirmUnverified", { path: notice.result.path, name: project.name })}</p>
+        <p>{t(notice.result.match === "different" ? "locateConfirmDifferentNext" : "locateConfirmUnverifiedNext")}</p>
+        <div className="unavailable-notice-actions">
+          <button className="primary-button small" disabled={busy} onClick={() => onConfirm(notice.result.candidateId)}><Check size={13} /> {t("useThisFolder")}</button>
+          <button className="outline-button small" disabled={busy} onClick={onLocate}><FolderOpen size={13} /> {t("chooseAnotherFolder")}</button>
+          <button className="ghost-button small" disabled={busy} onClick={onDismissNotice}>{t("cancel")}</button>
+        </div>
+      </div>}
+      {locateFirst ? [locate, retry] : [retry, locate]}
+      <button className="ghost-button welcome-button unavailable-remove" disabled={busy} onClick={onRemove}><Trash2 size={15} /> {t("removeFromRecent")}</button>
+      <div className="welcome-footnote">{t("unavailableKept")} {Number.isNaN(checked.valueOf()) ? "" : t("lastChecked", { time: checked.toLocaleTimeString(localeTag(locale)) })}</div>
+      {project.detail && <details className="unavailable-detail"><summary>{t("systemDetail")}</summary><code>{project.detail}</code></details>}
+    </div>
+  </div>;
 }
 
 function Welcome({ openProject }: { openProject: () => Promise<void> }) {

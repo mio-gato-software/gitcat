@@ -319,16 +319,57 @@ export type ConversationMessage = {
   content: string;
 };
 
+/**
+ * Why a saved project could not be read. Only `not_repository` is a fact about the folder itself;
+ * the others describe a drive, a permission or a tool that may be back in a minute, so none of them
+ * is a reason to forget the project.
+ */
+export type ProjectUnavailableReason = "storage" | "missing" | "permission" | "tool" | "not_repository";
+
+/** A saved project GitCat could not open, kept with its last known path so it can be retried or found again. */
+export type UnavailableProject = {
+  path: string;
+  name: string;
+  reason: ProjectUnavailableReason;
+  /** What the filesystem or Git actually said, for the person who wants the raw detail. */
+  detail?: string;
+  checkedAt: string;
+};
+
 export type RestoredWorkspace = {
   projects: RepoSnapshot[];
+  /** Saved projects that could not be opened this time. They stay in the workspace until removed explicitly. */
+  unavailable: UnavailableProject[];
+  /** Every saved path, opened or not, in the saved order. */
+  order: string[];
+  /** The project that was in front last time, even when it is one of the unavailable ones. */
   activePath?: string;
 };
+
+export type ProjectRetryResult = { project: RepoSnapshot } | { unavailable: UnavailableProject };
+
+/**
+ * How sure GitCat is that a replacement folder holds the same repository: the same first commit or
+ * remote ("same"), nothing saved to compare with ("unverified"), or clearly another one ("different").
+ */
+export type RepositoryMatch = "same" | "unverified" | "different";
+
+export type ProjectLocateResult =
+  | { status: "canceled" }
+  /** The chosen folder could not be used; nothing was changed. */
+  | { status: "invalid"; path: string; reason: ProjectUnavailableReason; detail?: string }
+  /** The folder is a repository GitCat cannot vouch for; it is only used after the person confirms. */
+  | { status: "confirm"; candidateId: string; path: string; name: string; match: Exclude<RepositoryMatch, "same"> }
+  | { status: "relocated"; previousPath: string; project: RepoSnapshot; match: RepositoryMatch; carriedOver: boolean };
 
 export type GitlineApi = {
   platform: NodeJS.Platform;
   selectProject: () => Promise<RepoSnapshot | null>;
   restoreWorkspace: () => Promise<RestoredWorkspace>;
   saveWorkspace: (paths: string[], activePath?: string) => Promise<void>;
+  retryProject: (path: string) => Promise<ProjectRetryResult>;
+  locateProject: (path: string, labels: { title: string; button: string }) => Promise<ProjectLocateResult>;
+  confirmLocateProject: (candidateId: string) => Promise<ProjectLocateResult>;
   getSnapshot: (path: string) => Promise<RepoSnapshot>;
   fetchRemotes: (path: string) => Promise<RepoSnapshot>;
   loadHistory: (path: string, request: HistoryRequest) => Promise<HistoryPage>;
