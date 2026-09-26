@@ -176,6 +176,11 @@ export type RepoSnapshot = {
   remotes: string[];
   /** Each remote's URL, keyed by its name: which one a push would actually reach. */
   remoteUrls: Record<string, string>;
+  /**
+   * Saved commits on the current branch that the default branch does not contain yet, counted by
+   * Git. Absent when there is nothing to compare: detached, before the first save, or on the default.
+   */
+  integration?: { target: string; notIntegrated: number };
 };
 
 /**

@@ -472,6 +472,7 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   const defaultBranchResolution = await resolveDefaultBranch(repoRoot, remotes, localNames);
   const defaultBranch = defaultBranchResolution?.name;
   await markIntegration(repoRoot, branches, [defaultBranch, currentBranch]);
+  const integration = await countNotIntegrated(repoRoot, head, currentBranch, defaultBranch);
   const pending = await readPendingOperation(repoRoot);
   const changes = parseStatus(statusRaw);
   const stageRaw = await checkedGit(repoRoot, ["ls-files", "--stage", "-z"], true);
@@ -523,8 +524,20 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     branches,
     commits,
     remotes,
-    remoteUrls: parseRemoteUrls(await optionalGit(repoRoot, ["remote", "-v"]))
+    remoteUrls: parseRemoteUrls(await optionalGit(repoRoot, ["remote", "-v"])),
+    ...(integration ? { integration } : {})
   };
+}
+
+/**
+ * How many saved commits of the current branch the default branch does not have yet, counted by Git
+ * rather than read off the graph page, which may not reach far enough back. Absent when there is no
+ * branch to compare (detached, unborn, or already on the default branch) or Git could not answer.
+ */
+async function countNotIntegrated(repoRoot: string, head: string, currentBranch: string, target: string | undefined) {
+  if (!target || !head || currentBranch === "HEAD" || currentBranch === target) return undefined;
+  const count = Number.parseInt(await optionalGit(repoRoot, ["rev-list", "--count", `${target}..HEAD`, "--"]), 10);
+  return Number.isInteger(count) ? { target, notIntegrated: count } : undefined;
 }
 
 /**
