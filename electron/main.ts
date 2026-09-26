@@ -6,10 +6,10 @@ import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  acknowledgeAiSharing, applyConflictResolution, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
-  getLlmConfig, getSnapshot, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
+  acknowledgeAiSharing, applyConflictResolution, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
+  getLlmConfig, getSnapshot, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
   prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, saveLlmConfig,
-  scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, type IssuedConflictProposal
+  scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictProposal
 } from "./git-service.js";
 import { localized } from "./i18n.js";
 import {
@@ -33,6 +33,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 const openedRepositories = new Set<string>();
 const issuedPlans = new Map<string, ActionPlan>();
+/** Plans that stopped, with what each step did: recovery reads completed steps from here, never from the renderer. */
+const failedPlans = new Map<string, FailedPlanRecord>();
 /** Conflict proposals keep their reviewed content and state binding here; the renderer only holds the id. */
 const issuedProposals = new Map<string, IssuedConflictProposal>();
 let persistedWorkspace: WorkspaceRecord = emptyWorkspace();
@@ -147,6 +149,32 @@ function rememberPlan(plan: ActionPlan) {
     issuedPlans.set(plan.id, plan);
   }
   return plan;
+}
+
+function rememberFailure(record: FailedPlanRecord) {
+  if (failedPlans.size >= 20) failedPlans.delete(failedPlans.keys().next().value ?? "");
+  failedPlans.set(record.plan.id, record);
+}
+
+const failureStages = new Set(["prepare", "execute", "stale"]);
+
+/** Shape only: what the failure means is read from the repository and the plan's own record. */
+function assertFailure(failure: unknown): ExecutionFailure {
+  const value = failure as ExecutionFailure;
+  if (!value || typeof value !== "object" || typeof value.error !== "string" || typeof value.command !== "string" || typeof value.summary !== "string"
+      || !Array.isArray(value.skipped) || value.skipped.some((item) => typeof item !== "string")
+      || (value.planId !== undefined && typeof value.planId !== "string") || (value.stage !== undefined && !failureStages.has(value.stage))) {
+    throw new Error("El fallo reportado no es válido.");
+  }
+  return { command: value.command, summary: value.summary, error: value.error, skipped: [...value.skipped], planId: value.planId, stage: value.stage };
+}
+
+/** The facts behind a failure, read in the main process: the plan's record when it has one. */
+function failureRecord(repoPath: string, failure: ExecutionFailure) {
+  const record = failure.planId ? failedPlans.get(failure.planId) : undefined;
+  if (record && record.plan.repoPath !== repoPath) throw new Error("El plan pertenece a otro repositorio.");
+  // A plan the interface names but this process no longer holds expired before it could run.
+  return { record, known: { stale: Boolean(failure.planId && !record) } };
 }
 
 /** One open review per repository: a newer proposal replaces the older one. */
@@ -364,11 +392,26 @@ app.whenReady().then(async () => {
     }
     return result;
   });
-  ipcMain.handle("action:recover", async (event, cwd: string, failure: ExecutionFailure, context?: ConversationMessage[], locale?: Locale) => {
+  ipcMain.handle("action:recover", async (event, cwd: string, reported: unknown, context?: ConversationMessage[], locale?: Locale) => {
     assertTrustedSender(event);
-    if (!failure || typeof failure !== "object" || typeof failure.error !== "string") throw new Error("El fallo reportado no es válido.");
+    const failure = assertFailure(reported);
     const repoPath = assertOpenedRepository(cwd);
-    return rememberPlan(await exclusive(repoPath, () => planRecovery(repoPath, failure, context, locale)));
+    const { record, known } = failureRecord(repoPath, failure);
+    return rememberPlan(await exclusive(repoPath, async () => planRecovery(repoPath, failure, context, locale, await describeFailure(repoPath, failure, record, known))));
+  });
+  ipcMain.handle("action:describe-failure", async (event, cwd: string, reported: unknown) => {
+    assertTrustedSender(event);
+    const failure = assertFailure(reported);
+    const repoPath = assertOpenedRepository(cwd);
+    const { record, known } = failureRecord(repoPath, failure);
+    return exclusive(repoPath, () => describeFailure(repoPath, failure, record, known));
+  });
+  ipcMain.handle("action:prepare-retry", async (event, cwd: string, planId: unknown, locale?: Locale) => {
+    assertTrustedSender(event);
+    const repoPath = assertOpenedRepository(cwd);
+    const record = typeof planId === "string" ? failedPlans.get(planId) : undefined;
+    if (!record || record.plan.repoPath !== repoPath) throw new Error(localized(locale, "Ese intento ya no está disponible. Actualiza y prepara la acción de nuevo.", "That attempt is no longer available. Refresh and prepare the action again."));
+    return rememberPlan(await exclusive(repoPath, () => prepareRetry(repoPath, record, locale)));
   });
   ipcMain.handle("action:plan", async (event, cwd: string, request: string, context?: ConversationMessage[], locale?: Locale) => {
     assertTrustedSender(event);
@@ -422,7 +465,15 @@ app.whenReady().then(async () => {
     if (!plan) throw new Error("El plan ya no es válido. Prepara la acción de nuevo.");
     issuedPlans.delete(planId);
     if (plan.repoPath !== repoPath) throw new Error("El plan pertenece a otro repositorio.");
-    return exclusive(repoPath, () => executePlan(repoPath, plan, locale));
+    try {
+      const result = await exclusive(repoPath, () => executePlan(repoPath, plan, locale));
+      if (result.error) rememberFailure({ plan, outcomes: result.outcomes, stale: false });
+      return result;
+    } catch (error) {
+      // Nothing ran: every step is still to do, and a plan the repository moved under is told apart.
+      rememberFailure({ plan, outcomes: plan.steps.map((step) => ({ command: step.command, summary: step.summary, status: "skipped", output: "" })), stale: error instanceof StalePlanError });
+      throw error;
+    }
   });
   ipcMain.handle("sharing:get", (event, cwd: string, purpose: unknown, paths?: unknown, locale?: Locale) => {
     assertTrustedSender(event);

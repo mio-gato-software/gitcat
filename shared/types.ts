@@ -287,6 +287,10 @@ export type Operation =
   | "github_create_repo"
   /** Adds one anchored line to .gitignore for an untracked file. Only a direct control prepares it; the model never can. */
   | "ignore_path"
+  /** Sets the name and email commits are signed with, for this repository only. Direct control only. */
+  | "set_identity"
+  /** Connects this repository to a remote address the person typed. Direct control only. */
+  | "add_remote"
   | "none";
 
 export type GitProtocol = "ssh" | "https";
@@ -367,7 +371,14 @@ export type ActionPlan = {
   kind: "plan" | "question" | "refusal";
   /** "llm": the model interpreted the request. "guardrail": a direct control or a local safety rule. */
   source: "llm" | "guardrail";
+  /**
+   * The assistant could not answer: it is not set up, it did not reply in time, it could not be
+   * reached, or it failed. The interface keeps what was typed and leans on what GitCat can prove.
+   */
+  assistantUnavailable?: AssistantUnavailable;
 };
+
+export type AssistantUnavailable = "not_configured" | "timeout" | "unreachable" | "error";
 
 export type LlmConfig = {
   provider: "openai";
@@ -390,6 +401,100 @@ export type ExecutionFailure = {
   error: string;
   /** The steps that never ran, so the model plans from where the repository actually is. */
   skipped: string[];
+  /**
+   * The plan that stopped, when there was one. The main process keeps what each of its steps did, so
+   * what completed, failed and never ran is read from that record, not from what the interface says.
+   */
+  planId?: string;
+  /** Where it stopped: before anything ran, while running, or because the repository moved under the plan. */
+  stage?: FailureStage;
+};
+
+/** Why a Git action stopped, as far as Git's own output and the repository state can prove it. */
+export type FailureKind =
+  | "network" | "auth" | "missing_upstream" | "no_remote" | "divergent" | "conflict" | "pending"
+  | "hook" | "identity" | "stale" | "lock" | "unknown";
+
+export type FailureStage = "prepare" | "execute" | "stale";
+
+/**
+ * A way on that GitCat can offer without interpreting anything. Each one maps to something that
+ * already exists: a re-read, a view, or an allow-listed operation that goes through the usual
+ * preparation and confirmation. None of them runs a change by itself.
+ */
+export type RecoveryActionKind =
+  /** Re-read the repository. Changes nothing. */
+  | "refresh"
+  /** Prepare, against a fresh read, only the steps of the stopped plan that never completed. */
+  | "retry"
+  /** Open the uncommitted work, with the save draft as it was. */
+  | "inspect_changes"
+  /** Ask for a name and an email, then prepare `set_identity`. */
+  | "configure_identity"
+  /** Ask for a remote address, then prepare `add_remote`. */
+  | "configure_remote"
+  /** Reopen conflict resolution. */
+  | "resolve_conflicts"
+  /** An allow-listed operation, prepared by `prepareOperation` and confirmed as usual. */
+  | "prepare"
+  /** Leave everything exactly as it is. Only offered as one answer to a choice. */
+  | "keep";
+
+/** Which answer an action is, so the interface can name it and say what it costs. */
+export type RecoveryOption =
+  | "fetch" | "pull" | "publish" | "merge_upstream" | "rebase_upstream" | "push_no_verify" | "abort" | "continue";
+
+export type RecoveryAction = {
+  kind: RecoveryActionKind;
+  option?: RecoveryOption;
+  operation?: Operation;
+  args?: Record<string, string>;
+};
+
+/** What the repository shows right now, read again after the failure. */
+export type RecoveryFacts = {
+  branch: string;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  remotes: string[];
+  /** The remote the failed step talked to, when it can be told. */
+  remote?: string;
+  pending?: PendingOperation;
+  conflicts: number;
+  /** Uncommitted changes, which stay exactly as they were. */
+  changes: number;
+  /** The hook that stopped the step, such as "pre-commit". */
+  hook?: string;
+  /** A lock file Git left behind, relative to the repository. */
+  lock?: string;
+  /** HEAD is not where the plan was prepared. */
+  moved?: boolean;
+};
+
+/**
+ * A failure explained from facts alone, so it stays actionable with no assistant: what completed,
+ * what failed, what never ran, what is still safe and what the repository supports doing next.
+ */
+export type RecoveryReport = {
+  repoPath: string;
+  kind: FailureKind;
+  stage: FailureStage;
+  failedSummary: string;
+  /** What Git said. Shown to the person; never interpreted beyond classification. */
+  detail: string;
+  completed: string[];
+  notRun: string[];
+  facts: RecoveryFacts;
+  /** Ways on that follow from the facts. */
+  actions: RecoveryAction[];
+  /**
+   * More than one reasonable answer and only the person can pick. Present as a focused question;
+   * GitCat never chooses one of these by itself.
+   */
+  choice?: RecoveryAction[];
+  /** The assistant's reasoning helps here: the choice is a judgment call or the cause is unknown. */
+  needsJudgment: boolean;
 };
 
 export type ExecutionResult = {
@@ -478,6 +583,10 @@ export type GitlineApi = {
   proposeConflictResolution: (path: string, locale?: Locale) => Promise<ConflictProposal>;
   applyConflictResolution: (path: string, proposalId: string, accepted: string[], locale?: Locale) => Promise<ConflictApplyResult>;
   planRecovery: (path: string, failure: ExecutionFailure, context?: ConversationMessage[], locale?: Locale) => Promise<ActionPlan>;
+  /** Explains a failure from facts alone. Never contacts the assistant. */
+  describeFailure: (path: string, failure: ExecutionFailure) => Promise<RecoveryReport>;
+  /** Prepares, against a fresh read, only the steps of a stopped plan that never completed. */
+  prepareRetry: (path: string, planId: string, locale?: Locale) => Promise<ActionPlan>;
   getWorkingFileDiff: (path: string, file: string) => Promise<CommitDetail>;
   planAction: (path: string, request: string, context?: ConversationMessage[], locale?: Locale) => Promise<ActionPlan>;
   prepareOperation: (path: string, operation: Operation, args?: Record<string, string>, locale?: Locale) => Promise<ActionPlan>;

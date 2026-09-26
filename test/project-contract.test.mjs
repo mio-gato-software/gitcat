@@ -688,6 +688,7 @@ test("una operación a medias es un estado del que se puede salir, no un callej�
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
   // El trabajo a medias existe en los datos: qué operación, por qué commit y qué lo bloquea.
   assert.match(types, /export type PendingOperationKind = "rebase" \| "merge" \| "cherry_pick" \| "revert"/);
   assert.match(types, /conflicts: Conflict\[\]/);
@@ -700,9 +701,12 @@ test("una operación a medias es un estado del que se puede salir, no un callej�
   // El fallo vuelve al modelo en vez de morir en la conversación, y lo que propone se confirma.
   assert.match(service, /export async function planRecovery/);
   assert.match(app, /await recoverFrom\(plan\.repoPath, \{/);
-  assert.match(app, /if \(failed && config\.configured\)/);
-  assert.match(app, /if \(config\.configured\) await recoverFrom\(path, \{/);
-  assert.match(app, /if \(config\.configured\) await recoverFrom\(plan\.repoPath, \{/);
+  // Recovery no longer depends on a provider: the facts come first, the assistant only when configured.
+  assert.doesNotMatch(app, /config\.configured\) await recoverFrom|failed && config\.configured/);
+  assert.match(app, /report = await window\.gitcat\.describeFailure\(path, failure\)/);
+  assert.match(app, /if \(report && !report\.needsJudgment\) return;\n {4}if \(!config\.configured\)/);
+  assert.match(main, /rememberFailure\(\{ plan, outcomes: result\.outcomes, stale: false \}\)/);
+  assert.match(main, /stale: error instanceof StalePlanError/);
   assert.match(service, /function explainGitFailure/);
   assert.match(service, /todavía no está publicada ni tiene un destino remoto asociado/);
   // La salida de un lío se propone, nunca se ejecuta sola: recoverFrom deja el plan esperando.

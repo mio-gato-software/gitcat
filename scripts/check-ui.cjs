@@ -72,7 +72,21 @@ app.whenReady().then(async () => {
     const plan = await service.prepareBranchDelivery(p, request, locale);
     plans.set(plan.id, plan); return plan;
   });
-  ipcMain.handle('action:execute', (_, p, id, locale) => service.executePlan(p, plans.get(id), locale));
+  // Like the main process, a plan that stops is kept with what each step did, so recovery reads facts.
+  const failed = new Map();
+  let recoverCalls = 0;
+  ipcMain.handle('action:execute', async (_, p, id, locale) => {
+    const plan = plans.get(id);
+    const result = await service.executePlan(p, plan, locale);
+    if (result.error) failed.set(id, { plan, outcomes: result.outcomes, stale: false });
+    return result;
+  });
+  ipcMain.handle('action:describe-failure', (_, p, failure) => service.describeFailure(p, failure, failure.planId ? failed.get(failure.planId) : undefined));
+  ipcMain.handle('action:recover', (_, p, failure, context, locale) => { recoverCalls += 1; return service.planRecovery(p, failure, context, locale); });
+  ipcMain.handle('action:prepare-retry', async (_, p, id, locale) => {
+    const plan = await service.prepareRetry(p, failed.get(id), locale);
+    plans.set(plan.id, plan); return plan;
+  });
   ipcMain.handle('action:prepare', async (_, p, operation, args, locale) => {
     const plan = await service.prepareOperation(p, operation, args, locale);
     plans.set(plan.id, plan); return plan;
@@ -279,6 +293,24 @@ app.whenReady().then(async () => {
   assert.equal(git('branch', '--show-current'), 'main');
   assert.equal(git('status', '--porcelain'), '');
   assert.equal(git('show', 'main:new-file.txt'), 'new file');
+  // A push with nowhere to go is explained from the repository itself, with the way on, and the
+  // assistant is not needed for it: no provider request is made.
+  const headBeforePush = git('rev-parse', 'HEAD');
+  await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find((node) => node.innerText.trim() === 'Push').click()`);
+  await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
+  await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
+  await waitFor(`document.querySelector('.recovery-card[data-kind="no_remote"]')`);
+  const recoveryText = await js(`document.querySelector('.recovery-card[data-kind="no_remote"]').innerText`);
+  for (const entry of [/aún no tiene dónde publicarse/, /Comprobado en este Mac/, /Se detuvo aquí/, /Tus commits están a salvo/, /Conectar un remoto/]) assert.match(recoveryText, entry);
+  assert.equal(recoverCalls, 0, 'A failure GitCat can prove needs no assistant');
+  await js(`document.querySelector('.recovery-card').scrollIntoView()`);
+  await capture('recovery-card');
+  await js(`[...document.querySelectorAll('.recovery-card .recovery-actions button')].find((node) => node.innerText.includes('Conectar un remoto')).click()`);
+  await waitFor(`document.querySelector('.input-modal')?.innerText.includes('Dirección del remoto')`);
+  await js(`document.querySelector('.input-modal .modal-heading .icon-button').click()`);
+  await waitFor(`!document.querySelector('.input-modal')`);
+  assert.equal(git('remote'), '', 'Offering a way on changes nothing');
+  assert.equal(git('rev-parse', 'HEAD'), headBeforePush);
   // Double-clicking a branch label in the graph checks that branch out.
   await waitFor(`[...document.querySelectorAll('.ref-tag')].some((node) => node.textContent === 'feature/search')`);
   await js(`[...document.querySelectorAll('.ref-tag')].find((node) => node.textContent === 'feature/search').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
@@ -300,7 +332,7 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.inspector .change-row .change-badge.secret').textContent`), /posible secreto/);
   await capture('secret-warning');
   win.destroy();
-  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, double-click checkout, background refresh, local secret warning.');
+  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));

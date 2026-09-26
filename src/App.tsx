@@ -30,9 +30,9 @@ import type { GraphRow } from "../shared/commit-graph";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
 import type {
-  ActionPlan, AiSharingPreview, AiSharingPurpose, Branch, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
+  ActionPlan, AiSharingPreview, AiSharingPurpose, AssistantUnavailable, Branch, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
   FileChange, FileStats, HistoryScope, LlmConfig, Locale, Operation, PendingOperationKind, ProjectLocateResult, ProjectUnavailableReason,
-  RepoSnapshot, SecretFinding, UnavailableProject, WithheldFile
+  RecoveryAction, RecoveryReport, RepoSnapshot, SecretFinding, UnavailableProject, WithheldFile
 } from "../shared/types";
 import { localeTag, readLocale, translate, writeLocale, type MessageKey, type Translate } from "./i18n";
 
@@ -59,7 +59,8 @@ function readSidebarHidden() {
 type ActivityItem = Notification;
 
 /** `from` is the commit a new branch starts at, or the branch a rename starts from. */
-type InputDialog = { operation: "create_branch" | "merge" | "rename_branch"; title: string; label: string; value: string; from?: string };
+type InputDialog = { operation: "create_branch" | "merge" | "rename_branch" | "add_remote"; title: string; label: string; value: string; from?: string };
+type IdentityDialog = { user: string; email: string };
 type Suggestion = { key: string; icon: LucideIcon; label: string } & ({ question: string } | { dialog: InputDialog });
 type ConversationTurn = {
   id: number;
@@ -73,6 +74,14 @@ type ConversationTurn = {
   withheld?: WithheldFile[];
   /** The output shows a file the assistant may not read: the person sees it, the conversation sent back does not. */
   private?: boolean;
+  /** A failure explained from repository facts, with the ways on it supports. Shown whether or not the assistant answers. */
+  recovery?: RecoveryReport;
+  /** The stopped plan, so a retry prepares only what did not finish. */
+  recoveryPlanId?: string;
+  /** Where the assistant's view of the failure stands. */
+  assistant?: "consulting" | "not_shared" | AssistantUnavailable;
+  /** The person chose to leave things as they are. */
+  kept?: boolean;
 };
 
 /** What goes back to the assistant in place of output it may not read. Model-facing, so it stays in English. */
@@ -421,6 +430,7 @@ export default function App() {
   const [applyingResolution, setApplyingResolution] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [inputDialog, setInputDialog] = useState<InputDialog>();
+  const [identityDialog, setIdentityDialog] = useState<IdentityDialog>();
   const [commitMessage, setCommitMessage] = useState("");
   const [deliveryMerge, setDeliveryMerge] = useState(false);
   /** The version of every listed file when the save was started, so a later edit to a ticked file asks for a fresh look. */
@@ -802,11 +812,13 @@ export default function App() {
     } catch (error) {
       notify({ message: cleanError(error, t("fallbackRefresh")), tone: "error" });
     } finally { setRefreshingPath(undefined); }
-    if (failure && config.configured) await recoverFrom(path, {
+    // Recovery never waits on the assistant: the facts are read locally, and the assistant is only asked when configured.
+    if (failure) await recoverFrom(path, {
       command: "git fetch --all --prune",
       summary: t("checkRemote"),
       error: failure,
-      skipped: []
+      skipped: [],
+      stage: "execute"
     });
   };
 
@@ -896,14 +908,19 @@ export default function App() {
   };
 
   const conversationContext = (turns: ConversationTurn[]): ConversationMessage[] => turns.flatMap((turn) => {
+    // Model-facing, so in English: what GitCat proved about a failure, never the raw output.
+    if (turn.recovery && !turn.answer && !turn.plan) {
+      const report = turn.recovery;
+      return [{ role: "user" as const, content: turn.question }, { role: "assistant" as const, content: `GitCat classified the failure of "${report.failedSummary}" as ${report.kind}.${report.completed.length ? ` Completed: ${report.completed.join("; ")}.` : ""}${report.notRun.length ? ` Not run: ${report.notRun.join("; ")}.` : ""}${turn.kept ? " The user chose to leave it as it is." : ""}` }];
+    }
     const response = turn.answer ?? (turn.private && (turn.error || turn.outcome) ? privateOutputNote : undefined) ?? turn.error ?? turn.outcome ?? (turn.plan
       ? `${turn.plan.allowed ? t("planWord") : t("refusalWord")}: ${turn.plan.summary}. ${turn.plan.rationale}`
       : undefined);
     return response ? [{ role: "user" as const, content: turn.question }, { role: "assistant" as const, content: response }] : [];
   });
 
-  const showPlan = async (question: string, loader: () => Promise<ActionPlan>, path = snapshot?.path, review = false) => {
-    if (!path || planning) return;
+  const showPlan = async (question: string, loader: () => Promise<ActionPlan>, path = snapshot?.path, review = false): Promise<ActionPlan | undefined> => {
+    if (!path || planning) return undefined;
     const turnId = addTurn(path, question);
     try {
       const plan = await loader();
@@ -911,7 +928,7 @@ export default function App() {
       if (plan.answer) {
         updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, withheld: plan.withheld, status: "completed" }));
         addActivity({ label: t("responsePrepared"), detail: plan.summary, tone: "neutral" });
-        return;
+        return plan;
       }
       if (review && plan.allowed && plan.requiresConfirmation && snapshotRef.current?.path === path) setDeliveryReview({ turnId, plan });
       const unattended = plan.allowed && !plan.requiresConfirmation;
@@ -923,15 +940,18 @@ export default function App() {
       });
       // Nothing to weigh up: a plan that changes no work does not need a click to say so.
       if (unattended) await runPlan(turnId, plan);
+      return plan;
     } catch (error) {
       const message = cleanError(error, t("fallbackPrepareAction"));
       updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
-      if (config.configured) await recoverFrom(path, {
+      await recoverFrom(path, {
         command: question,
         summary: t("prepareRequestedAction"),
         error: message,
-        skipped: []
+        skipped: [],
+        stage: "prepare"
       });
+      return undefined;
     }
   };
 
@@ -999,7 +1019,9 @@ export default function App() {
     setRequest("");
     // Declining keeps what was typed, so nothing the person wrote is lost.
     if (!(await ensureSharing(path, "planning"))) { setRequest(question); return; }
-    await showPlan(question, () => window.gitcat.planAction(path, question, context, locale), path);
+    const plan = await showPlan(question, () => window.gitcat.planAction(path, question, context, locale), path);
+    // When the assistant could not answer, what was typed comes back, unless something new was typed meanwhile.
+    if (!plan || plan.assistantUnavailable) setRequest((current) => current || question);
   };
 
   const prepare = async (operation: Operation, args: Record<string, string> = {}, question?: string) => {
@@ -1020,6 +1042,8 @@ export default function App() {
       resolve_conflict: t("resolveConflictNamed", { path: args.path }),
       commit: t("createCommitNamed", { message: args.message ?? "" }),
       ignore_path: t("ignoreFutureChanges", { path: args.path ?? "" }),
+      set_identity: t("setIdentityQuestion", { user: args.user ?? "", email: args.email ?? "" }),
+      add_remote: t("connectRemoteQuestion", { url: args.url ?? "" }),
       github_create_repo: t("createPrivateRepo", { owner: args.owner, name: args.name, host: args.host })
     };
     const path = snapshot.path;
@@ -1046,31 +1070,84 @@ export default function App() {
   };
 
   /**
-   * Asks the assistant how to carry on from where the repository actually is. It opens its own turn
-   * so the failure and the way out read as two separate things, which is what they are.
+   * How to carry on from where the repository actually is. GitCat first reads the repository again and
+   * explains the failure from facts: what completed, what failed, what never ran, what is still safe
+   * and which ways on this state supports. That part never needs the assistant. The assistant is asked
+   * only when a choice or an unknown cause calls for judgment, and when it is missing, silent or not
+   * allowed to read the repository, the card says so and the options stand as a focused question.
    */
   const recoverFrom = async (path: string, failure: ExecutionFailure) => {
     const context = conversationContext(conversations[path] ?? []);
     const turnId = addTurn(path, t("actionQuestion"));
-    if (!(await ensureSharing(path, "recovery"))) {
-      updateTurn(path, turnId, (turn) => ({ ...turn, answer: t("recoveryNotShared"), status: "completed" }));
+    let report: RecoveryReport | undefined;
+    try {
+      report = await window.gitcat.describeFailure(path, failure);
+      if (report.repoPath !== path) throw new Error(t("planOtherRepository"));
+      const described = report;
+      updateTurn(path, turnId, (turn) => ({ ...turn, recovery: described, recoveryPlanId: failure.planId, status: "completed" }));
+    } catch {
+      updateTurn(path, turnId, (turn) => ({ ...turn, error: t("recoveryDescribeFailed"), status: "error" }));
+    }
+    if (report && !report.needsJudgment) return;
+    if (!config.configured) {
+      updateTurn(path, turnId, (turn) => ({ ...turn, assistant: "not_configured" }));
       return;
     }
+    if (!(await ensureSharing(path, "recovery"))) {
+      updateTurn(path, turnId, (turn) => report ? { ...turn, assistant: "not_shared" } : { ...turn, answer: t("recoveryNotShared"), status: "completed" });
+      return;
+    }
+    updateTurn(path, turnId, (turn) => ({ ...turn, assistant: "consulting" }));
     try {
       const plan = await window.gitcat.planRecovery(path, failure, context, locale);
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
+      if (plan.assistantUnavailable) {
+        const reason = plan.assistantUnavailable;
+        updateTurn(path, turnId, (turn) => turn.recovery ? { ...turn, assistant: reason } : { ...turn, assistant: reason, error: plan.rationale, status: "error" });
+        return;
+      }
       if (plan.answer) {
-        updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, withheld: plan.withheld, status: "completed" }));
+        updateTurn(path, turnId, (turn) => ({ ...turn, assistant: undefined, answer: plan.answer, withheld: plan.withheld, status: "completed" }));
         return;
       }
       // Never unattended: a way out of a half-finished operation is always the user's call.
+      updateTurn(path, turnId, (turn) => ({ ...turn, assistant: undefined }));
       updateTurn(path, turnId, (turn) => ({ ...turn, plan, status: plan.allowed ? "ready" : "completed" }));
     } catch (error) {
-      updateTurn(path, turnId, (turn) => ({
-        ...turn,
-        error: cleanError(error, t("fallbackRecovery")),
-        status: "error"
-      }));
+      updateTurn(path, turnId, (turn) => turn.recovery
+        ? { ...turn, assistant: "error" }
+        : { ...turn, assistant: undefined, error: cleanError(error, t("fallbackRecovery")), status: "error" });
+    }
+  };
+
+  /**
+   * A way on from a recovery card. Each one is an existing, safe path: a re-read, a view, or an
+   * allow-listed operation prepared and confirmed like any other. Nothing here runs a change by itself.
+   */
+  const runRecoveryAction = async (turnId: number, turn: ConversationTurn, action: RecoveryAction) => {
+    if (!snapshot || planning || !turn.recovery) return;
+    const path = turn.recovery.repoPath;
+    if (path !== snapshot.path) return;
+    const facts = turn.recovery.facts;
+    switch (action.kind) {
+      case "refresh": await refreshProject(path); return;
+      case "retry":
+        if (turn.recoveryPlanId) {
+          const planId = turn.recoveryPlanId;
+          await showPlan(t("recoveryRetryQuestion"), () => window.gitcat.prepareRetry(path, planId, locale), path);
+        }
+        return;
+      case "inspect_changes": setFocus({ kind: "wip" }); setInspectorTab("details"); return;
+      case "configure_identity": setIdentityDialog({ user: "", email: "" }); return;
+      case "configure_remote": setInputDialog({ operation: "add_remote", title: t("connectRemoteTitle"), label: t("remoteAddress"), value: "" }); return;
+      case "resolve_conflicts":
+        if (config.configured) await resolveConflicts();
+        else { setFocus({ kind: "wip" }); setInspectorTab("details"); }
+        return;
+      case "keep": updateTurn(path, turnId, (item) => ({ ...item, kept: true })); return;
+      case "prepare":
+        if (action.operation) await prepare(action.operation, action.args ?? {}, recoveryActionLabel(action, facts, t, config.configured));
+        return;
     }
   };
 
@@ -1137,12 +1214,14 @@ export default function App() {
         // A failed push or fetch does not create a pending Git operation, but it still needs the
         // assistant's translation and next-step options. Recovery is for any failed plan, not only
         // merge/rebase states that leave metadata in .git.
-        if (failed && config.configured) {
+        if (failed) {
           await recoverFrom(plan.repoPath, {
             command: failed.command,
             summary: failed.summary,
             error: result.error,
-            skipped: (result.outcomes ?? []).filter((outcome) => outcome.status === "skipped").map((outcome) => outcome.summary)
+            skipped: (result.outcomes ?? []).filter((outcome) => outcome.status === "skipped").map((outcome) => outcome.summary),
+            planId: plan.id,
+            stage: "execute"
           });
         }
       } else {
@@ -1156,11 +1235,14 @@ export default function App() {
       updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
       notify({ message, tone: "error" });
       await refreshProject(plan.repoPath, false);
-      if (config.configured) await recoverFrom(plan.repoPath, {
+      // The main process kept what happened to this plan, including whether the repository moved under it.
+      await recoverFrom(plan.repoPath, {
         command: plan.command,
         summary: plan.summary,
         error: message,
-        skipped: plan.steps.map((step) => step.summary)
+        skipped: plan.steps.map((step) => step.summary),
+        planId: plan.id,
+        stage: "execute"
       });
     }
   };
@@ -1188,11 +1270,12 @@ export default function App() {
       const message = cleanError(error, t("branchSwitchFailed"));
       updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
       addActivity({ label: t("branchSwitchFailed"), detail: message, tone: "warning" });
-      if (config.configured) await recoverFrom(path, {
+      await recoverFrom(path, {
         command: `git switch ${name}`,
         summary: t("switchBranch", { name }),
         error: message,
-        skipped: []
+        skipped: [],
+        stage: "prepare"
       });
     }
   };
@@ -1201,7 +1284,8 @@ export default function App() {
     if (!inputDialog?.value.trim()) return;
     const value = inputDialog.value.trim();
     const operation = inputDialog.operation;
-    const args: Record<string, string> = operation === "rename_branch" && inputDialog.from ? { name: inputDialog.from, to: value }
+    const args: Record<string, string> = operation === "add_remote" ? { name: "origin", url: value }
+      : operation === "rename_branch" && inputDialog.from ? { name: inputDialog.from, to: value }
       : operation === "create_branch" && inputDialog.from ? { name: value, from: inputDialog.from }
       : { name: value };
     setInputDialog(undefined);
@@ -1499,7 +1583,7 @@ export default function App() {
                 : activeFocus
                   ? <CommitInspector key={activeFocus.commit.hash} commit={activeFocus.commit} snapshot={snapshot} known={graphCommits} onFocus={(commit) => focusOn({ kind: "commit", commit }, true)} onOpen={(file) => setModalCommit({ commit: activeFocus.commit, file })} />
                   : <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommitSelected")}</strong><span>{t("noCommitSelectedHint")}</span></div>}
-            </div> : <div className="assistant-body"><p className="assistant-copy">{config.configured ? t("assistantConfiguredCopy") : t("assistantUnconfiguredCopy")}</p>{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => void openSharingReview()} disabled={!config.configured}><Eye size={12} /> {t("sharingOpen")}</button><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div>}
+            </div> : <div className="assistant-body"><p className="assistant-copy">{config.configured ? t("assistantConfiguredCopy") : t("assistantUnconfiguredCopy")}</p>{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => void openSharingReview()} disabled={!config.configured}><Eye size={12} /> {t("sharingOpen")}</button><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} busy={planning} configured={config.configured} onRecoveryAction={(action) => void runRecoveryAction(turn.id, turn, action)} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div>}
             <div className="chat-compose"><textarea aria-label={t("assistantRequest")} disabled={!config.configured} value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder={config.configured ? t("assistantPlaceholder") : t("configureAssistantPlaceholder")} rows={2} /><button className="send-button" aria-label={t("prepareRequest")} onClick={() => void propose(request)} disabled={planning || !request.trim() || !config.configured}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div>
           </aside>
         </main>
@@ -1509,6 +1593,7 @@ export default function App() {
         onClose={() => { updateTurn(deliveryReview.plan.repoPath, deliveryReview.turnId, (turn) => ({ ...turn, status: "cancelled", outcome: t("planDiscarded") })); setDeliveryReview(undefined); }}
         onApply={async () => { const review = deliveryReview; setDeliveryReview(undefined); await applyPlan(review.turnId, review.plan); }} />}
       {settingsOpen && <SettingsModal config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onSaved={(next) => { setConfig(next); setSettingsOpen(false); notify({ message: t("settingsSaved"), tone: "success" }); }} />}
+      {identityDialog && <IdentityModal dialog={identityDialog} onChange={setIdentityDialog} onClose={() => setIdentityDialog(undefined)} onSubmit={() => { const identity = identityDialog; setIdentityDialog(undefined); void prepare("set_identity", { user: identity.user.trim(), email: identity.email.trim() }); }} />}
       {inputDialog && <InputModal dialog={inputDialog} branches={snapshot?.branches ?? []} onChange={(value) => setInputDialog({ ...inputDialog, value })} onClose={() => setInputDialog(undefined)} onSubmit={submitInputDialog} />}
       {menu && snapshot && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu)} label={menu.work ? t("uncommittedHeading") : menu.commit ? t("commitActions", { hash: menu.commit.shortHash }) : t("actionsFor", { name: menu.branch ?? "" })} onClose={() => setMenu(undefined)} />}
       {sharingDialog && <SharingDialog key={sharingDialog.preview.repoPath} initial={sharingDialog.preview} paths={sharingDialog.paths}
@@ -2668,13 +2753,94 @@ function DeliveryReviewModal({ review, busy, onClose, onApply }: {
   </section></div>;
 }
 
-function ConversationEntry({ turn, busy, onApply, onDismiss }: { turn: ConversationTurn; busy: boolean; onApply: (plan: ActionPlan) => void; onDismiss: () => void }) {
+function ConversationEntry({ turn, busy, configured, onRecoveryAction, onApply, onDismiss }: {
+  turn: ConversationTurn; busy: boolean; configured: boolean; onRecoveryAction: (action: RecoveryAction) => void; onApply: (plan: ActionPlan) => void; onDismiss: () => void;
+}) {
   const { t } = useI18n();
   // A sequence reports itself step by step, marks included, so it needs no outer verdict icon or colour.
   const sequence = (turn.plan?.steps.length ?? 0) > 1;
-  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.answer && <p>{turn.answer}</p>}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
+  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && <p>{turn.answer}</p>}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
 }
 
+
+/** The words for one way on, from the facts the card already shows. */
+function recoveryActionLabel(action: RecoveryAction, facts: RecoveryReport["facts"], t: Translate, configured: boolean) {
+  const values = {
+    branch: facts.branch === "HEAD" ? t("thisBranch") : facts.branch,
+    upstream: facts.upstream ?? t("theRemote"),
+    remote: action.args?.setUpstream ?? facts.remote ?? t("theRemote"),
+    operation: facts.pending ? pendingLabel(facts.pending.kind, t) : ""
+  };
+  if (action.kind === "prepare" && action.option) return t(`recoveryOption_${action.option}` as MessageKey, values);
+  if (action.kind === "resolve_conflicts") return t(configured ? "recoveryAction_resolve_conflicts" : "recoveryAction_open_conflicts");
+  return t(`recoveryAction_${action.kind}` as MessageKey);
+}
+
+function recoveryActionDetail(action: RecoveryAction, facts: RecoveryReport["facts"], t: Translate) {
+  const key = action.kind === "prepare" ? action.option : action.kind === "keep" || action.kind === "resolve_conflicts" ? action.kind : undefined;
+  if (!key) return undefined;
+  return t(`recoveryDetail_${key}` as MessageKey, {
+    branch: facts.branch, remote: action.args?.setUpstream ?? facts.remote ?? t("theRemote"), ahead: counted(t, facts.ahead, "commit", "commits")
+  });
+}
+
+/**
+ * A failure explained without the assistant: what completed, where it stopped, what never ran, what
+ * is still safe and the ways on the repository supports. A real choice is asked as one focused
+ * question with what each answer costs, and nothing is picked for the person.
+ */
+function RecoveryCard({ report, assistant, kept, busy, configured, retryable, onAction }: {
+  report: RecoveryReport; assistant?: ConversationTurn["assistant"]; kept: boolean; busy: boolean; configured: boolean; retryable: boolean; onAction: (action: RecoveryAction) => void;
+}) {
+  const { t } = useI18n();
+  const { facts, kind } = report;
+  const operation = facts.pending ? pendingLabel(facts.pending.kind, t) : "";
+  const values = {
+    branch: facts.branch === "HEAD" ? t("thisBranch") : facts.branch,
+    upstream: facts.upstream ?? t("theRemote"),
+    remote: facts.remote ?? t("theRemote"),
+    operation,
+    ahead: counted(t, facts.ahead, "commit", "commits"),
+    behind: counted(t, facts.behind, "commit", "commits"),
+    files: counted(t, facts.conflicts, "conflictFile", "conflictFiles"),
+    hook: facts.hook ?? "",
+    lock: facts.lock ?? ""
+  };
+  const why = kind === "divergent" ? (facts.behind === 0 ? "recoveryWhy_divergent_unseen" : facts.ahead === 0 ? "recoveryWhy_divergent_behind" : "recoveryWhy_divergent")
+    : kind === "missing_upstream" && !report.actions.some((action) => action.option === "publish") && !report.choice ? "recoveryWhy_missing_upstream_open"
+    : kind === "hook" && !facts.hook ? "recoveryWhy_hook_unnamed"
+    : kind === "lock" && !facts.lock ? "recoveryWhy_lock_unnamed"
+    : `recoveryWhy_${kind}`;
+  const safe = [
+    report.completed.length ? t("recoverySafeCompleted") : report.stage !== "execute" ? t("recoverySafeNothingRan") : undefined,
+    facts.changes ? t("recoverySafeChanges", { changes: counted(t, facts.changes, "change", "changes") }) : undefined,
+    ["network", "auth", "missing_upstream", "no_remote", "divergent"].includes(kind) ? t("recoverySafeRemote") : undefined,
+    ["conflict", "pending"].includes(kind) && operation ? t("recoverySafeBackOut", { operation }) : undefined,
+    ["network", "auth", "missing_upstream", "no_remote", "hook", "identity", "lock"].includes(kind) ? t("recoverySafeCommits") : undefined,
+    kind === "unknown" && !facts.changes ? t("recoverySafeFiles") : undefined
+  ].filter((line): line is string => Boolean(line));
+  const actions = report.actions.filter((action) => action.kind !== "retry" || retryable);
+  const button = (action: RecoveryAction, index: number, primary: boolean) => <button key={`${action.kind}-${action.option ?? ""}-${index}`} className={primary ? "outline-button small" : "ghost-button small"} disabled={busy || kept} onClick={() => onAction(action)}>{recoveryActionLabel(action, facts, t, configured)}</button>;
+  return <div className={`recovery-card kind-${kind}`} data-kind={kind}>
+    <div className="recovery-header"><AlertTriangle size={15} /><strong>{t(`recoveryTitle_${kind}` as MessageKey, values)}</strong><span className="recovery-tag" title={t("recoveryLocalCheckTitle")}><ShieldCheck size={11} /> {t("recoveryLocalCheck")}</span></div>
+    <p className="recovery-why">{t(why as MessageKey, values)}</p>
+    <ol className="recovery-steps">
+      {report.completed.map((summary, index) => <li key={`done-${index}`} className="done"><Check size={12} /><span>{summary}</span><em>{t("recoveryCompleted")}</em></li>)}
+      <li className="failed"><X size={12} /><span>{report.failedSummary}</span><em>{t("recoveryFailedStep")}</em></li>
+      {report.notRun.map((summary, index) => <li key={`skip-${index}`} className="skipped"><CircleDot size={12} /><span>{summary}</span><em>{t("recoveryNotRunStep")}</em></li>)}
+    </ol>
+    {safe.length > 0 && <div className="recovery-safe"><strong>{t("recoverySafeHeading")}</strong><ul>{safe.map((line) => <li key={line}>{line}</li>)}</ul></div>}
+    {report.detail && <details className="recovery-detail"><summary>{t("recoveryGitSaid")}</summary><pre>{report.detail}</pre></details>}
+    {report.choice && report.choice.length > 0 && <div className="recovery-choice" role="group" aria-label={t("recoveryChoicePrompt")}>
+      <strong>{t("recoveryChoicePrompt")}</strong>
+      {report.choice.map((action, index) => <button key={`${action.kind}-${action.option ?? ""}-${index}`} className="recovery-option" disabled={busy || kept} onClick={() => onAction(action)}><span>{recoveryActionLabel(action, facts, t, configured)}</span>{recoveryActionDetail(action, facts, t) && <small>{recoveryActionDetail(action, facts, t)}</small>}</button>)}
+    </div>}
+    {actions.length > 0 && <div className="recovery-actions" aria-label={t("recoveryNextHeading")}>{actions.map((action, index) => button(action, index, index === 0 && !report.choice))}</div>}
+    {kept && <p className="recovery-note">{t("recoveryKept")}</p>}
+    {assistant === "consulting" && <p className="recovery-note"><LoaderCircle className="spin" size={12} /> {t("recoveryAssistantConsulting")}</p>}
+    {assistant && assistant !== "consulting" && <p className="recovery-note assistant-unavailable">{assistant === "not_shared" ? t("recoveryNotShared") : t(`recoveryAssistant_${assistant}` as MessageKey)}</p>}
+  </div>;
+}
 
 function PlanCard({ plan, onApply, onDismiss, busy }: { plan: ActionPlan; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean }) {
   const { t } = useI18n();
@@ -2709,6 +2875,13 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onSaved }: { c
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="modal-heading"><div><div className="eyebrow">{t("llmProvider")}</div><h2 id="settings-title">{t("settings")}</h2></div><button className="icon-button soft" onClick={onClose} aria-label={t("closeSettings")}><X size={17} /></button></div><div className="provider-card"><div className="provider-logo">AI</div><div><strong>OpenAI</strong><span>{t("apiKeyLocal")}</span></div><span className={`connected-dot ${config.configured ? "on" : ""}`} /></div><label>{t("language")}<select value={locale} onChange={(event) => onLocaleChange(event.target.value as Locale)}><option value="en">{t("english")}</option><option value="es">{t("spanish")}</option></select><small>{t("languageHelp")}</small></label><label>{t("apiKey")}<input autoFocus type="password" value={apiKey} onChange={(event) => { setApiKey(event.target.value); setClearApiKey(false); }} placeholder={config.configured ? t("savedApiKeyPlaceholder") : "sk-…"} autoComplete="off" /></label>{config.configured && <label className="checkbox-label"><input type="checkbox" checked={clearApiKey} onChange={(event) => { setClearApiKey(event.target.checked); if (event.target.checked) setApiKey(""); }} /> {t("removeSavedApiKey")}</label>}<label>{t("model")}<input value={model} onChange={(event) => setModel(event.target.value)} placeholder={t("modelPlaceholder")} /><small>{t("modelHelp")}</small></label><div className="modal-note"><ShieldCheck size={15} /><span>{t("settingsNote")}</span></div>{error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}<div className="modal-actions"><button className="ghost-button" onClick={onClose}>{t("cancel")}</button><button className="primary-button" onClick={() => void save()} disabled={saving}>{saving ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />} {t("save")}</button></div></div></div>;
 }
 
+/** The name and email Git records with each commit here. Submitting prepares a plan; nothing is written until it is confirmed. */
+function IdentityModal({ dialog, onChange, onClose, onSubmit }: { dialog: IdentityDialog; onChange: (dialog: IdentityDialog) => void; onClose: () => void; onSubmit: () => void }) {
+  const { t } = useI18n();
+  useEscape(onClose);
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal identity-modal" role="dialog" aria-modal="true" aria-labelledby="identity-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><div className="modal-heading"><div><div className="eyebrow">{t("gitOperation")}</div><h2 id="identity-modal-title">{t("identityTitle")}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div><label>{t("identityName")}<input autoFocus value={dialog.user} onChange={(event) => onChange({ ...dialog, user: event.target.value })} maxLength={100} autoComplete="name" /></label><label>{t("identityEmail")}<input type="email" value={dialog.email} onChange={(event) => onChange({ ...dialog, email: event.target.value })} maxLength={254} autoComplete="email" /><small>{t("identityHelp")}</small></label><div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button><button className="primary-button" disabled={!dialog.user.trim() || !dialog.email.trim()}><UserRound size={14} /> {t("prepare")}</button></div></form></div>;
+}
+
 /**
  * Naming a branch, with what the repository already writes offered as completions. When the name
  * starts with a prefix this repo spells differently, it says so and stops there: creation is never
@@ -2719,8 +2892,8 @@ function InputModal({ dialog, branches, onChange, onClose, onSubmit }: { dialog:
   useEscape(onClose);
   const creating = dialog.operation === "create_branch" || dialog.operation === "rename_branch";
   const options = useMemo(
-    () => creating ? namingCompletions(branches) : branches.filter((branch) => !branch.isCurrent).map((branch) => branch.name),
-    [creating, branches]
+    () => dialog.operation === "add_remote" ? [] : creating ? namingCompletions(branches) : branches.filter((branch) => !branch.isCurrent).map((branch) => branch.name),
+    [creating, branches, dialog.operation]
   );
   const hint = useMemo(() => creating ? variantHint(dialog.value, branches) : undefined, [creating, dialog.value, branches]);
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal" role="dialog" aria-modal="true" aria-labelledby="input-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><div className="modal-heading"><div><div className="eyebrow">{t("gitOperation")}</div><h2 id="input-modal-title">{dialog.title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div><label>{dialog.label}<input autoFocus value={dialog.value} onChange={(event) => onChange(event.target.value)} list={options.length ? "branch-options" : undefined} maxLength={200} /></label>{options.length > 0 && <datalist id="branch-options">{options.map((option) => <option value={option} key={option} />)}</datalist>}{hint && <p className="naming-hint" role="status"><Lightbulb size={12} /><span>{t("repositoryUses", { prefix: hint.canonical, count: counted(t, hint.count, "branch", "branches"), suggestion: `${hint.canonical}/…` })} <button type="button" onClick={() => onChange(`${hint.canonical}/${dialog.value.trim().slice(hint.typed.length + 1)}`)}><code>{hint.canonical}/…</code></button></span></p>}<div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button><button className="primary-button" disabled={!dialog.value.trim()}><GitBranch size={14} /> {t("prepare")}</button></div></form></div>;

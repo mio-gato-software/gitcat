@@ -332,3 +332,33 @@
 .secret-warning code { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; overflow-wrap: anywhere; }
 .secret-warning small { color: #c9ad83; font-size: 9.5px; }
 .secret-warning .delivery-option { margin-top: 2px; }
+
+/* A failure explained from facts: what ran, where it stopped, what is safe, and the ways on. */
+.recovery-card { margin: 0 0 10px; padding: 11px 12px; border: 1px solid #644b2c; border-radius: 8px; background: #241f18; color: var(--secondary); font-size: 10.5px; line-height: 1.5; }
+.recovery-card.kind-stale, .recovery-card.kind-unknown { border-color: var(--border); background: var(--surface); }
+.recovery-header { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 5px 7px; }
+.recovery-header > svg { flex: none; margin-top: 1px; color: #e6a64f; }
+.recovery-header strong { flex: 1 1 160px; min-width: 0; color: var(--text); font-size: 11px; overflow-wrap: anywhere; }
+.recovery-tag { display: inline-flex; flex: none; align-items: center; gap: 3px; padding: 1px 6px; color: var(--mint); border: 1px solid #3b5a4a; border-radius: 999px; font-size: 9px; white-space: nowrap; }
+.recovery-card .recovery-why { margin: 7px 0 8px; font-size: 10.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.recovery-steps { display: flex; flex-direction: column; gap: 3px; margin: 0 0 8px; padding: 0; list-style: none; }
+.recovery-steps li { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.recovery-steps li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.recovery-steps li em { flex: none; font-size: 9px; font-style: normal; color: var(--muted); }
+.recovery-steps li.done svg { color: var(--mint); }
+.recovery-steps li.failed svg, .recovery-steps li.failed em { color: #ef9c92; }
+.recovery-steps li.skipped { color: var(--muted); }
+.recovery-safe strong, .recovery-choice strong { display: block; margin-bottom: 3px; color: var(--text); font-size: 10px; }
+.recovery-safe ul { margin: 0 0 8px; padding-left: 16px; }
+.recovery-detail { margin: 0 0 8px; }
+.recovery-detail summary { cursor: pointer; color: var(--muted); font-size: 10px; }
+.recovery-detail pre { max-height: 140px; margin: 5px 0 0; padding: 7px; overflow: auto; color: var(--secondary); background: var(--canvas); border-radius: 5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.recovery-choice { display: flex; flex-direction: column; gap: 5px; margin: 0 0 8px; }
+.recovery-option { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 7px 9px; color: var(--text); text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; font-size: 10.5px; }
+.recovery-option:hover:not(:disabled) { border-color: #4b8180; }
+.recovery-option small { color: var(--muted); font-size: 9.5px; line-height: 1.4; }
+.recovery-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.recovery-note { display: flex; align-items: center; gap: 5px; margin: 8px 0 0; color: var(--muted); font-size: 10px; }
+.recovery-note.assistant-unavailable { color: #e4b479; }
+.recovery-assistant-heading { display: flex; align-items: center; gap: 5px; margin: 4px 0; color: var(--muted); font-size: 10px; }
+.identity-modal small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
