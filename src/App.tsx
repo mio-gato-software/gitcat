@@ -19,6 +19,8 @@ import type { BranchSuggestion } from "../shared/branch-consistency";
 import { isProtectedBranch, lifecycleOf, staleDays } from "../shared/branch-lifecycle";
 import { buildCommitGraph, familyColour, maxLanes, withWorkInProgress, workInProgressHash } from "../shared/commit-graph";
 import { pullRequestReference } from "../shared/repository-activity";
+import { refChips } from "../shared/ref-chips";
+import type { RefChip } from "../shared/ref-chips";
 import { authorAvatarUrl, avatarKey } from "../shared/avatar";
 import { clampGraphColumn, graphColumnRange, parseGraphColumns } from "../shared/graph-columns";
 import type { GraphColumn, GraphColumnWidths } from "../shared/graph-columns";
@@ -1857,43 +1859,6 @@ function ChangeStats({ additions, deletions, files, binary = false }: { addition
   </span>;
 }
 
-type RefChip = { label: string; kind: "head" | "local" | "remote" | "tag" };
-
-/**
- * The refs worth showing, once each. `feature/x` and `origin/feature/x` are one branch that happens to
- * exist in two places, so drawing both spent the whole width saying the same name twice and truncated
- * it in the process. A remote-only ref keeps its own mark, because that one you do not have here.
- *
- * "origin/HEAD" is a symbolic pointer rather than a branch anyone can visit, and the "HEAD -> "
- * decoration is a statement about the checkout, not part of any name.
- */
-function refChips(refs: string[], remotes: string[]): RefChip[] {
-  const order: string[] = [];
-  const found = new Map<string, { head: boolean; local: boolean; remote: boolean; tag: boolean }>();
-  const note = (label: string, key: "head" | "local" | "remote" | "tag") => {
-    if (!found.has(label)) { found.set(label, { head: false, local: false, remote: false, tag: false }); order.push(label); }
-    found.get(label)![key] = true;
-  };
-  for (const raw of refs) {
-    const head = /^HEAD ->/.test(raw);
-    const name = raw.replace(/^HEAD ->\s*/, "").trim();
-    if (!name || name === "HEAD") continue;
-    if (name.startsWith("tag:")) { note(name.slice(4).trim(), "tag"); continue; }
-    if (remotes.some((remote) => name === `${remote}/HEAD`)) continue;
-    const remote = remotes.find((candidate) => name.startsWith(`${candidate}/`));
-    const label = remote ? name.slice(remote.length + 1) : name;
-    note(label, remote ? "remote" : "local");
-    if (head) note(label, "head");
-  }
-  return order.map((label) => {
-    const flags = found.get(label)!;
-    return {
-      label,
-      kind: flags.tag ? "tag" : flags.head ? "head" : flags.local ? "local" : "remote"
-    };
-  });
-}
-
 function CommitRow({ commit, row, lanes, remotes, colour, byFamily, selected, head, marker, work, register, onSelect, onOpen, onCheckout, onMenu }: {
   commit: Commit; row?: GraphRow; lanes: number; remotes: string[]; colour: string; byFamily: boolean;
   selected: boolean; head: boolean; marker: string;
@@ -1903,9 +1868,24 @@ function CommitRow({ commit, row, lanes, remotes, colour, byFamily, selected, he
 }) {
   const { t, locale } = useI18n();
   const lane = row && lanes ? Math.min(row.lane, lanes - 1) : 0;
-  // The checked-out branch leads, because it is the label the user is most likely looking for.
-  const chips = work ? [] : refChips(commit.refs, remotes).sort((a, b) => Number(b.kind === "head") - Number(a.kind === "head"));
+  const chips = work ? [] : refChips(commit.refs, remotes);
   const [first, ...rest] = chips;
+  // "+N" opens every label on the commit, stacked over the rows below, the way the row would show them
+  // if it were tall enough. It closes on a click elsewhere or Escape.
+  const [stackOpen, setStackOpen] = useState(false);
+  const stackRef = useRef<HTMLDivElement>(null);
+  const moreRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!stackOpen) return;
+    const close = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!stackRef.current?.contains(target) && !moreRef.current?.contains(target)) setStackOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setStackOpen(false); };
+    document.addEventListener("pointerdown", close, true);
+    document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("pointerdown", close, true); document.removeEventListener("keydown", escape); };
+  }, [stackOpen]);
   const pr = pullRequestReference(commit.subject);
   const merge = commit.parents.length > 1;
   const chipTitle = (chip: RefChip) => chip.kind === "remote" ? `${chip.label} · ${t("remoteOnlyTitle")}` : chip.label;
@@ -1917,6 +1897,9 @@ function CommitRow({ commit, row, lanes, remotes, colour, byFamily, selected, he
     onContextMenu: (event: ReactMouseEvent) => { event.preventDefault(); event.stopPropagation(); onMenu(chip.label, event.clientX, event.clientY); }
   };
   const size = node === "merge" ? 10 : 20;
+  const chipTag = (chip: RefChip) => <span className={`ref-tag ${chip.kind}`} key={`${chip.kind}:${chip.label}`} title={`${chipTitle(chip)}${chip.kind === "tag" ? "" : `\n${t(chip.kind === "head" ? "currentBranchHint" : "doubleClickSwitchHint")}`}`} {...chipEvents(chip)}>
+    {chip.kind === "head" ? <Check size={11} /> : chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <GitBranch size={11} />}<span>{chip.label}</span>
+  </span>;
   return <div
     className={`commit-row ${selected ? "selected" : ""} ${head ? "head" : ""} ${work ? "wip" : ""}`}
     style={{ "--lane": colour } as CSSProperties}
@@ -1926,12 +1909,19 @@ function CommitRow({ commit, row, lanes, remotes, colour, byFamily, selected, he
     onContextMenu={(event) => { event.preventDefault(); onMenu(branchOf(first), event.clientX, event.clientY); }}
   >
     <div className="commit-refs">
-      {first && <span className={`ref-tag ${first.kind}`} title={`${chips.map(chipTitle).join("\n")}${first.kind === "tag" ? "" : `\n${t(first.kind === "head" ? "currentBranchHint" : "doubleClickSwitchHint")}`}`} {...chipEvents(first)}>
-        {first.kind === "head" ? <Check size={11} /> : first.kind === "tag" ? <Tag size={11} /> : first.kind === "remote" ? <Cloud size={11} /> : <GitBranch size={11} />}<span>{first.label}</span>
-      </span>}
-      {rest.length > 0 && <span className="ref-tag more" title={rest.map(chipTitle).join("\n")}>+{rest.length}</span>}
+      {first && chipTag(first)}
+      {rest.length > 0 && <button
+        ref={moreRef}
+        className="ref-tag more"
+        aria-expanded={stackOpen}
+        aria-label={t("showAllRefs", { count: chips.length })}
+        title={rest.map(chipTitle).join("\n")}
+        onClick={(event) => { event.stopPropagation(); setStackOpen((open) => !open); }}
+        onDoubleClick={(event) => event.stopPropagation()}
+      >+{rest.length}</button>}
       {first && <span className="ref-connector" />}
     </div>
+    {stackOpen && <div className="ref-stack" ref={stackRef} role="group" aria-label={t("showAllRefs", { count: chips.length })}>{chips.map(chipTag)}</div>}
     <div className="graph-track">
       {row && lanes > 0 ? <GraphLanes row={row} lanes={lanes} colour={colour} byFamily={byFamily} connector={Boolean(first)} dashed={Boolean(work)} /> : <span className="track-line" />}
       <span className={`commit-node ${node}`} style={{ left: laneX(lane) - size / 2, borderColor: colour, ...(node === "avatar" ? authorTone(commit.email || commit.author) : node === "merge" ? { background: colour } : {}) }} title={work ? undefined : `${commit.author} · ${formatDateFull(commit.date, locale)}`}>
@@ -2181,7 +2171,7 @@ function CommitInspector({ commit, snapshot, known, onFocus, onOpen }: {
           : <code key={parent}>{parent.slice(0, 7)}</code>;
       })}</div>}
     </div>
-    {chips.length > 0 && <div className="detail-refs">{chips.map((chip) => <span className={`ref-tag ${chip.kind}`} key={chip.label} title={chip.kind === "remote" ? `${chip.label} · ${t("remoteOnlyTitle")}` : chip.label}>
+    {chips.length > 0 && <div className="detail-refs">{chips.map((chip) => <span className={`ref-tag ${chip.kind}`} key={`${chip.kind}:${chip.label}`} title={chip.kind === "remote" ? `${chip.label} · ${t("remoteOnlyTitle")}` : chip.label}>
       {chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <GitBranch size={11} />}{chip.label}
     </span>)}</div>}
     {commit.parents.length > 1 && <p className="detail-note"><GitMerge size={12} />{t("mergeDetails", { hash: commit.parents[0].slice(0, 7) })}</p>}
