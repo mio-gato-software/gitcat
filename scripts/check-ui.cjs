@@ -124,11 +124,49 @@ app.whenReady().then(async () => {
     plans.set(plan.id, plan); return plan;
   });
 
+  // Getting a first project in runs on the real setup service against disposable folders. The only
+  // stand-ins are the system dialogs (their answer is set per step) and one address mapped to a local
+  // empty repository, because a person's clone never reads local paths.
+  const setupService = await import(pathToFileURL(path.join(root, 'dist-electron/electron/project-setup.js')));
+  const setupRoot = path.join(scratch, 'setup');
+  fs.mkdirSync(setupRoot);
+  const pendingSetups = new Map();
+  let nextFolder = null;
+  let cloneParent = null;
+  let cloneController = null;
+  const emptyRemote = path.join(setupRoot, 'empty-remote.git');
+  const emptyRemoteUrl = 'https://example.test/octo/empty-start.git';
+  const selectResult = async (folder, intent) => {
+    const inspection = await setupService.inspectFolder(folder);
+    if (inspection.kind === 'repository') return { status: 'opened', project: await service.getSnapshot(inspection.root) };
+    const setupId = `setup-${pendingSetups.size + 1}`;
+    if (inspection.kind === 'folder') { pendingSetups.set(setupId, inspection.preview); return { status: 'not_repository', setupId, preview: inspection.preview, intent }; }
+    if (inspection.kind === 'inside_repository') return { status: 'inside_repository', setupId, path: inspection.path, root: inspection.root, rootName: path.basename(inspection.root) };
+    return { status: 'invalid', path: inspection.path, problem: inspection.problem };
+  };
+  ipcMain.handle('project:select', (_, intent) => nextFolder ? selectResult(nextFolder, intent === 'track' ? 'track' : 'open') : { status: 'canceled' });
+  ipcMain.handle('project:start-tracking', async (_, setupId) => {
+    const preview = pendingSetups.get(setupId);
+    const outcome = await setupService.startTracking(preview.path, { branch: preview.branch });
+    return outcome.status === 'started' ? { status: 'started', project: await service.getSnapshot(outcome.root) } : outcome;
+  });
+  ipcMain.handle('clone:choose-parent', () => ({ status: 'chosen', parentId: 'parent-1', path: cloneParent }));
+  ipcMain.handle('clone:preview', (_, url, _id, name) => setupService.previewClone({ url, parent: cloneParent, name }));
+  ipcMain.handle('clone:start', async (_, url, _id, name) => {
+    const controller = cloneController = new AbortController();
+    const local = url === emptyRemoteUrl;
+    const outcome = await setupService.cloneRepository({ url: local ? emptyRemote : url, parent: cloneParent, name }, { signal: controller.signal, allowLocalSource: local });
+    cloneController = null;
+    return outcome.status === 'cloned' ? { status: 'cloned', project: await service.getSnapshot(outcome.path), empty: outcome.empty } : outcome;
+  });
+  ipcMain.handle('clone:cancel', () => { cloneController?.abort(); return Boolean(cloneController); });
+
   const win = new BrowserWindow({ width: 1480, height: 940, show: false, webPreferences: { preload: path.join(root, 'electron/preload.cjs') } });
-  const js = code => win.webContents.executeJavaScript(code);
+  const js = code => win.webContents.executeJavaScript(code).catch((error) => { if (process.env.GITCAT_UI_DEBUG) console.error('JS FAILED:', code.slice(0, 300)); throw error; });
   const waitFor = async expression => {
     for (let attempt = 0; attempt < 100; attempt++) {
-      if (await js(expression)) return;
+      // Only the truth of the expression crosses back: a form element, for one, cannot be cloned.
+      if (await js(`Boolean(${expression})`)) return;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     if (process.env.GITCAT_UI_DEBUG) console.error((await js(`document.body.innerText`)).slice(0, 3000));
@@ -450,9 +488,9 @@ app.whenReady().then(async () => {
   await win.loadFile(path.join(root, 'dist/index.html'));
   await waitFor(`document.querySelector('.welcome-card.first-run')`);
   const welcome = await js(`document.querySelector('.welcome-card').innerText`);
-  for (const entry of [/Abrir proyecto/, /Listo sin configurar nada/, /Guardar tus cambios/, /Resolver conflictos paso a paso/, /Asistente de IA · opcional/, /Conectar un asistente de IA/]) assert.match(welcome, entry);
+  for (const entry of [/Abrir un proyecto existente/, /Clonar desde una URL/, /Empezar a seguir una carpeta/, /Listo sin configurar nada/, /Guardar tus cambios/, /Resolver conflictos paso a paso/, /Asistente de IA · opcional/, /Conectar un asistente de IA/]) assert.match(welcome, entry);
   assert.doesNotMatch(welcome, /REQUERIDO|API key/i, 'No technical configuration before the first useful action');
-  assert.equal(await js(`document.querySelector('.welcome-card .primary-button').innerText.trim()`), 'Abrir proyecto');
+  assert.match(await js(`document.querySelector('.welcome-card .start-option.primary').innerText`), /^Abrir un proyecto existente/);
   await capture('first-run');
   // The guided connection: what a provider is, that it is billed by the provider, where the key comes from.
   await js(`[...document.querySelectorAll('.welcome-ai button')][0].click()`);
@@ -513,8 +551,105 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.ai-problem').scrollIntoView({ block: 'center' })`);
   await new Promise(resolve => setTimeout(resolve, 100));
   await capture('settings-storage-unavailable');
+
+  // Starting from an ordinary folder: three plain ways in, a preview of what tracking does, and
+  // nothing written until it is confirmed. The files then wait as changes for the first save.
+  secureStorage = true;
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await waitFor(`document.querySelectorAll('.welcome-card .start-option').length === 3`);
+  const options = await js(`[...document.querySelectorAll('.welcome-card .start-option')].map((node) => node.innerText)`);
+  assert.match(options[0], /Abrir un proyecto existente[\s\S]*ya usa Git/);
+  assert.match(options[1], /Clonar desde una URL[\s\S]*Solo necesitas su dirección/);
+  assert.match(options[2], /Empezar a seguir una carpeta[\s\S]*No se sube nada/);
+  assert.equal(await js(`document.querySelector('.welcome-card .start-option.primary').dataset.option`), 'open');
+  const setText = (selector, value) => js(`(() => { const input = document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  const plain = path.join(setupRoot, 'Recetas');
+  fs.mkdirSync(path.join(plain, 'node_modules', 'pkg'), { recursive: true });
+  fs.writeFileSync(path.join(plain, 'pan.md'), 'harina\n');
+  fs.writeFileSync(path.join(plain, 'tarta.md'), 'azúcar\n');
+  fs.writeFileSync(path.join(plain, '.env'), 'TOKEN=abc\n');
+  fs.writeFileSync(path.join(plain, 'node_modules', 'pkg', 'index.js'), '1\n');
+  nextFolder = plain;
+  // Opening it as a project explains that it is not one yet instead of failing with Git's words.
+  await js(`document.querySelector('.welcome-card .start-option[data-option="open"]').click()`);
+  await waitFor(`document.querySelector('.setup-modal')?.innerText.includes('todavía no es un proyecto de Git')`);
+  assert.match(await js(`document.querySelector('.setup-modal').innerText`), /puede empezar a seguirla aquí mismo/);
+  await js(`document.querySelector('.setup-modal .ghost-button').click()`);
+  await waitFor(`!document.querySelector('.setup-modal')`);
+  await js(`document.querySelector('.welcome-card .start-option[data-option="track"]').click()`);
+  await waitFor(`document.querySelector('.setup-modal .setup-facts')`);
+  const trackText = await js(`document.querySelector('.setup-modal').innerText`);
+  for (const entry of [/Empezar a seguir Recetas/, /4 archivos aparecerán como cambios, listos para tu primer guardado/, /No se sube nada/, /no se cambian, no se mueven/, /carpeta oculta \.git/, /La primera rama se llamará \S+/, /Lo que se suele dejar fuera/, /GitCat no escribe un \.gitignore por ti/]) assert.match(trackText, entry);
+  assert.deepEqual((await js(`document.querySelector('.setup-gitignore').innerText`)).split('\n').sort(), ['.env', 'node_modules/']);
+  assert.equal(fs.existsSync(path.join(plain, '.git')), false, 'Previewing writes nothing');
+  await capture('start-tracking-preview');
+  await js(`[...document.querySelectorAll('.setup-modal .primary-button')].find((node) => node.innerText.includes('Empezar a seguir')).click()`);
+  await waitFor(`!document.querySelector('.setup-modal') && document.querySelector('.changes-view')`);
+  assert.equal(fs.existsSync(path.join(plain, '.git')), true);
+  assert.equal(fs.existsSync(path.join(plain, '.gitignore')), false, 'The .gitignore suggestion is never written on its own');
+  await waitFor(`document.querySelector('.graph-empty.first-save')`);
+  assert.match(await js(`document.querySelector('.graph-empty.first-save').innerText`), /Todavía no hay versiones guardadas[\s\S]*listos para el primer guardado/);
+  assert.match(await js(`document.querySelector('.changes-view').innerText`), /primera versión guardada del proyecto/);
+  for (const file of ['pan.md', 'tarta.md', '.env']) assert.ok((await js(`document.querySelector('.changes-view').innerText`)).includes(file), `${file} waits for the first save`);
+  await capture('first-save-ready');
+
+  // Cloning: the address is checked while it is typed, the destination is previewed, a folder with
+  // files is refused, and a stopped copy leaves the chosen place exactly as it was.
+  cloneParent = path.join(setupRoot, 'Proyectos');
+  fs.mkdirSync(path.join(cloneParent, 'ocupada'), { recursive: true });
+  fs.writeFileSync(path.join(cloneParent, 'ocupada', 'mio.txt'), 'mío\n');
+  const sockets = new Set();
+  const silent = require('node:net').createServer((socket) => { sockets.add(socket); socket.on('error', () => {}); });
+  await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve));
+  await js(`document.querySelector('.tab-add').click()`);
+  await waitFor(`document.querySelectorAll('.setup-modal .start-option').length === 3`);
+  await js(`document.querySelector('.setup-modal .start-option[data-option="clone"]').click()`);
+  await waitFor(`document.querySelector('.clone-form')`);
+  for (const [address, problem] of [['file:///etc', 'local'], ['ext::sh -c touch', 'spaces'], ['ext::sh', 'transport_helper'], ['--upload-pack=touch', 'option'], ['http://github.com/o/r.git', 'insecure'], ['https://user:token@github.com/o/r.git', 'credentials']]) {
+    await setText('.clone-form input', address);
+    await waitFor(`document.querySelector('.clone-form .setup-problem')?.dataset.problem === ${JSON.stringify(problem)}`);
+  }
+  assert.match(await js(`document.querySelector('.clone-form .setup-problem').innerText`), /contraseña o un token/);
+  assert.equal(await js(`document.querySelector('.clone-form .primary-button').disabled`), true, 'Nothing can start from an address that failed the check');
+  await setText('.clone-form input', `https://127.0.0.1:${silent.address().port}/octo/demo.git`);
+  await waitFor(`document.querySelectorAll('.clone-form input')[1].value === 'demo'`);
+  await js(`document.querySelector('.setup-parent button').click()`);
+  await waitFor(`document.querySelector('.setup-preview')`);
+  assert.match(await js(`document.querySelector('.setup-preview').innerText`), new RegExp(`La copia se creará en[\\s\\S]*Proyectos/demo[\\s\\S]*No se toca nada más`));
+  await setText('.clone-form label:nth-of-type(2) input', 'ocupada');
+  await waitFor(`document.querySelector('.clone-form .setup-problem')?.dataset.problem === 'destination_not_empty'`);
+  assert.match(await js(`document.querySelector('.clone-form .setup-problem').innerText`), /nunca mezcla una copia con archivos que ya existen/);
+  await setText('.clone-form label:nth-of-type(2) input', 'demo');
+  await waitFor(`document.querySelector('.setup-preview') && !document.querySelector('.clone-form .primary-button').disabled`);
+  await js(`document.querySelector('.clone-form .primary-button').click()`);
+  await waitFor(`document.querySelector('.setup-running')`);
+  for (let attempt = 0; attempt < 100 && !sockets.size; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(fs.readdirSync(cloneParent).some((name) => name.startsWith('.demo.gitcat-clone-')), 'The copy in progress has a folder of its own');
+  await capture('clone-running');
+  await js(`[...document.querySelectorAll('.clone-form .modal-actions button')].find((node) => node.innerText.includes('Cancelar la copia')).click()`);
+  await waitFor(`document.querySelector('.clone-form .setup-notice')?.innerText.includes('La copia se detuvo')`);
+  assert.deepEqual(fs.readdirSync(cloneParent), ['ocupada'], 'Only the folder the copy created was removed');
+  assert.deepEqual(fs.readdirSync(path.join(cloneParent, 'ocupada')), ['mio.txt']);
+  for (const socket of sockets) socket.destroy();
+  silent.close();
+
+  // An empty repository clones cleanly and opens on the way to its first save.
+  execFileSync('git', ['init', '-q', '--bare', emptyRemote]);
+  await setText('.clone-form input', emptyRemoteUrl);
+  // The name was edited by hand above, so it stays the person's until they change it again.
+  assert.equal(await js(`document.querySelectorAll('.clone-form input')[1].value`), 'demo');
+  await setText('.clone-form label:nth-of-type(2) input', 'empty-start');
+  await waitFor(`document.querySelectorAll('.clone-form input')[1].value === 'empty-start' && document.querySelector('.setup-preview')`);
+  await js(`document.querySelector('.clone-form .primary-button').click()`);
+  await waitFor(`!document.querySelector('.setup-modal') && document.querySelector('.graph-empty.first-save')`);
+  assert.match(await js(`document.querySelector('.graph-empty.first-save').innerText`), /Este proyecto está vacío[\s\S]*empty-start/);
+  assert.match(await js(`document.querySelector('.changes-view').innerText`), /Todavía no hay versiones guardadas/);
+  assert.match(await js(`document.querySelector('.window-tab.active').innerText`), /empty-start/);
+  assert.match(await js(`document.querySelector('.branch-list').innerText`), /está lista\. Aparecerá aquí después del primer guardado/, 'An unborn branch is explained, not reported as a filter miss');
+  assert.doesNotMatch(await js(`document.querySelector('.toolbar-delivery').innerText`), /Trabajo guardado/, 'Nothing is called saved before the first save');
+  await capture('cloned-empty');
   win.destroy();
-  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage).');
+  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));

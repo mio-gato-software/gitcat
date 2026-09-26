@@ -433,8 +433,8 @@
 .start-option > span { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .start-option strong { color: var(--text); font-size: 12px; }
 .start-option small { color: var(--muted); font-size: 11px; line-height: 1.5; }
-.start-option.primary { border-color: #3f7d74; background: #1a2b29; }
-.start-option.primary > svg { color: #6be0cf; }
+.start-option.primary { border-color: #6b3f35; background: var(--coral-soft); }
+.start-option.primary > svg { color: var(--coral); }
 .setup-modal { width: min(520px, 100%); max-height: calc(100vh - 36px); overflow: auto; padding: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 25px 90px #000c; }
 .setup-modal h2 { overflow-wrap: anywhere; }
 .setup-copy { margin: 0 0 14px; color: var(--secondary); font-size: 12px; line-height: 1.6; }

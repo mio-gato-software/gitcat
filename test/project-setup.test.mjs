@@ -300,3 +300,19 @@ test("a stalled or unreachable clone reports why and leaves nothing behind", asy
   assert.equal(classifyCloneFailure("Host key verification failed."), "host_key");
   assert.equal(classifyCloneFailure("fatal: unable to access 'https://x/': Could not resolve host: x"), "network");
 });
+
+test("opening, starting and cloning go through trusted IPC with the strict address check", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const main = await readFile(join(root, "electron/main.ts"), "utf8");
+  const preload = await readFile(join(root, "electron/preload.cjs"), "utf8");
+  for (const channel of ["project:select", "project:open-parent", "project:start-tracking", "clone:choose-parent", "clone:preview", "clone:start", "clone:cancel"]) {
+    const at = main.indexOf(`ipcMain.handle("${channel}"`);
+    assert.ok(at >= 0, `${channel} is handled`);
+    assert.match(main.slice(at, at + 400), /assertTrustedSender\(event\)/, `${channel} checks its sender`);
+    assert.ok(preload.includes(`ipcRenderer.invoke("${channel}"`), `${channel} is bridged`);
+  }
+  // The renderer never names a folder to write in: only ids the main process issued for dialog answers.
+  assert.match(main, /cloneParents\.get\(parentId\)/);
+  assert.match(main, /takeSetup\(setupId, "track"\)/);
+  assert.doesNotMatch(main, /allowLocalSource/, "people only ever get the strict address check");
+});

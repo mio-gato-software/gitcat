@@ -2237,6 +2237,8 @@ function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, o
       {/* Nada oculto en silencio: si lo que falta lo esconde el filtro de integradas, la fila lo dice. */}
       {!matches.length && <div className="empty-small">{!filtering && hideMerged && merged.length
         ? t("allOtherBranchesMerged", { branch: snapshot.defaultBranch ?? "" })
+        // Before the first save a branch has a name but nothing to point at, so Git lists none yet.
+        : !snapshot.head && !snapshot.branches.length ? t("branchAfterFirstSave", { branch: snapshot.currentBranch })
         : t("noMatchingBranches")}</div>}
     </div>
   </div>;
@@ -2838,7 +2840,7 @@ function RepoToolbar({ snapshot, busy, deliveryBusy, refreshing, fetching, refre
     <div className={`toolbar-delivery ${snapshot.isDirty ? "is-dirty" : "is-saved"}`} title={guidance}>
       <span className="delivery-status">{snapshot.isDirty
         ? <><CircleDot size={12} />{t("workNeedsSaving", { count: snapshot.changes.length })}</>
-        : integrated ? <><Check size={12} />{t("integratedStatus", { target: target! })}</> : <><Check size={12} />{t("workSaved")}</>}</span>
+        : integrated ? <><Check size={12} />{t("integratedStatus", { target: target! })}</> : snapshot.head ? <><Check size={12} />{t("workSaved")}</> : <><CircleDot size={12} />{t("firstSaveTitle")}</>}</span>
       <div className="delivery-actions">
         {snapshot.isDirty && <button className={canIntegrate ? "outline-button" : "primary-button"} disabled={deliveryBusy || blocked} onClick={onSave}><GitCommitHorizontal size={14} />{t("saveChanges")}</button>}
         {canIntegrate && !integrated && <button className="primary-button" disabled={deliveryBusy || blocked} onClick={onIntegrate}><GitMerge size={14} />{t(snapshot.isDirty ? "saveAndIntegrate" : "integrateInto", { target: target! })}</button>}
