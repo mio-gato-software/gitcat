@@ -700,9 +700,99 @@ export type ProjectLocateResult =
   | { status: "confirm"; candidateId: string; path: string; name: string; match: Exclude<RepositoryMatch, "same"> }
   | { status: "relocated"; previousPath: string; project: RepoSnapshot; match: RepositoryMatch; carriedOver: boolean };
 
+/** Something people usually leave out of a first save, found in the folder. Only ever shown, never written. */
+export type GitignoreSuggestion = {
+  pattern: string;
+  kind: "dependencies" | "system_files" | "secrets" | "python_cache" | "virtualenv" | "logs" | "build_output" | "editor";
+  /** How many of the files that would be listed match it. */
+  files: number;
+};
+
+/** Why an ordinary folder cannot become a project as it is. */
+export type FolderBlock = "protected" | "broken_repository";
+
+/** What starting to track an ordinary folder would do, read from the folder before anything is written. */
+export type FolderPreview = {
+  path: string;
+  name: string;
+  /** Files that would be listed as ready for the first save, after the folder's own .gitignore. Undefined when counting took too long. */
+  files?: number;
+  /** The count stopped at a limit; there are at least this many. */
+  filesCapped: boolean;
+  /** The name the first branch will get: the person's init.defaultBranch, or main. */
+  branch: string;
+  hasGitignore: boolean;
+  suggestions: GitignoreSuggestion[];
+  blocked?: FolderBlock;
+};
+
+/** Why a chosen folder could not be looked at. Nothing was changed in any of these cases. */
+export type FolderProblem = "missing" | "not_folder" | "permission" | "tool";
+
+/**
+ * What choosing a folder led to. A folder that is not a repository, or sits inside another one, is
+ * explained and waits for the person's choice; the id is the main process's record of that folder.
+ */
+export type ProjectSelectResult =
+  | { status: "canceled" }
+  | { status: "opened"; project: RepoSnapshot; alreadyTracked?: boolean }
+  | { status: "not_repository"; setupId: string; preview: FolderPreview; intent: "open" | "track" }
+  | { status: "inside_repository"; setupId: string; path: string; root: string; rootName: string }
+  | { status: "invalid"; path: string; problem: FolderProblem; detail?: string };
+
+export type StartTrackingResult =
+  | { status: "started"; project: RepoSnapshot }
+  /** The folder changed while the preview was on screen; this is what it looks like now. Nothing was written. */
+  | { status: "changed"; result: ProjectSelectResult }
+  | { status: "failed"; detail: string; cleaned: boolean };
+
+/** Why an address cannot be cloned from. Checked on this Mac before Git is ever run. */
+export type CloneUrlProblem = "empty" | "too_long" | "spaces" | "option" | "local" | "transport_helper" | "insecure" | "credentials" | "unsupported" | "malformed";
+
+export type CloneDestinationProblem = "name_invalid" | "parent_missing" | "parent_not_writable" | "destination_not_empty" | "destination_is_file";
+
+export type CloneProblem = CloneUrlProblem | CloneDestinationProblem;
+
+export type ClonePreview =
+  | {
+    ok: true;
+    url: string;
+    host: string;
+    /** "local" is only reachable from the service's test option; the interface never accepts a local path. */
+    protocol: "https" | "ssh" | "local";
+    parent: string;
+    name: string;
+    destination: string;
+    /** "new": GitCat creates the folder. "empty": an empty folder of that name is already there and will be filled. */
+    destinationState: "new" | "empty";
+    /** The destination is inside another repository, which will see the clone as a folder of its own. */
+    insideRepository?: string;
+  }
+  | { ok: false; problem: CloneProblem; detail?: string };
+
+export type CloneFailureReason = "auth" | "not_found" | "network" | "host_key" | "timeout" | "destination" | "tool" | "unknown";
+
+export type CloneResult =
+  | { status: "cloned"; project: RepoSnapshot; empty: boolean }
+  /** The copy was stopped on request. `cleaned` says whether the partial copy GitCat created was removed. */
+  | { status: "cancelled"; cleaned: boolean; leftAt?: string }
+  | { status: "failed"; reason: CloneFailureReason; detail: string; cleaned: boolean; leftAt?: string }
+  | { status: "invalid"; problem: CloneProblem; detail?: string };
+
+export type CloneParentResult = { status: "canceled" } | { status: "chosen"; parentId: string; path: string };
+
 export type GitlineApi = {
   platform: NodeJS.Platform;
-  selectProject: () => Promise<RepoSnapshot | null>;
+  /** Opens the folder picker. `track` is the "start tracking a folder" entry: an existing repository is simply opened. */
+  selectProject: (intent?: "open" | "track", labels?: { title: string; button: string }) => Promise<ProjectSelectResult>;
+  /** Runs the start-tracking preview the person confirmed, after checking the folder again. */
+  startTracking: (setupId: string) => Promise<StartTrackingResult>;
+  /** Opens the repository around a folder that was picked inside it. */
+  openParentProject: (setupId: string) => Promise<ProjectSelectResult>;
+  chooseCloneParent: (labels: { title: string; button: string }) => Promise<CloneParentResult>;
+  previewClone: (url: string, parentId: string, name: string) => Promise<ClonePreview>;
+  startClone: (url: string, parentId: string, name: string) => Promise<CloneResult>;
+  cancelClone: () => Promise<boolean>;
   restoreWorkspace: () => Promise<RestoredWorkspace>;
   saveWorkspace: (paths: string[], activePath?: string) => Promise<void>;
   retryProject: (path: string) => Promise<ProjectRetryResult>;

@@ -140,8 +140,23 @@ async function resolveTool(name: string) {
   return found ?? name;
 }
 
-function runGit(cwd: string, args: string[], timeoutMs = 60_000): Promise<CommandResult> {
+export function runGit(cwd: string, args: string[], timeoutMs = 60_000): Promise<CommandResult> {
   return runCommand("git", args, cwd, timeoutMs);
+}
+
+function commandEnv(searchPath: string, extraEnv: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { ...process.env, PATH: searchPath, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no", GIT_EDITOR: "true", ...extraEnv };
+}
+
+/**
+ * A Git process with the same tool lookup and environment as every other command, for the callers
+ * that have to read its output as it arrives or stop it part way: a clone, or a count of many files.
+ */
+export async function spawnGit(cwd: string, args: string[], { extraEnv = {}, group = false }: { extraEnv?: NodeJS.ProcessEnv; group?: boolean } = {}) {
+  const executable = await resolveTool("git");
+  const searchPath = (await toolDirectories()).join(delimiter);
+  // A group of its own lets a stop reach the helpers Git starts too (git-remote-https, ssh), not only Git.
+  return spawn(executable, args, { cwd, env: commandEnv(searchPath, extraEnv), stdio: ["ignore", "pipe", "pipe"], detached: group && process.platform !== "win32" });
 }
 
 async function runCommand(command: string, args: string[], cwd: string, timeoutMs = 60_000, extraEnv: NodeJS.ProcessEnv = {}): Promise<CommandResult> {
@@ -150,7 +165,7 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
   return new Promise((resolvePromise, reject) => {
     const child = spawn(executable, args, {
       cwd,
-      env: { ...process.env, PATH: searchPath, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no", GIT_EDITOR: "true", ...extraEnv },
+      env: commandEnv(searchPath, extraEnv),
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
