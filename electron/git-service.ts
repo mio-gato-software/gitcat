@@ -36,9 +36,10 @@ import type {
   ActionPlan, AiSharingFile, AiSharingPreview, AiSharingPurpose, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource,
   DeliveryRequest, FileChange, GitProtocol, SecretFinding, SecretKind, SelectedChange, WithheldFile,
   ConflictApplyResult, ConflictFileOutcome, ConflictProposal, ConflictChoice, ConflictChoiceOutcome, ConflictChoiceRequest, ConflictChoiceResult,
-  ConflictFileVersion, ConflictGuide, ConflictGuideFile, ConflictSideIdentity, ConflictSideId, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput,
+  ConflictFileVersion, ConflictGuide, ConflictGuideFile, ConflictSideIdentity, ConflictSideId, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput, LlmConnectResult, AiConnectionProblem,
   Locale, Operation, PendingOperation, PlanStep, RepoSnapshot, StepOutcome, AssistantUnavailable, RecoveryReport
 } from "../shared/types.js";
+import { classifyProviderFailure, maskKeys, recommendedModel } from "../shared/ai-connection.js";
 import { classifyFailure, operationFromCommand, recoveryActions, recoveryFacts, type FailureEvidence } from "./failure-recovery.js";
 import { localized, normalizeLocale } from "./i18n.js";
 import {
@@ -53,7 +54,7 @@ import {
 type CommandResult = { stdout: string; stderr: string; code: number };
 type PlanDraft = Omit<ActionPlan, "id" | "repoPath" | "head" | "stateId">;
 
-const MODEL_FALLBACK = "gpt-5.6-luna";
+const MODEL_FALLBACK = recommendedModel;
 const RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses";
 const LLM_REQUIRED =
   "GitCat necesita un proveedor LLM configurado: toda interpretación de tus mensajes la hace el modelo, no reglas locales. Añade tu API key y tu modelo en Configuración.";
@@ -70,6 +71,10 @@ const allowedOperations = new Set<Operation>([...executableOperations, "github_c
 const unattendedOperations = new Set<Operation>(["status", "fetch"]);
 
 let llmState: LlmConfigInput = { apiKey: "", model: MODEL_FALLBACK };
+/** The last request with the saved key that failed, so Settings can say the connection needs a look. */
+let llmProblem: AiConnectionProblem | undefined;
+/** A key saved on disk that secure storage cannot unlock now. It is kept as it is, never dropped or decoded otherwise. */
+let unreadableEncryptedKey: string | undefined;
 let memory: Memory = emptyMemory();
 
 function isLlmConfigured() {
@@ -995,6 +1000,19 @@ function extractOutputText(body: ProviderResponse): string {
  * provider problems into silent, wrong refusals. Every failure mode is now explicit.
  */
 async function callProvider(body: Record<string, unknown>, timeoutMs = 180_000, credentials: LlmConfigInput = llmState): Promise<ProviderResponse> {
+  // Only the saved credentials leave a trace in Settings; a candidate being verified answers its caller.
+  const saved = credentials === llmState;
+  try {
+    const payload = await sendToProvider(body, timeoutMs, credentials);
+    if (saved) llmProblem = undefined;
+    return payload;
+  } catch (error) {
+    if (saved && !(error instanceof ProviderError && error.reason === "not_configured")) llmProblem = connectionProblem(error);
+    throw error;
+  }
+}
+
+async function sendToProvider(body: Record<string, unknown>, timeoutMs: number, credentials: LlmConfigInput): Promise<ProviderResponse> {
   const model = credentials.model.trim() || MODEL_FALLBACK;
   if (!credentials.apiKey.trim()) throw new ProviderError("not_configured", LLM_REQUIRED);
   const controller = new AbortController();
@@ -1014,15 +1032,44 @@ async function callProvider(body: Record<string, unknown>, timeoutMs = 180_000, 
   } finally {
     clearTimeout(timeout);
   }
-  if (!response.ok) throw new ProviderError("error", `El proveedor respondió ${response.status}: ${(await response.text()).slice(0, 300)}`);
+  if (!response.ok) {
+    const raw = maskKeys(await response.text().catch(() => ""));
+    throw new ProviderError("error", `El proveedor respondió ${response.status}: ${raw.slice(0, 300)}`, { status: response.status, body: raw.slice(0, 4_000) });
+  }
   return response.json();
 }
 
 /** A provider problem, told apart by kind so the interface can say what happened without parsing a message. */
 export class ProviderError extends Error {
-  constructor(readonly reason: AssistantUnavailable, message: string, options?: { cause?: unknown }) {
+  /** The HTTP status and error body of a provider that answered with a failure. */
+  readonly status?: number;
+  readonly body?: string;
+  constructor(readonly reason: AssistantUnavailable, message: string, options?: { cause?: unknown; status?: number; body?: string }) {
     super(message, options);
     this.name = "ProviderError";
+    this.status = options?.status;
+    this.body = options?.body;
+  }
+}
+
+/** Why connecting failed, for any error a request to the provider produced, in terms the interface can explain. */
+export function connectionProblem(error: unknown): AiConnectionProblem {
+  const at = new Date().toISOString();
+  for (let current = error; current; current = (current as { cause?: unknown }).cause) {
+    if (current instanceof LlmConnectionError) return current.problem;
+    if (current instanceof ProviderError) {
+      const transport = current.reason === "timeout" || current.reason === "unreachable" ? current.reason : undefined;
+      return { kind: classifyProviderFailure({ status: current.status, body: current.body, transport }), detail: maskKeys(current.message).slice(0, 600), at };
+    }
+  }
+  return { kind: "unexpected", detail: maskKeys(error instanceof Error ? error.message : String(error)).slice(0, 600), at };
+}
+
+/** Connecting did not work, and why: the configuration that was there stays as it was. */
+export class LlmConnectionError extends Error {
+  constructor(readonly problem: AiConnectionProblem, message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "LlmConnectionError";
   }
 }
 
@@ -3345,15 +3392,33 @@ export async function prepareRetry(cwd: string, record: FailedPlanRecord, locale
 function settingsPath() { return join(app.getPath("userData"), "gitcat-settings.json"); }
 
 export function loadLlmConfig() {
+  let saved: { model?: string; encryptedApiKey?: string };
+  try { saved = JSON.parse(readFileSync(settingsPath(), "utf8")); } catch { return; /* first launch */ }
+  llmState.model = saved.model || MODEL_FALLBACK;
+  if (!saved.encryptedApiKey) return;
+  // A key that cannot be unlocked now is kept on disk untouched, and Settings says why the assistant is off.
   try {
-    const saved = JSON.parse(readFileSync(settingsPath(), "utf8")) as { model?: string; encryptedApiKey?: string };
-    llmState.model = saved.model || MODEL_FALLBACK;
-    if (saved.encryptedApiKey && safeStorage.isEncryptionAvailable()) llmState.apiKey = safeStorage.decryptString(Buffer.from(saved.encryptedApiKey, "base64"));
-  } catch { /* first launch */ }
+    if (!safeStorage.isEncryptionAvailable()) throw new Error("secure storage unavailable");
+    llmState.apiKey = safeStorage.decryptString(Buffer.from(saved.encryptedApiKey, "base64"));
+    unreadableEncryptedKey = undefined;
+  } catch {
+    unreadableEncryptedKey = saved.encryptedApiKey;
+  }
+}
+
+function secureStorageAvailable() {
+  try { return safeStorage.isEncryptionAvailable(); } catch { return false; }
 }
 
 export function getLlmConfig(): LlmConfig {
-  return { provider: "openai", model: llmState.model || MODEL_FALLBACK, configured: isLlmConfigured() };
+  return {
+    provider: "openai",
+    model: llmState.model || MODEL_FALLBACK,
+    configured: isLlmConfigured(),
+    secureStorage: secureStorageAvailable(),
+    ...(unreadableEncryptedKey && !isLlmConfigured() ? { storedKeyUnreadable: true } : {}),
+    ...(llmProblem && isLlmConfigured() ? { lastProblem: llmProblem } : {})
+  };
 }
 
 /**
@@ -3365,7 +3430,7 @@ async function verifyLlmAccess(candidate: LlmConfigInput) {
     // A 200 proves the key and the model id; the answer itself is irrelevant here.
     await callProvider({ instructions: "Reply with the single word: ok.", input: "ok", max_output_tokens: 1_000 }, 60_000, candidate);
   } catch (error) {
-    throw new Error(`No se guardó la configuración porque el proveedor no respondió correctamente. ${error instanceof Error ? error.message : "Error desconocido."}`, { cause: error });
+    throw new LlmConnectionError(connectionProblem(error), `No se guardó la configuración porque el proveedor no respondió correctamente. ${error instanceof Error ? error.message : "Error desconocido."}`, { cause: error });
   }
 }
 
@@ -3373,12 +3438,47 @@ export async function saveLlmConfig(input: LlmConfigInput): Promise<LlmConfig> {
   if (!input || typeof input.apiKey !== "string" || typeof input.model !== "string") throw new Error("La configuración no es válida.");
   const nextApiKey = input.clearApiKey ? "" : input.apiKey.trim() || llmState.apiKey;
   const nextModel = input.model.trim() || MODEL_FALLBACK;
-  if (nextApiKey && !safeStorage.isEncryptionAvailable()) throw new Error("El almacenamiento seguro no está disponible; la API key no se guardó.");
+  // Without encryption the key is not saved at all: never as plain text, and not silently in memory either.
+  if (nextApiKey && !secureStorageAvailable()) {
+    throw new LlmConnectionError({ kind: "storage_unavailable", detail: "safeStorage.isEncryptionAvailable() = false", at: new Date().toISOString() },
+      "El almacenamiento seguro no está disponible; la API key no se guardó.");
+  }
   if (nextApiKey) await verifyLlmAccess({ apiKey: nextApiKey, model: nextModel });
   llmState = { apiKey: nextApiKey, model: nextModel };
+  llmProblem = undefined;
+  // A key that could not be unlocked survives a model change; only a new key or removing it replaces it.
+  const keepUnreadable = !nextApiKey && !input.clearApiKey ? unreadableEncryptedKey : undefined;
+  unreadableEncryptedKey = keepUnreadable;
   mkdirSync(app.getPath("userData"), { recursive: true });
   const payload: { model: string; encryptedApiKey?: string } = { model: llmState.model };
-  if (llmState.apiKey && safeStorage.isEncryptionAvailable()) payload.encryptedApiKey = safeStorage.encryptString(llmState.apiKey).toString("base64");
+  if (llmState.apiKey) payload.encryptedApiKey = safeStorage.encryptString(llmState.apiKey).toString("base64");
+  else if (keepUnreadable) payload.encryptedApiKey = keepUnreadable;
   writeFileSync(settingsPath(), JSON.stringify(payload, null, 2), { mode: 0o600 });
   return getLlmConfig();
+}
+
+/** Saving, as the interface asks for it: a provider problem comes back as a reason, never as a bare error. */
+export async function connectLlm(input: LlmConfigInput): Promise<LlmConnectResult> {
+  try {
+    return { ok: true, config: await saveLlmConfig(input) };
+  } catch (error) {
+    if (error instanceof LlmConnectionError) return { ok: false, config: getLlmConfig(), problem: error.problem };
+    throw error;
+  }
+}
+
+/** Checks the saved key and model again, changing nothing; the answer updates what Settings shows. */
+export async function verifyLlmConfig(): Promise<LlmConnectResult> {
+  if (!isLlmConfigured()) {
+    if (!unreadableEncryptedKey) throw new Error("No hay ninguna API key guardada que comprobar.");
+    // Secure storage may have come back (the keychain was unlocked): the saved key is tried again.
+    loadLlmConfig();
+    if (!isLlmConfigured()) return { ok: false, config: getLlmConfig(), problem: { kind: "storage_unavailable", detail: "safeStorage", at: new Date().toISOString() } };
+  }
+  try {
+    await callProvider({ instructions: "Reply with the single word: ok.", input: "ok", max_output_tokens: 1_000 }, 60_000);
+    return { ok: true, config: getLlmConfig() };
+  } catch (error) {
+    return { ok: false, config: getLlmConfig(), problem: connectionProblem(error) };
+  }
 }

@@ -35,5 +35,7 @@ contextBridge.exposeInMainWorld("gitcat", {
   setAiSharingReview: (path, file, share, locale) => ipcRenderer.invoke("sharing:review", path, file, share, locale),
   scanChangesForSecrets: (path) => ipcRenderer.invoke("changes:scan-secrets", path),
   getLlmConfig: () => ipcRenderer.invoke("llm:get-config"),
-  saveLlmConfig: (config) => ipcRenderer.invoke("llm:save-config", config)
+  saveLlmConfig: (config) => ipcRenderer.invoke("llm:save-config", config),
+  verifyLlmConfig: () => ipcRenderer.invoke("llm:verify"),
+  openProviderPage: (page) => ipcRenderer.invoke("llm:open-provider-page", page)
 });

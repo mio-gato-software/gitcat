@@ -482,11 +482,42 @@ export type ActionPlan = {
 
 export type AssistantUnavailable = "not_configured" | "timeout" | "unreachable" | "error";
 
+/**
+ * Why the AI assistant could not be connected or stopped answering, told apart so the interface can
+ * say it in plain words and offer the way on: fix the key, pick another model, set up billing on the
+ * provider, wait for the provider, check the network, or unlock this Mac's secure storage.
+ */
+export type AiProblemKind =
+  | "invalid_key" | "unknown_model" | "no_access" | "billing" | "rate_limited"
+  | "outage" | "unreachable" | "timeout" | "storage_unavailable" | "unexpected";
+
+export type AiConnectionProblem = {
+  kind: AiProblemKind;
+  /** The provider's or the system's own words, with anything that looks like a key masked. */
+  detail: string;
+  at: string;
+};
+
 export type LlmConfig = {
   provider: "openai";
   model: string;
+  /** A key is saved and was verified with the provider when it was saved. */
   configured: boolean;
+  /** Whether this Mac can encrypt a key. Without it no key is saved: never as plain text. */
+  secureStorage: boolean;
+  /** A key was saved before, but this Mac's secure storage cannot unlock it right now. It is kept. */
+  storedKeyUnreadable?: boolean;
+  /** The last request with the saved key that failed; the next one that works clears it. */
+  lastProblem?: AiConnectionProblem;
 };
+
+/** Connecting or checking the assistant never throws for a provider problem: it says which one. */
+export type LlmConnectResult =
+  | { ok: true; config: LlmConfig }
+  | { ok: false; config: LlmConfig; problem: AiConnectionProblem };
+
+/** Provider pages GitCat may open in the browser. The main process holds the only addresses. */
+export type ProviderPage = "api_keys" | "billing";
 
 export type LlmConfigInput = {
   apiKey: string;
@@ -716,5 +747,9 @@ export type GitlineApi = {
   /** Likely credentials among the uncommitted changes, found on this Mac. */
   scanChangesForSecrets: (path: string) => Promise<SecretFinding[]>;
   getLlmConfig: () => Promise<LlmConfig>;
-  saveLlmConfig: (config: LlmConfigInput) => Promise<LlmConfig>;
+  /** Verifies the key and model with the provider and saves them only when they answer. */
+  saveLlmConfig: (config: LlmConfigInput) => Promise<LlmConnectResult>;
+  /** Checks the saved key and model again, without changing them. */
+  verifyLlmConfig: () => Promise<LlmConnectResult>;
+  openProviderPage: (page: ProviderPage) => Promise<void>;
 };

@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
   getLlmConfig, getSnapshot, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
-  prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, saveLlmConfig,
+  prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig,
   scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictGuide, type IssuedConflictProposal
 } from "./git-service.js";
 import { localized } from "./i18n.js";
@@ -18,7 +18,7 @@ import {
   parseWorkspace, relocateProject, restoreProjects, type RepoFingerprint, type WorkspaceRecord
 } from "./workspace-restore.js";
 import type {
-  ActionPlan, AiSharingPurpose, ConflictChoiceRequest, ConflictGuide, ConflictProposal, ConversationMessage, DeliveryRequest, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation, ProjectLocateResult,
+  ActionPlan, AiSharingPurpose, ConflictChoiceRequest, ConflictGuide, ConflictProposal, ConversationMessage, DeliveryRequest, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, ProviderPage, Operation, ProjectLocateResult,
   RepoSnapshot, RepositoryMatch, UnavailableProject
 } from "../shared/types.js";
 
@@ -144,6 +144,11 @@ function assertPathList(paths: unknown) {
   return paths as string[];
 }
 
+/** The provider's own pages for creating a key and setting up billing. Nothing else is opened from Settings. */
+const providerPages: Record<ProviderPage, string> = {
+  api_keys: "https://platform.openai.com/api-keys",
+  billing: "https://platform.openai.com/settings/organization/billing/overview"
+};
 const sharingPurposes = new Set<AiSharingPurpose>(["planning", "description", "conflicts", "recovery"]);
 
 function rememberPlan(plan: ActionPlan) {
@@ -550,7 +555,15 @@ app.whenReady().then(async () => {
     return scanChangesForSecrets(assertOpenedRepository(cwd));
   });
   ipcMain.handle("llm:get-config", (event) => { assertTrustedSender(event); return getLlmConfig(); });
-  ipcMain.handle("llm:save-config", (event, input: LlmConfigInput) => { assertTrustedSender(event); return saveLlmConfig(input); });
+  ipcMain.handle("llm:save-config", (event, input: LlmConfigInput) => { assertTrustedSender(event); return connectLlm(input); });
+  ipcMain.handle("llm:verify", (event) => { assertTrustedSender(event); return verifyLlmConfig(); });
+  // The renderer names a page; only these fixed addresses of the provider are ever opened.
+  ipcMain.handle("llm:open-provider-page", async (event, page: unknown) => {
+    assertTrustedSender(event);
+    const url = typeof page === "string" && Object.hasOwn(providerPages, page) ? providerPages[page as ProviderPage] : undefined;
+    if (!url) throw new Error("Página del proveedor no reconocida.");
+    await shell.openExternal(url);
+  });
   await createWindow();
   app.on("activate", async () => { if (BrowserWindow.getAllWindows().length === 0) await createWindow(); });
 });
