@@ -25,7 +25,7 @@ import {
 } from "./memory.js";
 import type {
   ActionPlan, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource, GitProtocol,
-  ConflictProposal, ConflictResolution, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput,
+  ConflictApplyResult, ConflictFileOutcome, ConflictProposal, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput,
   Locale, Operation, PendingOperation, PlanStep, RepoSnapshot, StepOutcome
 } from "../shared/types.js";
 import { localized, normalizeLocale } from "./i18n.js";
@@ -1231,16 +1231,65 @@ function bindPlan(snapshot: RepoSnapshot, draft: PlanDraft): ActionPlan {
 }
 
 /**
+ * What a conflict proposal was drafted against. The operation part covers the job holding the
+ * conflicts; each file keeps its unmerged index stages and the exact bytes that were reviewed. A file
+ * can be edited without its status code changing, so "still UU" is not enough to write over it.
+ */
+export type ConflictBinding = {
+  operation: string;
+  files: Record<string, { stages: string; content: string }>;
+};
+
+/** A proposal as the main process keeps it: the reviewed content plus what it is bound to. */
+export type IssuedConflictProposal = ConflictProposal & { binding: ConflictBinding };
+
+async function conflictOperation(repoRoot: string) {
+  const heads = await Promise.all(["HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD"]
+    .map((ref) => optionalGit(repoRoot, ["rev-parse", "-q", "--verify", ref])));
+  return createHash("sha256").update(JSON.stringify([heads, (await readPendingOperation(repoRoot)) ?? null])).digest("hex");
+}
+
+/** Every unmerged index entry, grouped by path: mode, blob and stage of each side Git is holding. */
+async function unmergedStages(repoRoot: string) {
+  const stages = new Map<string, string[]>();
+  for (const record of (await checkedGit(repoRoot, ["ls-files", "-u", "-z"], true)).split("\0")) {
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    const path = record.slice(tab + 1);
+    stages.set(path, [...(stages.get(path) ?? []), record.slice(0, tab)]);
+  }
+  return new Map([...stages].map(([path, entries]) => [path, entries.sort().join("\n")]));
+}
+
+function contentVersion(raw: Buffer | undefined) {
+  return raw ? createHash("sha256").update(raw).digest("hex") : "missing";
+}
+
+function readIfPresent(absolute: string) {
+  try {
+    return readFileSync(absolute);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+/**
  * The model's reading of every open conflict, as a proposal and nothing else. The file contents do
  * leave the machine here — that is unavoidable, since settling a conflict means understanding both
  * sides — so it only ever happens because someone pressed the button, never on its own.
  */
-export async function proposeConflictResolution(cwd: string, locale?: Locale): Promise<ConflictProposal> {
+export async function proposeConflictResolution(cwd: string, locale?: Locale): Promise<IssuedConflictProposal> {
   const language = normalizeLocale(locale);
   if (!isLlmConfigured()) throw new Error(llmRequired(language));
   const snapshot = await getSnapshot(cwd);
   if (!snapshot.conflicts.length) throw new Error(localized(language, "No hay conflictos que resolver.", "There are no conflicts to resolve."));
+  // Captured before anything is read, so a change made while the model is thinking is caught later.
+  const operation = await conflictOperation(snapshot.path);
+  const stages = await unmergedStages(snapshot.path);
+  const issued = { id: randomUUID(), repoPath: snapshot.path };
   const current: Record<string, string> = {};
+  const files: ConflictBinding["files"] = {};
   const readable: Conflict[] = [];
   for (const conflict of snapshot.conflicts) {
     const absolute = resolve(snapshot.path, conflict.path);
@@ -1250,17 +1299,20 @@ export async function proposeConflictResolution(cwd: string, locale?: Locale): P
       // A binary file has no sides to read, and a huge one nobody is going to review properly.
       if (raw.includes(0) || raw.length > conflictFileLimit) continue;
       current[conflict.path] = raw.toString("utf8");
+      files[conflict.path] = { stages: stages.get(conflict.path) ?? "", content: contentVersion(raw) };
       readable.push(conflict);
     } catch { /* deleted on one side: there is no content to reason about */ }
   }
   if (!readable.length) {
     return {
+      ...issued,
       resolutions: [],
       skipped: snapshot.conflicts.map((conflict) => ({
         path: conflict.path,
         reason: "Es binario, demasiado grande, o uno de los lados lo borró: eso se decide con «quedarse con un lado»."
       })),
-      current: {}
+      current: {},
+      binding: { operation, files }
     };
   }
 
@@ -1282,29 +1334,92 @@ export async function proposeConflictResolution(cwd: string, locale?: Locale): P
   const text = await askProvider({ instructions, input, text: { format: resolutionResponseFormat } }, 240_000);
   const parsed = parseConflictProposal(text);
   if (!parsed) throw new Error(localized(language, "El proveedor devolvió una respuesta que no cumple el esquema de resolución.", "The provider returned a response that does not match the resolution schema."));
-  return { ...validateProposal(parsed, readable.map((conflict) => conflict.path)), current };
+  return { ...issued, ...validateProposal(parsed, readable.map((conflict) => conflict.path)), current, binding: { operation, files } };
 }
 
 /**
- * Writes what the person accepted, and only that. Every path is checked against the conflicts Git
- * reports right now rather than against the list the proposal was made from, because the repository
- * may have moved while it was being read.
+ * Writes what the person accepted, and only that. The content comes from the proposal the main
+ * process issued, never from the renderer. The whole accepted set is checked against the repository
+ * as it is now — the same repository, the same operation, the same conflict stages and the same bytes
+ * that were reviewed — before a single file is written, because an edit made while the review was
+ * open must never be overwritten by a draft of the older file.
  */
-export async function applyConflictResolution(cwd: string, resolutions: ConflictResolution[], locale?: Locale): Promise<RepoSnapshot> {
+export async function applyConflictResolution(
+  cwd: string, proposal: IssuedConflictProposal, accepted: string[], locale?: Locale
+): Promise<ConflictApplyResult> {
   const language = normalizeLocale(locale);
-  const snapshot = await getSnapshot(cwd);
-  if (!Array.isArray(resolutions) || !resolutions.length) throw new Error(localized(language, "No hay ninguna resolución que aplicar.", "There is no resolution to apply."));
-  const open = new Set(snapshot.conflicts.map((conflict) => conflict.path));
-  for (const resolution of resolutions) {
-    if (typeof resolution?.path !== "string" || typeof resolution?.content !== "string") throw new Error(localized(language, "La resolución no es válida.", "The resolution is invalid."));
-    if (!open.has(resolution.path)) throw new Error(localized(language, `${resolution.path} ya no está en conflicto.`, `${resolution.path} is no longer in conflict.`));
-    if (/^(<{7}|={7}|>{7})/m.test(resolution.content)) throw new Error(localized(language, `${resolution.path} todavía contiene marcas de conflicto.`, `${resolution.path} still contains conflict markers.`));
-    const absolute = resolve(snapshot.path, resolution.path);
-    if (!absolute.startsWith(`${snapshot.path}${sep}`)) throw new Error(localized(locale, "La ruta no pertenece a este repositorio.", "The path does not belong to this repository."));
-    writeFileSync(absolute, resolution.content, "utf8");
-    await checkedGit(snapshot.path, ["add", "--", resolution.path]);
+  const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
+  if (!Array.isArray(accepted) || !accepted.length) throw new Error(localized(language, "No hay ninguna resolución que aplicar.", "There is no resolution to apply."));
+  if (accepted.some((path) => typeof path !== "string") || new Set(accepted).size !== accepted.length) {
+    throw new Error(localized(language, "La resolución no es válida.", "The resolution is invalid."));
   }
-  return getSnapshot(cwd);
+  const missing = accepted.find((path) => !proposal.resolutions.some((resolution) => resolution.path === path));
+  if (missing) throw new Error(localized(language, `${missing} no forma parte de esta propuesta.`, `${missing} is not part of this proposal.`));
+  const chosen = proposal.resolutions.filter((resolution) => accepted.includes(resolution.path));
+  for (const resolution of chosen) {
+    if (/^(<{7}|={7}|>{7})/m.test(resolution.content)) throw new Error(localized(language, `${resolution.path} todavía contiene marcas de conflicto.`, `${resolution.path} still contains conflict markers.`));
+    const absolute = resolve(repoRoot, resolution.path);
+    if (!absolute.startsWith(`${repoRoot}${sep}`)) throw new Error(localized(locale, "La ruta no pertenece a este repositorio.", "The path does not belong to this repository."));
+  }
+  const untouched = (status: "changed" | "not_applied", changed = new Set<string>()) => chosen.map((resolution) => ({
+    path: resolution.path, status: changed.has(resolution.path) ? "changed" as const : status
+  }));
+
+  if (proposal.repoPath !== repoRoot) {
+    return { snapshot: await getSnapshot(repoRoot), complete: false, stale: "repository", outcomes: untouched("not_applied") };
+  }
+  if (await conflictOperation(repoRoot) !== proposal.binding.operation) {
+    return { snapshot: await getSnapshot(repoRoot), complete: false, stale: "operation", outcomes: untouched("changed") };
+  }
+  const stages = await unmergedStages(repoRoot);
+  const reviewedNow = (path: string) => {
+    const reviewed = proposal.binding.files[path];
+    return Boolean(reviewed?.stages) && stages.get(path) === reviewed.stages &&
+      contentVersion(readIfPresent(resolve(repoRoot, path))) === reviewed.content;
+  };
+  const changed = new Set(chosen.filter((resolution) => !reviewedNow(resolution.path)).map((resolution) => resolution.path));
+  if (changed.size) {
+    return { snapshot: await getSnapshot(repoRoot), complete: false, stale: "files", outcomes: untouched("not_applied", changed) };
+  }
+
+  // Everything still matches the review. Write and stage one file at a time, and stop at the first
+  // failure: what was applied stays applied and is reported as such, the file that failed is put back
+  // as it was, and the rest is left alone for another try.
+  const outcomes: ConflictFileOutcome[] = [];
+  for (const resolution of chosen) {
+    const absolute = resolve(repoRoot, resolution.path);
+    const original = readIfPresent(absolute);
+    // The last look before writing: an editor can still save between the check above and here.
+    if (contentVersion(original) !== proposal.binding.files[resolution.path].content) {
+      outcomes.push({ path: resolution.path, status: "changed" });
+      break;
+    }
+    let failure: string | undefined;
+    try {
+      writeFileSync(absolute, resolution.content, "utf8");
+      const staged = await runGit(repoRoot, ["add", "--", resolution.path]);
+      if (staged.code !== 0) failure = staged.stderr.trim() || staged.stdout.trim() || `git add -- ${resolution.path}`;
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+    }
+    if (failure === undefined) {
+      outcomes.push({ path: resolution.path, status: "applied" });
+      continue;
+    }
+    let restored = false;
+    try {
+      if (original) writeFileSync(absolute, original);
+      restored = contentVersion(readIfPresent(absolute)) === proposal.binding.files[resolution.path].content;
+    } catch { /* reported below: the file may now hold the proposed content */ }
+    outcomes.push({ path: resolution.path, status: "failed", restored, detail: failure });
+    break;
+  }
+  for (const resolution of chosen.slice(outcomes.length)) outcomes.push({ path: resolution.path, status: "not_applied" });
+  return {
+    snapshot: await getSnapshot(repoRoot),
+    complete: outcomes.every((outcome) => outcome.status === "applied"),
+    outcomes
+  };
 }
 
 /**

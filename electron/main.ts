@@ -7,9 +7,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   applyConflictResolution, executePlan, fetchRemotes, generateCommitDescription, getCommitDetail, getCommitFileDiff, getLlmConfig, getSnapshot,
   getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
-  prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, saveLlmConfig
+  prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, saveLlmConfig, type IssuedConflictProposal
 } from "./git-service.js";
-import type { ActionPlan, ConversationMessage, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation } from "../shared/types.js";
+import { localized } from "./i18n.js";
+import type { ActionPlan, ConflictProposal, ConversationMessage, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation } from "../shared/types.js";
 
 // Electron captures the encryption identity before app-ready. Keep the existing Keychain
 // identity for upgrades, then use the new display name once startup has initialized it.
@@ -23,6 +24,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 const openedRepositories = new Set<string>();
 const issuedPlans = new Map<string, ActionPlan>();
+/** Conflict proposals keep their reviewed content and state binding here; the renderer only holds the id. */
+const issuedProposals = new Map<string, IssuedConflictProposal>();
 let persistedWorkspace: { paths: string[]; activePath?: string } = { paths: [] };
 
 function workspacePath() { return join(app.getPath("userData"), "gitcat-workspace.json"); }
@@ -83,6 +86,15 @@ function rememberPlan(plan: ActionPlan) {
     issuedPlans.set(plan.id, plan);
   }
   return plan;
+}
+
+/** One open review per repository: a newer proposal replaces the older one. */
+function rememberProposal(proposal: IssuedConflictProposal): ConflictProposal {
+  for (const [id, issued] of issuedProposals) if (issued.repoPath === proposal.repoPath) issuedProposals.delete(id);
+  if (issuedProposals.size >= 20) issuedProposals.delete(issuedProposals.keys().next().value ?? "");
+  issuedProposals.set(proposal.id, proposal);
+  // The binding is the main process's own record; the renderer gets what it needs to show the review.
+  return { id: proposal.id, repoPath: proposal.repoPath, resolutions: proposal.resolutions, skipped: proposal.skipped, current: proposal.current };
 }
 
 async function createWindow() {
@@ -149,6 +161,7 @@ app.whenReady().then(async () => {
     };
     for (const path of openedRepositories) if (!normalized.includes(path)) openedRepositories.delete(path);
     for (const [id, plan] of issuedPlans) if (!normalized.includes(plan.repoPath)) issuedPlans.delete(id);
+    for (const [id, proposal] of issuedProposals) if (!normalized.includes(proposal.repoPath)) issuedProposals.delete(id);
     saveWorkspace();
   });
   ipcMain.handle("project:select", async (event) => {
@@ -195,15 +208,32 @@ app.whenReady().then(async () => {
     if (typeof file !== "string" || !file) throw new Error("El archivo solicitado no es válido.");
     return getWorkingFileDiff(assertOpenedRepository(cwd), file);
   });
-  ipcMain.handle("conflicts:propose", (event, cwd: string, locale?: Locale) => {
+  ipcMain.handle("conflicts:propose", async (event, cwd: string, locale?: Locale) => {
     assertTrustedSender(event);
-    return proposeConflictResolution(assertOpenedRepository(cwd), locale);
-  });
-  ipcMain.handle("conflicts:apply", (event, cwd: string, resolutions: unknown, locale?: Locale) => {
-    assertTrustedSender(event);
-    if (!Array.isArray(resolutions)) throw new Error("Las resoluciones no son válidas.");
     const repoPath = assertOpenedRepository(cwd);
-    return exclusive(repoPath, () => applyConflictResolution(repoPath, resolutions, locale));
+    return rememberProposal(await exclusive(repoPath, () => proposeConflictResolution(repoPath, locale)));
+  });
+  ipcMain.handle("conflicts:apply", async (event, cwd: string, proposalId: unknown, accepted: unknown, locale?: Locale) => {
+    assertTrustedSender(event);
+    if (typeof proposalId !== "string" || !Array.isArray(accepted) || accepted.some((path) => typeof path !== "string")) {
+      throw new Error(localized(locale, "Las resoluciones no son válidas.", "The resolutions are invalid."));
+    }
+    const repoPath = assertOpenedRepository(cwd);
+    const proposal = issuedProposals.get(proposalId);
+    if (!proposal) {
+      throw new Error(localized(locale,
+        "Esta propuesta ya no está disponible y no se escribió nada. Pulsa «Proponer resolución» para pedir una nueva.",
+        "This proposal is no longer available and nothing was written. Press “Propose resolution” to get a fresh one."));
+    }
+    // The service refuses a proposal from another repository; it stays issued for the one it belongs to.
+    const result = await exclusive(repoPath, () => applyConflictResolution(repoPath, proposal, accepted as string[], locale));
+    if (result.complete) issuedProposals.delete(proposalId);
+    else {
+      // What was applied is done; the rest stays available for another try against the same binding.
+      const applied = new Set(result.outcomes.filter((outcome) => outcome.status === "applied").map((outcome) => outcome.path));
+      if (applied.size) issuedProposals.set(proposalId, { ...proposal, resolutions: proposal.resolutions.filter((item) => !applied.has(item.path)) });
+    }
+    return result;
   });
   ipcMain.handle("action:recover", async (event, cwd: string, failure: ExecutionFailure, context?: ConversationMessage[], locale?: Locale) => {
     assertTrustedSender(event);

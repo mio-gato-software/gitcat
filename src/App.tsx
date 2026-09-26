@@ -29,7 +29,7 @@ import type { GraphRow } from "../shared/commit-graph";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
 import type {
-  ActionPlan, Branch, Commit, CommitDetail, ConflictProposal, ConflictResolution, ConversationMessage, ExecutionFailure,
+  ActionPlan, Branch, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
   FileChange, FileStats, HistoryScope, LlmConfig, Locale, Operation, PendingOperationKind, RepoSnapshot
 } from "../shared/types";
 import { localeTag, readLocale, translate, writeLocale, type MessageKey, type Translate } from "./i18n";
@@ -354,6 +354,9 @@ export default function App() {
   const [sidebarHidden, setSidebarHidden] = useState(readSidebarHidden);
   const [selectedFile, setSelectedFile] = useState<FileChange>();
   const [proposal, setProposal] = useState<ConflictProposal>();
+  /** How the last attempt to apply the open proposal went, when it did not settle everything. */
+  const [proposalResult, setProposalResult] = useState<ConflictApplyResult>();
+  const [applyingResolution, setApplyingResolution] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [inputDialog, setInputDialog] = useState<InputDialog>();
   const [commitMessage, setCommitMessage] = useState("");
@@ -806,6 +809,7 @@ export default function App() {
     if (!snapshot || resolving) return;
     setResolving(true);
     setProposal(undefined);
+    setProposalResult(undefined);
     try {
       setProposal(await window.gitcat.proposeConflictResolution(snapshot.path, locale));
     } catch (error) {
@@ -813,17 +817,34 @@ export default function App() {
     } finally { setResolving(false); }
   };
 
-  const applyResolutions = async (resolutions: ConflictResolution[]) => {
-    if (!snapshot || !resolutions.length) return;
+  const closeProposal = () => { setProposal(undefined); setProposalResult(undefined); };
+
+  /**
+   * Sends only the proposal id and the accepted paths: the reviewed content stays in the main process,
+   * which checks it against the repository before writing anything. A refusal keeps the review open
+   * with what happened to each file, so the next step is visible rather than a dead end.
+   */
+  const applyResolutions = async (accepted: string[]) => {
+    if (!snapshot || !proposal || !accepted.length || applyingResolution) return;
     const path = snapshot.path;
+    setApplyingResolution(true);
     try {
-      updateSnapshot(path, await window.gitcat.applyConflictResolution(path, resolutions, locale));
-      setProposal(undefined);
-      addActivity({ label: t("conflictsResolved"), detail: counted(t, resolutions.length, "acceptedFile", "acceptedFiles"), tone: "success" });
+      const result = await window.gitcat.applyConflictResolution(path, proposal.id, accepted, locale);
+      updateSnapshot(path, result.snapshot);
+      const applied = result.outcomes.filter((outcome) => outcome.status === "applied").map((outcome) => outcome.path);
+      if (result.complete) {
+        closeProposal();
+        addActivity({ label: t("conflictsResolved"), detail: counted(t, applied.length, "acceptedFile", "acceptedFiles"), tone: "success" });
+        return;
+      }
+      // Applied files are done and leave the review; the rest can be retried or reviewed again.
+      setProposal({ ...proposal, resolutions: proposal.resolutions.filter((item) => !applied.includes(item.path)) });
+      setProposalResult(result);
+      if (applied.length) addActivity({ label: t("conflictsPartlyResolved"), detail: counted(t, applied.length, "acceptedFile", "acceptedFiles"), tone: "warning" });
     } catch (error) {
       notify({ message: cleanError(error, t("fallbackApplyResolution")), tone: "error" });
       await refreshProject(path, false);
-    }
+    } finally { setApplyingResolution(false); }
   };
 
   const runPlan = async (turnId: number, plan: ActionPlan) => {
@@ -1173,7 +1194,7 @@ export default function App() {
       {menu && snapshot && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu)} label={menu.work ? t("uncommittedHeading") : menu.commit ? t("commitActions", { hash: menu.commit.shortHash }) : t("actionsFor", { name: menu.branch ?? "" })} onClose={() => setMenu(undefined)} />}
       {modalCommit && snapshot && <CommitModal commit={modalCommit.commit} initialFile={modalCommit.file} repoPath={snapshot.path} onClose={() => setModalCommit(undefined)} />}
       {selectedFile && snapshot && <FileDiffModal file={selectedFile} repoPath={snapshot.path} onClose={() => setSelectedFile(undefined)} />}
-      {proposal && <ConflictProposalModal proposal={proposal} busy={planning} onApply={(resolutions) => void applyResolutions(resolutions)} onClose={() => setProposal(undefined)} />}
+      {proposal && snapshot?.path === proposal.repoPath && <ConflictProposalModal key={proposal.id} proposal={proposal} result={proposalResult} busy={planning || applyingResolution || resolving} onApply={(accepted) => void applyResolutions(accepted)} onReviewAgain={() => void resolveConflicts()} onClose={closeProposal} />}
       {resolving && <div className="resolving-overlay" role="status"><LoaderCircle className="spin" size={22} /><span>{t("readConflictSides")}</span></div>}
     </div>
     </I18nContext.Provider>
@@ -2305,14 +2326,21 @@ function canSkipPending(kind: PendingOperationKind) { return kind === "rebase" |
  * whole feature rests on: accepting is a deliberate act per file, and the model's own doubt is shown
  * rather than buried, because a confident-looking wrong merge is the failure mode that matters.
  */
-function ConflictProposalModal({ proposal, busy, onApply, onClose }: {
-  proposal: ConflictProposal; busy: boolean; onApply: (resolutions: ConflictResolution[]) => void; onClose: () => void;
+function ConflictProposalModal({ proposal, result, busy, onApply, onReviewAgain, onClose }: {
+  proposal: ConflictProposal; result?: ConflictApplyResult; busy: boolean;
+  onApply: (accepted: string[]) => void; onReviewAgain: () => void; onClose: () => void;
 }) {
   const { t } = useI18n();
   const [accepted, setAccepted] = useState<string[]>(() => proposal.resolutions.filter((item) => item.confidence === "high").map((item) => item.path));
   useEscape(onClose);
+  const outcomeOf = (path: string) => result?.outcomes.find((outcome) => outcome.path === path);
+  // A file that moved on since the review can never be written from this proposal; neither can any
+  // file once the operation or the repository is not the one it was drafted for.
+  const blocked = (path: string) => result?.stale === "operation" || result?.stale === "repository" || outcomeOf(path)?.status === "changed";
   const toggle = (path: string) => setAccepted((current) => current.includes(path) ? current.filter((item) => item !== path) : [...current, path]);
-  const chosen = proposal.resolutions.filter((resolution) => accepted.includes(resolution.path));
+  const chosen = proposal.resolutions.filter((resolution) => accepted.includes(resolution.path) && !blocked(resolution.path));
+  const applied = result?.outcomes.filter((outcome) => outcome.status === "applied") ?? [];
+  const failed = result?.outcomes.find((outcome) => outcome.status === "failed");
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="commit-modal wide" role="dialog" aria-modal="true" aria-labelledby="proposal-title">
@@ -2320,14 +2348,27 @@ function ConflictProposalModal({ proposal, busy, onApply, onClose }: {
         <div><div className="eyebrow">{t("proposedResolution")}</div><h2 id="proposal-title">{t("reviewBeforeAccepting")}</h2></div>
         <button className="icon-button soft" onClick={onClose} aria-label={t("dismissProposal")}><X size={17} /></button>
       </div>
-      <div className="modal-note"><ShieldCheck size={15} /><span>{t("nothingWritten")}</span></div>
-      {proposal.resolutions.map((resolution) => <div className={`resolution ${accepted.includes(resolution.path) ? "accepted" : ""}`} key={resolution.path}>
+      {result
+        ? <div className="modal-note attention" role="alert"><AlertTriangle size={15} /><div>
+          {result.stale === "files" && <span>{t("proposalStaleFiles")}</span>}
+          {result.stale === "operation" && <span>{t("proposalStaleOperation")}</span>}
+          {result.stale === "repository" && <span>{t("proposalOtherRepository")}</span>}
+          {!result.stale && applied.length > 0 && <span>{t("proposalPartlyApplied", { files: applied.map((outcome) => outcome.path).join(", ") })}</span>}
+          {!result.stale && !applied.length && <span>{t("proposalNotApplied")}</span>}
+          {failed && <span>{t(failed.restored ? "resolutionFailedRestored" : "resolutionFailedNotRestored", { path: failed.path })}{failed.detail ? ` (${failed.detail})` : ""}</span>}
+          {result.outcomes.some((outcome) => outcome.status === "changed") && !failed && result.stale === undefined && <span>{t("proposalChangedDuringApply")}</span>}
+          <button className="outline-button small" onClick={onReviewAgain} disabled={busy}><Sparkles size={13} /> {t("reviewConflictsAgain")}</button>
+        </div></div>
+        : <div className="modal-note"><ShieldCheck size={15} /><span>{t("nothingWritten")}</span></div>}
+      {proposal.resolutions.map((resolution) => <div className={`resolution ${accepted.includes(resolution.path) && !blocked(resolution.path) ? "accepted" : ""}`} key={resolution.path}>
         <label className="resolution-heading">
-          <input type="checkbox" checked={accepted.includes(resolution.path)} onChange={() => toggle(resolution.path)} />
+          <input type="checkbox" checked={accepted.includes(resolution.path) && !blocked(resolution.path)} disabled={blocked(resolution.path)} onChange={() => toggle(resolution.path)} />
           <div>
             <strong>{resolution.path}</strong>
             <span>{resolution.rationale}</span>
           </div>
+          {outcomeOf(resolution.path)?.status === "changed" && <span className="resolution-doubt">{t("changedSinceReview")}</span>}
+          {outcomeOf(resolution.path)?.status === "failed" && <span className="resolution-doubt">{t("resolutionNotApplied")}</span>}
           {resolution.confidence === "low" && <span className="resolution-doubt" title={t("reviewCarefully")}>{t("reviewCarefully")}</span>}
         </label>
         <DiffView diff={lineDiff(proposal.current[resolution.path] ?? "", resolution.content)} truncated={false} />
@@ -2338,7 +2379,7 @@ function ConflictProposalModal({ proposal, busy, onApply, onClose }: {
       </div>}
       <div className="modal-actions">
         <button className="ghost-button" onClick={onClose}>{t("discardAll")}</button>
-        <button className="primary-button" onClick={() => onApply(chosen)} disabled={busy || !chosen.length}>
+        <button className="primary-button" onClick={() => onApply(chosen.map((resolution) => resolution.path))} disabled={busy || !chosen.length}>
           <Check size={14} /> {t("acceptFiles", { count: counted(t, chosen.length, "file", "files") })}
         </button>
       </div>

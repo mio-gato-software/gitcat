@@ -11,7 +11,7 @@ contextBridge.exposeInMainWorld("gitcat", {
   getCommitDetail: (path, hash) => ipcRenderer.invoke("commit:detail", path, hash),
   getCommitFileDiff: (path, hash, file) => ipcRenderer.invoke("commit:file-detail", path, hash, file),
   proposeConflictResolution: (path, locale) => ipcRenderer.invoke("conflicts:propose", path, locale),
-  applyConflictResolution: (path, resolutions, locale) => ipcRenderer.invoke("conflicts:apply", path, resolutions, locale),
+  applyConflictResolution: (path, proposalId, accepted, locale) => ipcRenderer.invoke("conflicts:apply", path, proposalId, accepted, locale),
   planRecovery: (path, failure, context, locale) => ipcRenderer.invoke("action:recover", path, failure, context, locale),
   getWorkingFileDiff: (path, file) => ipcRenderer.invoke("commit:file-diff", path, file),
   planAction: (path, request, context, locale) => ipcRenderer.invoke("action:plan", path, request, context, locale),

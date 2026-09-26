@@ -698,16 +698,24 @@ test("resolver un conflicto con el modelo se propone, se revisa y solo entonces 
   assert.doesNotMatch(resolution, /writeFileSync|runGit|checkedGit/);
   assert.match(resolution, /export function validateProposal/);
   assert.match(resolution, /strict: true/);
-  // Escribir es un paso aparte, y cada ruta se comprueba contra los conflictos que Git reporta ahora.
+  // Escribir es un paso aparte: la propuesta la emite y la guarda el proceso principal, ligada al
+  // repositorio, la operación, las etapas del índice y los bytes revisados, y se revalida entera antes de escribir.
   assert.match(service, /export async function applyConflictResolution/);
-  assert.match(service, /if \(!open\.has\(resolution\.path\)\) throw new Error\(localized\(language, `\$\{resolution\.path\} ya no está en conflicto\.`/);
+  assert.match(service, /if \(proposal\.repoPath !== repoRoot\)/);
+  assert.match(service, /if \(await conflictOperation\(repoRoot\) !== proposal\.binding\.operation\)/);
+  assert.match(service, /\["ls-files", "-u", "-z"\]/);
   assert.match(service, /todavía contiene marcas de conflicto/);
-  assert.match(service, /if \(!absolute\.startsWith\(`\$\{snapshot\.path\}\$\{sep\}`\)\) throw new Error\(localized\(locale, "La ruta no pertenece a este repositorio\."/);
+  assert.match(main, /const issuedProposals = new Map<string, IssuedConflictProposal>\(\)/);
+  assert.match(main, /ipcMain\.handle\("conflicts:apply", async \(event, cwd: string, proposalId: unknown, accepted: unknown, locale\?: Locale\)/);
+  assert.match(main, /exclusive\(repoPath, \(\) => proposeConflictResolution\(repoPath, locale\)\)/);
+  assert.match(main, /exclusive\(repoPath, \(\) => applyConflictResolution\(repoPath, proposal, accepted as string\[\], locale\)\)/);
+  assert.match(service, /if \(!absolute\.startsWith\(`\$\{repoRoot\}\$\{sep\}`\)\) throw new Error\(localized\(locale, "La ruta no pertenece a este repositorio\."/);
   // Nunca en automático: hay un botón, y la propuesta se revisa archivo a archivo antes de aceptarla.
   assert.match(main, /ipcMain\.handle\("conflicts:propose"/);
   assert.match(app, /function ConflictProposalModal/);
   assert.match(app, /t\("nothingWritten"\)/);
-  assert.match(app, /onApply=\{\(resolutions\) => void applyResolutions\(resolutions\)\}/);
+  assert.match(app, /onApply=\{\(accepted\) => void applyResolutions\(accepted\)\}/);
+  assert.match(app, /window\.gitcat\.applyConflictResolution\(path, proposal\.id, accepted, locale\)/);
   // La duda del propio modelo se enseña en vez de enterrarse.
   assert.match(app, /resolution\.confidence === "low" && <span className="resolution-doubt"/);
   assert.match(app, /proposal\.resolutions\.filter\(\(item\) => item\.confidence === "high"\)\.map/);

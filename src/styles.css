@@ -289,6 +289,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .resolution-heading > div { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
 .resolution-heading strong { color: var(--text); font-size: 11px; overflow-wrap: anywhere; }
 .resolution-heading span { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.modal-note.attention { color: #e5c89a; background: #2a2218; border-color: #5a482a; }
+.modal-note.attention svg { color: #e5b36e; }
+.modal-note.attention > div { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
+.modal-note.attention .outline-button svg { color: inherit; }
 .resolution-doubt { flex: none; padding: 3px 7px; color: #e6c07b; background: #2c2418; border: 1px solid #5a482a; border-radius: 4px; font-size: 9px; font-weight: 700; }
 .resolution .diff-view { margin-top: 0; border: 0; border-top: 1px solid var(--hover); border-radius: 0; }
 .resolution .diff-view pre { max-height: 30vh; }

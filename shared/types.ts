@@ -156,11 +156,43 @@ export type ConflictResolution = {
 };
 
 export type ConflictProposal = {
+  /**
+   * Issued by the main process, which keeps the reviewed content and what it was drafted against.
+   * Applying names this id and the accepted paths; the renderer never sends file content back.
+   */
+  id: string;
+  /** The repository the proposal was drafted in. Applying it anywhere else is refused. */
+  repoPath: string;
   resolutions: ConflictResolution[];
   /** Files the model would not settle, each with its reason. Leaving one alone is a valid answer. */
   skipped: { path: string; reason: string }[];
   /** What each file looks like right now, so the interface can show the change rather than assert it. */
   current: Record<string, string>;
+};
+
+/**
+ * What happened to one accepted file. "changed" means the file, its conflict or the operation moved on
+ * after the review, so it was left exactly as it is; "not_applied" means it was never reached.
+ */
+export type ConflictFileOutcome = {
+  path: string;
+  status: "applied" | "changed" | "not_applied" | "failed";
+  /** For a failure: whether the file was put back exactly as it was before GitCat touched it. */
+  restored?: boolean;
+  /** What Git or the file system said, for a failure. */
+  detail?: string;
+};
+
+export type ConflictApplyResult = {
+  snapshot: RepoSnapshot;
+  /** True only when every accepted file was written and marked resolved. */
+  complete: boolean;
+  /**
+   * Why nothing was written: the reviewed files changed, the operation holding the conflicts moved
+   * on, or the proposal belongs to another repository. A fresh review is the way forward.
+   */
+  stale?: "files" | "operation" | "repository";
+  outcomes: ConflictFileOutcome[];
 };
 
 export type Operation =
@@ -303,7 +335,7 @@ export type GitlineApi = {
   getCommitDetail: (path: string, hash: string) => Promise<CommitDetail>;
   getCommitFileDiff: (path: string, hash: string, file: string) => Promise<CommitDetail>;
   proposeConflictResolution: (path: string, locale?: Locale) => Promise<ConflictProposal>;
-  applyConflictResolution: (path: string, resolutions: ConflictResolution[], locale?: Locale) => Promise<RepoSnapshot>;
+  applyConflictResolution: (path: string, proposalId: string, accepted: string[], locale?: Locale) => Promise<ConflictApplyResult>;
   planRecovery: (path: string, failure: ExecutionFailure, context?: ConversationMessage[], locale?: Locale) => Promise<ActionPlan>;
   getWorkingFileDiff: (path: string, file: string) => Promise<CommitDetail>;
   planAction: (path: string, request: string, context?: ConversationMessage[], locale?: Locale) => Promise<ActionPlan>;
