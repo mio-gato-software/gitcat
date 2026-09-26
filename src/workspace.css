@@ -475,3 +475,45 @@
 .setup-running span { color: var(--muted); font-size: 10.5px; }
 .graph-empty.first-save code { max-width: 100%; margin-top: 4px; color: var(--secondary); font: 10.5px var(--mono, ui-monospace, Menlo, monospace); overflow-wrap: anywhere; }
 .first-save-note { margin: 0 0 8px; }
+
+/* Readiness: Git, the commit author and the remote, checked before the first save or a publish. */
+.readiness-checklist { margin: 12px 0 0; padding: 10px 11px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; font-size: 11px; }
+.changes-view .readiness-checklist { margin: 0 0 10px; }
+.plan-card .readiness-checklist { margin: 8px 0; }
+.welcome-card .readiness-checklist { margin: 16px 0; text-align: left; }
+.readiness-checklist h4 { margin: 0 0 8px; color: var(--secondary); font-size: 10px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; }
+.readiness-checklist ul { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.readiness-row { display: flex; gap: 9px; min-width: 0; }
+.readiness-icon { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 22px; height: 22px; color: var(--secondary); background: var(--raised); border-radius: 6px; }
+.readiness-row[data-state="ok"] .readiness-icon { color: var(--mint); }
+.readiness-row[data-state="missing"] .readiness-icon, .readiness-row[data-state="attention"] .readiness-icon { color: #e6a64f; }
+.readiness-body { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
+.readiness-body > strong { display: flex; align-items: flex-start; gap: 5px; color: var(--text); line-height: 1.4; overflow-wrap: anywhere; }
+.readiness-state-icon { flex: none; margin-top: 2px; }
+.readiness-row[data-state="ok"] .readiness-state-icon { color: var(--mint); }
+.readiness-row[data-state="missing"] .readiness-state-icon, .readiness-row[data-state="attention"] .readiness-state-icon { color: #e6a64f; }
+.readiness-row[data-state="pending"] .readiness-state-icon { color: var(--muted); }
+.readiness-body span { color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
+.readiness-body .readiness-detail { color: var(--secondary); font-size: 10.5px; }
+.readiness-body .readiness-note { font-size: 10px; }
+.readiness-body .readiness-warning { color: #e4b479; }
+.readiness-body .readiness-verified { display: flex; align-items: flex-start; gap: 5px; color: var(--mint); }
+.readiness-body .readiness-verified svg { flex: none; margin-top: 3px; }
+.readiness-access, .readiness-account { display: flex; flex-direction: column; gap: 3px; margin-top: 3px; }
+.readiness-access > strong { display: flex; align-items: center; gap: 5px; color: var(--secondary); }
+.readiness-access[data-access="ok"] > strong { color: var(--mint); }
+.readiness-access:not([data-access="ok"]):not([data-access="not_checked"]) > strong { color: #e6a64f; }
+.readiness-command { display: inline-flex; align-self: flex-start; align-items: center; gap: 5px; max-width: 100%; padding: 3px 7px; color: var(--secondary); background: var(--canvas); border-radius: 5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; overflow-wrap: anywhere; user-select: all; }
+.readiness-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; margin-left: -8px; }
+.readiness-remote-choice { display: flex; align-items: center; gap: 6px; margin: 3px 0 0; color: var(--muted); font-size: 10.5px; }
+.readiness-remote-choice select { width: auto; padding: 2px 6px; font-size: 10.5px; }
+.readiness-loading, .readiness-error { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; color: var(--muted); }
+.readiness-error { color: #e4b479; }
+.readiness-checklist .recovery-detail { margin: 3px 0 0; }
+.commit-author-note { display: flex; align-items: flex-start; gap: 5px; margin: 6px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.commit-author-note svg { flex: none; margin-top: 3px; }
+.identity-scopes { margin-top: 12px; }
+.identity-modal .identity-scope { display: flex; flex-direction: row; align-items: flex-start; gap: 9px; margin: 0; padding: 9px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 7px; font-weight: 500; cursor: pointer; }
+.identity-modal .identity-scope:has(input:checked) { border-color: #4b8180; }
+.identity-modal .identity-scope input { width: 14px; height: 14px; flex: none; margin: 2px 0 0; padding: 0; accent-color: #68d9ca; }
+.identity-modal .identity-now { color: var(--secondary); }

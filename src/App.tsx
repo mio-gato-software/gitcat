@@ -34,10 +34,11 @@ import type {
   ActionPlan, AiConnectionProblem, AiSharingPreview, AiSharingPurpose, AssistantUnavailable, Branch, ClonePreview, CloneResult, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
   ConflictChoice, ConflictChoiceRequest, ConflictChoiceResult, ConflictGuide, ConflictGuideFile, ConflictSideId, ConflictSideIdentity,
   FileChange, FileStats, FolderPreview, FolderProblem, HistoryScope, LlmConfig, LlmConnectResult, Locale, Operation, PendingOperationKind, ProjectLocateResult, ProjectSelectResult, ProjectUnavailableReason,
-  RecoveryAction, RecoveryReport, RepoSnapshot, SecretFinding, UnavailableProject, WithheldFile
+  RecoveryAction, RecoveryReport, RepoSnapshot, SecretFinding, UnavailableProject, WithheldFile, AuthorReadiness, HelpPage, IdentityScope
 } from "../shared/types";
 import { localeTag, readLocale, translate, writeLocale, type MessageKey, type Translate } from "./i18n";
 import { folderNameProblem, parseCloneUrl, suggestedFolderName } from "../shared/clone-source";
+import { ReadinessActionsContext, ReadinessChecklist, authorOrigin, identityText, useReadiness, type ReadinessActions, type ReadinessState } from "./Readiness";
 
 type ProjectTab = { id: string; snapshot: RepoSnapshot; loadedAt: string; fetchedAt?: string };
 /** One tab in the saved order: a project that opened, or a saved one that could not be opened this time. Its id is its saved path. */
@@ -73,7 +74,8 @@ type ActivityItem = Notification;
 
 /** `from` is the commit a new branch starts at, or the branch a rename starts from. */
 type InputDialog = { operation: "create_branch" | "merge" | "rename_branch" | "add_remote"; title: string; label: string; value: string; from?: string };
-type IdentityDialog = { user: string; email: string };
+/** The identity under review, with where it would be written and what each place holds now. */
+type IdentityDialog = { user: string; email: string; scope: IdentityScope; author?: AuthorReadiness };
 type Suggestion = { key: string; icon: LucideIcon; label: string } & ({ question: string } | { dialog: InputDialog });
 type ConversationTurn = {
   id: number;
@@ -449,6 +451,8 @@ export default function App() {
   const [inputDialog, setInputDialog] = useState<InputDialog>();
   const [setup, setSetup] = useState<SetupState>();
   const [identityDialog, setIdentityDialog] = useState<IdentityDialog>();
+  /** Bumped after every Git action, so the readiness checks read again what an action may have changed. */
+  const [readinessEpoch, setReadinessEpoch] = useState(0);
   const [commitMessage, setCommitMessage] = useState("");
   const [deliveryMerge, setDeliveryMerge] = useState(false);
   /** The version of every listed file when the save was started, so a later edit to a ticked file asks for a fresh look. */
@@ -537,6 +541,8 @@ export default function App() {
     const kept = saved.filter((path) => listed.has(path));
     if (kept.length !== saved.length) setExcludedByRepo((items) => ({ ...items, [snapshot.path]: kept }));
   }, [snapshot?.path, snapshot?.stateId]);
+  // Git and the commit author, read on this Mac for the project on screen (or for this Mac alone on Welcome).
+  const readiness = useReadiness(snapshot?.path, { key: `${readinessEpoch}:${snapshot?.head ?? ""}`, enabled: workspaceReady });
   const conversation = snapshot ? conversations[snapshot.path] ?? [] : [];
   const planning = conversation.some((turn) => turn.status === "loading" || turn.status === "executing");
   // Something prepared against the current state that the user has not decided on yet.
@@ -693,6 +699,28 @@ export default function App() {
   const openSettings = () => {
     setSettingsOpen(true);
     window.gitcat.getLlmConfig().then(setConfig).catch(() => undefined);
+  };
+
+  /**
+   * The name and email under review start from what Git uses now, with what this repository and the
+   * global settings each hold, so the person sees what a change replaces before choosing where it goes.
+   */
+  const openIdentityDialog = async () => {
+    const path = snapshot?.path;
+    if (!path) return;
+    let author: AuthorReadiness | undefined;
+    try { author = (await window.gitcat.checkReadiness(path)).author; } catch { /* the dialog still works with empty fields */ }
+    setIdentityDialog({ user: author?.name?.value ?? "", email: author?.email?.value ?? "", scope: "local", author });
+  };
+
+  const openHelpPage = (page: HelpPage) => {
+    window.gitcat.openHelpPage(page).catch((error) => notify({ message: cleanError(error, t("fallbackGitAction")), tone: "error" }));
+  };
+
+  const readinessActions: ReadinessActions = {
+    onSetIdentity: snapshot ? () => void openIdentityDialog() : undefined,
+    onConnectRemote: snapshot ? () => setInputDialog({ operation: "add_remote", title: t("connectRemoteTitle"), label: t("remoteAddress"), value: "" }) : undefined,
+    onOpenPage: openHelpPage
   };
 
   const updateSnapshot = (path: string, next: RepoSnapshot, fetched = false) => {
@@ -1112,7 +1140,7 @@ export default function App() {
       resolve_conflict: t("resolveConflictNamed", { path: args.path }),
       commit: t("createCommitNamed", { message: args.message ?? "" }),
       ignore_path: t("ignoreFutureChanges", { path: args.path ?? "" }),
-      set_identity: t("setIdentityQuestion", { user: args.user ?? "", email: args.email ?? "" }),
+      set_identity: t(args.scope === "global" ? "setIdentityQuestionGlobal" : "setIdentityQuestion", { user: args.user ?? "", email: args.email ?? "" }),
       add_remote: t("connectRemoteQuestion", { url: args.url ?? "" }),
       github_create_repo: t("createPrivateRepo", { owner: args.owner, name: args.name, host: args.host })
     };
@@ -1208,7 +1236,7 @@ export default function App() {
         }
         return;
       case "inspect_changes": setFocus({ kind: "wip" }); setInspectorTab("details"); return;
-      case "configure_identity": setIdentityDialog({ user: "", email: "" }); return;
+      case "configure_identity": await openIdentityDialog(); return;
       case "configure_remote": setInputDialog({ operation: "add_remote", title: t("connectRemoteTitle"), label: t("remoteAddress"), value: "" }); return;
       // The guided resolver works without the assistant; a draft from it stays one optional button inside.
       case "resolve_conflicts": await openGuide(); return;
@@ -1331,6 +1359,7 @@ export default function App() {
     try {
       const result = await window.gitcat.executePlan(plan.repoPath, plan.id, locale);
       updateSnapshot(plan.repoPath, result.snapshot);
+      setReadinessEpoch((epoch) => epoch + 1);
       if (result.error) {
         // A sequence that stopped halfway did change the repository: show what ran, not only the failure.
         const progress = plan.steps.length > 1 ? result.output : undefined;
@@ -1363,6 +1392,7 @@ export default function App() {
       }
     } catch (error) {
       const message = cleanError(error, t("fallbackGitAction"));
+      setReadinessEpoch((epoch) => epoch + 1);
       updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
       notify({ message, tone: "error" });
       await refreshProject(plan.repoPath, false);
@@ -1611,6 +1641,7 @@ export default function App() {
 
   return (
     <I18nContext.Provider value={{ locale, t, setLocale }}>
+    <ReadinessActionsContext.Provider value={readinessActions}>
     <div className={`app-shell platform-${window.gitcat.platform}`}>
       <header className="topbar">
         <div className="brand-lockup"><div className="brand-mark"><CatMark size={28} /></div><span>GitCat</span></div>
@@ -1636,7 +1667,7 @@ export default function App() {
         onConfirm={(candidateId) => void confirmLocation(activeUnavailable.path, candidateId)}
         onDismissNotice={() => setLocateNotice(undefined)}
         onRemove={() => closeProject(activeUnavailable.path)}
-      /> : !snapshot ? <Welcome onOpen={() => void openProject()} onClone={() => setSetup({ kind: "clone" })} onTrack={() => void openProject("track")} config={config} onConnect={openSettings} /> : <>
+      /> : !snapshot ? <Welcome onOpen={() => void openProject()} onClone={() => setSetup({ kind: "clone" })} onTrack={() => void openProject("track")} config={config} onConnect={openSettings} readiness={readiness} /> : <>
 
 
         <RepoToolbar
@@ -1711,7 +1742,7 @@ export default function App() {
             </div>
             {inspectorTab === "details" ? <div className="inspector-body">
               {activeFocus?.kind === "wip"
-                ? <ChangesView snapshot={snapshot} secrets={secretFindings} secretsReviewed={secretsReviewed} onSecretsReviewed={(reviewed) => setSecretsReviewedKey(reviewed ? secretsKey : undefined)} descriptionWithheld={descriptionWithheld} merge={deliveryMerge} configured={config.configured} stale={deliveryStale} onReviewAgain={() => beginDelivery(deliveryMerge)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} message={commitMessage} generating={generatingDescription} busy={planning} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit}
+                ? <ChangesView readiness={readiness} snapshot={snapshot} secrets={secretFindings} secretsReviewed={secretsReviewed} onSecretsReviewed={(reviewed) => setSecretsReviewedKey(reviewed ? secretsKey : undefined)} descriptionWithheld={descriptionWithheld} merge={deliveryMerge} configured={config.configured} stale={deliveryStale} onReviewAgain={() => beginDelivery(deliveryMerge)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} message={commitMessage} generating={generatingDescription} busy={planning} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit}
                     excluded={excluded} onToggle={toggleIncluded} onToggleAll={setAllIncluded} onIgnore={ignoreFile} onShowSelected={() => setSelectionDiffOpen(true)} />
                 : activeFocus
                   ? <CommitInspector key={activeFocus.commit.hash} commit={activeFocus.commit} snapshot={snapshot} known={graphCommits} onFocus={(commit) => focusOn({ kind: "commit", commit }, true)} onOpen={(file) => setModalCommit({ commit: activeFocus.commit, file })} />
@@ -1730,8 +1761,10 @@ export default function App() {
         onCloned={(project, empty) => showProject(project, { label: t("cloneDone", { name: project.name }), detail: empty ? t("cloneDoneEmpty", { name: project.name }) : project.path })} />}
       {settingsOpen && <SettingsModal config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onConfigChange={setConfig}
         onNotice={(message) => notify({ message, tone: "success" })}
-        repoName={snapshot?.name} onSetAuthor={snapshot ? () => { setSettingsOpen(false); setIdentityDialog({ user: "", email: "" }); } : undefined} />}
-      {identityDialog && <IdentityModal dialog={identityDialog} onChange={setIdentityDialog} onClose={() => setIdentityDialog(undefined)} onSubmit={() => { const identity = identityDialog; setIdentityDialog(undefined); void prepare("set_identity", { user: identity.user.trim(), email: identity.email.trim() }); }} />}
+        onSetAuthor={snapshot ? () => { setSettingsOpen(false); void openIdentityDialog(); } : undefined}
+        repoPath={snapshot?.path} readinessKey={readinessEpoch}
+        onConnectRemote={snapshot ? () => { setSettingsOpen(false); readinessActions.onConnectRemote?.(); } : undefined} />}
+      {identityDialog && <IdentityModal dialog={identityDialog} onChange={setIdentityDialog} onClose={() => setIdentityDialog(undefined)} onSubmit={() => { const identity = identityDialog; setIdentityDialog(undefined); void prepare("set_identity", { user: identity.user.trim(), email: identity.email.trim(), scope: identity.scope }); }} />}
       {inputDialog && <InputModal dialog={inputDialog} branches={snapshot?.branches ?? []} onChange={(value) => setInputDialog({ ...inputDialog, value })} onClose={() => setInputDialog(undefined)} onSubmit={submitInputDialog} />}
       {menu && snapshot && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu)} label={menu.work ? t("uncommittedHeading") : menu.commit ? t("commitActions", { hash: menu.commit.shortHash }) : t("actionsFor", { name: menu.branch ?? "" })} onClose={() => setMenu(undefined)} />}
       {sharingDialog && <SharingDialog key={sharingDialog.preview.repoPath} initial={sharingDialog.preview} paths={sharingDialog.paths}
@@ -1749,6 +1782,7 @@ export default function App() {
       {guideBusy && !guide && <div className="resolving-overlay" role="status"><LoaderCircle className="spin" size={22} /><span>{t("guideLoading")}</span></div>}
       {resolving && <div className="resolving-overlay" role="status"><LoaderCircle className="spin" size={22} /><span>{t("readConflictSides")}</span></div>}
     </div>
+    </ReadinessActionsContext.Provider>
     </I18nContext.Provider>
   );
 }
@@ -1808,9 +1842,11 @@ function UnavailableProjectPanel({ project, busy, notice, onRetry, onLocate, onC
  * The first screen needs nothing configured: opening a project and every Git button work on their
  * own. The AI assistant is offered as help that can be connected later, never as a gate.
  */
-function Welcome({ onOpen, onClone, onTrack, config, onConnect }: { onOpen: () => void; onClone: () => void; onTrack: () => void; config: LlmConfig; onConnect: () => void }) {
+function Welcome({ onOpen, onClone, onTrack, config, onConnect, readiness }: { onOpen: () => void; onClone: () => void; onTrack: () => void; config: LlmConfig; onConnect: () => void; readiness: ReadinessState }) {
   const { t } = useI18n();
-  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card first-run"><div className="welcome-mark"><CatMark size={42} /></div><div className="eyebrow">{t("branchWorkspace")}</div><h1>{t("yourGitClearer")}</h1><p>{t("welcomeCopy")}</p><ProjectStartOptions onOpen={onOpen} onClone={onClone} onTrack={onTrack} />
+  // Without Git nothing below can work, so a missing or broken Git is said first, with how to get it.
+  const gitMissing = readiness.report && !readiness.report.repoPath && readiness.report.git.status !== "ok";
+  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card first-run"><div className="welcome-mark"><CatMark size={42} /></div><div className="eyebrow">{t("branchWorkspace")}</div><h1>{t("yourGitClearer")}</h1><p>{t("welcomeCopy")}</p>{gitMissing && <ReadinessChecklist readiness={readiness} items={["git"]} t={t} />}<ProjectStartOptions onOpen={onOpen} onClone={onClone} onTrack={onTrack} />
     <div className="welcome-direct"><strong>{t("welcomeDirectTitle")}</strong><div className="welcome-features"><span><GitCommitHorizontal size={14} /> {t("welcomeDirectSave")}</span><span><GitBranch size={14} /> {t("welcomeDirectBranches")}</span><span><ArrowUpFromLine size={14} /> {t("welcomeDirectSync")}</span><span><GitMerge size={14} /> {t("welcomeDirectConflicts")}</span></div></div>
     <div className={`welcome-ai ${config.configured ? "connected" : ""}`}><Sparkles size={15} /><div><strong>{config.configured ? t("welcomeAiConnected", { model: config.model }) : t("welcomeAiTitle")}</strong><span>{t("welcomeAiCopy")}</span></div>{!config.configured && <button className="outline-button small" onClick={onConnect}>{t("connectAssistant")}</button>}</div>
   </div></div>;
@@ -2977,8 +3013,8 @@ function FileList({ files, stats, onOpen, selection }: { files: FileChange[]; st
  * the ticked files into a saved version. Unticked files are listed too, so leaving one out is a
  * visible decision rather than something that happens to it.
  */
-function ChangesView({ snapshot, secrets, secretsReviewed, onSecretsReviewed, descriptionWithheld, message, generating, busy, onOpenFile, onMessageChange, onGenerate, onPrepare, merge, configured, stale, onReviewAgain, onMergeChange, excluded, onToggle, onToggleAll, onIgnore, onShowSelected }: {
-  snapshot: RepoSnapshot; secrets: SecretFinding[]; secretsReviewed: boolean; onSecretsReviewed: (reviewed: boolean) => void; descriptionWithheld: WithheldFile[];
+function ChangesView({ readiness, snapshot, secrets, secretsReviewed, onSecretsReviewed, descriptionWithheld, message, generating, busy, onOpenFile, onMessageChange, onGenerate, onPrepare, merge, configured, stale, onReviewAgain, onMergeChange, excluded, onToggle, onToggleAll, onIgnore, onShowSelected }: {
+  readiness: ReadinessState; snapshot: RepoSnapshot; secrets: SecretFinding[]; secretsReviewed: boolean; onSecretsReviewed: (reviewed: boolean) => void; descriptionWithheld: WithheldFile[];
   message: string; generating: boolean; busy: boolean;
   onOpenFile: (file: FileChange) => void; onMessageChange: (message: string) => void; onGenerate: () => void; onPrepare: () => void;
   merge: boolean; configured: boolean; stale: boolean; onReviewAgain: () => void; onMergeChange: (value: boolean) => void;
@@ -2994,8 +3030,14 @@ function ChangesView({ snapshot, secrets, secretsReviewed, onSecretsReviewed, de
   // Only the ticked files decide the save; a flagged file left out is already safe from it.
   const flaggedTicked = selected.filter((change) => flagged.has(change.path));
   const mustReview = flaggedTicked.length > 0 && !secretsReviewed;
+  // Before the first save, or whenever Git or the author is missing, the checklist says so up front;
+  // otherwise one line under the form says who the save will be signed as.
+  const report = readiness.report?.repoPath === snapshot.path ? readiness.report : undefined;
+  const needsSetup = Boolean(report && (report.git.status !== "ok" || report.author.status !== "ok"));
+  const author = report?.author.status === "ok" ? report.author : undefined;
   return <div className="changes-view">
     <div className="detail-head"><span className="detail-kind"><PencilLine size={13} />{t("uncommittedHeading")}</span><span className="detail-branch" title={snapshot.currentBranch}><GitBranch size={12} />{snapshot.currentBranch}</span></div>
+    {(needsSetup || (!snapshot.head && report)) && <ReadinessChecklist readiness={readiness} items={["git", "author"]} t={t} compact title={t("readinessSaveTitle")} />}
     {hasChanges ? <>
       {!snapshot.head && <p className="file-inclusion-note first-save-note" role="note">{t("firstSaveNote")}</p>}
       <ChangeSummary files={selected} />
@@ -3016,6 +3058,7 @@ function ChangesView({ snapshot, secrets, secretsReviewed, onSecretsReviewed, de
         <div className="commit-form-heading"><h3>{t("saveDescription")}</h3><button className="outline-button small" onClick={onGenerate} disabled={!configured || generating || busy || !selected.length}>{generating ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{t(generating ? "generatingSaveDescription" : "generateDescription")}</button></div>
         <label htmlFor="commit-description" className="visually-hidden">{t("commitMessage")}</label><textarea id="commit-description" value={message} onChange={(event) => onMessageChange(event.target.value)} maxLength={120} rows={3} placeholder={t("commitPlaceholder")} disabled={generating || busy} />
         <div className="commit-form-meta"><span>{t(configured ? "editableDescription" : "manualSaveDescription")}</span><span>{message.length}/120</span></div>
+        {author && !needsSetup && <p className="commit-author-note"><UserRound size={11} />{t("readinessCommitAuthor", { identity: identityText({ name: author.name?.value, email: author.email?.value }), origin: authorOrigin(author, t) })}</p>}
         {descriptionWithheld.length > 0 && <p className="file-inclusion-note withheld-note">{t("descriptionWithheld", { files: withheldText(descriptionWithheld, t) })}</p>}
         {canMerge && <label className="delivery-option"><input type="checkbox" checked={merge} disabled={busy} onChange={(event) => onMergeChange(event.target.checked)} /><span>{t("integrateAfterSave", { target: snapshot.defaultBranch! })}</span></label>}
         {merge && canMerge && leftOut > 0 && <p className="file-inclusion-note">{t("excludedStayForIntegration", { count: leftOut, target: snapshot.defaultBranch! })}</p>}
@@ -3206,10 +3249,18 @@ function RecoveryCard({ report, assistant, kept, busy, configured, retryable, on
   </div>;
 }
 
+/** Before a publish is confirmed: where it goes, whether this Mac can reach it, and which account it uses. */
+function PublishReadiness({ repoPath, remote }: { repoPath: string; remote?: string }) {
+  const { t } = useI18n();
+  const readiness = useReadiness(repoPath, { access: true, remote });
+  return <ReadinessChecklist readiness={readiness} items={["remote"]} t={t} compact title={t("readinessPublishTitle")} />;
+}
+
 function PlanCard({ plan, onApply, onDismiss, busy }: { plan: ActionPlan; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean }) {
   const { t } = useI18n();
   const asking = plan.kind === "question";
-  return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? t("interpretedByProvider") : t("directAction")}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? t("dismissQuestion") : t("dismissPlan")}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.withheld && plan.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(plan.withheld, t) })}</p>}{plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}{plan.repositoryPlan && <pre className="repository-plan-json">{JSON.stringify(plan.repositoryPlan, null, 2)}</pre>}{plan.allowed && (plan.steps.length > 1
+  const push = plan.allowed && plan.requiresConfirmation ? plan.steps.find((step) => step.operation === "push") : undefined;
+  return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? t("interpretedByProvider") : t("directAction")}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? t("dismissQuestion") : t("dismissPlan")}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.withheld && plan.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(plan.withheld, t) })}</p>}{plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}{plan.repositoryPlan && <pre className="repository-plan-json">{JSON.stringify(plan.repositoryPlan, null, 2)}</pre>}{push && <PublishReadiness repoPath={plan.repoPath} remote={push.args.setUpstream} />}{plan.allowed && (plan.steps.length > 1
       ? <ol className="plan-steps">{plan.steps.map((step, index) => <li key={`${step.command}-${index}`}><span className="step-summary">{step.summary}</span><code><TerminalSquare size={11} />{step.command}</code></li>)}</ol>
       : <div className="command-preview"><TerminalSquare size={14} /><code>{plan.command}</code></div>)}
     {plan.allowed && plan.requiresConfirmation && plan.steps.length > 1 && <p className="plan-hint">{t("planStepsHint", { count: plan.steps.length })}</p>}
@@ -3228,11 +3279,16 @@ type AiConnectionState = "none" | "verifying" | "connected" | "attention" | "fai
  * the three sign-ins people mix up. Connecting verifies the key and model with the provider before
  * anything is saved; a failure says why in plain words and can be retried from the same place.
  */
-function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange, onNotice, repoName, onSetAuthor }: {
+function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange, onNotice, onSetAuthor, repoPath, readinessKey, onConnectRemote }: {
   config: LlmConfig; locale: Locale; onLocaleChange: (locale: Locale) => void; onClose: () => void;
-  onConfigChange: (config: LlmConfig) => void; onNotice: (message: string) => void; repoName?: string; onSetAuthor?: () => void;
+  onConfigChange: (config: LlmConfig) => void; onNotice: (message: string) => void; onSetAuthor?: () => void;
+  repoPath?: string; readinessKey?: number; onConnectRemote?: () => void;
 }) {
   const { t } = useI18n();
+  // The full readiness panel: with a project open, the remote is contacted too, read-only.
+  const [checkedRemote, setCheckedRemote] = useState<string>();
+  const setupReadiness = useReadiness(repoPath, { access: Boolean(repoPath), remote: checkedRemote, key: readinessKey });
+  const parentActions = useContext(ReadinessActionsContext);
   const [apiKey, setApiKey] = useState("");
   const [modelChoice, setModelChoice] = useState<"recommended" | "custom">(isSupportedModel(config.model) ? "recommended" : "custom");
   const [customModel, setCustomModel] = useState(isSupportedModel(config.model) ? "" : config.model);
@@ -3317,11 +3373,19 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange
       </div>
     </section>
 
+    <section className="settings-section readiness-section" aria-labelledby="readiness-title">
+      <h3 id="readiness-title">{t("readinessTitle")}</h3>
+      <p className="settings-intro">{t("readinessIntro")}</p>
+      <ReadinessActionsContext.Provider value={{ ...parentActions, onSetIdentity: onSetAuthor, onConnectRemote }}>
+        <ReadinessChecklist readiness={setupReadiness} items={["git", "author", "remote"]} t={t} remoteChoice={{ value: checkedRemote, onChange: setCheckedRemote }} />
+      </ReadinessActionsContext.Provider>
+    </section>
+
     <section className="settings-section accounts-explainer" aria-labelledby="accounts-title">
       <h3 id="accounts-title">{t("accountsTitle")}</h3>
       <p className="settings-intro">{t("accountsIntro")}</p>
       <div className="account-row"><Sparkles size={14} /><div><strong>{t("accountAiTitle")}</strong><span>{t("accountAiCopy")}</span></div></div>
-      <div className="account-row"><UserRound size={14} /><div><strong>{t("accountAuthorTitle")}</strong><span>{t("accountAuthorCopy")}</span>{onSetAuthor && repoName && <button type="button" className="ghost-button small" onClick={onSetAuthor}>{t("setAuthorForRepo", { name: repoName })}</button>}</div></div>
+      <div className="account-row"><UserRound size={14} /><div><strong>{t("accountAuthorTitle")}</strong><span>{t("accountAuthorCopy")}</span></div></div>
       <div className="account-row"><Cloud size={14} /><div><strong>{t("accountRemoteTitle")}</strong><span>{t("accountRemoteCopy")}</span></div></div>
     </section>
     <div className="modal-actions"><button className="ghost-button" onClick={onClose}>{t("close")}</button></div>
@@ -3332,7 +3396,22 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange
 function IdentityModal({ dialog, onChange, onClose, onSubmit }: { dialog: IdentityDialog; onChange: (dialog: IdentityDialog) => void; onClose: () => void; onSubmit: () => void }) {
   const { t } = useI18n();
   useEscape(onClose);
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal identity-modal" role="dialog" aria-modal="true" aria-labelledby="identity-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><div className="modal-heading"><div><div className="eyebrow">{t("gitOperation")}</div><h2 id="identity-modal-title">{t("identityTitle")}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div><label>{t("identityName")}<input autoFocus value={dialog.user} onChange={(event) => onChange({ ...dialog, user: event.target.value })} maxLength={100} autoComplete="name" /></label><label>{t("identityEmail")}<input type="email" value={dialog.email} onChange={(event) => onChange({ ...dialog, email: event.target.value })} maxLength={254} autoComplete="email" /><small>{t("identityHelp")}</small></label><div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button><button className="primary-button" disabled={!dialog.user.trim() || !dialog.email.trim()}><UserRound size={14} /> {t("prepare")}</button></div></form></div>;
+  const now = (scope: IdentityScope) => {
+    const values = scope === "global" ? dialog.author?.global : dialog.author?.repository;
+    return dialog.author ? t("identityNow", { value: values && identityText(values) ? identityText(values) : t("identityNotSet") }) : undefined;
+  };
+  const option = (scope: IdentityScope, title: MessageKey, help: MessageKey) =>
+    <label className="model-option identity-scope" data-scope={scope}><input type="radio" name="identity-scope" checked={dialog.scope === scope} onChange={() => onChange({ ...dialog, scope })} /><span><strong>{t(title)}</strong><small>{t(help)}</small>{now(scope) && <small className="identity-now">{now(scope)}</small>}</span></label>;
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal identity-modal" role="dialog" aria-modal="true" aria-labelledby="identity-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+    <div className="modal-heading"><div><div className="eyebrow">{t("gitOperation")}</div><h2 id="identity-modal-title">{t("identityTitle")}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div>
+    <label>{t("identityName")}<input autoFocus value={dialog.user} onChange={(event) => onChange({ ...dialog, user: event.target.value })} maxLength={100} autoComplete="name" /></label>
+    <label>{t("identityEmail")}<input type="email" value={dialog.email} onChange={(event) => onChange({ ...dialog, email: event.target.value })} maxLength={254} autoComplete="email" /><small>{t("identityHelp")}</small></label>
+    <fieldset className="model-choice identity-scopes"><legend>{t("identityScopeLegend")}</legend>
+      {option("local", "identityScopeLocal", "identityScopeLocalHelp")}
+      {option("global", "identityScopeGlobal", "identityScopeGlobalHelp")}
+    </fieldset>
+    <div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button><button className="primary-button" disabled={!dialog.user.trim() || !dialog.email.trim()}><UserRound size={14} /> {t("prepare")}</button></div>
+  </form></div>;
 }
 
 /**

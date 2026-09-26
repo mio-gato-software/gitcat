@@ -14,6 +14,12 @@ const repo = path.join(scratch, 'GitCat');
 const screenshots = process.env.GITCAT_UI_SCREENSHOTS;
 fs.mkdirSync(repo);
 app.setPath('userData', path.join(scratch, 'profile'));
+// Git reads a disposable global configuration and no system one, so this Mac's own identity and
+// helpers never leak into what the checks show, and setting a global identity writes only here.
+const globalGitConfig = path.join(scratch, 'global.gitconfig');
+fs.writeFileSync(globalGitConfig, '');
+process.env.GIT_CONFIG_GLOBAL = globalGitConfig;
+process.env.GIT_CONFIG_NOSYSTEM = '1';
 const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 app.whenReady().then(async () => {
@@ -65,6 +71,14 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('llm:verify', () => ({ ok: true, config: llmConfig() }));
   ipcMain.handle('llm:open-provider-page', (_, page) => { openedPages.push(page); });
+  // Readiness is the real, read-only service. None of these repositories point at a network host.
+  const readinessRequests = [];
+  ipcMain.handle('readiness:check', (_, p, request) => {
+    readinessRequests.push({ path: p ?? null, access: request?.access === true });
+    return service.checkReadiness(p ?? undefined, { ...(request?.remote ? { remote: request.remote } : {}), access: request?.access === true });
+  });
+  const helpPages = [];
+  ipcMain.handle('help:open-page', (_, page) => { helpPages.push(page); });
   ipcMain.handle('history:load', (_, p, request) => service.loadHistory(p, request));
   ipcMain.handle('commit:detail', (_, p, hash) => service.getCommitDetail(p, hash));
   ipcMain.handle('commit:file-diff', (_, p, file) => service.getWorkingFileDiff(p, file));
@@ -353,6 +367,9 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.inspector .select-all')?.innerText.includes('Se guardarán 2 de 2 archivos')`);
   assert.equal(await js(`document.querySelector('.delivery-option input').checked`), true);
   assert.match(await js(`document.querySelector('.inspector .change-row[title^="Nuevo · incluido"]').innerText`), /new-file\.txt/);
+  // Who the save will be signed as is said beside the form, with where that comes from.
+  assert.match(await js(`document.querySelector('.commit-author-note').innerText`), /Se guarda como GitCat QA <qa@example\.test>, configurado solo para este repositorio/);
+  assert.equal(await js(`Boolean(document.querySelector('.changes-view .readiness-checklist'))`), false, 'Nothing to set up, so no checklist in the way');
   await capture('changes');
   await js(`document.querySelector('.commit-form-actions .primary-button').click()`);
   await waitFor(`document.querySelector('.delivery-review-modal')`);
@@ -369,6 +386,12 @@ app.whenReady().then(async () => {
   const headBeforePush = git('rev-parse', 'HEAD');
   await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find((node) => node.innerText.trim() === 'Push').click()`);
   await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
+  // Before confirming, the plan says where the work would go; here there is nowhere yet, and the way on is offered.
+  await waitFor(`document.querySelector('.plan-card .readiness-row[data-item="remote"]')`);
+  const publishReadiness = await js(`document.querySelector('.plan-card .readiness-checklist').innerText`);
+  for (const entry of [/Adónde va esto/i, /Todavía no está conectado a un remoto/, /Guardar funciona sin él/, /Conectar un remoto…/]) assert.match(publishReadiness, entry);
+  assert.ok(readinessRequests.some((entry) => entry.path === snapshot.path && entry.access), 'A publish checks access before it is confirmed');
+  await capture('publish-readiness');
   await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
   await waitFor(`document.querySelector('.recovery-card[data-kind="no_remote"]')`);
   const recoveryText = await js(`document.querySelector('.recovery-card[data-kind="no_remote"]').innerText`);
@@ -496,7 +519,13 @@ app.whenReady().then(async () => {
   await js(`[...document.querySelectorAll('.welcome-ai button')][0].click()`);
   await waitFor(`document.querySelector('.settings-modal.guided')`);
   const settingsText = () => js(`document.querySelector('.settings-modal').innerText`);
+  await waitFor(`document.querySelector('.settings-modal .readiness-row[data-item="author"]')`);
   const guide = await settingsText();
+  // Without a project, Settings still says whether Git is ready and who saves would be signed as.
+  for (const entry of [/Listo para guardar y publicar/, /Git \d[\d.]* está listo/, /Git todavía no sabe quién guarda/, /No es un inicio de sesión/]) assert.match(guide, entry);
+  await js(`document.querySelector('.settings-modal .readiness-section').scrollIntoView()`);
+  await capture('settings-readiness');
+  await js(`document.querySelector('.settings-modal .modal-heading').scrollIntoView()`);
   for (const entry of [/Asistente de IA \(opcional\)/, /Sin conectar/, /OpenAI cobra a tu cuenta/, /GitCat no cobra nada/, /Crea una clave/, /solo para el asistente de IA/, /recomendado/, /Avanzado: ID de modelo personalizado/,
     /Tres accesos distintos/, /Clave del asistente de IA/, /Identidad de autor en Git/, /Acceso al remoto/]) assert.match(guide, entry);
   assert.equal(await js(`Boolean(document.querySelector('.settings-modal .model-custom'))`), false, 'The custom model ID is an advanced choice, hidden until picked');
@@ -592,6 +621,35 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.changes-view').innerText`), /primera versión guardada del proyecto/);
   for (const file of ['pan.md', 'tarta.md', '.env']) assert.ok((await js(`document.querySelector('.changes-view').innerText`)).includes(file), `${file} waits for the first save`);
   await capture('first-save-ready');
+  // Before the first save, the checklist says Git is ready and that nobody is set as the author yet,
+  // with the way to set one. The name, the email and where they apply are reviewed before anything is written.
+  await waitFor(`document.querySelector('.changes-view .readiness-row[data-item="author"][data-state="missing"]')`);
+  const firstSaveChecklist = await js(`document.querySelector('.changes-view .readiness-checklist').innerText`);
+  for (const entry of [/Antes de tu primer guardado/i, /Git \d[\d.]* está listo/, /Git todavía no sabe quién guarda/, /Poner nombre y correo…/]) assert.match(firstSaveChecklist, entry);
+  await capture('first-save-checklist');
+  await js(`[...document.querySelectorAll('.changes-view .readiness-actions button')].find((node) => node.innerText.includes('Poner nombre y correo')).click()`);
+  await waitFor(`document.querySelectorAll('.identity-modal .identity-scope').length === 2`);
+  const identityText = await js(`document.querySelector('.identity-modal').innerText`);
+  for (const entry of [/Solo este repositorio/, /Todos los repositorios de este Mac/, /Ahora: sin configurar/, /no es un inicio de sesión/]) assert.match(identityText, entry);
+  assert.equal(await js(`document.querySelector('.identity-scope[data-scope="local"] input').checked`), true, 'This repository only is the default');
+  await setText('.identity-modal label:nth-of-type(1) input', 'QA Recetas');
+  await setText('.identity-modal label:nth-of-type(2) input', 'recetas@example.test');
+  await js(`document.querySelector('.identity-scope[data-scope="global"] input').click()`);
+  await waitFor(`document.querySelector('.identity-scope[data-scope="global"] input').checked`);
+  await capture('identity-review');
+  await js(`document.querySelector('.identity-modal .primary-button').click()`);
+  await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
+  const identityPlan = await js(`document.querySelector('.plan-card').innerText`);
+  for (const entry of [/todos los repositorios de este Mac como QA Recetas <recetas@example\.test>/, /Todavía no hay una identidad global/, /conservan su autor/, /git config --global user\.name/]) assert.match(identityPlan, entry);
+  assert.equal(fs.readFileSync(globalGitConfig, 'utf8'), '', 'Nothing is written before the confirmation');
+  await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
+  for (let attempt = 0; attempt < 100 && !fs.readFileSync(globalGitConfig, 'utf8').includes('recetas@example.test'); attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.match(fs.readFileSync(globalGitConfig, 'utf8'), /name = QA Recetas[\s\S]*email = recetas@example\.test/);
+  assert.throws(() => execFileSync('git', ['config', '--local', 'user.name'], { cwd: plain, stdio: 'ignore' }), 'The global choice leaves the repository settings alone');
+  await js(`document.querySelector('.inspector-tabs button').click()`);
+  await waitFor(`document.querySelector('.changes-view .readiness-row[data-item="author"][data-state="ok"]')`);
+  assert.match(await js(`document.querySelector('.changes-view .readiness-row[data-item="author"]').innerText`), /QA Recetas <recetas@example\.test>[\s\S]*configurado para todos los repositorios de este Mac/);
+  await capture('first-save-author-set');
 
   // Cloning: the address is checked while it is typed, the destination is previewed, a folder with
   // files is refused, and a stopped copy leaves the chosen place exactly as it was.
@@ -648,8 +706,17 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.branch-list').innerText`), /está lista\. Aparecerá aquí después del primer guardado/, 'An unborn branch is explained, not reported as a filter miss');
   assert.doesNotMatch(await js(`document.querySelector('.toolbar-delivery').innerText`), /Trabajo guardado/, 'Nothing is called saved before the first save');
   await capture('cloned-empty');
+  // With a remote, Settings says where a publish goes and checks access read-only; this one is a
+  // folder on this Mac, so nothing reaches a network.
+  await js(`document.querySelector('.top-actions .icon-button').click()`);
+  await waitFor(`document.querySelector('.settings-modal .readiness-access[data-access="ok"]')`);
+  const remoteReadiness = await js(`document.querySelector('.settings-modal .readiness-row[data-item="remote"]').innerText`);
+  for (const entry of [/Se publica en \S*empty-remote\.git/, /origin · una carpeta de este Mac · el destino que esta rama ya sigue|origin · una carpeta de este Mac · el habitual, origin/, /Acceso confirmado/, /Comprobar el acceso de nuevo/]) assert.match(remoteReadiness, entry);
+  assert.match(await js(`document.querySelector('.settings-modal .readiness-row[data-item="author"]').innerText`), /QA Recetas <recetas@example\.test>[\s\S]*configurado para todos los repositorios de este Mac/);
+  await js(`document.querySelector('.settings-modal .readiness-section').scrollIntoView()`);
+  await capture('settings-readiness-remote');
   win.destroy();
-  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');
+  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));

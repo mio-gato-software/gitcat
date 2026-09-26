@@ -395,7 +395,7 @@ test("el asistente es opcional: interpretar sigue siendo del modelo y Git funcio
   assert.doesNotMatch(service, /local-fallback/);
   // No first-run gate: Welcome opens a project and the repository view works without a provider.
   assert.doesNotMatch(app, /ProviderRequired|exploring|provider-banner/);
-  assert.match(app, /!snapshot \? <Welcome onOpen=\{\(\) => void openProject\(\)\} onClone=\{\(\) => setSetup\(\{ kind: "clone" \}\)\} onTrack=\{\(\) => void openProject\("track"\)\} config=\{config\} onConnect=\{openSettings\} \/>/);
+  assert.match(app, /!snapshot \? <Welcome onOpen=\{\(\) => void openProject\(\)\} onClone=\{\(\) => setSetup\(\{ kind: "clone" \}\)\} onTrack=\{\(\) => void openProject\("track"\)\} config=\{config\} onConnect=\{openSettings\} readiness=\{readiness\} \/>/);
   assert.doesNotMatch(i18n, /LLM PROVIDER REQUIRED|PROVEEDOR LLM REQUERIDO/);
   // The assistant box explains how to connect instead of blocking; natural language still needs the model.
   assert.match(app, /config\.configured \? <p className="assistant-copy">\{t\("assistantConfiguredCopy"\)\}<\/p> : <AssistantSetupCard onConnect=\{openSettings\} \/>/);
