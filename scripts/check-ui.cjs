@@ -49,7 +49,22 @@ app.whenReady().then(async () => {
   ipcMain.handle('workspace:restore', () => restored ?? ({ projects: [snapshot], unavailable: [moved()], order: [snapshot.path, movedPath], activePath: snapshot.path }));
   ipcMain.handle('workspace:retry', () => { retries += 1; return { unavailable: moved() }; });
   ipcMain.handle('workspace:save', () => {});
-  ipcMain.handle('llm:get-config', () => ({ provider: 'openai', model: 'ui-test', configured }));
+  // The fresh-profile scenario drives the guided connection against scripted answers; nothing reaches a provider.
+  let secureStorage = true;
+  let connected = false;
+  const connectAnswers = [];
+  const connectRequests = [];
+  const openedPages = [];
+  const llmConfig = () => ({ provider: 'openai', model: configured ? 'ui-test' : 'gpt-5.6-luna', configured: configured || connected, secureStorage });
+  ipcMain.handle('llm:get-config', () => llmConfig());
+  ipcMain.handle('llm:save-config', (_, input) => {
+    connectRequests.push({ model: input.model, hasKey: Boolean(input.apiKey) });
+    const answer = connectAnswers.shift() ?? { ok: true };
+    if (answer.ok) connected = true;
+    return answer.ok ? { ok: true, config: llmConfig() } : { ok: false, config: llmConfig(), problem: { kind: answer.kind, detail: answer.detail ?? '', at: new Date().toISOString() } };
+  });
+  ipcMain.handle('llm:verify', () => ({ ok: true, config: llmConfig() }));
+  ipcMain.handle('llm:open-provider-page', (_, page) => { openedPages.push(page); });
   ipcMain.handle('history:load', (_, p, request) => service.loadHistory(p, request));
   ipcMain.handle('commit:detail', (_, p, hash) => service.getCommitDetail(p, hash));
   ipcMain.handle('commit:file-diff', (_, p, file) => service.getWorkingFileDiff(p, file));
@@ -370,10 +385,10 @@ app.whenReady().then(async () => {
   restored = { projects: [conflicted], unavailable: [], order: [conflicted.path], activePath: conflicted.path };
   configured = false;
   await win.loadFile(path.join(root, 'dist/index.html'));
-  // Without a provider GitCat first says so, and offers to go on without one.
-  await waitFor(`[...document.querySelectorAll('button')].some((node) => node.innerText.includes('Ver la interfaz sin configurar'))`);
-  await js(`[...document.querySelectorAll('button')].find((node) => node.innerText.includes('Ver la interfaz sin configurar')).click()`);
+  // Without a provider the repository opens straight away: no setup screen stands in the way.
   await waitFor(`document.querySelector('.rebase-banner .guide-open')`);
+  assert.equal(await js(`Boolean(document.querySelector('.welcome'))`), false, 'No first-run gate');
+  assert.match(await js(`document.querySelector('.statusbar .provider-status').innerText`), /Asistente de IA sin conectar/);
   const banner = await js(`document.querySelector('.rebase-banner').innerText`);
   assert.match(banner, /Fusión en curso/); assert.match(banner, /3 archivos en conflicto/);
   assert.doesNotMatch(banner, /Proponer resolución/, 'No assistant, no draft button');
@@ -423,8 +438,83 @@ app.whenReady().then(async () => {
   assert.equal(cgit('status', '--porcelain'), '');
   await waitFor(`!document.querySelector('.rebase-banner') && !document.querySelector('.plan-card .plan-actions .primary-button')`);
   assert.equal(proposals, 0, 'No provider was needed at any point');
+  // The assistant tab explains how to connect instead of pretending to work, and nothing is interpreted locally.
+  await js(`[...document.querySelectorAll('.inspector-tabs button')][1].click()`);
+  await waitFor(`document.querySelector('.assistant-setup')`);
+  assert.match(await js(`document.querySelector('.assistant-setup').innerText`), /Conecta un asistente de IA para preguntar con tus propias palabras/);
+  assert.equal(await js(`document.querySelector('.chat-compose textarea').disabled`), true);
+  await capture('assistant-not-connected');
+
+  // A fresh profile: nothing saved, no provider. Opening a project is the first thing offered.
+  restored = { projects: [], unavailable: [], order: [] };
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await waitFor(`document.querySelector('.welcome-card.first-run')`);
+  const welcome = await js(`document.querySelector('.welcome-card').innerText`);
+  for (const entry of [/Abrir proyecto/, /Listo sin configurar nada/, /Guardar tus cambios/, /Resolver conflictos paso a paso/, /Asistente de IA · opcional/, /Conectar un asistente de IA/]) assert.match(welcome, entry);
+  assert.doesNotMatch(welcome, /REQUERIDO|API key/i, 'No technical configuration before the first useful action');
+  assert.equal(await js(`document.querySelector('.welcome-card .primary-button').innerText.trim()`), 'Abrir proyecto');
+  await capture('first-run');
+  // The guided connection: what a provider is, that it is billed by the provider, where the key comes from.
+  await js(`[...document.querySelectorAll('.welcome-ai button')][0].click()`);
+  await waitFor(`document.querySelector('.settings-modal.guided')`);
+  const settingsText = () => js(`document.querySelector('.settings-modal').innerText`);
+  const guide = await settingsText();
+  for (const entry of [/Asistente de IA \(opcional\)/, /Sin conectar/, /OpenAI cobra a tu cuenta/, /GitCat no cobra nada/, /Crea una clave/, /solo para el asistente de IA/, /recomendado/, /Avanzado: ID de modelo personalizado/,
+    /Tres accesos distintos/, /Clave del asistente de IA/, /Identidad de autor en Git/, /Acceso al remoto/]) assert.match(guide, entry);
+  assert.equal(await js(`Boolean(document.querySelector('.settings-modal .model-custom'))`), false, 'The custom model ID is an advanced choice, hidden until picked');
+  await js(`[...document.querySelectorAll('.ai-steps button')].find((node) => node.innerText.includes('claves de OpenAI')).click()`);
+  for (let attempt = 0; attempt < 100 && !openedPages.length; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.deepEqual(openedPages, ['api_keys'], 'The key page is named, never passed as an address');
+  // Connecting without a key asks for one; nothing is sent.
+  await js(`document.querySelector('.ai-actions .primary-button').click()`);
+  await waitFor(`document.querySelector('.settings-modal .modal-error')?.innerText.includes('pega tu API key')`);
+  assert.equal(connectRequests.length, 0);
+  // An invalid key and an unknown custom model are explained in plain words and can be retried.
+  const typeKey = (value) => js(`(() => { const input = document.querySelector('.settings-modal input[type="password"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await typeKey('sk-wrong');
+  connectAnswers.push({ ok: false, kind: 'invalid_key', detail: 'El proveedor respondió 401: Incorrect API key provided: sk-wro…' });
+  await js(`document.querySelector('.ai-actions .primary-button').click()`);
+  await waitFor(`document.querySelector('.ai-problem[data-kind="invalid_key"]')`);
+  assert.match(await settingsText(), /No se pudo conectar/);
+  assert.match(await js(`document.querySelector('.ai-problem').innerText`), /OpenAI no aceptó esta clave[\s\S]*Reintentar/);
+  await js(`document.querySelector('.ai-problem').scrollIntoView({ block: 'center' })`);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  await capture('settings-invalid-key');
+  await js(`[...document.querySelectorAll('.model-option')][1].querySelector('input').click()`);
+  await waitFor(`document.querySelector('.settings-modal .model-custom')`);
+  await js(`(() => { const input = document.querySelector('.settings-modal .model-custom'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'gpt-imaginary'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  connectAnswers.push({ ok: false, kind: 'unknown_model' });
+  await js(`document.querySelector('.ai-actions .primary-button').click()`);
+  await waitFor(`document.querySelector('.ai-problem[data-kind="unknown_model"]')`);
+  assert.equal(connectRequests.at(-1).model, 'gpt-imaginary');
+  await js(`[...document.querySelectorAll('.ai-problem button')].find((node) => node.innerText.includes('Usar el modelo recomendado')).click()`);
+  await waitFor(`!document.querySelector('.settings-modal .model-custom')`);
+  // A provider outage is the provider's problem; retrying the same attempt connects.
+  connectAnswers.push({ ok: false, kind: 'outage' }, { ok: true });
+  await js(`document.querySelector('.ai-actions .primary-button').click()`);
+  await waitFor(`document.querySelector('.ai-problem[data-kind="outage"]')`);
+  assert.match(await js(`document.querySelector('.ai-problem').innerText`), /OpenAI tiene problemas ahora mismo[\s\S]*no tuyo/);
+  await js(`[...document.querySelectorAll('.ai-problem button')].find((node) => node.innerText.includes('Reintentar')).click()`);
+  await waitFor(`document.querySelector('.ai-status[data-state="connected"]')`);
+  assert.equal(connectRequests.at(-1).model, 'gpt-5.6-luna');
+  assert.equal(connectRequests.at(-1).hasKey, true);
+  assert.equal(await js(`document.querySelector('.settings-modal input[type="password"]').value`), '', 'The key leaves the field once saved');
+  await capture('settings-connected');
+  await js(`document.querySelector('.settings-modal .modal-actions .ghost-button').click()`);
+  await waitFor(`document.querySelector('.welcome-ai.connected')`);
+  // Secure storage unavailable: the key field is closed and the reason is plain, with a retry.
+  connected = false; secureStorage = false;
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await waitFor(`document.querySelector('.welcome-card.first-run')`);
+  await js(`document.querySelector('.topbar .top-actions .icon-button').click()`);
+  await waitFor(`document.querySelector('.ai-problem[data-kind="storage_unavailable"]')`);
+  assert.match(await js(`document.querySelector('.ai-problem').innerText`), /nunca como texto plano/);
+  assert.equal(await js(`document.querySelector('.settings-modal input[type="password"]').disabled`), true);
+  await js(`document.querySelector('.ai-problem').scrollIntoView({ block: 'center' })`);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  await capture('settings-storage-unavailable');
   win.destroy();
-  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning, guided conflict resolution without an assistant.');
+  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage).');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));

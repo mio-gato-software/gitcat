@@ -57,9 +57,9 @@ type PlanDraft = Omit<ActionPlan, "id" | "repoPath" | "head" | "stateId">;
 const MODEL_FALLBACK = recommendedModel;
 const RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses";
 const LLM_REQUIRED =
-  "GitCat necesita un proveedor LLM configurado: toda interpretación de tus mensajes la hace el modelo, no reglas locales. Añade tu API key y tu modelo en Configuración.";
+  "Para entender lo que escribes, GitCat necesita un proveedor de IA conectado: esa interpretación la hace solo el modelo, no reglas locales. Conéctalo en Configuración; mientras tanto, todas las acciones de Git funcionan desde los botones.";
 const LLM_REQUIRED_EN =
-  "GitCat needs a configured LLM provider: the model interprets every message, not local rules. Add your API key and model in Settings.";
+  "To understand what you write, GitCat needs a connected AI provider: only the model interprets requests, never local rules. Connect one in Settings; meanwhile every Git action works from the buttons.";
 
 function llmRequired(locale?: Locale) { return localized(locale, LLM_REQUIRED, LLM_REQUIRED_EN); }
 const allowedOperations = new Set<Operation>([...executableOperations, "github_create_repo", "ignore_path", "set_identity", "add_remote", "none"]);

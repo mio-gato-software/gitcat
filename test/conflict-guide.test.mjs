@@ -311,7 +311,7 @@ test("rename conflicts say which side renamed what, and offer only choices that 
 test("the resolver works with no provider at all, while the assistant's proposal stays optional", async () => {
   const r = mergeConflicts();
   const calls = providerCalls;
-  await assert.rejects(service.proposeConflictResolution(r.repo, "en"), /needs a configured LLM provider/);
+  await assert.rejects(service.proposeConflictResolution(r.repo, "en"), /needs a connected AI provider/);
   const guide = await service.describeConflicts(r.repo, "en");
   assert.equal(guide.files.length, 5);
   assert.equal(providerCalls, calls);

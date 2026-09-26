@@ -62,7 +62,7 @@ test("sin proveedor configurado no se interpreta nada", async () => {
   const result = await service.planAction(repo, "cámbiame a la rama main");
   assert.equal(result.allowed, false);
   assert.equal(result.source, "guardrail");
-  assert.match(result.rationale, /necesita un proveedor LLM configurado/);
+  assert.match(result.rationale, /necesita un proveedor de IA conectado/);
   assert.equal(requests.length, 0, "no debe existir ningún camino que planifique sin modelo");
 });
 

@@ -49,7 +49,7 @@ Los artefactos aparecen en `release/`. El build local no usa una identidad de de
 - Acciones esenciales: switch, crear/borrar rama, fetch, pull fast-forward only, push, merge, commit y rebase.
 - Rebase en curso: continuar o abortar.
 - Solicitudes en lenguaje natural, en cualquier idioma, con un plan visible antes de ejecutar.
-- OpenAI mediante Responses API. El proveedor es obligatorio: al guardarlo se verifica contra la API, y sin él la aplicación no interpreta nada.
+- OpenAI mediante Responses API, como asistente opcional. Abrir un proyecto y todas las acciones directas de Git (guardar con descripción propia, ramas, pull/push, conflictos) funcionan sin él. La conexión es guiada: explica qué hace falta y que cobra el proveedor, ofrece el modelo recomendado o un ID avanzado, verifica la clave y el modelo antes de guardarlos y, si falla, dice por qué (clave, modelo, facturación, caída o red, almacenamiento seguro) y permite reintentar. Sin proveedor no se interpreta nada: no hay modo de reglas locales.
 - Ícono de aplicación en `build/icon.svg`; el build genera `build/icon.png` y electron-builder lo convierte al formato nativo del instalador.
 - Filtro de alcance: el modelo decide si la solicitud trata sobre el repositorio y rechaza el resto.
 
@@ -81,4 +81,4 @@ El estado del entorno no se guarda jamás: si `gh` está instalado, dónde vive 
 
 Lo recordado **reordena la búsqueda, nunca sustituye la comprobación**: el alias recordado se marca primero, pero se verifica igual, y si responde otra identidad se descarta del recuerdo y la búsqueda continúa.
 
-La API key se conserva en el proceso principal y, cuando el sistema lo permite, se cifra con `safeStorage` de Electron. Para una aplicación distribuida convendría complementar esto con firma de builds, actualizaciones verificadas y un control más granular de permisos remotos.
+La API key se conserva en el proceso principal y se cifra con `safeStorage` de Electron; si el almacenamiento seguro no está disponible, no se guarda ninguna clave (nunca como texto plano) y Configuración lo explica. Para una aplicación distribuida convendría complementar esto con firma de builds, actualizaciones verificadas y un control más granular de permisos remotos.
