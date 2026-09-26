@@ -57,7 +57,28 @@ export type FileChange = {
   path: string;
   /** Where a renamed or copied file used to be. Absent for every other kind of change. */
   from?: string;
+  /**
+   * Git's own two-letter status for an uncommitted change: the first letter is the staged side, the
+   * second the working-tree side, so "MM" is a file with both staged and unstaged edits. Absent in
+   * commit details, which have no such split.
+   */
+  xy?: string;
+  /**
+   * What this uncommitted change looks like right now: the commit it sits on, its status, its staged
+   * entries and its bytes on disk. A save of selected files is bound to these, so an edit to a file
+   * that was left out does not invalidate the review, and an edit to a selected one always does.
+   */
+  version?: string;
 };
+
+/** One file picked for a save, with the version the person reviewed. */
+export type SelectedChange = { path: string; version: string };
+
+/**
+ * A save from the Changes view. Without `selection` every listed file is saved and the whole
+ * repository state is the binding; with it, only those files are saved and each one's version is.
+ */
+export type DeliveryRequest = { stateId: string; mergeToDefault: boolean; message?: string; selection?: SelectedChange[] };
 
 /**
  * A Git job that stopped part-way. It is a state the repository is in, not a failure that happened:
@@ -213,6 +234,8 @@ export type Operation =
   | "commit"
   | "git_command"
   | "github_create_repo"
+  /** Adds one anchored line to .gitignore for an untracked file. Only a direct control prepares it; the model never can. */
+  | "ignore_path"
   | "none";
 
 export type GitProtocol = "ssh" | "https";
@@ -236,6 +259,11 @@ export type PlanStep = {
   args: Record<string, string>;
   /** Free-form git_command steps: the argument list handed to git verbatim, without the leading "git". */
   argv?: string[];
+  /**
+   * For a commit that saves selected files only: every path it records, including both sides of a
+   * rename. Absent means the commit saves every change, as a planned commit always has.
+   */
+  paths?: string[];
   command: string;
   summary: string;
   risk: "low" | "medium" | "high";
@@ -270,6 +298,12 @@ export type ActionPlan = {
   targetPath?: string;
   targetHead?: string;
   targetStateId?: string;
+  /**
+   * A save of selected files is bound to those files, not to the whole repository: `binding` covers
+   * the commit, the branch, each selected file's reviewed version and, when integrating, the target
+   * branch tip. It replaces the `stateId` comparison at execution.
+   */
+  selection?: { changes: SelectedChange[]; binding: string; target?: string };
   risk: "low" | "medium" | "high";
   requiresConfirmation: boolean;
   /** "question" is the assistant asking for something, not a failure; the interface must not dress it as one. */
@@ -312,6 +346,8 @@ export type ExecutionResult = {
 export type CommitDescriptionResult = {
   description: string;
   stateId: string;
+  /** The files the description was written from, with the versions that were read. */
+  selection?: SelectedChange[];
 };
 
 export type ConversationMessage = {
@@ -381,9 +417,11 @@ export type GitlineApi = {
   getWorkingFileDiff: (path: string, file: string) => Promise<CommitDetail>;
   planAction: (path: string, request: string, context?: ConversationMessage[], locale?: Locale) => Promise<ActionPlan>;
   prepareOperation: (path: string, operation: Operation, args?: Record<string, string>, locale?: Locale) => Promise<ActionPlan>;
-  prepareBranchDelivery: (path: string, request: { stateId: string; mergeToDefault: boolean; message?: string }, locale?: Locale) => Promise<ActionPlan>;
+  prepareBranchDelivery: (path: string, request: DeliveryRequest, locale?: Locale) => Promise<ActionPlan>;
   prepareMergeToDefault: (path: string, branch: string, locale?: Locale) => Promise<ActionPlan>;
-  generateCommitDescription: (path: string, locale?: Locale) => Promise<CommitDescriptionResult>;
+  generateCommitDescription: (path: string, locale?: Locale, paths?: string[]) => Promise<CommitDescriptionResult>;
+  /** Exactly what a save of these files would record, against the last saved version. */
+  getSelectionDiff: (path: string, paths: string[], locale?: Locale) => Promise<CommitDetail>;
   executePlan: (path: string, planId: string, locale?: Locale) => Promise<ExecutionResult>;
   getLlmConfig: () => Promise<LlmConfig>;
   saveLlmConfig: (config: LlmConfigInput) => Promise<LlmConfig>;

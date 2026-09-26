@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   applyConflictResolution, executePlan, fetchRemotes, generateCommitDescription, getCommitDetail, getCommitFileDiff, getLlmConfig, getSnapshot,
-  getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
+  getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
   prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, saveLlmConfig,
   type IssuedConflictProposal
 } from "./git-service.js";
@@ -17,7 +17,7 @@ import {
   parseWorkspace, relocateProject, restoreProjects, type RepoFingerprint, type WorkspaceRecord
 } from "./workspace-restore.js";
 import type {
-  ActionPlan, ConflictProposal, ConversationMessage, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation, ProjectLocateResult,
+  ActionPlan, ConflictProposal, ConversationMessage, DeliveryRequest, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, Operation, ProjectLocateResult,
   RepoSnapshot, RepositoryMatch, UnavailableProject
 } from "../shared/types.js";
 
@@ -131,6 +131,12 @@ function assertTrustedSender(event: Electron.IpcMainInvokeEvent) {
 function assertOpenedRepository(cwd: unknown) {
   if (typeof cwd !== "string" || !openedRepositories.has(resolve(cwd))) throw new Error("El repositorio no está abierto en GitCat.");
   return resolve(cwd);
+}
+
+/** A list of repository paths from the renderer. Which of them are real changes is Git's answer, checked by the service. */
+function assertPathList(paths: unknown) {
+  if (!Array.isArray(paths) || paths.length > 20_000 || paths.some((path) => typeof path !== "string" || !path)) throw new Error("La lista de archivos no es válida.");
+  return paths as string[];
 }
 
 function rememberPlan(plan: ActionPlan) {
@@ -374,11 +380,18 @@ app.whenReady().then(async () => {
     const repoPath = assertOpenedRepository(cwd);
     return rememberPlan(await exclusive(repoPath, () => prepareOperation(repoPath, operation, args, locale)));
   });
-  ipcMain.handle("action:prepare-delivery", async (event, cwd: string, request: { stateId: string; mergeToDefault: boolean; message?: string }, locale?: Locale) => {
+  ipcMain.handle("action:prepare-delivery", async (event, cwd: string, request: DeliveryRequest, locale?: Locale) => {
     assertTrustedSender(event);
     if (!request || typeof request.stateId !== "string" || typeof request.mergeToDefault !== "boolean" || (request.message !== undefined && typeof request.message !== "string")) throw new Error("Invalid delivery request.");
+    // Shape only: whether each file is still an unsaved change, at the version reviewed, is the service's to check against Git.
+    if (request.selection !== undefined && (!Array.isArray(request.selection) || request.selection.length > 20_000 || request.selection.some((item) =>
+      !item || typeof item.path !== "string" || !item.path || typeof item.version !== "string"))) throw new Error("Invalid delivery request.");
     const repoPath = assertOpenedRepository(cwd);
-    return rememberPlan(await exclusive(repoPath, () => prepareBranchDelivery(repoPath, request, locale)));
+    const delivery: DeliveryRequest = {
+      stateId: request.stateId, mergeToDefault: request.mergeToDefault, message: request.message,
+      ...(request.selection ? { selection: request.selection.map((item) => ({ path: item.path, version: item.version })) } : {})
+    };
+    return rememberPlan(await exclusive(repoPath, () => prepareBranchDelivery(repoPath, delivery, locale)));
   });
   ipcMain.handle("action:prepare-merge-to-default", async (event, cwd: string, branch: string, locale?: Locale) => {
     assertTrustedSender(event);
@@ -386,10 +399,16 @@ app.whenReady().then(async () => {
     const repoPath = assertOpenedRepository(cwd);
     return rememberPlan(await exclusive(repoPath, () => prepareMergeToDefault(repoPath, branch, locale)));
   });
-  ipcMain.handle("commit:generate-description", async (event, cwd: string, locale?: Locale) => {
+  ipcMain.handle("commit:generate-description", async (event, cwd: string, locale?: Locale, paths?: unknown) => {
     assertTrustedSender(event);
+    const selected = paths === undefined ? undefined : assertPathList(paths);
     const repoPath = assertOpenedRepository(cwd);
-    return exclusive(repoPath, () => generateCommitDescription(repoPath, locale));
+    return exclusive(repoPath, () => generateCommitDescription(repoPath, locale, selected));
+  });
+  ipcMain.handle("commit:selection-diff", (event, cwd: string, paths: unknown, locale?: Locale) => {
+    assertTrustedSender(event);
+    const selected = assertPathList(paths);
+    return getSelectionDiff(assertOpenedRepository(cwd), selected, locale);
   });
   ipcMain.handle("action:execute", async (event, cwd: string, planId: string, locale?: Locale) => {
     assertTrustedSender(event);

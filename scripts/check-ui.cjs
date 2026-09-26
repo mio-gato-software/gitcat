@@ -54,7 +54,14 @@ app.whenReady().then(async () => {
     if (refreshError) throw new Error('A long example error for notification layout. '.repeat(30));
     return service.getSnapshot(repo);
   });
-  ipcMain.handle('commit:generate-description', async () => ({ description: 'Update menu and add a new file', stateId: (await service.getSnapshot(repo)).stateId }));
+  // The description is written from the ticked files only; the stub records which ones it was asked about.
+  const described = [];
+  ipcMain.handle('commit:generate-description', async (_, p, locale, paths) => {
+    described.push([...paths].sort());
+    const current = await service.getSnapshot(repo);
+    return { description: 'Update menu and add a new file', stateId: current.stateId, selection: current.changes.filter((change) => paths.includes(change.path)).map((change) => ({ path: change.path, version: change.version })) };
+  });
+  ipcMain.handle('commit:selection-diff', (_, p, paths, locale) => service.getSelectionDiff(p, paths, locale));
   ipcMain.handle('action:prepare-delivery', async (_, p, request, locale) => {
     const plan = await service.prepareBranchDelivery(p, request, locale);
     plans.set(plan.id, plan); return plan;
@@ -209,12 +216,40 @@ app.whenReady().then(async () => {
   await win.loadFile(path.join(root, 'dist/index.html'));
   await waitFor(`document.querySelector('.delivery-actions .primary-button')`);
 
+  // Each listed file has its own tick; leaving one out is visible and the count follows.
+  const rowFor = (name) => `[...document.querySelectorAll('.inspector .change-row')].find((node) => node.innerText.includes('${name}'))`;
+  await waitFor(`${rowFor('new-file.txt')}?.querySelector('.change-include')`);
+  assert.equal(await js(`${rowFor('app.txt')}.querySelector('.change-ignore') === null`), true, 'A tracked file offers no ignore rule');
+  await js(`${rowFor('new-file.txt')}.querySelector('.change-include').click()`);
+  await waitFor(`document.querySelector('.inspector .select-all')?.innerText.includes('Se guardarán 1 de 2 archivos')`);
+  assert.match(await js(`${rowFor('new-file.txt')}.title`), /^Nuevo · fuera/);
+  assert.equal(await js(`${rowFor('new-file.txt')}.classList.contains('excluded')`), true);
+  // What will be saved is shown as one diff of the ticked files only.
+  await js(`[...document.querySelectorAll('.commit-form-actions button')].find((node) => node.innerText.includes('Ver lo que se guardará')).click()`);
+  await waitFor(`document.querySelector('.selection-diff-modal .diff-view')`);
+  const selectedDiff = await js(`document.querySelector('.selection-diff-modal .diff-view').innerText`);
+  assert.match(selectedDiff, /updated menu/); assert.doesNotMatch(selectedDiff, /new-file/);
+  await capture('selected-diff');
+  await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+  await waitFor(`!document.querySelector('.selection-diff-modal')`);
+  // Ignoring an untracked file previews the exact .gitignore line and writes nothing until confirmed.
+  await js(`${rowFor('new-file.txt')}.querySelector('.change-ignore').click()`);
+  await waitFor(`document.querySelector('.delivery-review-modal')`);
+  const ignoreReview = await js(`document.querySelector('.delivery-review-modal').innerText`);
+  assert.match(ignoreReview, /\/new-file\.txt/); assert.match(ignoreReview, /ya están guardados en Git se siguen vigilando/);
+  await js(`document.querySelector('.delivery-review-modal .modal-heading .icon-button').click()`);
+  await waitFor(`!document.querySelector('.delivery-review-modal')`);
+  assert.equal(fs.existsSync(path.join(repo, '.gitignore')), false, 'Closing the preview writes nothing');
+
   await js(`document.querySelector('.delivery-actions .primary-button').click()`);
   await waitFor(`document.querySelector('#commit-description')?.value === 'Update menu and add a new file'`);
+  assert.deepEqual(described.at(-1), ['app.txt'], 'The description reads only the ticked files');
+  await js(`${rowFor('new-file.txt')}.querySelector('.change-include').click()`);
+  await waitFor(`document.querySelector('.inspector .select-all')?.innerText.includes('Se guardarán 2 de 2 archivos')`);
   assert.equal(await js(`document.querySelector('.delivery-option input').checked`), true);
   assert.match(await js(`document.querySelector('.inspector .change-row[title^="Nuevo · incluido"]').innerText`), /new-file\.txt/);
   await capture('changes');
-  await js(`document.querySelector('.commit-form-actions button').click()`);
+  await js(`document.querySelector('.commit-form-actions .primary-button').click()`);
   await waitFor(`document.querySelector('.delivery-review-modal')`);
   await capture('review');
   assert.equal(git('branch', '--show-current'), 'feature/new-menu');
@@ -236,7 +271,7 @@ app.whenReady().then(async () => {
   // A read is skipped while GitCat is still finishing the checkout, so focus is offered until one lands.
   await waitFor(`document.querySelector('aside.sidebar').textContent.includes('outside') || (window.dispatchEvent(new Event('focus')), false)`);
   win.destroy();
-  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, reviewed save and integration, double-click checkout, background refresh.');
+  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, per-file include/exclude with selected diff and description, previewed .gitignore rule, reviewed save and integration, double-click checkout, background refresh.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));

@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, readlinkSync, accessSync, constants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { createReadStream, readlinkSync, accessSync, constants, copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
 import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
@@ -9,6 +9,7 @@ import { parseWorktrees } from "./worktrees.js";
 import { stackCandidates } from "./stacked-branches.js";
 import { parseNameStatus, parseNumstat, parseShortstat } from "./diff-status.js";
 import { parseRemoteUrls } from "./remotes.js";
+import { changePaths, gitignoreLine, isPartlyStaged, isUntracked, resolveSelection, type SelectionProblem } from "../shared/selected-changes.js";
 import {
   canSkip, conflictLabels, conflictsFrom, parseRebaseProgress, pendingCommands, resolutionFor
 } from "./pending-operation.js";
@@ -24,7 +25,7 @@ import {
   sanitizeMemory, type Memory
 } from "./memory.js";
 import type {
-  ActionPlan, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource, GitProtocol,
+  ActionPlan, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource, DeliveryRequest, FileChange, GitProtocol, SelectedChange,
   ConflictApplyResult, ConflictFileOutcome, ConflictProposal, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput,
   Locale, Operation, PendingOperation, PlanStep, RepoSnapshot, StepOutcome
 } from "../shared/types.js";
@@ -49,7 +50,7 @@ const LLM_REQUIRED_EN =
   "GitCat needs a configured LLM provider: the model interprets every message, not local rules. Add your API key and model in Settings.";
 
 function llmRequired(locale?: Locale) { return localized(locale, LLM_REQUIRED, LLM_REQUIRED_EN); }
-const allowedOperations = new Set<Operation>([...executableOperations, "github_create_repo", "none"]);
+const allowedOperations = new Set<Operation>([...executableOperations, "github_create_repo", "ignore_path", "none"]);
 /**
  * Operations that run without asking. The bar is deliberately high: they must leave the working tree,
  * the branch history and everything already published untouched, and running one again must be
@@ -183,14 +184,37 @@ async function optionalGit(cwd: string, args: string[]): Promise<string> {
 
 function parseStatus(raw: string) {
   const records = raw.split("\0").filter(Boolean);
-  const changes = [];
+  const changes: FileChange[] = [];
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
-    const code = record.slice(0, 2).trim() || "??";
-    changes.push({ code, path: record.slice(3) || record });
-    if (code.includes("R") || code.includes("C")) index += 1;
+    const xy = record.slice(0, 2);
+    const code = xy.trim() || "??";
+    const change: FileChange = { code, path: record.slice(3) || record, xy };
+    // With -z, a rename or copy is followed by the path it came from, as a record of its own.
+    if (code.includes("R") || code.includes("C")) {
+      index += 1;
+      if (records[index]) change.from = records[index];
+    }
+    changes.push(change);
   }
   return changes;
+}
+
+/** The staged entries of every path, as `ls-files --stage -z` lists them, so each change can be bound to its own. */
+function parseStage(raw: string) {
+  const entries = new Map<string, string[]>();
+  for (const record of raw.split("\0").filter(Boolean)) {
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    const path = record.slice(tab + 1);
+    entries.set(path, [...(entries.get(path) ?? []), record.slice(0, tab)]);
+  }
+  return entries;
+}
+
+/** A pathspec that means this exact path: no glob, no magic, whatever characters the name has. */
+function literalPaths(paths: string[]) {
+  return paths.map((path) => `:(literal)${path}`);
 }
 
 function parseTrack(track: string) {
@@ -414,27 +438,37 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   await markIntegration(repoRoot, branches, [defaultBranch, currentBranch]);
   const pending = await readPendingOperation(repoRoot);
   const changes = parseStatus(statusRaw);
+  const stageRaw = await checkedGit(repoRoot, ["ls-files", "--stage", "-z"], true);
+  const stage = parseStage(stageRaw);
   // A file can change while keeping exactly the same status code. Bind reviews to its
   // contents, the staged version, the branch refs and checkout, not just "M file.txt".
   const fingerprint = createHash("sha256").update(JSON.stringify([
-    head, currentBranch, statusRaw, branchRaw, remoteBranchRaw, pending, [...worktrees],
-    await checkedGit(repoRoot, ["ls-files", "--stage", "-z"])
+    head, currentBranch, statusRaw, branchRaw, remoteBranchRaw, pending, [...worktrees], stageRaw
   ]));
   for (const change of changes) {
-    const file = resolve(repoRoot, change.path);
-    fingerprint.update(change.path);
-    try {
-      const stat = lstatSync(file);
-      fingerprint.update(String(stat.mode));
-      if (stat.isSymbolicLink()) fingerprint.update(readlinkSync(file));
-      else if (stat.isFile()) {
-        for await (const chunk of createReadStream(file)) fingerprint.update(chunk);
-      } else if (stat.isDirectory()) fingerprint.update(await optionalGit(file, ["rev-parse", "HEAD"]));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      fingerprint.update("missing");
+    // Each change also gets a version of its own: the commit and branch it sits on, its status, the
+    // staged entries of every path it occupies and the bytes on disk. A save of selected files is
+    // bound to these, so it is not invalidated by edits to files it leaves alone.
+    const version = createHash("sha256").update(JSON.stringify([
+      head, currentBranch, change.xy, change.path, change.from ?? "", stage.get(change.path) ?? [], change.from ? stage.get(change.from) ?? [] : []
+    ]));
+    for (const path of change.from ? [change.path, change.from] : [change.path]) {
+      const file = resolve(repoRoot, path);
+      version.update(`\0${path}\0`);
+      try {
+        const stat = lstatSync(file);
+        version.update(String(stat.mode));
+        if (stat.isSymbolicLink()) version.update(readlinkSync(file));
+        else if (stat.isFile()) {
+          for await (const chunk of createReadStream(file)) version.update(chunk);
+        } else if (stat.isDirectory()) version.update(await optionalGit(file, ["rev-parse", "HEAD"]));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        version.update("missing");
+      }
     }
-    fingerprint.update("\0");
+    change.version = version.digest("hex");
+    fingerprint.update(`${change.path}\0${change.version}\0`);
   }
 
   return {
@@ -643,6 +677,7 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
     case "skip_operation": return `git ${args.pending ?? "rebase"} --skip`;
     case "resolve_conflict": return resolveConflictCommand(args);
     case "commit": return `git add -A && git commit -m "${args.message ?? ""}"`;
+    case "ignore_path": return `echo ${JSON.stringify(args.line ?? "")} >> .gitignore`;
     case "git_command": return ["git", ...argv].map(quoteToken).join(" ");
     case "github_create_repo": {
       const steps = [];
@@ -988,14 +1023,27 @@ function cleanCommitDescription(text: string) {
   return firstParagraph.slice(0, commitMessageLimit).trim();
 }
 
-async function getWorkingTreeDiff(snapshot: RepoSnapshot) {
-  const trackedDiff = snapshot.head
+/** The tree a first commit is measured against. Asked of Git, because it depends on the hash the repository uses. */
+async function emptyTree(repoRoot: string) {
+  return checkedGit(repoRoot, ["hash-object", "-t", "tree", "--stdin"]);
+}
+
+/**
+ * The working tree as a diff against the last saved version. With `paths`, only those files, each
+ * read whole as it is on disk: that is exactly what a save of selected files records, so the model
+ * describing it and the person reviewing it read the same thing the commit will contain.
+ */
+async function getWorkingTreeDiff(snapshot: RepoSnapshot, paths?: string[], display = false) {
+  const scope = paths ? literalPaths(paths) : [];
+  const trackedDiff = paths
+    ? await checkedGit(snapshot.path, ["diff", "--no-ext-diff", "--unified=3", snapshot.head || await emptyTree(snapshot.path), "--", ...scope])
+    : snapshot.head
     ? await checkedGit(snapshot.path, ["diff", "--no-ext-diff", "--unified=3", "HEAD", "--"])
     : [
         await checkedGit(snapshot.path, ["diff", "--cached", "--no-ext-diff", "--unified=3", "--"]),
         await checkedGit(snapshot.path, ["diff", "--no-ext-diff", "--unified=3", "--"])
       ].filter(Boolean).join("\n");
-  const untrackedRaw = await checkedGit(snapshot.path, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  const untrackedRaw = await checkedGit(snapshot.path, ["ls-files", "--others", "--exclude-standard", "-z", ...(paths ? ["--", ...scope] : [])]);
   const sections = [trackedDiff];
 
   // Nothing is truncated: whatever the working tree holds is what the model gets to read.
@@ -1009,7 +1057,9 @@ async function getWorkingTreeDiff(snapshot: RepoSnapshot) {
       }
       const content = readFileSync(absolutePath);
       const header = `\n--- /dev/null\n+++ b/${relativePath}\n@@ archivo nuevo @@\n`;
-      sections.push(`${header}${content.includes(0) ? "[archivo binario omitido]" : content.toString("utf8")}`);
+      // Shown to a person, a new file reads as added lines, the way the single-file diff shows it.
+      const text = display ? content.toString("utf8").split("\n").map((line) => `+${line}`).join("\n") : content.toString("utf8");
+      sections.push(`${header}${content.includes(0) ? "[archivo binario omitido]" : text}`);
     } catch (reason) {
       // A file too large for a single Buffer, or unreadable: reported, never silently dropped.
       sections.push(`\n+++ b/${relativePath}\n[no se pudo leer: ${reason instanceof Error ? reason.message : "error desconocido"}]`);
@@ -1020,9 +1070,12 @@ async function getWorkingTreeDiff(snapshot: RepoSnapshot) {
   return diff;
 }
 
-/** One commit message read off the real diff. Shared by the manual button and by any planned commit. */
-async function describeChanges(snapshot: RepoSnapshot) {
-  const diff = await getWorkingTreeDiff(snapshot);
+/**
+ * One commit message read off the real diff. Shared by the manual button and by any planned commit.
+ * With `paths`, the model only ever reads the files that will be saved.
+ */
+async function describeChanges(snapshot: RepoSnapshot, paths?: string[]) {
+  const diff = await getWorkingTreeDiff(snapshot, paths);
   const recentSubjects = snapshot.commits.slice(0, 15).map((commit) => commit.subject).filter(Boolean);
   const instructions = `Write one commit message for the working tree diff below.
 Rules: a single line, ${commitMessageLimit} characters maximum, imperative mood, describing the intent of
@@ -1038,15 +1091,43 @@ they are mixed, write it in English.`;
   return cleanCommitDescription(text);
 }
 
-export async function generateCommitDescription(cwd: string, locale?: Locale) {
+/**
+ * The listed changes behind these paths, checked against Git's list right now. The versions are the
+ * current ones: this is for reading, and whoever shows the result compares them with what they show.
+ */
+function currentSelection(snapshot: RepoSnapshot, paths: string[], language: Locale) {
+  const versions = new Map(snapshot.changes.map((change) => [change.path, change.version ?? ""]));
+  const resolved = resolveSelection(snapshot.changes, paths.map((path) => ({ path, version: versions.get(path) ?? "" })));
+  if ("problem" in resolved) throw new Error(selectionProblemText(resolved.problem, language));
+  return resolved;
+}
+
+function selectedVersions(changes: FileChange[]): SelectedChange[] {
+  return changes.map((change) => ({ path: change.path, version: change.version ?? "" }));
+}
+
+export async function generateCommitDescription(cwd: string, locale?: Locale, paths?: string[]) {
   const language = normalizeLocale(locale);
   if (!isLlmConfigured()) throw new Error(llmRequired(language));
   const snapshot = await getSnapshot(cwd);
   if (!snapshot.changes.length) throw new Error(localized(language, "No hay cambios locales que describir.", "There are no local changes to describe."));
-  const description = await describeChanges(snapshot);
+  const selection = paths ? currentSelection(snapshot, paths, language) : undefined;
+  const description = await describeChanges(snapshot, selection?.paths);
   const current = await getSnapshot(snapshot.path);
-  if (current.stateId !== snapshot.stateId) throw new Error(localized(language, "Los cambios variaron durante la generación. Inténtalo de nuevo.", "The changes moved while the description was being generated. Try again."));
-  return { description, stateId: snapshot.stateId };
+  const moved = selection
+    ? selection.selected.some((change) => current.changes.find((item) => item.path === change.path)?.version !== change.version)
+    : current.stateId !== snapshot.stateId;
+  if (moved) throw new Error(localized(language, "Los cambios variaron durante la generación. Inténtalo de nuevo.", "The changes moved while the description was being generated. Try again."));
+  return { description, stateId: snapshot.stateId, ...(selection ? { selection: selectedVersions(selection.selected) } : {}) };
+}
+
+/** Exactly what saving these files would record, for the review before anything is saved. */
+export async function getSelectionDiff(cwd: string, paths: string[], locale?: Locale): Promise<CommitDetail> {
+  const language = normalizeLocale(locale);
+  const snapshot = await getSnapshot(cwd);
+  const selection = currentSelection(snapshot, paths, language);
+  const diff = await getWorkingTreeDiff(snapshot, selection.paths, true).catch(() => "");
+  return { hash: "", files: selection.selected, stats: {}, ...cutDiff(diff) };
 }
 
 /** Everything the model is allowed to reason about: verified repository facts, never raw guesses. */
@@ -1509,6 +1590,7 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     skip_operation: [localized(locale, `Saltar el commit atascado de ${args.pendingLabel ?? "la operación"}`, `Skip the stuck commit from ${args.pendingLabel ?? "the operation"}`), localized(locale, "Descarta el commit en el que se atascó y sigue con el resto.", "Discards the stuck commit and continues with the rest."), "high"],
     resolve_conflict: [localized(locale, `Resolver ${args.path} quedándose con ${args.side === "theirs" ? "el otro lado" : args.side === "ours" ? "nuestro lado" : "el archivo tal cual está"}`, `Resolve ${args.path} by keeping ${args.side === "theirs" ? "the other side" : args.side === "ours" ? "our side" : "the file as it is"}`), localized(locale, "Marca el conflicto de un archivo como resuelto. No modifica el contenido de ningún archivo.", "Marks a file conflict as resolved. It does not change file content."), "medium"],
     commit: [localized(locale, `Crear commit “${args.message ?? ""}”`, `Create commit “${args.message ?? ""}”`), localized(locale, "Añade todos los cambios y crea un commit.", "Stages all changes and creates a commit."), "high"],
+    ignore_path: [localized(locale, `Ignorar los cambios futuros de ${args.path}`, `Ignore future changes to ${args.path}`), localized(locale, "Añade una línea a .gitignore para que Git deje de listar este archivo nuevo. El archivo se queda en tu disco tal como está.", "Adds one line to .gitignore so Git stops listing this new file. The file stays on your disk exactly as it is."), "medium"],
     git_command: [
       localized(locale, `Ejecutar ${buildCommand("git_command", {}, argv)}`, `Run ${buildCommand("git_command", {}, argv)}`),
       localized(locale, "Comando Git propuesto por el asistente: se ejecuta tal cual, sin shell, y solo tras tu confirmación.", "Git command proposed by the assistant: it runs as-is, without a shell, only after your confirmation."),
@@ -1601,6 +1683,7 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
     if ("blockers" in preparation) throw new Error(preparation.blockers.map((blocker) => `${blocker.field}: ${blocker.problem}`).join(" "));
     return bindPlan(snapshot, preparation.draft);
   }
+  if (operation === "ignore_path") return prepareIgnore(snapshot, typeof args.path === "string" ? args.path : "", language);
   if (operation === "create_branch" && args.from && /^[0-9a-f]{7,40}$/i.test(args.from)
       && !(await optionalGit(snapshot.path, ["rev-parse", "--verify", "--quiet", `${args.from}^{commit}`]))) {
     throw new Error(localized(language, "Ese commit ya no existe en este repositorio.", "That commit no longer exists in this repository."));
@@ -1610,12 +1693,111 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
   return bindPlan(snapshot, draft);
 }
 
-/** Explicit workflow: save all reviewed files on the current branch, optionally integrate locally. */
-export async function prepareBranchDelivery(cwd: string, request: { stateId: string; mergeToDefault: boolean; message?: string }, locale?: Locale) {
+function selectionProblemText(problem: SelectionProblem, language: Locale) {
+  switch (problem.kind) {
+    case "empty": return localized(language, "Marca al menos un archivo para guardar. No se cambió nada.", "Tick at least one file to save. Nothing was changed.");
+    case "duplicate": return localized(language, `${problem.path} aparece dos veces en la selección. Revisa la selección de nuevo; no se cambió nada.`, `${problem.path} appears twice in the selection. Review the selection again; nothing was changed.`);
+    case "unknown": return localized(language,
+      `${problem.path} ya no es un cambio sin guardar: puede que se haya guardado, restaurado o borrado fuera de GitCat. No se cambió nada; revisa la lista actualizada.`,
+      `${problem.path} is no longer an unsaved change: it may have been saved, restored or removed outside GitCat. Nothing was changed; review the updated list.`);
+    case "changed": return localized(language,
+      `${problem.path} cambió después de revisarlo. No se guardó nada; revísalo de nuevo para que el guardado contenga lo que viste.`,
+      `${problem.path} changed after you reviewed it. Nothing was saved; review it again so the save contains what you saw.`);
+    case "shared": return localized(language,
+      `${problem.path} y ${problem.with} comparten una ruta por un renombrado. Inclúyelos los dos o déjalos los dos fuera; no se cambió nada.`,
+      `${problem.path} and ${problem.with} share a path because of a rename. Include both or leave both out; nothing was changed.`);
+  }
+}
+
+/**
+ * What a save of selected files is bound to. The selected files' versions already carry the commit
+ * and branch they sit on; when the save continues into an integration, the target branch's tip and
+ * whether another worktree holds it are part of it too. Edits to files that were left out are not.
+ */
+async function selectionBinding(snapshot: RepoSnapshot, changes: SelectedChange[], target?: string) {
+  const targetTip = target ? await optionalGit(snapshot.path, ["rev-parse", "--verify", "--quiet", `refs/heads/${target}`]) : "";
+  const holder = target ? snapshot.branches.find((branch) => branch.name === target)?.checkedOutIn ?? "" : "";
+  const ordered = [...changes].sort((a, b) => a.path.localeCompare(b.path));
+  return createHash("sha256").update(JSON.stringify([
+    snapshot.path, snapshot.head, snapshot.currentBranch, snapshot.pending ?? null, snapshot.conflicts.length, ordered, target ?? "", targetTip, holder
+  ])).digest("hex");
+}
+
+/** The versions the selected files have now; a file that is no longer listed has none. */
+function currentVersions(snapshot: RepoSnapshot, changes: SelectedChange[]): SelectedChange[] {
+  return changes.map((change) => ({ path: change.path, version: snapshot.changes.find((item) => item.path === change.path)?.version ?? "missing" }));
+}
+
+/** Whether saving these paths would record anything at all, compared with the last saved version. */
+async function selectionHasChanges(snapshot: RepoSnapshot, paths: string[]) {
+  const scope = literalPaths(paths);
+  if ((await checkedGit(snapshot.path, ["ls-files", "--others", "--exclude-standard", "-z", "--", ...scope])).length) return true;
+  const result = await runGit(snapshot.path, ["diff", "--quiet", "--no-ext-diff", snapshot.head || await emptyTree(snapshot.path), "--", ...scope]);
+  if (result.code > 1) throw new Error(result.stderr.trim() || `git diff terminó con código ${result.code}`);
+  return result.code === 1;
+}
+
+/**
+ * Files left out of a save that would stop the switch to the target branch. The save leaves them as
+ * they are, so after it the branch still has their last saved version: where the target's version is
+ * different, or the target has a file where an untracked one sits, Git refuses to switch rather than
+ * overwrite them. They are named here instead of being saved behind the person's back.
+ */
+async function integrationBlockers(snapshot: RepoSnapshot, excluded: FileChange[], target: string) {
+  if (!excluded.length || !snapshot.head) return [];
+  const paths = [...new Set(excluded.flatMap(changePaths))];
+  const raw = await checkedGit(snapshot.path, ["diff", "--name-only", "-z", "--no-renames", "HEAD", `refs/heads/${target}`, "--", ...literalPaths(paths)], true);
+  const differing = raw.split("\0").filter(Boolean);
+  return excluded.filter((change) => changePaths(change).some((path) => differing.some((item) => item === path || item.startsWith(`${path}/`))));
+}
+
+function blockersText(blockers: FileChange[], branch: string, target: string, language: Locale) {
+  const list = blockers.map((change) => change.path).join(", ");
+  return localized(language,
+    `No se guardó ni se integró nada. Estos archivos que dejaste fuera tienen cambios sin guardar que Git tendría que sobrescribir al cambiar a ${target}: ${list}. GitCat no los guarda por su cuenta. Puedes marcarlos para incluirlos en este guardado, guardar ahora solo los archivos marcados en ${branch} sin integrar (desmarca «integrar»), o integrar más tarde, cuando hayas decidido qué hacer con ellos.`,
+    `Nothing was saved or integrated. These files you left out have unsaved changes that Git would have to overwrite when switching to ${target}: ${list}. GitCat does not save them on its own. You can tick them to include them in this save, save only the ticked files on ${branch} now without integrating (untick “integrate”), or integrate later, once you have decided what to do with them.`);
+}
+
+/** What the confirmation says a save of selected files will and will not do, file by file where it matters. */
+function selectionEffects(selection: { selected: FileChange[]; excluded: FileChange[] }, branch: string, language: Locale) {
+  const effects: string[] = [];
+  const { selected, excluded } = selection;
+  effects.push(excluded.length
+    ? localized(language,
+      `Solo se guardarán los ${selected.length} archivos marcados en ${branch}. Los ${excluded.length} que dejaste fuera se quedan exactamente como están, sin guardar.`,
+      `Only the ${selected.length} ticked files will be saved on ${branch}. The ${excluded.length} you left out stay exactly as they are, unsaved.`)
+    : localized(language,
+      `Se guardarán todos los ${selected.length} archivos listados, incluidos los nuevos, en ${branch}.`,
+      `All ${selected.length} listed files, including new files, will be saved on ${branch}.`));
+  const partial = selected.filter(isPartlyStaged).map((change) => change.path);
+  if (partial.length) effects.push(localized(language,
+    `${partial.join(", ")} tenía cambios preparados y otros sin preparar: se guarda el archivo completo tal como está ahora en tu disco.`,
+    `${partial.join(", ")} had both staged and unstaged edits: the whole file is saved as it is on your disk now.`));
+  for (const change of selected.filter((item) => item.from)) effects.push(localized(language,
+    `El renombrado de ${change.from} a ${change.path} se guarda completo: ${change.from} deja de existir y ${change.path} queda guardado.`,
+    `The rename from ${change.from} to ${change.path} is saved as a whole: ${change.from} goes away and ${change.path} is saved.`));
+  if (excluded.some((change) => change.xy && !" ?!".includes(change.xy[0]))) effects.push(localized(language,
+    "Lo que ya habías preparado (staged) en los archivos que dejaste fuera sigue preparado y no entra en este guardado.",
+    "Anything you had already staged in the files you left out stays staged and is not part of this save."));
+  return effects;
+}
+
+/** A save of these paths only. The command reads as Git's own "only these paths" commit, which is what it does. */
+function selectedCommitCommand(message: string, paths: string[]) {
+  return ["git", "commit", "--only", "-m", message, "--", ...paths].map(quoteToken).join(" ");
+}
+
+/**
+ * Explicit workflow: save reviewed files on the current branch, optionally integrate locally. With a
+ * selection only those files are saved, bound to the versions that were reviewed; without one every
+ * listed file is saved and the whole repository state is the binding, as it always was.
+ */
+export async function prepareBranchDelivery(cwd: string, request: DeliveryRequest, locale?: Locale) {
   const language = normalizeLocale(locale);
   const snapshot = await getSnapshot(cwd);
   const fail = (es: string, en: string): never => { throw new Error(localized(language, es, en)); };
-  if (snapshot.stateId !== request.stateId) fail("Los archivos o las ramas cambiaron. Revisa los cambios de nuevo antes de guardar.", "Files or branches changed. Review the changes again before saving.");
+  const picked = request.selection;
+  if (!picked && snapshot.stateId !== request.stateId) fail("Los archivos o las ramas cambiaron. Revisa los cambios de nuevo antes de guardar.", "Files or branches changed. Review the changes again before saving.");
   if (snapshot.pending || snapshot.conflicts.length) fail("Resuelve la operación pendiente antes de guardar e integrar. Tus archivos siguen disponibles.", "Resolve the pending operation before saving and integrating. Your files remain available.");
   const source = snapshot.branches.find((branch) => branch.isCurrent);
   if ((!source && snapshot.head) || snapshot.currentBranch === "HEAD") fail("Cambia a una rama antes de guardar este trabajo.", "Switch to a branch before saving this work.");
@@ -1625,32 +1807,181 @@ export async function prepareBranchDelivery(cwd: string, request: { stateId: str
     const destination = snapshot.branches.find((branch) => branch.name === target);
     if (!destination || destination.presence === "remote") fail("La rama principal debe existir en este equipo antes de integrar.", "The main branch must exist on this computer before integrating.");
     if (destination?.checkedOutIn) fail(`La rama ${target} está abierta en otro worktree. Guarda primero o continúa allí.`, `Branch ${target} is open in another worktree. Save first or continue there.`);
-    if (!snapshot.isDirty) {
+    if (!snapshot.isDirty && !picked) {
       const plan = await prepareMergeToDefault(cwd, snapshot.currentBranch, locale);
       if (plan.stateId !== request.stateId) fail("El repositorio cambió. Revisa el plan de nuevo.", "The repository changed. Review the plan again.");
       return plan;
     }
   }
   if (!snapshot.changes.length) fail("No hay archivos pendientes que guardar.", "There are no pending files to save.");
-  const commit = stepFrom("commit", { message: request.message?.trim() ?? "" }, [], language)!;
-  const steps = [commit];
+  const resolved = picked ? resolveSelection(snapshot.changes, picked) : undefined;
+  if (resolved && "problem" in resolved) throw new Error(selectionProblemText(resolved.problem, language));
+  const selection = resolved && !("problem" in resolved) ? resolved : undefined;
+  if (selection && !await selectionHasChanges(snapshot, selection.paths)) fail(
+    "Los archivos marcados ya coinciden con la última versión guardada, así que no hay nada que guardar de ellos (pasa, por ejemplo, cuando se deshace en el archivo un cambio que estaba preparado). Marca otros archivos o déjalos como están.",
+    "The ticked files already match the last saved version, so there is nothing to save from them (this happens, for example, when a staged edit was undone in the file itself). Tick other files, or leave them as they are.");
+  const message = request.message?.trim() ?? "";
+  const commit = stepFrom("commit", { message }, [], language)!;
+  const steps = [selection ? { ...commit, paths: selection.paths, command: selectedCommitCommand(message, selection.paths) } : commit];
   if (request.mergeToDefault) {
+    if (selection) {
+      const blockers = await integrationBlockers(snapshot, selection.excluded, target!);
+      if (blockers.length) {
+        return bindPlan(snapshot, refused(blockersText(blockers, snapshot.currentBranch, target!, language), "guardrail",
+          localized(language, `Hay archivos fuera del guardado que impiden integrar en ${target}`, `Files left out of the save block integrating into ${target}`)));
+      }
+    }
     steps.push(stepFrom("checkout", { name: target! }, [], language)!);
     steps.push(stepFrom("merge", { name: snapshot.currentBranch }, [], language)!);
   }
-  const effects = [localized(language,
+  const effects = selection ? selectionEffects(selection, snapshot.currentBranch, language) : [localized(language,
     `Se guardarán todos los ${snapshot.changes.length} archivos listados, incluidos los nuevos, en ${snapshot.currentBranch}.`,
-    `All ${snapshot.changes.length} listed files, including new files, will be saved on ${snapshot.currentBranch}.`),
-    localized(language, "La operación es local: no publica cambios ni elimina tu rama.", "This is local: it does not publish changes or delete your branch.")];
+    `All ${snapshot.changes.length} listed files, including new files, will be saved on ${snapshot.currentBranch}.`)];
+  effects.push(localized(language, "La operación es local: no publica cambios ni elimina tu rama.", "This is local: it does not publish changes or delete your branch."));
   if (request.mergeToDefault) effects.push(localized(language,
     `Al terminar estarás en ${target}. Si hay conflictos, la integración se detendrá y el commit guardado seguirá en ${snapshot.currentBranch}.`,
     `You will finish on ${target}. If conflicts occur, integration stops and the saved commit remains on ${snapshot.currentBranch}.`));
+  if (request.mergeToDefault && selection?.excluded.length) effects.push(localized(language,
+    `Los ${selection.excluded.length} archivos que dejaste fuera no se integran: siguen sin guardar en tu carpeta de trabajo y te acompañan a ${target}.`,
+    `The ${selection.excluded.length} files you left out are not integrated: they stay unsaved in your working folder and come along to ${target}.`));
   const draft = sequenceDraft(steps, request.mergeToDefault ? localized(language, "Guarda el trabajo revisado antes de integrarlo.", "Saves the reviewed work before integrating it.") : localized(language, "Crea una versión local del trabajo revisado en tu rama.", "Creates a local saved version of the reviewed work on your branch."), effects, language);
-  const plan = bindPlan(snapshot, { ...draft, summary: request.mergeToDefault
+  const summary = request.mergeToDefault
     ? localized(language, `Guardar e integrar en ${target}`, `Save and integrate into ${target}`)
-    : localized(language, `Guardar cambios en ${snapshot.currentBranch}`, `Save changes on ${snapshot.currentBranch}`) });
+    : localized(language, `Guardar cambios en ${snapshot.currentBranch}`, `Save changes on ${snapshot.currentBranch}`);
+  const reviewed = selection ? selectedVersions(selection.selected) : undefined;
+  const bound = reviewed ? { changes: reviewed, binding: await selectionBinding(snapshot, reviewed, request.mergeToDefault ? target : undefined), ...(request.mergeToDefault ? { target } : {}) } : undefined;
+  const plan = bindPlan(snapshot, { ...draft, summary, ...(bound ? { selection: bound } : {}) });
+  validateExecution(plan, snapshot, language, bound?.binding);
+  return plan;
+}
+
+/**
+ * Saves only the selected paths, in a commit built from a private copy of the index. The copy starts
+ * from the last saved version, each selected path is recorded whole as it is on disk (so a file with
+ * both staged and unstaged edits is saved complete), and the commit runs with hooks as usual. The real
+ * index is only touched afterwards, and only for those paths: whatever was staged in any other file
+ * stays staged, and every file that was left out keeps its contents on disk.
+ */
+async function commitSelected(repoRoot: string, paths: string[], message: string, locale?: Locale) {
+  const language = normalizeLocale(locale);
+  const head = await optionalGit(repoRoot, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+  const directory = mkdtempSync(join(tmpdir(), "gitcat-save-"));
+  const index = join(directory, "index");
+  const git = (args: string[], timeoutMs = 120_000) => runCommand("git", args, repoRoot, timeoutMs, { GIT_INDEX_FILE: index });
+  const detail = (result: CommandResult, args: string[]) => [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n") || `git ${args[0]} terminó con código ${result.code}`;
+  try {
+    if (head) {
+      // Starting from a copy keeps what Git knows about unchanged files, so it does not re-read them all.
+      const real = await optionalGit(repoRoot, ["rev-parse", "--git-path", "index"]);
+      if (real && existsSync(resolve(repoRoot, real))) copyFileSync(resolve(repoRoot, real), index);
+      let seeded = await git(["read-tree", "-m", "HEAD"]);
+      if (seeded.code !== 0) {
+        rmSync(index, { force: true });
+        seeded = await git(["read-tree", "HEAD"]);
+        if (seeded.code !== 0) throw new Error(detail(seeded, ["read-tree"]));
+      }
+    }
+    // A path that is neither on disk nor in the last saved version has nothing to record.
+    const listed = await git(["ls-files", "-z", "--", ...literalPaths(paths)]);
+    const known = new Set(listed.stdout.split("\0").filter(Boolean));
+    const present = paths.filter((path) => known.has(path) || existsSync(resolve(repoRoot, path)) || isSymlink(resolve(repoRoot, path)));
+    if (present.length) {
+      const added = await git(["add", "-A", "--", ...literalPaths(present)]);
+      if (added.code !== 0) throw new Error(detail(added, ["add"]));
+    }
+    const pendingSave = head
+      ? (await git(["diff", "--cached", "--quiet", "HEAD", "--"])).code === 1
+      : Boolean((await git(["ls-files", "-z"])).stdout);
+    if (!pendingSave) throw new Error(localized(language, "Los archivos marcados ya coinciden con la última versión guardada; no se guardó nada.", "The ticked files already match the last saved version; nothing was saved."));
+    // Hooks run as they would for any commit, and see the files being saved as the staged ones.
+    const committed = await git(["commit", "-m", message], 600_000);
+    const output = detail(committed, ["commit"]);
+    if (committed.code !== 0) throw new Error(output);
+    const reset = await runGit(repoRoot, ["reset", "-q", "--", ...literalPaths(paths)]);
+    if (reset.code !== 0) {
+      const saved = await optionalGit(repoRoot, ["rev-parse", "--short", "HEAD"]);
+      throw new Error(localized(language,
+        `Los archivos marcados se guardaron en el commit ${saved}, pero Git no pudo actualizar su lista de cambios preparados para ellos: ${detail(reset, ["reset"])}. Tus archivos en disco no cambiaron.`,
+        `The ticked files were saved in commit ${saved}, but Git could not update its list of staged changes for them: ${detail(reset, ["reset"])}. Your files on disk did not change.`));
+    }
+    return output;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function isSymlink(path: string) {
+  try { return lstatSync(path).isSymbolicLink(); } catch { return false; }
+}
+
+/**
+ * The .gitignore rule for one untracked file, prepared for review. Only a file Git does not track yet
+ * can be ignored this way: a rule never stops Git from seeing changes to a file it already tracks, so
+ * that case is explained instead of being turned into a rule that would look like it worked.
+ */
+function prepareIgnore(snapshot: RepoSnapshot, path: string, language: Locale) {
+  const change = snapshot.changes.find((item) => item.path === path);
+  if (!change || !isUntracked(change)) throw new Error(ignoreTrackedText(path, Boolean(change), language));
+  const line = gitignoreLine(path);
+  if (!line) throw new Error(localized(language, `No se puede escribir una regla de .gitignore de una sola línea para ${JSON.stringify(path)}. No se cambió nada.`, `A single-line .gitignore rule cannot be written for ${JSON.stringify(path)}. Nothing was changed.`));
+  const target = join(snapshot.path, ".gitignore");
+  const existing = (() => {
+    try { return lstatSync(target); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return undefined;
+    }
+  })();
+  // A link or a folder named .gitignore is not something to write through.
+  if (existing && !existing.isFile()) throw new Error(localized(language, ".gitignore no es un archivo normal en este repositorio, así que GitCat no lo modifica. No se cambió nada.", ".gitignore is not a regular file in this repository, so GitCat does not modify it. Nothing was changed."));
+  const exists = Boolean(existing);
+  const draft = operationDraft("ignore_path", { path, line }, snapshot, [], language);
+  const plan = bindPlan(snapshot, {
+    ...draft,
+    effects: [
+      exists
+        ? localized(language, `Se añade esta línea al final de .gitignore: ${line}`, `This line is added at the end of .gitignore: ${line}`)
+        : localized(language, `Se crea .gitignore en la raíz del repositorio con esta línea: ${line}`, `.gitignore is created at the root of the repository with this line: ${line}`),
+      localized(language, `La regla solo coincide con ${path}; otros archivos con un nombre parecido no se ven afectados.`, `The rule matches ${path} only; other files with a similar name are not affected.`),
+      localized(language, `${path} se queda en tu disco tal como está; Git solo deja de listarlo como trabajo nuevo.`, `${path} stays on your disk exactly as it is; Git only stops listing it as new work.`),
+      localized(language, "El cambio en .gitignore aparece como un archivo por guardar, para que puedas compartir la regla o deshacerla.", "The .gitignore edit shows up as a file to save, so you can share the rule or undo it."),
+      localized(language, "Ignorar solo funciona con archivos que Git todavía no sigue. Los archivos que ya están guardados en Git se siguen vigilando aunque coincidan con una regla.", "Ignoring only works for files Git does not track yet. Files already saved in Git keep being tracked even when a rule matches them.")
+    ]
+  });
   validateExecution(plan, snapshot, language);
   return plan;
+}
+
+function ignoreTrackedText(path: string, listed: boolean, language: Locale) {
+  return listed
+    ? localized(language,
+      `${path} ya lo sigue Git, así que una regla de .gitignore no haría que Git dejara de ver sus cambios: ignorar solo funciona con archivos nuevos que Git todavía no sigue. Para dejar de seguirlo habría que quitarlo de Git (el archivo puede quedarse en tu disco); pídeselo al asistente y te enseñará el plan antes de cambiar nada. No se cambió nada.`,
+      `Git already tracks ${path}, so a .gitignore rule would not stop Git from seeing its changes: ignoring only works for new files Git does not track yet. To stop tracking it, it would have to be removed from Git (the file can stay on your disk); ask the assistant and it will show you the plan before changing anything. Nothing was changed.`)
+    : localized(language,
+      `${path} ya no aparece como archivo nuevo, así que no hay nada que ignorar. No se cambió nada; revisa la lista actualizada.`,
+      `${path} is no longer listed as a new file, so there is nothing to ignore. Nothing was changed; review the updated list.`);
+}
+
+/** Appends the reviewed rule, then asks Git whether it now ignores the file; if not, .gitignore is put back as it was. */
+async function ignorePath(repoRoot: string, args: Record<string, string>, locale?: Locale) {
+  const language = normalizeLocale(locale);
+  const target = join(repoRoot, ".gitignore");
+  let previous: string | undefined;
+  try {
+    if (!lstatSync(target).isFile()) throw new Error(localized(language, ".gitignore no es un archivo normal en este repositorio, así que GitCat no lo modifica.", ".gitignore is not a regular file in this repository, so GitCat does not modify it."));
+    previous = readFileSync(target, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const separator = previous && !previous.endsWith("\n") ? "\n" : "";
+  writeFileSync(target, `${previous ?? ""}${separator}${args.line}\n`);
+  const check = await runGit(repoRoot, ["check-ignore", "-q", "--", args.path]);
+  if (check.code !== 0) {
+    if (previous === undefined) unlinkSync(target); else writeFileSync(target, previous);
+    throw new Error(localized(language,
+      `Git no ignoró ${args.path} con la nueva línea, así que .gitignore se dejó como estaba. El archivo sigue en tu disco y en la lista de cambios.`,
+      `Git did not ignore ${args.path} with the new line, so .gitignore was left as it was. The file is still on your disk and in the list of changes.`));
+  }
+  return localized(language, `Git ya no listará ${args.path}. Se añadió ${args.line} a .gitignore; el archivo sigue en tu disco.`, `Git will no longer list ${args.path}. ${args.line} was added to .gitignore; the file is still on your disk.`);
 }
 
 /** A branch-row action with a known target: switch to the repository default, then merge the branch. */
@@ -1740,6 +2071,16 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
       throw new Error(localized(language, `Todavía quedan ${snapshot.conflicts.length} archivos en conflicto: resuélvelos antes de continuar.`, `${snapshot.conflicts.length} files are still in conflict; resolve them before continuing.`));
     }
   }
+  if (operation === "commit" && step.paths) {
+    const listed = new Set(snapshot.changes.flatMap(changePaths));
+    const missing = step.paths.find((path) => !listed.has(path));
+    if (!step.paths.length || missing) throw new Error(localized(language, `${missing ?? "—"} ya no es un cambio sin guardar. Revisa los archivos de nuevo.`, `${missing ?? "—"} is no longer an unsaved change. Review the files again.`));
+  }
+  if (operation === "ignore_path") {
+    const change = snapshot.changes.find((item) => item.path === args.path);
+    if (!change || !isUntracked(change)) throw new Error(ignoreTrackedText(args.path ?? "", Boolean(change), language));
+    if (!args.line || gitignoreLine(args.path) !== args.line) throw new Error(localized(language, "La regla de .gitignore no es válida.", "The .gitignore rule is invalid."));
+  }
   if (operation === "resolve_conflict") {
     if (!snapshot.conflicts.some((conflict) => conflict.path === args.path)) throw new Error(localized(language, `${args.path} no está en conflicto.`, `${args.path} is not in conflict.`));
     if (!["ours", "theirs", "resolved"].includes(args.side)) throw new Error(localized(language, "Hay que decir con qué lado quedarse.", "The side to keep must be specified."));
@@ -1759,14 +2100,22 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
   }
 }
 
-/** The plan as issued: it must belong to this repository, and the repository must not have moved under it. */
-function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot, locale?: Locale) {
+/**
+ * The plan as issued: it must belong to this repository, and the repository must not have moved under
+ * it. A save of selected files passes its binding as it stands now; everything else is held to the
+ * whole repository state.
+ */
+function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot, locale?: Locale, selectionNow?: string) {
   const language = normalizeLocale(locale);
   if (!plan.allowed || !plan.steps.length) throw new Error(localized(language, "La acción no está permitida.", "The action is not allowed."));
   if (plan.answer) throw new Error(localized(language, "Las consultas informativas no se ejecutan como operaciones Git.", "Informational questions are not executed as Git operations."));
   if (plan.repoPath !== snapshot.path) throw new Error(localized(language, "El plan pertenece a otro repositorio.", "The plan belongs to another repository."));
   if (plan.head !== snapshot.head) throw new Error(localized(language, "El repositorio cambió desde que se preparó el plan. Prepara la acción de nuevo.", "The repository changed after this plan was prepared. Prepare the action again."));
-  if (plan.stateId !== snapshot.stateId) throw new Error(localized(language, "Los cambios locales variaron desde que se preparó el plan. Prepara la acción de nuevo.", "Local changes moved after this plan was prepared. Prepare the action again."));
+  if (plan.selection) {
+    if (selectionNow !== plan.selection.binding) throw new Error(localized(language,
+      "Un archivo marcado, su versión preparada o la rama de destino cambió después de la revisión, así que no se guardó nada. Revisa los archivos marcados de nuevo.",
+      "A ticked file, its staged version or the target branch changed after the review, so nothing was saved. Review the ticked files again."));
+  } else if (plan.stateId !== snapshot.stateId) throw new Error(localized(language, "Los cambios locales variaron desde que se preparó el plan. Prepara la acción de nuevo.", "Local changes moved after this plan was prepared. Prepare the action again."));
   validateStep(plan.steps[0], snapshot, language);
 }
 
@@ -1872,8 +2221,10 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     case "skip_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--skip"]);
     case "resolve_conflict": return runResolveConflict(cwd, args, snapshot, locale);
     case "commit":
+      if (step.paths) return commitSelected(snapshot.path, step.paths, args.message, locale);
       await checkedGit(cwd, ["add", "-A"]);
       return reportedGit(cwd, ["commit", "-m", args.message]);
+    case "ignore_path": return ignorePath(snapshot.path, args, locale);
     case "git_command": return reportedGit(cwd, step.argv ?? []);
     case "github_create_repo": return executeGithubRepositoryPlan(plan, locale);
     default: throw new Error(localized(locale, "La acción no está permitida.", "The action is not allowed."));
@@ -1952,7 +2303,14 @@ export async function fetchRemotes(cwd: string): Promise<RepoSnapshot> {
 export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale): Promise<{ snapshot: RepoSnapshot; output: string; error?: string; outcomes: StepOutcome[] }> {
   const language = normalizeLocale(locale);
   let snapshot = await getSnapshot(cwd);
-  validateExecution(plan, snapshot, language);
+  const selectionNow = plan.selection ? await selectionBinding(snapshot, currentVersions(snapshot, plan.selection.changes), plan.selection.target) : undefined;
+  validateExecution(plan, snapshot, language, selectionNow);
+  if (plan.selection?.target) {
+    // Files left out can have changed since the review; one that now blocks the switch is named before anything is saved.
+    const resolved = resolveSelection(snapshot.changes, plan.selection.changes);
+    const blockers = "problem" in resolved ? [] : await integrationBlockers(snapshot, resolved.excluded, plan.selection.target);
+    if (blockers.length) throw new Error(blockersText(blockers, snapshot.currentBranch, plan.selection.target, language));
+  }
   const outcomes: StepOutcome[] = plan.steps.map((step) => ({ command: step.command, summary: step.summary, status: "skipped", output: "" }));
 
   for (const [index, step] of plan.steps.entries()) {

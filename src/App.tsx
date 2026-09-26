@@ -20,6 +20,7 @@ import { isProtectedBranch, lifecycleOf, staleDays } from "../shared/branch-life
 import { buildCommitGraph, familyColour, maxLanes, withWorkInProgress, workInProgressHash } from "../shared/commit-graph";
 import { pullRequestReference } from "../shared/repository-activity";
 import { refChips } from "../shared/ref-chips";
+import { isPartlyStaged, isUntracked } from "../shared/selected-changes";
 import type { RefChip } from "../shared/ref-chips";
 import { authorAvatarUrl, avatarKey } from "../shared/avatar";
 import { clampGraphColumn, graphColumnRange, parseGraphColumns } from "../shared/graph-columns";
@@ -398,7 +399,11 @@ export default function App() {
   const [inputDialog, setInputDialog] = useState<InputDialog>();
   const [commitMessage, setCommitMessage] = useState("");
   const [deliveryMerge, setDeliveryMerge] = useState(false);
-  const [deliveryStateId, setDeliveryStateId] = useState<string>();
+  /** The version of every listed file when the save was started, so a later edit to a ticked file asks for a fresh look. */
+  const [deliveryBaseline, setDeliveryBaseline] = useState<{ path: string; versions: Record<string, string> }>();
+  /** Files left out of the next save, per repository. Everything listed is included until someone unticks it. */
+  const [excludedByRepo, setExcludedByRepo] = useState<Record<string, string[]>>({});
+  const [selectionDiffOpen, setSelectionDiffOpen] = useState(false);
   const [deliveryReview, setDeliveryReview] = useState<{ turnId: number; plan: ActionPlan }>();
   const [generatingDescription, setGeneratingDescription] = useState(false);
   const [workspaceReady, setWorkspaceReady] = useState(false);
@@ -433,11 +438,28 @@ export default function App() {
   }, [projects, unavailable, workspaceOrder]);
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
+  const excludedRef = useRef(excludedByRepo);
+  excludedRef.current = excludedByRepo;
+  const excluded = useMemo(() => new Set(snapshot ? excludedByRepo[snapshot.path] ?? [] : []), [snapshot?.path, excludedByRepo]);
+  const selectedChanges = useMemo(() => snapshot?.changes.filter((change) => !excluded.has(change.path)) ?? [], [snapshot, excluded]);
+  // Only the ticked files matter: an edit to a file that was left out does not make the review stale.
+  const deliveryStale = Boolean(snapshot && deliveryBaseline?.path === snapshot.path
+    && selectedChanges.some((change) => deliveryBaseline.versions[change.path] !== change.version));
+
+  // A file that is no longer listed has no decision left to remember; if it changes again, it starts included.
+  useEffect(() => {
+    if (!snapshot) return;
+    const saved = excludedByRepo[snapshot.path];
+    if (!saved?.length) return;
+    const listed = new Set(snapshot.changes.map((change) => change.path));
+    const kept = saved.filter((path) => listed.has(path));
+    if (kept.length !== saved.length) setExcludedByRepo((items) => ({ ...items, [snapshot.path]: kept }));
+  }, [snapshot?.path, snapshot?.stateId]);
   const conversation = snapshot ? conversations[snapshot.path] ?? [] : [];
   const planning = conversation.some((turn) => turn.status === "loading" || turn.status === "executing");
   // Something prepared against the current state that the user has not decided on yet.
   const awaitingDecision = conversation.some((turn) => turn.status === "ready") || Boolean(deliveryReview || inputDialog || proposal || generatingDescription
-    || (snapshot?.isDirty && deliveryStateId === snapshot.stateId));
+    || (snapshot?.isDirty && deliveryBaseline?.path === snapshot.path && !deliveryStale));
   // A hidden branch panel gives its column to the graph; its saved width waits for it to come back.
   const paneStyle = panes || sidebarHidden
     ? { ...(panes ? { "--sidebar-w": `${panes.sidebar}px`, "--inspector-w": `${panes.inspector}px` } : {}), ...(sidebarHidden ? { "--sidebar-w": "0px" } : {}) } as CSSProperties
@@ -556,7 +578,8 @@ export default function App() {
     setGraphCommits([]);
     setCommitMessage("");
     setDeliveryReview(undefined);
-    setDeliveryStateId(undefined);
+    setDeliveryBaseline(undefined);
+    setSelectionDiffOpen(false);
     setDeliveryMerge(false);
     setGeneratingDescription(false);
   }, [activeId]);
@@ -881,6 +904,7 @@ export default function App() {
       skip_operation: t("skipStuckCommit"),
       resolve_conflict: t("resolveConflictNamed", { path: args.path }),
       commit: t("createCommitNamed", { message: args.message ?? "" }),
+      ignore_path: t("ignoreFutureChanges", { path: args.path ?? "" }),
       github_create_repo: t("createPrivateRepo", { owner: args.owner, name: args.name, host: args.host })
     };
     const path = snapshot.path;
@@ -1004,7 +1028,7 @@ export default function App() {
         const outcome = result.output || t("completed", { summary: plan.summary });
         updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome, status: "completed" }));
         addActivity({ label: t("actionExecuted"), detail: outcome, tone: "success" });
-        if (plan.steps.some((step) => step.operation === "commit")) setCommitMessage("");
+        if (plan.steps.some((step) => step.operation === "commit")) { setCommitMessage(""); setDeliveryBaseline(undefined); }
       }
     } catch (error) {
       const message = cleanError(error, t("fallbackGitAction"));
@@ -1069,15 +1093,27 @@ export default function App() {
     setInspectorTab("details");
   };
 
-  const generateDescription = async () => {
-    if (!snapshot?.changes.length || generatingDescription) return;
+  /** The ticked files of a repository as the window shows them now, for answers that arrive later. */
+  const tickedNow = (repoPath: string) => {
+    const current = snapshotRef.current;
+    if (current?.path !== repoPath) return undefined;
+    const left = new Set(excludedRef.current[repoPath] ?? []);
+    return current.changes.filter((change) => !left.has(change.path));
+  };
+
+  const generateDescription = async (paths = selectedChanges.map((change) => change.path)) => {
+    if (!snapshot?.changes.length || !paths.length || generatingDescription) return;
     const repoPath = snapshot.path;
-    const stateId = snapshot.stateId;
     const sequence = requestSequence.current;
     setGeneratingDescription(true);
     try {
-      const result = await window.gitcat.generateCommitDescription(repoPath, locale);
-      if (requestSequence.current === sequence && result.stateId === stateId && snapshotRef.current?.stateId === result.stateId && snapshotRef.current?.path === repoPath) {
+      const result = await window.gitcat.generateCommitDescription(repoPath, locale, paths);
+      // The description is only used while it still describes exactly the ticked files, as they are.
+      const ticked = tickedNow(repoPath);
+      const described = result.selection ?? [];
+      const current = Boolean(ticked && ticked.length === described.length
+        && described.every((item) => ticked.some((change) => change.path === item.path && change.version === item.version)));
+      if (requestSequence.current === sequence && current) {
         setCommitMessage(result.description);
       }
     } catch (error) {
@@ -1089,7 +1125,7 @@ export default function App() {
   const beginDelivery = (merge: boolean) => {
     if (!snapshot || planning || generatingDescription) return;
     setDeliveryMerge(merge);
-    setDeliveryStateId(snapshot.stateId);
+    setDeliveryBaseline({ path: snapshot.path, versions: Object.fromEntries(snapshot.changes.map((change) => [change.path, change.version ?? ""])) });
     if (snapshot.isDirty) {
       openCommitForm();
       if (config.configured && !commitMessage.trim()) void generateDescription();
@@ -1099,12 +1135,30 @@ export default function App() {
     }
   };
 
+  /** Sends the ticked files with the version of each that is on screen; the save is bound to exactly those. */
   const prepareCommit = () => {
     const message = commitMessage.trim();
-    if (!snapshot?.changes.length || !message || message.length > 120) return;
+    if (!snapshot?.changes.length || !selectedChanges.length || !message || message.length > 120) return;
     const path = snapshot.path;
+    const selection = selectedChanges.map((change) => ({ path: change.path, version: change.version ?? "" }));
     void showPlan(t(deliveryMerge ? "saveAndIntegrate" : "saveChanges", { target: snapshot.defaultBranch ?? "" }),
-      () => window.gitcat.prepareBranchDelivery(path, { stateId: deliveryStateId ?? snapshot.stateId, message, mergeToDefault: deliveryMerge }, locale), path, true);
+      () => window.gitcat.prepareBranchDelivery(path, { stateId: snapshot.stateId, message, mergeToDefault: deliveryMerge, selection }, locale), path, true);
+  };
+
+  const setExcluded = (path: string, next: string[]) => setExcludedByRepo((items) => ({ ...items, [path]: next }));
+  const toggleIncluded = (file: FileChange) => {
+    if (!snapshot) return;
+    setExcluded(snapshot.path, excluded.has(file.path) ? [...excluded].filter((path) => path !== file.path) : [...excluded, file.path]);
+  };
+  const setAllIncluded = (include: boolean) => {
+    if (snapshot) setExcluded(snapshot.path, include ? [] : snapshot.changes.map((change) => change.path));
+  };
+
+  /** A rule for one untracked file, previewed before anything is written. The main process builds and checks the line. */
+  const ignoreFile = (file: FileChange) => {
+    if (!snapshot || planning) return;
+    const path = snapshot.path;
+    void showPlan(t("ignoreFutureChanges", { path: file.path }), () => window.gitcat.prepareOperation(path, "ignore_path", { path: file.path }, locale), path, true);
   };
 
   /** Suggestions are ordinary questions: the model answers them, in whatever language they arrive. */
@@ -1313,7 +1367,8 @@ export default function App() {
             </div>
             {inspectorTab === "details" ? <div className="inspector-body">
               {activeFocus?.kind === "wip"
-                ? <ChangesView snapshot={snapshot} merge={deliveryMerge} configured={config.configured} stale={Boolean(deliveryStateId && deliveryStateId !== snapshot.stateId)} onReviewAgain={() => beginDelivery(deliveryMerge)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} message={commitMessage} generating={generatingDescription} busy={planning} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit} />
+                ? <ChangesView snapshot={snapshot} merge={deliveryMerge} configured={config.configured} stale={deliveryStale} onReviewAgain={() => beginDelivery(deliveryMerge)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} message={commitMessage} generating={generatingDescription} busy={planning} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit}
+                    excluded={excluded} onToggle={toggleIncluded} onToggleAll={setAllIncluded} onIgnore={ignoreFile} onShowSelected={() => setSelectionDiffOpen(true)} />
                 : activeFocus
                   ? <CommitInspector key={activeFocus.commit.hash} commit={activeFocus.commit} snapshot={snapshot} known={graphCommits} onFocus={(commit) => focusOn({ kind: "commit", commit }, true)} onOpen={(file) => setModalCommit({ commit: activeFocus.commit, file })} />
                   : <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommitSelected")}</strong><span>{t("noCommitSelectedHint")}</span></div>}
@@ -1331,6 +1386,7 @@ export default function App() {
       {menu && snapshot && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu)} label={menu.work ? t("uncommittedHeading") : menu.commit ? t("commitActions", { hash: menu.commit.shortHash }) : t("actionsFor", { name: menu.branch ?? "" })} onClose={() => setMenu(undefined)} />}
       {modalCommit && snapshot && <CommitModal commit={modalCommit.commit} initialFile={modalCommit.file} repoPath={snapshot.path} onClose={() => setModalCommit(undefined)} />}
       {selectedFile && snapshot && <FileDiffModal file={selectedFile} repoPath={snapshot.path} onClose={() => setSelectedFile(undefined)} />}
+      {selectionDiffOpen && snapshot && <SelectionDiffModal files={selectedChanges} repoPath={snapshot.path} onClose={() => setSelectionDiffOpen(false)} />}
       {proposal && snapshot?.path === proposal.repoPath && <ConflictProposalModal key={proposal.id} proposal={proposal} result={proposalResult} busy={planning || applyingResolution || resolving} onApply={(accepted) => void applyResolutions(accepted)} onReviewAgain={() => void resolveConflicts()} onClose={closeProposal} />}
       {resolving && <div className="resolving-overlay" role="status"><LoaderCircle className="spin" size={22} /><span>{t("readConflictSides")}</span></div>}
     </div>
@@ -2233,11 +2289,20 @@ function ChangeSummary({ files, stats }: { files: FileChange[]; stats?: Record<s
   </div>;
 }
 
+/** The uncommitted list's include/exclude controls. Commit details show the same list without them. */
+type FileSelection = {
+  excluded: Set<string>;
+  disabled: boolean;
+  onToggle: (file: FileChange) => void;
+  onToggleAll: (include: boolean) => void;
+  onIgnore: (file: FileChange) => void;
+};
+
 /**
  * The files a change touched, as a flat list of paths or as the folders they live in. Either way
  * each file says what happened to it and how much, and a click opens exactly that file's diff.
  */
-function FileList({ files, stats, onOpen }: { files: FileChange[]; stats?: Record<string, FileStats>; onOpen: (file: FileChange) => void }) {
+function FileList({ files, stats, onOpen, selection }: { files: FileChange[]; stats?: Record<string, FileStats>; onOpen: (file: FileChange) => void; selection?: FileSelection }) {
   const { t } = useI18n();
   const [mode, setModeState] = useState<FileListMode>(readFileListMode);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
@@ -2250,8 +2315,24 @@ function FileList({ files, stats, onOpen }: { files: FileChange[]; stats?: Recor
   const fileRow = (file: FileChange, depth: number, label: string, folder: string, index: number) => {
     const kind = fileKind(file.code);
     const Icon = fileKindIcons[kind];
-    const status = file.code.includes("?") ? t("newFileIncluded") : changeStatus(file.code, t);
     const counts = stats?.[file.path];
+    if (selection) {
+      const included = !selection.excluded.has(file.path);
+      const untracked = isUntracked(file);
+      const partly = isPartlyStaged(file);
+      const status = untracked ? t(included ? "newFileIncluded" : "newFileExcluded") : `${changeStatus(file.code, t)}${included ? "" : ` · ${t("leftOutOfSave")}`}`;
+      return <div className={`change-row selectable kind-${kind}${included ? "" : " excluded"}`} key={`${file.path}-${index}`} style={{ paddingLeft: 8 + depth * 14 }} title={`${status} · ${file.from ? `${file.from} → ` : ""}${file.path}${partly ? `\n${t("partlyStagedHint")}` : ""}`}>
+        <input type="checkbox" className="change-include" checked={included} disabled={selection.disabled} onChange={() => selection.onToggle(file)} aria-label={t(included ? "excludeFromSave" : "includeInSave", { path: file.path })} />
+        <button className="change-open" onClick={() => onOpen(file)}>
+          <span className="change-status"><Icon size={14} /><span className="visually-hidden">{status}</span></span>
+          <span className="change-path">{folder && <span className="change-folder">{folder}</span>}<span className="change-name">{label}</span></span>
+          {partly && <span className="change-badge">{t("partlyStagedBadge")}</span>}
+          {counts && <ChangeStats additions={counts.additions} deletions={counts.deletions} binary={counts.binary} />}
+        </button>
+        {untracked && <button className="mini-icon change-ignore" onClick={() => selection.onIgnore(file)} disabled={selection.disabled} aria-label={t("ignoreFutureChanges", { path: file.path })} title={t("ignoreFutureChangesTitle")}><EyeOff size={13} /></button>}
+      </div>;
+    }
+    const status = file.code.includes("?") ? t("newFileIncluded") : changeStatus(file.code, t);
     return <button className={`change-row kind-${kind}`} key={`${file.path}-${index}`} style={{ paddingLeft: 10 + depth * 14 }} onClick={() => onOpen(file)} title={`${status} · ${file.from ? `${file.from} → ` : ""}${file.path}`}>
       <span className="change-status"><Icon size={14} /><span className="visually-hidden">{status}</span></span>
       <span className="change-path">{folder && <span className="change-folder">{folder}</span>}<span className="change-name">{label}</span></span>
@@ -2287,9 +2368,15 @@ function FileList({ files, stats, onOpen }: { files: FileChange[]; stats?: Recor
     return rows;
   };
 
+  const includedCount = selection ? files.filter((file) => !selection.excluded.has(file.path)).length : 0;
   return <div className="file-list">
     <div className="file-list-toolbar">
-      <span>{counted(t, files.length, "file", "files")}</span>
+      {selection
+        ? <label className="select-all"><input type="checkbox" checked={includedCount === files.length} disabled={selection.disabled}
+            ref={(node) => { if (node) node.indeterminate = includedCount > 0 && includedCount < files.length; }}
+            onChange={() => selection.onToggleAll(includedCount < files.length)} aria-label={t("includeAllFiles")} />
+          <span>{t("selectedOfFiles", { selected: includedCount, total: files.length })}</span></label>
+        : <span>{counted(t, files.length, "file", "files")}</span>}
       <div className="mode-toggle" role="group" aria-label={t("fileListMode")}>
         <button className={mode === "path" ? "active" : ""} aria-pressed={mode === "path"} onClick={() => setMode("path")} title={t("pathView")}><List size={13} /><span>{t("pathView")}</span></button>
         <button className={mode === "tree" ? "active" : ""} aria-pressed={mode === "tree"} onClick={() => setMode("tree")} title={t("treeView")}><ListTree size={13} /><span>{t("treeView")}</span></button>
@@ -2304,28 +2391,42 @@ function FileList({ files, stats, onOpen }: { files: FileChange[]; stats?: Recor
   </div>;
 }
 
-/** The uncommitted work: what changed, and the form that turns it into a saved version. */
-function ChangesView({ snapshot, message, generating, busy, onOpenFile, onMessageChange, onGenerate, onPrepare, merge, configured, stale, onReviewAgain, onMergeChange }: {
+/**
+ * The uncommitted work: what changed, which of it goes into the next save, and the form that turns
+ * the ticked files into a saved version. Unticked files are listed too, so leaving one out is a
+ * visible decision rather than something that happens to it.
+ */
+function ChangesView({ snapshot, message, generating, busy, onOpenFile, onMessageChange, onGenerate, onPrepare, merge, configured, stale, onReviewAgain, onMergeChange, excluded, onToggle, onToggleAll, onIgnore, onShowSelected }: {
   snapshot: RepoSnapshot; message: string; generating: boolean; busy: boolean;
   onOpenFile: (file: FileChange) => void; onMessageChange: (message: string) => void; onGenerate: () => void; onPrepare: () => void;
   merge: boolean; configured: boolean; stale: boolean; onReviewAgain: () => void; onMergeChange: (value: boolean) => void;
+  excluded: Set<string>; onToggle: (file: FileChange) => void; onToggleAll: (include: boolean) => void; onIgnore: (file: FileChange) => void; onShowSelected: () => void;
 }) {
   const { t } = useI18n();
   const hasChanges = snapshot.changes.length > 0;
   const canMerge = snapshot.defaultBranch && snapshot.defaultBranch !== snapshot.currentBranch;
+  const selected = snapshot.changes.filter((change) => !excluded.has(change.path));
+  const leftOut = snapshot.changes.length - selected.length;
+  const partly = selected.filter(isPartlyStaged).length;
   return <div className="changes-view">
     <div className="detail-head"><span className="detail-kind"><PencilLine size={13} />{t("uncommittedHeading")}</span><span className="detail-branch" title={snapshot.currentBranch}><GitBranch size={12} />{snapshot.currentBranch}</span></div>
     {hasChanges ? <>
-      <ChangeSummary files={snapshot.changes} />
-      <FileList files={snapshot.changes} onOpen={onOpenFile} />
+      <ChangeSummary files={selected} />
+      <FileList files={snapshot.changes} onOpen={onOpenFile} selection={{ excluded, disabled: busy || generating, onToggle, onToggleAll, onIgnore }} />
+      {partly > 0 && <p className="file-inclusion-note partly-staged">{t("partlyStagedNote", { count: partly })}</p>}
       <div className="commit-form">
-        <div className="commit-form-heading"><h3>{t("saveDescription")}</h3><button className="outline-button small" onClick={onGenerate} disabled={!configured || generating || busy}>{generating ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{t(generating ? "generatingSaveDescription" : "generateDescription")}</button></div>
+        <div className="commit-form-heading"><h3>{t("saveDescription")}</h3><button className="outline-button small" onClick={onGenerate} disabled={!configured || generating || busy || !selected.length}>{generating ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{t(generating ? "generatingSaveDescription" : "generateDescription")}</button></div>
         <label htmlFor="commit-description" className="visually-hidden">{t("commitMessage")}</label><textarea id="commit-description" value={message} onChange={(event) => onMessageChange(event.target.value)} maxLength={120} rows={3} placeholder={t("commitPlaceholder")} disabled={generating || busy} />
         <div className="commit-form-meta"><span>{t(configured ? "editableDescription" : "manualSaveDescription")}</span><span>{message.length}/120</span></div>
         {canMerge && <label className="delivery-option"><input type="checkbox" checked={merge} disabled={busy} onChange={(event) => onMergeChange(event.target.checked)} /><span>{t("integrateAfterSave", { target: snapshot.defaultBranch! })}</span></label>}
+        {merge && canMerge && leftOut > 0 && <p className="file-inclusion-note">{t("excludedStayForIntegration", { count: leftOut, target: snapshot.defaultBranch! })}</p>}
         {stale && <div className="delivery-stale" role="alert">{t("filesChangedReview")} <button className="outline-button small" onClick={onReviewAgain}>{t("reviewUpdatedFiles")}</button></div>}
-        <div className="commit-form-actions"><button className="primary-button" onClick={onPrepare} disabled={stale || !message.trim() || generating || busy}><ShieldCheck size={14} />{t(merge && canMerge ? "reviewSaveAndMerge" : "reviewSave")}</button></div>
-        <p className="file-inclusion-note">{t("allFilesIncluded")}</p>
+        {!selected.length && <p className="file-inclusion-note selection-empty" role="status">{t("tickFilesToSave")}</p>}
+        <div className="commit-form-actions">
+          <button className="ghost-button" onClick={onShowSelected} disabled={!selected.length}><FileDiff size={14} />{t("showSelectedDiff")}</button>
+          <button className="primary-button" onClick={onPrepare} disabled={stale || !selected.length || !message.trim() || generating || busy}><ShieldCheck size={14} />{t(merge && canMerge ? "reviewSaveAndMerge" : "reviewSave")}</button>
+        </div>
+        <p className="file-inclusion-note">{t("selectedFilesNote")}</p>
       </div>
     </> : <div className="graph-empty"><Check size={26} /><strong>{t("noUncommittedChanges")}</strong><span>{t("savedNextStep")}</span></div>}
   </div>;
@@ -2709,6 +2810,36 @@ function FileDiffModal({ file, repoPath, onClose }: { file: FileChange; repoPath
       {error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}
       {!detail && !error && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> {t("readingFile")}</div>}
       {detail && <DiffView diff={detail.diff} truncated={detail.truncated} />}
+    </div>
+  </div>;
+}
+
+/** Every ticked file as one diff, read the same way the save will record it. */
+function SelectionDiffModal({ files, repoPath, onClose }: { files: FileChange[]; repoPath: string; onClose: () => void }) {
+  const { t, locale } = useI18n();
+  const [detail, setDetail] = useState<CommitDetail>();
+  const [error, setError] = useState<string>();
+  const paths = files.map((file) => file.path);
+  const key = paths.join("\0");
+  useEscape(onClose);
+  useEffect(() => {
+    let live = true;
+    setDetail(undefined); setError(undefined);
+    window.gitcat.getSelectionDiff(repoPath, paths, locale)
+      .then((next) => { if (live) setDetail(next); })
+      .catch((reason) => { if (live) setError(cleanError(reason, t("fallbackReadFile"))); });
+    return () => { live = false; };
+  }, [repoPath, key]);
+
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="commit-modal wide selection-diff-modal" role="dialog" aria-modal="true" aria-labelledby="selection-modal-title">
+      <div className="modal-heading">
+        <div><div className="eyebrow">{t("selectedDiffEyebrow", { count: files.length })}</div><h2 id="selection-modal-title">{t("selectedDiffTitle")}</h2></div>
+        <button className="icon-button soft" onClick={onClose} aria-label={t("closeDiffs")}><X size={17} /></button>
+      </div>
+      {error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}
+      {!detail && !error && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> {t("readingFile")}</div>}
+      {detail && (detail.diff.trim() ? <DiffView diff={detail.diff} truncated={detail.truncated} /> : <p className="detail-note">{t("selectedDiffEmpty")}</p>)}
     </div>
   </div>;
 }

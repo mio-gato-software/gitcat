@@ -21,7 +21,8 @@ contextBridge.exposeInMainWorld("gitcat", {
   prepareOperation: (path, operation, args, locale) => ipcRenderer.invoke("action:prepare", path, operation, args, locale),
   prepareBranchDelivery: (path, request, locale) => ipcRenderer.invoke("action:prepare-delivery", path, request, locale),
   prepareMergeToDefault: (path, branch, locale) => ipcRenderer.invoke("action:prepare-merge-to-default", path, branch, locale),
-  generateCommitDescription: (path, locale) => ipcRenderer.invoke("commit:generate-description", path, locale),
+  generateCommitDescription: (path, locale, paths) => ipcRenderer.invoke("commit:generate-description", path, locale, paths),
+  getSelectionDiff: (path, paths, locale) => ipcRenderer.invoke("commit:selection-diff", path, paths, locale),
   executePlan: (path, planId, locale) => ipcRenderer.invoke("action:execute", path, planId, locale),
   getLlmConfig: () => ipcRenderer.invoke("llm:get-config"),
   saveLlmConfig: (config) => ipcRenderer.invoke("llm:save-config", config)

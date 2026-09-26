@@ -216,6 +216,17 @@
 .change-folder { color: var(--muted); }
 .change-name { color: inherit; }
 .change-row .change-stats { margin-left: auto; }
+/* The uncommitted list: a tick decides whether the file goes into the next save, the rest of the row opens its diff. */
+.change-row.selectable { gap: 6px; padding-right: 4px; }
+.change-row.selectable .change-open { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; height: 100%; padding: 0; color: inherit; background: transparent; text-align: left; }
+.change-include, .select-all input { flex: none; margin: 0; accent-color: var(--coral); }
+.change-row.excluded .change-open { opacity: .55; }
+.change-row.excluded .change-name { text-decoration: line-through; text-decoration-color: var(--muted); }
+.change-badge { flex: none; padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; font-size: 9.5px; white-space: nowrap; }
+.change-row .change-ignore { flex: none; width: 22px; height: 22px; color: var(--muted); }
+.change-row .change-ignore:hover { color: var(--text); }
+.select-all { display: inline-flex; align-items: center; gap: 6px; min-width: 0; cursor: pointer; }
+.file-inclusion-note.partly-staged, .file-inclusion-note.selection-empty { color: #e4b479; }
 .change-code { width: 34px; flex: none; color: var(--amber); font: 700 10.5px var(--mono); }
 .code-a, .code-\? { color: var(--add); }
 .code-d { color: var(--del); }
@@ -235,8 +246,9 @@
 .commit-form-meta span:last-child { flex: none; }
 .commit-form .delivery-option { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; color: var(--secondary); font-size: 11.5px; line-height: 1.5; }
 .delivery-option input { accent-color: var(--coral); }
-.commit-form-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
-.commit-form-actions .primary-button { width: 100%; }
+.commit-form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.commit-form-actions .ghost-button { display: inline-flex; flex: none; align-items: center; gap: 6px; }
+.commit-form-actions .primary-button { flex: 1 1 160px; }
 .file-inclusion-note { margin: 10px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.55; }
 .diff-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; color: var(--muted); font-size: 11px; }
 .diff-toolbar code { min-width: 0; overflow: hidden; color: var(--secondary); font-family: var(--mono); text-overflow: ellipsis; white-space: nowrap; }

@@ -531,7 +531,9 @@ test("la descripción de commit usa el diff real y conserva la confirmación", a
   assert.match(main, /ipcMain\.handle\("commit:generate-description"/);
   assert.match(preload, /generateCommitDescription/);
   assert.match(app, /t\(generating \? "generatingSaveDescription" : "generateDescription"\)/);
-  assert.match(app, /window\.gitcat\.prepareBranchDelivery\(path, \{ stateId: deliveryStateId \?\? snapshot\.stateId, message, mergeToDefault: deliveryMerge \}, locale\)/);
+  assert.match(app, /window\.gitcat\.prepareBranchDelivery\(path, \{ stateId: snapshot\.stateId, message, mergeToDefault: deliveryMerge, selection \}, locale\)/);
+  assert.match(app, /window\.gitcat\.generateCommitDescription\(repoPath, locale, paths\)/);
+  assert.match(preload, /generateCommitDescription: \(path, locale, paths\) => ipcRenderer\.invoke\("commit:generate-description", path, locale, paths\)/);
 });
 
 test("Cambios muestra estado, ruta y formulario manual sin LLM", async () => {
