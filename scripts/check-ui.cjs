@@ -192,7 +192,7 @@ app.whenReady().then(async () => {
     fs.writeFileSync(path.join(screenshots, `${name}.png`), (await win.webContents.capturePage()).toPNG());
   };
   const assertFits = async () => assert.deepEqual(await js(`(() => {
-    const nodes = [...document.querySelectorAll('.tool-button, .delivery-actions button, .inspector-tabs button, .commit-search, .notification-bell, .chat-compose textarea, .send-button')];
+    const nodes = [...document.querySelectorAll('.tool-button, .delivery-actions button, .overview-toggle, .inspector-tabs button, .commit-search, .notification-bell, .chat-compose textarea, .send-button')];
     return nodes.filter(node => { const r = node.getBoundingClientRect(); return r.left < 0 || r.right > innerWidth || r.width < 20 || r.bottom > innerHeight; }).map(node => node.textContent || node.getAttribute('aria-label'));
   })()`), [], 'Primary controls fit the window');
 
@@ -242,15 +242,34 @@ app.whenReady().then(async () => {
 
   // The overview keeps edited, saved, integrated and published apart, and names one next step by intent.
   await waitFor(`document.querySelector('.work-overview')?.dataset.next === 'save_changes'`);
+  assert.equal(await js(`document.querySelector('.overview-toggle').getAttribute('aria-expanded')`), 'false');
+  assert.equal(await js(`document.querySelector('.overview-details') === null`), true, 'Details take no room by default');
+  assert.ok(await js(`document.querySelector('.work-overview').getBoundingClientRect().height <= 40`), 'Default status is a single compact row');
+  assert.equal(await js(`document.querySelectorAll('.repo-toolbar .primary-button').length`), 1, 'One primary work action');
+  assert.match(await js(`document.querySelector('.repo-toolbar .primary-button').innerText`), /Revisar y guardar/);
+  assert.match(await js(`document.querySelector('.overview-summary').innerText`), /2 archivos sin guardar[\s\S]*Solo en este equipo[\s\S]*Falta integrar en main/);
+  await capture('status-strip');
+  // The alternate action is keyboard accessible and Escape returns focus to its trigger.
+  await js(`document.querySelector('.overview-more').click()`);
+  await waitFor(`document.querySelector('.context-menu [role="menuitem"]')`);
+  assert.match(await js(`document.activeElement.textContent`), /Guardar e integrar en main/);
+  await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+  await waitFor(`!document.querySelector('.context-menu')`);
+  assert.equal(await js(`document.activeElement === document.querySelector('.overview-more')`), true);
+  await js(`document.querySelector('.overview-toggle').click()`);
+  await waitFor(`document.querySelector('.overview-details')`);
+  assert.equal(await js(`localStorage.getItem('gitcat-work-overview-details')`), 'open');
   const stage = (name) => js(`document.querySelector('.work-overview [data-stage="${name}"]').innerText`);
   assert.match(await stage('edited'), /En este equipo[\s\S]*2 archivos sin guardar/);
   assert.match(await stage('integrated'), /En main[\s\S]*Falta integrar en main: 1 commit/);
   assert.match(await stage('published'), /Sin remoto conectado/);
   const nextStep = await js(`document.querySelector('.work-overview .overview-next').innerText`);
-  for (const entry of [/Siguiente paso/, /Guarda tus cambios/, /En términos de Git: git add \+ git commit/, /Revisar y guardar/]) assert.match(nextStep, entry);
+  for (const entry of [/Siguiente paso/, /Guarda tus cambios/, /En términos de Git: git add \+ git commit/]) assert.match(nextStep, entry);
   // Naming remarks wait behind a disclosure instead of sitting on the beginner path.
   assert.equal(await js(`document.querySelectorAll('.naming-suggestion').length`), 0);
   await capture('work-overview');
+  await js(`document.querySelector('.overview-toggle').click()`);
+  assert.equal(await js(`localStorage.getItem('gitcat-work-overview-details')`), 'collapsed');
   assert.equal(await js(`document.querySelector('.commit-row').classList.contains('wip')`), true);
   assert.match(await js(`document.querySelector('.commit-row.wip').innerText`), /WIP/);
   // Every commit says how much it changed, without opening it.
@@ -351,6 +370,13 @@ app.whenReady().then(async () => {
   await win.loadFile(path.join(root, 'dist/index.html'));
   await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
   await assertFits(); await capture('compact');
+  assert.equal(await js(`document.querySelector('.overview-toggle').getAttribute('aria-expanded')`), 'false', 'Compact preference survives reload');
+  await js(`document.querySelector('.overview-toggle').click()`);
+  await waitFor(`document.querySelector('.overview-details')`);
+  await assertFits(); await capture('compact-details');
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await waitFor(`document.querySelector('.overview-details')`);
+  assert.equal(await js(`document.querySelector('.overview-toggle').getAttribute('aria-expanded')`), 'true', 'Details preference survives reload');
   await js(`localStorage.removeItem('gitcat-pane-widths')`);
   win.setSize(1480, 940);
   await win.loadFile(path.join(root, 'dist/index.html'));
@@ -388,6 +414,13 @@ app.whenReady().then(async () => {
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal(described.length, 0, 'No description is requested before the disclosure');
   assert.equal(await js(`document.querySelector('#commit-description').value`), '');
+  assert.equal(await js(`document.querySelector('.delivery-option input').checked`), false, 'Primary save does not also integrate');
+  assert.equal(git('status', '--porcelain'), before, 'Opening save never changes Git');
+  await js(`document.querySelector('.overview-more').click()`);
+  await waitFor(`document.querySelector('.context-menu [role="menuitem"]')`);
+  await js(`document.querySelector('.context-menu [role="menuitem"]').click()`);
+  await waitFor(`document.querySelector('.delivery-option input').checked`);
+  assert.equal(git('status', '--porcelain'), before, 'Choosing integration still waits for review');
   // Asking for one shows what would leave this Mac, file by file, before anything is sent.
   await js(`document.querySelector('.commit-form-heading button').click()`);
   await waitFor(`document.querySelector('.sharing-modal')`);
@@ -423,7 +456,7 @@ app.whenReady().then(async () => {
   assert.match(await stage('saved'), /Solo en este equipo[\s\S]*no es una copia de seguridad hasta que se publica/);
   assert.match(await stage('integrated'), /Estás en main/);
   assert.match(await js(`document.querySelector('.work-overview .overview-next').innerText`), /Conecta un sitio donde publicar[\s\S]*git remote add/);
-  assert.match(await js(`document.querySelector('.toolbar-delivery').innerText`), /Guardado en este equipo/, 'A save is described as local, never as a backup');
+  assert.match(await js(`document.querySelector('.overview-summary').innerText`), /Solo en este equipo/, 'A save is described as local, never as a backup');
   // A push with nowhere to go is explained from the repository itself, with the way on, and the
   // assistant is not needed for it: no provider request is made.
   const headBeforePush = git('rev-parse', 'HEAD');
@@ -505,7 +538,7 @@ app.whenReady().then(async () => {
   // A half-finished merge outranks every other step, and the overview's button opens the same guide.
   await waitFor(`document.querySelector('.work-overview')?.dataset.next === 'finish_pending'`);
   assert.match(await js(`document.querySelector('.work-overview .overview-next').innerText`), /Termina la operación en curso[\s\S]*Fusión en curso[\s\S]*git merge --continue/);
-  await js(`document.querySelector('.work-overview .overview-actions .primary-button').click()`);
+  await js(`document.querySelector('.repo-toolbar .overview-actions .primary-button').click()`);
   await waitFor(`document.querySelector('.conflict-guide .guide-file')`);
   const guideText = await js(`document.querySelector('.conflict-guide').innerText`);
   for (const entry of [/Fusionando otra en main/, /La rama en la que estás/, /La rama que se está fusionando/, /Cambios en otra/, /Git: «theirs»/,

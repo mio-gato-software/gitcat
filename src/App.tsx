@@ -2,10 +2,10 @@ import { useDialog } from "./useDialog";
 import { CatMark, SleepingCat } from "./CatMark";
 import { NotificationCenter } from "./NotificationCenter";
 import { addNotification, type Notification } from "../shared/notifications";
-import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
-  AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronRight, CircleDot,
+  AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronDown, ChevronRight, CircleDot,
   Clock3, Cloud, CloudDownload, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
   FolderOpen, FolderPlus, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
   ListTree, LoaderCircle, Maximize2, MessageCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen, Palette, Pencil, PencilLine, Plus,
@@ -1681,23 +1681,21 @@ export default function App() {
       /> : !snapshot ? <Welcome onOpen={() => void openProject()} onClone={() => setSetup({ kind: "clone" })} onTrack={() => void openProject("track")} config={config} onConnect={openSettings} readiness={readiness} /> : <>
 
 
-        <RepoToolbar
-          snapshot={snapshot}
-          busy={planning}
-          deliveryBusy={planning || generatingDescription}
-          refreshing={refreshingPath === snapshot.path && refreshKind === "refresh"}
-          fetching={refreshingPath === snapshot.path && refreshKind === "fetch"}
-          refreshDisabled={Boolean(refreshingPath)}
-          onRefresh={() => void refreshEverything()}
-          onFetch={() => void refreshEverything("fetch")}
-          onPull={() => void prepare("pull")}
-          onPush={() => void prepare("push")}
-          onBranch={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
-          onSave={() => beginDelivery(false)}
-          onIntegrate={() => beginDelivery(true)}
-        />
         <WorkOverviewStrip
           key={`overview:${snapshot.path}`}
+          toolbar={(actions) => <RepoToolbar
+            snapshot={snapshot}
+            busy={planning}
+            refreshing={refreshingPath === snapshot.path && refreshKind === "refresh"}
+            fetching={refreshingPath === snapshot.path && refreshKind === "fetch"}
+            refreshDisabled={Boolean(refreshingPath)}
+            onRefresh={() => void refreshEverything()}
+            onFetch={() => void refreshEverything("fetch")}
+            onPull={() => void prepare("pull")}
+            onPush={() => void prepare("push")}
+            onBranch={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
+            actions={actions}
+          />}
           snapshot={snapshot}
           fetchedAt={active?.fetchedAt}
           busy={planning || generatingDescription}
@@ -2883,19 +2881,13 @@ function changeStatus(code: string, t: Translate) {
  * The repository bar: where you are, the everyday Git verbs, and the next step for this branch. The
  * verbs still go through a plan, so a click here explains itself before anything changes.
  */
-function RepoToolbar({ snapshot, busy, deliveryBusy, refreshing, fetching, refreshDisabled, onRefresh, onFetch, onPull, onPush, onBranch, onSave, onIntegrate }: {
-  snapshot: RepoSnapshot; busy: boolean; deliveryBusy: boolean; refreshing: boolean; fetching: boolean; refreshDisabled: boolean;
+function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, onRefresh, onFetch, onPull, onPush, onBranch, actions }: {
+  snapshot: RepoSnapshot; busy: boolean; refreshing: boolean; fetching: boolean; refreshDisabled: boolean;
   onRefresh: () => void; onFetch: () => void; onPull: () => void; onPush: () => void; onBranch: () => void;
-  onSave: () => void; onIntegrate: () => void;
+  actions: ReactNode;
 }) {
   const { t } = useI18n();
   const source = snapshot.branches.find((branch) => branch.isCurrent);
-  const target = snapshot.defaultBranch;
-  const canIntegrate = Boolean(source && target && target !== snapshot.currentBranch);
-  const integrated = Boolean(target && source?.mergedInto.includes(target) && !snapshot.isDirty);
-  const blocked = Boolean(snapshot.pending || snapshot.conflicts.length || (!source && snapshot.head) || snapshot.currentBranch === "HEAD");
-  const newFiles = snapshot.changes.filter((file) => file.code.includes("?")).length;
-  const guidance = blocked ? t("finishPendingFirst") : snapshot.isDirty ? t("workSaveGuidance", { count: newFiles }) : integrated ? t("workIntegrated", { target: target! }) : canIntegrate ? t("workReadyToIntegrate", { target: target! }) : t(target ? "workOnMain" : "workNoMain");
   const tool = (Icon: LucideIcon, label: string, onClick: () => void, disabled: boolean, title?: string, spinning = false) =>
     <button className="tool-button" onClick={onClick} disabled={disabled} title={title ?? label}>{spinning ? <LoaderCircle className="spin" size={17} /> : <Icon size={17} />}<span>{label}</span></button>;
   return <div className="repo-toolbar">
@@ -2916,14 +2908,8 @@ function RepoToolbar({ snapshot, busy, deliveryBusy, refreshing, fetching, refre
       <span className="tool-divider" aria-hidden="true" />
       {tool(GitBranchPlus, t("branchTool"), onBranch, busy, t("newBranch"))}
     </div>
-    <div className={`toolbar-delivery ${snapshot.isDirty ? "is-dirty" : "is-saved"}`} title={guidance}>
-      <span className="delivery-status">{snapshot.isDirty
-        ? <><CircleDot size={12} />{t("workNeedsSaving", { count: snapshot.changes.length })}</>
-        : integrated ? <><Check size={12} />{t("integratedStatus", { target: target! })}</> : snapshot.head ? <><Check size={12} />{t("workSaved")}</> : <><CircleDot size={12} />{t("firstSaveTitle")}</>}</span>
-      <div className="delivery-actions">
-        {snapshot.isDirty && <button className={canIntegrate ? "outline-button" : "primary-button"} disabled={deliveryBusy || blocked} onClick={onSave}><GitCommitHorizontal size={14} />{t("saveChanges")}</button>}
-        {canIntegrate && !integrated && <button className="primary-button" disabled={deliveryBusy || blocked} onClick={onIntegrate}><GitMerge size={14} />{t(snapshot.isDirty ? "saveAndIntegrate" : "integrateInto", { target: target! })}</button>}
-      </div>
+    <div className={`toolbar-delivery ${snapshot.isDirty ? "is-dirty" : "is-saved"}`}>
+      {actions}
     </div>
   </div>;
 }
@@ -2934,10 +2920,10 @@ type OverviewHandlers = {
   onPrepare: (operation: Operation, args?: Record<string, string>) => void;
 };
 
-const overviewStorageKey = "gitcat-work-overview";
+const overviewStorageKey = "gitcat-work-overview-details";
 
 function readOverviewCollapsed() {
-  try { return localStorage.getItem(overviewStorageKey) === "collapsed"; } catch { return false; }
+  try { return localStorage.getItem(overviewStorageKey) !== "open"; } catch { return true; }
 }
 
 /**
@@ -2946,9 +2932,17 @@ function readOverviewCollapsed() {
  * merge on this computer is never mistaken for a published one. Every button opens an existing flow
  * that still shows its plan before Git runs; the Git term is offered underneath, never required.
  */
-function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers }: { snapshot: RepoSnapshot; fetchedAt?: string; busy: boolean; handlers: OverviewHandlers }) {
+function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
+  snapshot: RepoSnapshot; fetchedAt?: string; busy: boolean; handlers: OverviewHandlers;
+  toolbar: (actions: ReactNode) => ReactNode;
+}) {
   const { t, locale } = useI18n();
   const [collapsed, setCollapsed] = useState(readOverviewCollapsed);
+  const detailsId = useId();
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number }>();
+  // A refreshed snapshot invalidates an open menu just as it invalidates an old action plan.
+  useEffect(() => setMenu(undefined), [snapshot.stateId, busy]);
   const toggle = () => setCollapsed((value) => {
     try { localStorage.setItem(overviewStorageKey, value ? "open" : "collapsed"); } catch { /* only a preference */ }
     return !value;
@@ -3028,25 +3022,64 @@ function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers }: { snapshot: 
   }
   const detail = t(key("_detail"), values);
   const title = t(`next_${next.action}` as MessageKey, values);
-  return <section className={`work-overview ${collapsed ? "collapsed" : ""}`} aria-label={t("overviewLabel")} data-next={next.action}>
-    {!collapsed && <ol className="overview-stages">
-      {cells.map((cell) => <li key={cell.key} className={`overview-stage tone-${cell.tone}`} data-stage={cell.key} title={cell.note ? `${cell.value}. ${cell.note}` : cell.value}>
-        <span className="overview-caption"><cell.icon size={12} />{cell.caption}</span>
-        <strong>{cell.value}</strong>
-        {cell.note && <small>{cell.note}</small>}
-      </li>)}
-    </ol>}
-    <div className="overview-next" title={detail}>
-      <div className="overview-next-text">
-        <span className="overview-caption">{t("overviewNext")}</span>
-        <strong>{title}</strong>
-        {!collapsed && <small>{detail}</small>}
-        <code className="overview-git" title={t("overviewGitHint", { command: next.git })}>{t("overviewGitHint", { command: next.git })}</code>
+  const source = snapshot.branches.find((branch) => branch.isCurrent);
+  const canIntegrate = Boolean(source && target && target !== snapshot.currentBranch
+    && (snapshot.isDirty || integration.state === "not_integrated")
+    && !overview.pending && !overview.conflicts && !overview.detached);
+  const moreActions: MenuEntry[] = canIntegrate && next.action !== "integrate" ? [{
+    key: "integrate", icon: GitMerge,
+    label: t(snapshot.isDirty ? "saveAndIntegrate" : "integrateInto", { target: target! }),
+    onSelect: handlers.onIntegrate, disabled: busy
+  }] : [];
+  const closeMenu = () => { setMenu(undefined); moreButton.current?.focus(); };
+  const toolbarActions = <div className="delivery-actions overview-actions">
+    {actions}
+    {moreActions.length > 0 && <button ref={moreButton} className="outline-button overview-more" disabled={busy}
+      aria-label={t("overviewMoreActions")} aria-haspopup="menu" aria-expanded={Boolean(menu)}
+      onClick={() => {
+        const box = moreButton.current?.getBoundingClientRect();
+        if (box) setMenu(menu ? undefined : { x: box.right, y: box.bottom + 5 });
+      }}><ChevronDown size={14} /></button>}
+  </div>;
+  const summary = [
+    { key: "edited", icon: overview.pending || overview.conflicts || overview.detached ? AlertTriangle : edited.count ? CircleDot : Check,
+      value: overview.pending ? pendingLabel(overview.pending, t) : overview.detached ? savedCell.value : edited.count || overview.conflicts ? editedCell.value : overview.saved.hasCommits ? t("overviewEditedNone") : savedCell.value,
+      tone: overview.pending || overview.detached ? "attention" : editedCell.tone },
+    { key: "published", icon: Cloud, value: localOnly && overview.saved.hasCommits ? t("overviewLocalOnly")
+      : published.state === "in_sync" && freshness.state !== "checked" ? t("overviewRemoteUnchecked")
+      : publishedCell.value, tone: publishedCell.tone },
+    { key: "integrated", icon: GitMerge, value: integration.state === "integrated" ? t("overviewSavedIn", { target: target! }) : integrationCell.value, tone: integrationCell.tone }
+  ];
+  return <>
+    {toolbar(toolbarActions)}
+    <section className={`work-overview ${collapsed ? "collapsed" : ""}`} aria-label={t("overviewLabel")} data-next={next.action}>
+      <div className="overview-summary">
+        <ul className="overview-statuses">
+          {summary.map((item) => <li key={item.key} className={`overview-status tone-${item.tone}`}><item.icon size={13} aria-hidden="true" /><span>{item.value}</span></li>)}
+        </ul>
+        <button className="overview-toggle" onClick={toggle} aria-expanded={!collapsed} aria-controls={detailsId}>
+          {t("overviewDetails")}<ChevronDown size={13} className={collapsed ? "" : "open"} />
+        </button>
       </div>
-      {actions.length > 0 && <div className="overview-actions">{actions}</div>}
-      <button className="mini-icon overview-toggle" onClick={toggle} aria-expanded={!collapsed} aria-label={t(collapsed ? "overviewShow" : "overviewHide")} title={t(collapsed ? "overviewShow" : "overviewHide")}><ChevronRight size={13} className={collapsed ? "" : "open"} /></button>
-    </div>
-  </section>;
+      {!collapsed && <div className="overview-details" id={detailsId}>
+        <dl className="overview-stages">
+          {cells.map((cell) => <div key={cell.key} className={`overview-stage tone-${cell.tone}`} data-stage={cell.key}>
+            <dt className="overview-caption"><cell.icon size={13} aria-hidden="true" />{cell.caption}</dt>
+            <dd><strong>{cell.value}</strong>{cell.note && <small>{cell.note}</small>}</dd>
+          </div>)}
+        </dl>
+        <div className="overview-next">
+          <div className="overview-next-text">
+            <span className="overview-caption">{t("overviewNext")}</span>
+            <strong>{title}</strong>
+            <small>{detail}</small>
+            <code className="overview-git">{t("overviewGitHint", { command: next.git })}</code>
+          </div>
+        </div>
+      </div>}
+    </section>
+    {menu && moreActions.length > 0 && <ContextMenu {...menu} items={moreActions} label={t("overviewMoreActions")} onClose={closeMenu} />}
+  </>;
 }
 
 type FileListMode = "path" | "tree";
