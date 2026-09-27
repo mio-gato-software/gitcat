@@ -793,7 +793,7 @@ app.whenReady().then(async () => {
   await setText('.clone-form label:nth-of-type(2) input', 'empty-start');
   await waitFor(`document.querySelectorAll('.clone-form input')[1].value === 'empty-start' && document.querySelector('.setup-preview')`);
   await js(`document.querySelector('.clone-form .primary-button').click()`);
-  await waitFor(`!document.querySelector('.setup-modal') && document.querySelector('.graph-empty.first-save')`);
+  await waitFor(`!document.querySelector('.setup-modal') && document.querySelector('.graph-empty.first-save code')`);
   assert.match(await js(`document.querySelector('.graph-empty.first-save').innerText`), /Este proyecto está vacío[\s\S]*empty-start/);
   assert.match(await js(`document.querySelector('.changes-view').innerText`), /Todavía no hay versiones guardadas/);
   assert.match(await js(`document.querySelector('.window-tab.active').innerText`), /empty-start/);
