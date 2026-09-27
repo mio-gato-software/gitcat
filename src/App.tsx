@@ -1,3 +1,4 @@
+import { ShareReview } from "./ShareReview";
 import { SwitchWork } from "./SwitchWork";
 import { ActivityHistory } from "./ActivityHistory";
 import { OperationStatus, Elapsed } from "./OperationStatus";
@@ -475,6 +476,7 @@ export default function App() {
   /** Ticked files the last generated description could not read, so the form can say so. */
   const [descriptionWithheld, setDescriptionWithheld] = useState<WithheldFile[]>([]);
   /** The disclosure on screen. `resolve` answers a request that is waiting for the person's decision. */
+  const [shareReview, setShareReview] = useState<{path:string;head:string}>();
   const [switchWork, setSwitchWork] = useState<{ path: string; target: string }>();
   const [historyPath, setHistoryPath] = useState<string>();
   const [sharingDialog, setSharingDialog] = useState<{ preview: AiSharingPreview; paths?: string[]; resolve?: (accepted: boolean) => void }>();
@@ -1686,7 +1688,7 @@ export default function App() {
           </div>)}
           <button className="icon-button tab-add" onClick={() => setSetup({ kind: "choose" })} aria-label={t("addProjectTitle")} title={t("addProjectTitle")}><Plus size={16} /></button>
         </div>
-        <div className="top-actions">{snapshot && <button className="icon-button" onClick={()=>setSwitchWork({path:snapshot.path,target:snapshot.currentBranch})} aria-label={locale==='es'?'Trabajo apartado':'Set-aside work'}><ArrowLeftRight size={17} /></button>}{snapshot && <button className="icon-button" onClick={() => setHistoryPath(snapshot.path)} data-action="activity" aria-label={locale === "es" ? "Actividad y recuperación" : "Activity and recovery"}><Clock3 size={17} /></button>}<button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
+        <div className="top-actions">{snapshot && <button className="icon-button" onClick={()=>setShareReview({path:snapshot.path,head:selection})} aria-label={locale==='es'?'Compartir para revisión':'Share for review'} title={locale==='es'?'Compartir para revisión':'Share for review'}><Send size={17} /></button>}{snapshot && <button className="icon-button" onClick={()=>setSwitchWork({path:snapshot.path,target:snapshot.currentBranch})} aria-label={locale==='es'?'Trabajo apartado':'Set-aside work'}><ArrowLeftRight size={17} /></button>}{snapshot && <button className="icon-button" onClick={() => setHistoryPath(snapshot.path)} data-action="activity" aria-label={locale === "es" ? "Actividad y recuperación" : "Activity and recovery"}><Clock3 size={17} /></button>}<button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
       </header>
       <NotificationCenter items={activity} onDismiss={dismissActivity} onClear={dismissAllActivity} t={t} />
 
@@ -1801,6 +1803,7 @@ export default function App() {
         <footer className="statusbar"><div className="status-left"><span className={`status-good ${snapshot.isDirty ? "has-changes" : ""}`}><CircleDot size={12} /> {snapshot.isDirty ? counted(t, snapshot.changes.length, "change", "changes") : t("noUncommittedChanges")}</span><span className="status-separator" /><span>{counted(t, branchCount.local, "localBranch", "localBranches")}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} ${t("remoteOnly")}` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> {t("lastRead", { date: formatDate(active.loadedAt, locale) })}</span><span className="remote-status" title={snapshot.remotes.length ? `${remoteTitle(snapshot, t)}\n${active.fetchedAt ? t("remoteCheckedAt", { date: formatDate(active.fetchedAt, locale) }) : t("remoteNotChecked")}` : remoteTitle(snapshot, t)}><Cloud size={12} /> {remoteLabel(snapshot, t)}</span><button className={`provider-status ${config.lastProblem ? "attention" : ""}`} onClick={openSettings} title={t("aiStatusTitle")}><Sparkles size={12} /> {config.configured ? t(config.lastProblem ? "statusAiAttention" : "statusAiConnected", { model: config.model }) : t("llmNotConfigured")}</button></div></footer>
       </>}
       <OperationStatus path={snapshot?.path} t={t} />
+      {shareReview && snapshot?.path===shareReview.path && <ShareReview snapshot={snapshot} head={shareReview.head} locale={locale} onClose={()=>setShareReview(undefined)} onUpdated={value=>updateSnapshot(value.path,value)} />}
       {switchWork && <SwitchWork {...switchWork} locale={locale} onClose={()=>setSwitchWork(undefined)} onSave={()=>{setSwitchWork(undefined);beginDelivery(false);}} onPrepare={request=>{
         const path=switchWork.path;setSwitchWork(undefined);
         void showPlan(locale==='es'?'Revisar trabajo sin terminar':'Review unfinished work',()=>window.gitcat.prepareSwitchWork(path,request,locale),path,true);

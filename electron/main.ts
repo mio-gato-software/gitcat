@@ -8,7 +8,7 @@ import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  getSwitchWork, prepareSwitchWork, getActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
+  previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
   getLlmConfig, getSnapshot, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
   prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
   scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictGuide, type IssuedConflictProposal
@@ -36,6 +36,7 @@ if (userProfile === join(app.getPath("appData"), legacyAppName)) app.setName(leg
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 const openedRepositories = new Set<string>();
+const issuedReviews = new Map<string, import("../shared/types.js").ShareReviewPreview>();
 const issuedPlans = new Map<string, ActionPlan>();
 /** Plans that stopped, with what each step did: recovery reads completed steps from here, never from the renderer. */
 const failedPlans = new Map<string, FailedPlanRecord>();
@@ -487,6 +488,24 @@ app.whenReady().then(async () => {
     }
     if (project.path !== pending.to) return { status: "invalid", path: pending.to, reason: "not_repository", detail: `git rev-parse --show-toplevel: ${project.path}` };
     return adoptLocation(pending.from, project, pending.fingerprint, pending.match);
+  });
+  ipcMain.handle("review:preview",async(event,cwd:string,request:import('../shared/types.js').ShareReviewRequest)=>{
+    assertTrustedSender(event);const path=assertOpenedRepository(cwd);
+    if(!request || typeof request!=='object')throw new Error('Invalid review request');
+    const preview=await tracked(event,path,'planning',()=>previewShareReview(path,request));
+    if(issuedReviews.size>=50)issuedReviews.delete(issuedReviews.keys().next().value??'');
+    issuedReviews.set(preview.id,preview);return preview;
+  });
+  ipcMain.handle("review:publish",async(event,cwd:string,id:unknown)=>{
+    assertTrustedSender(event);const path=assertOpenedRepository(cwd),preview=typeof id==='string'?issuedReviews.get(id):undefined;
+    if(!preview || preview.repoPath!==path)throw new Error('Review expired. Check again before publishing.');
+    issuedReviews.delete(preview.id);
+    return tracked(event,path,'executing',()=>publishShareReview(preview),true);
+  });
+  ipcMain.handle("review:open",async(event,url:unknown)=>{
+    assertTrustedSender(event);
+    if(typeof url!=='string'||!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+$/.test(url))throw new Error('Invalid review URL');
+    await shell.openExternal(url);
   });
   ipcMain.handle("switch-work:read", (event, cwd: string, target: unknown) => {
     assertTrustedSender(event); if (typeof target !== 'string') throw new Error('Invalid branch'); return getSwitchWork(assertOpenedRepository(cwd),target);

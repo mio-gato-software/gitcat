@@ -928,6 +928,9 @@ export type GitlineApi = {
   generateCommitDescription: (path: string, locale?: Locale, paths?: string[]) => Promise<CommitDescriptionResult>;
   /** Exactly what a save of these files would record, against the last saved version. */
   getSelectionDiff: (path: string, paths: string[], locale?: Locale) => Promise<CommitDetail>;
+  previewReview: (path:string, request:ShareReviewRequest)=>Promise<ShareReviewPreview>;
+  publishReview: (path:string,id:string)=>Promise<{snapshot:RepoSnapshot;pullRequest:ReviewPullRequest}>;
+  openReview: (url:string)=>Promise<void>;
   getSwitchWork: (path: string, target: string) => Promise<SwitchWorkPreview>;
   prepareSwitchWork: (path: string, request: SwitchWorkRequest, locale?: Locale) => Promise<ActionPlan>;
   getActivityHistory: (path: string) => Promise<{ retentionDays: number; entries: ActivityRecord[] }>;
@@ -969,10 +972,14 @@ export type ActivityRecord = {
   id: string; repoPath: string; startedAt: string; finishedAt?: string;
   state: 'running' | 'completed' | 'failed';
   before: { head: string; branch: string }; after?: { head: string; branch: string };
-  steps: { operation: Operation; status: 'pending' | StepOutcome['status']; beforeHead?: string; afterHead?: string; at?: string }[];
+  steps: { operation: Operation | 'pull_request'; status: 'pending' | StepOutcome['status']; beforeHead?: string; afterHead?: string; at?: string }[];
   error?: string;
 };
 export type HistoryRecovery = { mode: 'revert' | 'undo' | 'restore'; commit: string; branch?: string };
 
 export type SwitchWorkRequest = { mode: 'carry' | 'set_aside' | 'restore'; target?: string; label?: string; includeUntracked?: boolean; stash?: string };
 export type SwitchWorkPreview = { snapshot: RepoSnapshot; target: string; occupied?: string; blockers: string[]; entries: { hash: string; label: string }[] };
+
+export type ShareReviewRequest = { remote:string;head:string;base:string;title:string;body:string };
+export type ReviewPullRequest = {url:string;state:'OPEN'|'CLOSED'|'MERGED';head:string;base:string};
+export type ShareReviewPreview = {id:string;repoPath:string;request:ShareReviewRequest;headHash:string;baseHash:string;publishedHash?:string;repository:string;remoteUrl:string;account:string;commits:{hash:string;subject:string}[];existing?:ReviewPullRequest;reviewable:boolean;checkedAt:string};

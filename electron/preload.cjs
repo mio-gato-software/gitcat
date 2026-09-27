@@ -2,6 +2,9 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("gitcat", {
   platform: process.platform,
+  previewReview:(path,request)=>ipcRenderer.invoke("review:preview",path,request),
+  publishReview:(path,id)=>ipcRenderer.invoke("review:publish",path,id),
+  openReview:(url)=>ipcRenderer.invoke("review:open",url),
   getSwitchWork: (path, target) => ipcRenderer.invoke("switch-work:read", path, target),
   prepareSwitchWork: (path, request, locale) => ipcRenderer.invoke("switch-work:prepare", path, request, locale),
   getActivityHistory: (path) => ipcRenderer.invoke("activity:list", path),

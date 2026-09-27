@@ -1,3 +1,5 @@
+import { previewReview, publishReview, type ReviewTools } from "./share-review.js";
+import type { ShareReviewRequest, ShareReviewPreview } from "../shared/types.js";
 import { ActivityHistory } from "./activity-history.js";
 import type { HistoryRecovery, SwitchWorkRequest, SwitchWorkPreview } from "../shared/types.js";
 import { operationContext, operationCheckpoint, operationPhase, inspectOperation, OperationCancelled } from "./operation-progress.js";
@@ -3817,3 +3819,26 @@ export async function prepareSwitchWork(cwd: string, request: SwitchWorkRequest,
   }
   return bindPlan(snapshot,{...sequenceDraft(steps,summary,effects,language),summary,switchWork:request,requiresConfirmation:true});
 }
+
+
+const reviewTools: ReviewTools = {
+  snapshot:getSnapshot,
+  remote:async (cwd,name)=>readRemote(await getSnapshot(cwd),{remote:name,access:true}),
+  git:(cwd,args)=>checkedGit(cwd,args), gh:(cwd,args)=>checkedGh(args,cwd,'github.com'),
+  publish:async preview=>{
+    const snapshot=await getSnapshot(preview.repoPath);
+    const argv=['push',preview.request.remote,`${preview.headHash}:refs/heads/${preview.request.head}`];
+    const plan=bindPlan(snapshot,sequenceDraft([stepFrom('git_command',{},argv,'en')!],'Publish the reviewed branch',undefined,'en'));
+    const result=await executePlan(preview.repoPath,plan,'en'); if(result.error)throw new Error(result.error);
+  },
+  create:async preview=>{
+    const snapshot=await getSnapshot(preview.repoPath),history=activityHistory();
+    const id=history.begin({steps:[{operation:'pull_request'}]},snapshot);
+    try {
+      await checkedGh(['pr','create','--repo',preview.repository,'--head',preview.request.head,'--base',preview.request.base,'--title',preview.request.title,'--body',preview.request.body],preview.repoPath,'github.com');
+      history.finish(id,snapshot,[{command:'',summary:'pull_request',status:'completed',output:''}]);
+    } catch(error){history.finish(id,snapshot,[{command:'',summary:'pull_request',status:'failed',output:''}],String(error));throw error;}
+  }
+};
+export const previewShareReview=(cwd:string,request:ShareReviewRequest)=>previewReview(reviewTools,cwd,request);
+export const publishShareReview=(preview:ShareReviewPreview)=>publishReview(reviewTools,preview);

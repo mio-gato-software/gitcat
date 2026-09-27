@@ -253,6 +253,14 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.operation-status button').click()`);
   await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
   const before = git('status', '--porcelain');
+  await js(`document.querySelector('[aria-label="Compartir para revisión"]').click()`);
+  await waitFor(`document.querySelector('.share-review')`);
+  await assertDialog();
+  assert.match(await js(`document.querySelector('.share-review').innerText`), /archivos sin guardar quedan en este equipo[\s\S]*Conecta primero un remoto/);
+  assert.equal(await js(`document.querySelector('.share-review .outline-button').disabled`),true);
+  await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
+  await waitFor(`!document.querySelector('.share-review')`);
+
   await js(`document.querySelector('.branch-switch').click()`);
   await waitFor(`document.querySelector('.switch-work fieldset')`);
   await assertDialog();

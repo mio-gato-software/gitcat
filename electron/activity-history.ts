@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { redactSecrets } from './readiness.js';
 import { redactText } from './outbound-content.js';
-import type { ActivityRecord, ActionPlan, RepoSnapshot, StepOutcome } from '../shared/types.js';
+import type { ActivityRecord, RepoSnapshot, StepOutcome } from '../shared/types.js';
 
 type Store = { retentionDays: number; entries: ActivityRecord[] };
 export class ActivityHistory {
@@ -27,7 +27,7 @@ export class ActivityHistory {
   }
   retention(days: number) { if (![0,7,30,90].includes(days)) throw new Error('Invalid retention.'); const s=this.read(); s.retentionDays=days; this.write(s); }
   clear(repoPath: string) { const s=this.read(); s.entries=s.entries.filter(e=>e.repoPath!==repoPath); this.write(s); }
-  begin(plan: ActionPlan, before: RepoSnapshot): string | undefined {
+  begin(plan: { steps: { operation: ActivityRecord["steps"][number]["operation"] }[] }, before: RepoSnapshot): string | undefined {
     const s=this.read(); if (!s.retentionDays) return;
     const id=randomUUID();
     s.entries.push({ id, repoPath:before.path, startedAt:new Date().toISOString(), state:'running', before:{ head:before.head, branch:before.currentBranch },

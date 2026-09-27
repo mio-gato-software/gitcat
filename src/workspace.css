@@ -601,3 +601,7 @@
 .activity-history { color: var(--secondary); font-size: 13px; line-height: 1.5; }
 .activity-history select { margin: 8px; padding: 6px; }
 .activity-record { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 16px; }
+.share-review { font-size: 13px; line-height: 1.5; color: var(--secondary); }
+.share-review fieldset { display: grid; gap: 8px; }
+.share-review label { display: grid; gap: 4px; }
+.share-review input, .share-review select, .share-review textarea { padding: 7px; max-width: 100%; color: var(--text); background: var(--canvas); border: 1px solid var(--border); }
