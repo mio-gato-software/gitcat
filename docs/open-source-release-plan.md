@@ -1,6 +1,6 @@
 # GitCat public portfolio release plan
 
-Planning deliverable for uncurved #113, prepared 2026-09-27 against `99ad341`.
+Planning document prepared 2026-09-27 against `99ad341`.
 This proposes a scope; it does not authorize publication, adopt a license, commit
 spending, or announce a release date. Personal use remains the current model.
 
@@ -18,7 +18,7 @@ the direct workflows without AI, or connect an optional assistant to plan an act
 Demonstrate selected-file saves, reviewed branch integration, and recovery with
 visible effects. Mention GitHub review sharing as an optional team workflow.
 Rebase and natural-language commands are supporting features. Do not claim proven
-beginner usability: #111 still needs five consenting participants and observed results.
+beginner usability: observed testing with consenting participants is still needed.
 
 ## Current evidence and release gaps
 
@@ -60,10 +60,8 @@ Use a separate audit checkout, fetching every branch/tag intended for release.
 Scan current files and historical blobs for secrets and inspect findings locally,
 redacting values from reports. Review commit identities, private paths and URLs,
 screenshots, fixtures, provider transcripts, copied code and generated assets.
-AGENTS.md currently contains an internal task-source address: replace that with a
-public contribution entry point in the future public copy. Add deliberate
-secret-file ignore patterns before accepting outside contributions. Do not upload
-private history to a third-party scanner by default.
+Add deliberate secret-file ignore patterns before accepting outside contributions.
+Do not upload private history to a third-party scanner by default.
 
 If credentials are found, rotate them before proposing history cleanup. Preserve
 a private backup and decide between audited history and a clean public snapshot.
@@ -105,7 +103,7 @@ Write a 700–1,000 word case study with links to source and tests:
 - Tradeoff: cooperative cancellation lets an active mutation settle, stops later
   steps, and reports the resulting repository state.
 - Evidence: reproducible fixtures, regressions and UI checks; separate automated
-  evidence from unfinished observed usability work in #111.
+  evidence from unfinished observed usability work.
 - AI assistance: actual coding/review assistance, the owner's decisions and
   verification, plus a limitation exposed by testing.
 
@@ -167,7 +165,7 @@ income only if users request it and maintenance remains sustainable.
 
 ## Decisions before executing the plan
 
-This task delivers the plan. Execution still requires decisions on publication,
+This document records the plan. Execution still requires decisions on publication,
 copyright/license adoption, public history, signing credentials/budget, verified
 platform versions and support contact. Missing beginner sessions block usability
 claims, not this planning artifact. No signing evidence or public release is claimed.

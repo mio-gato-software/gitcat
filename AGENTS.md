@@ -2,14 +2,9 @@
 
 Read this file before starting a task in this repository.
 
-## Task source
-
-Tasks for this repository are available at [llms.txt](http://100.106.172.17:3000/llms.txt).
-
 ## Naming
 
-The desktop app is named **GitCat**. Its task tracker is **uncurved**; refer to tracker tasks as
-**uncurved tasks** or simply **the board**.
+The desktop app is named **GitCat**.
 
 ## Product spirit
 

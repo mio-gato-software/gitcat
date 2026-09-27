@@ -26,4 +26,4 @@ Automated coverage: `npm run test:ui` checks keyboard context actions and focus 
 modal containment in both directions, background inertness, and Settings actions at
 150% zoom on 1280x800. Existing graph, pane, selected-save and conflict checks remain.
 Human VoiceOver listening is a manual check; automated DOM assertions do not prove
-spoken output or substitute for observed usability sessions (#111).
+spoken output or substitute for observed usability sessions.
