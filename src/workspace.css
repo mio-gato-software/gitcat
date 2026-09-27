@@ -605,3 +605,10 @@
 .share-review fieldset { display: grid; gap: 8px; }
 .share-review label { display: grid; gap: 4px; }
 .share-review input, .share-review select, .share-review textarea { padding: 7px; max-width: 100%; color: var(--text); background: var(--canvas); border: 1px solid var(--border); }
+.practice-guide { flex: none; max-height: 220px; overflow: auto; padding: 10px 16px; color: var(--secondary); background: var(--surface); border-bottom: 1px solid var(--border); font-size: 12px; line-height: 1.45; }
+.practice-heading, .practice-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.practice-heading { justify-content: space-between; }
+.practice-guide p { margin: 6px 0; }
+.practice-guide select { max-width: 100%; background: var(--canvas); color: var(--text); padding: 5px; }
+.practice-guide code { overflow-wrap: anywhere; }
+.practice-welcome { margin: 18px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }

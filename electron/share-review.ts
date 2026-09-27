@@ -65,7 +65,7 @@ export async function publishReview(tools:ReviewTools,preview:ShareReviewPreview
  operationCheckpoint();
  operationPhase("executing",1,2);
  if(fresh.commits.length) {
-  try { await tools.publish(fresh); } catch(error) { throw new Error(`Publishing was not confirmed. Check remote state before retrying. A protected branch or permission rule may require a topic branch or writable fork. No force-push was attempted. ${error instanceof Error?error.message:String(error)}`); }
+  try { await tools.publish(fresh); } catch(error) { throw new Error(`Publishing was not confirmed. Check remote state before retrying. A protected branch or permission rule may require a topic branch or writable fork. No force-push was attempted. ${error instanceof Error?error.message:String(error)}`, {cause:error}); }
  }
  operationCheckpoint();
  operationPhase("executing",2,2);
@@ -74,7 +74,7 @@ export async function publishReview(tools:ReviewTools,preview:ShareReviewPreview
  if(tips.get(`refs/heads/${fresh.request.head}`)!==fresh.headHash || tips.get(`refs/heads/${fresh.request.base}`)!==fresh.baseHash)throw new Error('Publication may have completed, but remote branches moved before review submission. Check live status and review again.');
  let current=await pullRequest(tools,fresh.repoPath,fresh.repository,fresh.request.head,fresh.request.base);
  if(current?.state!=='OPEN') {
-  try { await tools.create(fresh); } catch(error) { throw new Error(`The branch may already be published, but review creation was not confirmed. Check the live review status before retrying. ${error instanceof Error?error.message:String(error)}`); }
+  try { await tools.create(fresh); } catch(error) { throw new Error(`The branch may already be published, but review creation was not confirmed. Check the live review status before retrying. ${error instanceof Error?error.message:String(error)}`, {cause:error}); }
   current=await pullRequest(tools,fresh.repoPath,fresh.repository,fresh.request.head,fresh.request.base);
  }
  if(!current || current.state!=='OPEN')throw new Error('The branch is published, but an open review could not be verified. Refresh live status before retrying.');

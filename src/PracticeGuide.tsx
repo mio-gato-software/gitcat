@@ -1,0 +1,41 @@
+import { useEffect, useState } from 'react';
+import type { Locale, Operation, PracticeInfo, RepoSnapshot } from '../shared/types';
+
+export function PracticeGuide({snapshot,locale,onUpdated,onSave,onAction,onHistory,onResolve,onReplay,onRemoved}:{snapshot:RepoSnapshot;locale:Locale;onUpdated:(snapshot:RepoSnapshot)=>void;onSave:(integrate:boolean)=>void;onAction:(operation:Operation,args:Record<string,string>)=>void;onHistory:()=>void;onResolve:()=>void;onReplay:()=>void;onRemoved:()=>void}) {
+ const [info,setInfo]=useState<PracticeInfo|null>(null),[error,setError]=useState(''),[busy,setBusy]=useState(false),[remove,setRemove]=useState(false),[expanded,setExpanded]=useState(true);
+ const text=(en:string,es:string)=>locale==='es'?es:en;
+ useEffect(()=>{let alive=true;setInfo(null);void window.gitcat.getPracticeInfo(snapshot.path).then(value=>{if(alive)setInfo(value);}).catch(()=>undefined);return()=>{alive=false;};},[snapshot.path]);
+ const work=async(task:()=>Promise<void>)=>{setBusy(true);setError('');try{await task();}catch(e){setError(String(e));}finally{setBusy(false);}};
+ if(!info)return null;
+ const pages=[
+  [text('Edit a file','Editar un archivo'),text('Your working folder holds edits that are not saved in Git yet. Add a harmless line to story.txt, then inspect it in Changes.','Tu carpeta contiene cambios que aún no están guardados en Git. Añade una línea de ejemplo a story.txt y revísala en Cambios.')],
+  [text('Review and save','Revisar y guardar'),text('A commit is a saved version on this computer. Tick only the files you want, review their differences, write a message and confirm. This does not publish anything.','Un commit es una versión guardada en este equipo. Marca solo los archivos deseados, revisa sus diferencias, escribe un mensaje y confirma. Esto no publica nada.')],
+  [text('Create a line of work','Crear una línea de trabajo'),text('A branch is a line of work. Create practice/my-idea, then make another sample edit and save it. Switching branches changes which saved version your folder continues from.','Una rama es una línea de trabajo. Crea practice/my-idea, haz otro cambio de ejemplo y guárdalo. Cambiar de rama cambia la versión desde la que continúa tu carpeta.')],
+  [text('Bring the work into main','Integrar el trabajo en main'),text('Integration combines saved work from your branch with main. Review saving and integrating; it stays local. It is not publication or a cloud backup.','Integrar combina el trabajo guardado de tu rama con main. Revisa guardar e integrar; sigue siendo local. No es publicar ni crear una copia en la nube.')],
+  [text('Resolve an example conflict','Resolver un conflicto de ejemplo'),text('Two prepared example branches change the same greeting in conflict.txt. Switch to practice/conflict-ours, then review merging practice/conflict-theirs. Git will pause for your choice; open the conflict guide, choose a version, review and finish.','Dos ramas de ejemplo cambian el mismo saludo en conflict.txt. Cambia a practice/conflict-ours y revisa integrar practice/conflict-theirs. Git esperará tu elección; abre la guía, elige una versión, revisa y termina.')],
+  [text('Recover and replay','Recuperar y repetir'),text('Activity shows what GitCat did and offers reviewed recovery from saved versions. Never-saved files are not backed up. Publishing is a separate remote action, disabled in this disposable project. Start another practice to replay without deleting this one.','Actividad muestra qué hizo GitCat y ofrece recuperar versiones guardadas con revisión. Los archivos nunca guardados no tienen copia. Publicar es una acción remota aparte, desactivada en este proyecto desechable. Inicia otra práctica para repetir sin borrar esta.')]
+ ];
+ return <section className="practice-guide" aria-label={text('Disposable practice project','Proyecto de práctica desechable')}>
+  <div className="practice-heading"><strong>{text('Practice only · no remote · no AI needed','Solo práctica · sin remoto · no necesita IA')}</strong><button className="ghost-button small" aria-expanded={expanded} onClick={()=>setExpanded(!expanded)}>{text(expanded?'Hide lessons':'Resume lessons',expanded?'Ocultar lecciones':'Retomar lecciones')}</button></div>
+  {expanded&&<>
+   <label>{text('Lesson (skip or return anytime)','Lección (puedes saltar o volver)')} <select disabled={busy} value={info.lesson} onChange={e=>void work(async()=>setInfo(await window.gitcat.setPracticeLesson(snapshot.path,Number(e.target.value))))}>{pages.map(([title],i)=><option key={i} value={i}>{i+1}. {title}</option>)}</select></label>
+   <p>{pages[info.lesson][1]}</p>
+   <p>{text('Current state','Estado actual')}: <strong>{snapshot.currentBranch}</strong> · {snapshot.changes.length} {text('unsaved files','archivos sin guardar')} · {snapshot.conflicts.length} {text('conflicts','conflictos')}</p>
+   <div className="practice-actions">
+    {(info.lesson===0||info.lesson===2)&&<button className="outline-button small" disabled={busy||Boolean(snapshot.pending)} onClick={()=>void work(async()=>onUpdated(await window.gitcat.editPractice(snapshot.path)))}>{text('Add a sample line to story.txt','Añadir una línea de ejemplo a story.txt')}</button>}
+    {(info.lesson===1||info.lesson===2)&&<button className="outline-button small" disabled={!snapshot.isDirty} onClick={()=>onSave(false)}>{text('Review files and save a version','Revisar archivos y guardar una versión')}</button>}
+    {info.lesson===2&&<button className="outline-button small" onClick={()=>onAction(snapshot.branches.some(b=>b.name==='practice/my-idea')?'checkout':'create_branch',{name:'practice/my-idea'})}>{text('Review creating/switching to practice/my-idea','Revisar crear/cambiar a practice/my-idea')}</button>}
+    {info.lesson===3&&<button className="outline-button small" disabled={snapshot.currentBranch==='main'} onClick={()=>onSave(true)}>{text('Review saving and integrating into main','Revisar guardar e integrar en main')}</button>}
+    {info.lesson===4&&<>
+      <button className="outline-button small" disabled={Boolean(snapshot.pending)||snapshot.currentBranch==='practice/conflict-ours'} onClick={()=>onAction('checkout',{name:'practice/conflict-ours'})}>{text('Review switching to the example branch','Revisar cambiar a la rama de ejemplo')}</button>
+      <button className="outline-button small" disabled={snapshot.isDirty||Boolean(snapshot.pending)||snapshot.currentBranch!=='practice/conflict-ours'} onClick={()=>onAction('merge',{name:'practice/conflict-theirs'})}>{text('Review starting the example conflict','Revisar iniciar el conflicto de ejemplo')}</button>
+      <button className="outline-button small" disabled={!snapshot.pending&&!snapshot.conflicts.length} onClick={onResolve}>{text('Open the conflict guide','Abrir la guía del conflicto')}</button>
+    </>}
+    {info.lesson===5&&<><button className="outline-button small" onClick={onHistory}>{text('Review recovery in Activity','Revisar recuperación en Actividad')}</button><button className="outline-button small" onClick={onReplay}>{text('Start another disposable practice','Iniciar otra práctica desechable')}</button></>}
+    {info.lesson<5&&<button className="ghost-button small" disabled={busy} onClick={()=>void work(async()=>setInfo(await window.gitcat.setPracticeLesson(snapshot.path,info.lesson+1)))}>{text('Next / skip this lesson','Siguiente / saltar esta lección')}</button>}
+   </div>
+   {error&&<p role="alert">{error}</p>}
+   <details><summary>{text('Practice folder and cleanup','Carpeta de práctica y limpieza')}</summary><code>{snapshot.path}</code><p>{text('Deleting removes this disposable folder and all its files. Other projects are untouched.','Borrar elimina esta carpeta desechable y todos sus archivos. No afecta a otros proyectos.')}</p><button className="outline-button small" disabled={busy} onClick={()=>remove?void work(async()=>{await window.gitcat.removePractice(snapshot.path);onRemoved();}):setRemove(true)}>{remove?text('Confirm deleting this practice folder','Confirmar borrar esta carpeta de práctica'):text('Delete this practice folder','Borrar esta carpeta de práctica')}</button>{remove&&<button className="ghost-button small" onClick={()=>setRemove(false)}>{text('Keep it','Conservarla')}</button>}</details>
+  </>}
+ </section>;
+}

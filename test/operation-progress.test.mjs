@@ -8,7 +8,6 @@ import { execFileSync } from 'node:child_process';
 registerHooks({ resolve(s,c,n) { return s === 'electron' ? { url: new URL('./helpers/electron-stub.mjs', import.meta.url).href, shortCircuit: true } : n(s,c); } });
 const { trackOperation, cancelOperation, listOperations, operationCheckpoint } = await import('../dist-electron/electron/operation-progress.js');
 const service = await import('../dist-electron/electron/git-service.js');
-const delay = ms => new Promise(r => setTimeout(r, ms));
 
 test('cancellation rejects late read results, isolates repositories and rejects duplicate requests', async () => {
  let release;

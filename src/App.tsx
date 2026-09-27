@@ -1,3 +1,4 @@
+import { PracticeGuide } from "./PracticeGuide";
 import { ShareReview } from "./ShareReview";
 import { SwitchWork } from "./SwitchWork";
 import { ActivityHistory } from "./ActivityHistory";
@@ -476,6 +477,7 @@ export default function App() {
   /** Ticked files the last generated description could not read, so the form can say so. */
   const [descriptionWithheld, setDescriptionWithheld] = useState<WithheldFile[]>([]);
   /** The disclosure on screen. `resolve` answers a request that is waiting for the person's decision. */
+  const [practiceBusy, setPracticeBusy] = useState(false);
   const [shareReview, setShareReview] = useState<{path:string;head:string}>();
   const [switchWork, setSwitchWork] = useState<{ path: string; target: string }>();
   const [historyPath, setHistoryPath] = useState<string>();
@@ -1674,6 +1676,11 @@ export default function App() {
   };
 
 
+  const startPractice = async () => {
+    if(practiceBusy)return;setPracticeBusy(true);
+    try {showProject(await window.gitcat.createPractice());}catch(error){notify({message:cleanError(error,locale==='es'?'No se pudo crear la práctica.':'Could not create practice.'),tone:'error'});}finally{setPracticeBusy(false);}
+  };
+
   return (
     <I18nContext.Provider value={{ locale, t, setLocale }}>
     <ReadinessActionsContext.Provider value={readinessActions}>
@@ -1688,7 +1695,7 @@ export default function App() {
           </div>)}
           <button className="icon-button tab-add" onClick={() => setSetup({ kind: "choose" })} aria-label={t("addProjectTitle")} title={t("addProjectTitle")}><Plus size={16} /></button>
         </div>
-        <div className="top-actions">{snapshot && <button className="icon-button" onClick={()=>setShareReview({path:snapshot.path,head:selection})} aria-label={locale==='es'?'Compartir para revisión':'Share for review'} title={locale==='es'?'Compartir para revisión':'Share for review'}><Send size={17} /></button>}{snapshot && <button className="icon-button" onClick={()=>setSwitchWork({path:snapshot.path,target:snapshot.currentBranch})} aria-label={locale==='es'?'Trabajo apartado':'Set-aside work'}><ArrowLeftRight size={17} /></button>}{snapshot && <button className="icon-button" onClick={() => setHistoryPath(snapshot.path)} data-action="activity" aria-label={locale === "es" ? "Actividad y recuperación" : "Activity and recovery"}><Clock3 size={17} /></button>}<button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
+        <div className="top-actions"><button className="icon-button" disabled={practiceBusy} onClick={()=>void startPractice()} aria-label={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'} title={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'}><Lightbulb size={17} /></button>{snapshot && <button className="icon-button" onClick={()=>setShareReview({path:snapshot.path,head:selection})} aria-label={locale==='es'?'Compartir para revisión':'Share for review'} title={locale==='es'?'Compartir para revisión':'Share for review'}><Send size={17} /></button>}{snapshot && <button className="icon-button" onClick={()=>setSwitchWork({path:snapshot.path,target:snapshot.currentBranch})} aria-label={locale==='es'?'Trabajo apartado':'Set-aside work'}><ArrowLeftRight size={17} /></button>}{snapshot && <button className="icon-button" onClick={() => setHistoryPath(snapshot.path)} data-action="activity" aria-label={locale === "es" ? "Actividad y recuperación" : "Activity and recovery"}><Clock3 size={17} /></button>}<button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
       </header>
       <NotificationCenter items={activity} onDismiss={dismissActivity} onClear={dismissAllActivity} t={t} />
 
@@ -1702,7 +1709,7 @@ export default function App() {
         onConfirm={(candidateId) => void confirmLocation(activeUnavailable.path, candidateId)}
         onDismissNotice={() => setLocateNotice(undefined)}
         onRemove={() => closeProject(activeUnavailable.path)}
-      /> : !snapshot ? <Welcome onOpen={() => void openProject()} onClone={() => setSetup({ kind: "clone" })} onTrack={() => void openProject("track")} config={config} onConnect={openSettings} readiness={readiness} /> : <>
+      /> : !snapshot ? <Welcome onOpen={() => void openProject()} onClone={() => setSetup({ kind: "clone" })} onTrack={() => void openProject("track")} config={config} onConnect={openSettings} readiness={readiness} onPractice={() => void startPractice()} practiceBusy={practiceBusy} /> : <>
 
 
         <WorkOverviewStrip
@@ -1734,6 +1741,7 @@ export default function App() {
             onPrepare: (operation, args) => void prepare(operation, args)
           }}
         />
+        <PracticeGuide key={snapshot.path} snapshot={snapshot} locale={locale} onUpdated={value=>updateSnapshot(value.path,value)} onSave={beginDelivery} onAction={(operation,args)=>void prepare(operation,args)} onHistory={()=>setHistoryPath(snapshot.path)} onResolve={()=>void openGuide()} onReplay={()=>void startPractice()} onRemoved={()=>closeProject(snapshot.path)} />
         <main className="main-layout" ref={layoutRef} style={paneStyle}>
           {panes && !sidebarHidden && <PaneDivider edge="sidebar" width={panes.sidebar} onPointerDown={startResize("sidebar")} onNudge={(delta) => nudgePane("sidebar", delta)} onReset={() => resetPane("sidebar")} />}
           {panes && <PaneDivider edge="inspector" width={panes.inspector} onPointerDown={startResize("inspector")} onNudge={(delta) => nudgePane("inspector", delta)} onReset={() => resetPane("inspector")} />}
@@ -1901,12 +1909,13 @@ function UnavailableProjectPanel({ project, busy, notice, onRetry, onLocate, onC
  * The first screen needs nothing configured: opening a project and every Git button work on their
  * own. The AI assistant is offered as help that can be connected later, never as a gate.
  */
-function Welcome({ onOpen, onClone, onTrack, config, onConnect, readiness }: { onOpen: () => void; onClone: () => void; onTrack: () => void; config: LlmConfig; onConnect: () => void; readiness: ReadinessState }) {
+function Welcome({ onPractice, practiceBusy, onOpen, onClone, onTrack, config, onConnect, readiness }: { onPractice:()=>void; practiceBusy:boolean; onOpen: () => void; onClone: () => void; onTrack: () => void; config: LlmConfig; onConnect: () => void; readiness: ReadinessState }) {
   const { t } = useI18n();
   // Without Git nothing below can work, so a missing or broken Git is said first, with how to get it.
   const gitMissing = readiness.report && !readiness.report.repoPath && readiness.report.git.status !== "ok";
   return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card first-run"><div className="welcome-mark"><CatMark size={42} /></div><div className="eyebrow">{t("branchWorkspace")}</div><h1>{t("yourGitClearer")}</h1><p>{t("welcomeCopy")}</p>{gitMissing && <ReadinessChecklist readiness={readiness} items={["git"]} t={t} />}<ProjectStartOptions onOpen={onOpen} onClone={onClone} onTrack={onTrack} />
     <div className="welcome-direct"><strong>{t("welcomeDirectTitle")}</strong><div className="welcome-features"><span><GitCommitHorizontal size={14} /> {t("welcomeDirectSave")}</span><span><GitBranch size={14} /> {t("welcomeDirectBranches")}</span><span><ArrowUpFromLine size={14} /> {t("welcomeDirectSync")}</span><span><GitMerge size={14} /> {t("welcomeDirectConflicts")}</span></div></div>
+    <div className="practice-welcome"><strong>{t("practiceWelcomeTitle")}</strong><p>{t("practiceWelcomeCopy")}</p><button className="outline-button" disabled={practiceBusy} onClick={onPractice}><Lightbulb size={15} />{t("practiceWelcomeAction")}</button></div>
     <div className={`welcome-ai ${config.configured ? "connected" : ""}`}><Sparkles size={15} /><div><strong>{config.configured ? t("welcomeAiConnected", { model: config.model }) : t("welcomeAiTitle")}</strong><span>{t("welcomeAiCopy")}</span></div>{!config.configured && <button className="outline-button small" onClick={onConnect}>{t("connectAssistant")}</button>}</div>
   </div></div>;
 }

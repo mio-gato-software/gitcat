@@ -3,6 +3,9 @@ export type Locale = "en" | "es";
 type MessageValues = Record<string, string | number>;
 
 const en = {
+  practiceWelcomeTitle: "Try Git safely",
+  practiceWelcomeCopy: "Learn with a disposable local project: edit, save, branch, integrate and resolve a sample conflict. No remote, account or AI required.",
+  practiceWelcomeAction: "Create a practice project",
   operation_planning: "Reading the project and preparing a plan",
   operation_provider: "Waiting for the AI provider",
   operation_fetching: "Checking the remote",
@@ -1138,6 +1141,9 @@ const en = {
 
 const es: { [K in keyof typeof en]: string } = {
   ...en,
+  practiceWelcomeTitle: "Prueba Git con tranquilidad",
+  practiceWelcomeCopy: "Aprende en un proyecto local desechable: edita, guarda, crea ramas, integra y resuelve un conflicto de ejemplo. Sin remoto, cuenta ni IA.",
+  practiceWelcomeAction: "Crear proyecto de práctica",
   operation_planning: "Leyendo el proyecto y preparando un plan",
   operation_provider: "Esperando al proveedor de IA",
   operation_fetching: "Consultando el remoto",

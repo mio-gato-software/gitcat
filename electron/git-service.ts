@@ -1,3 +1,4 @@
+import { PracticeProjects } from "./practice-project.js";
 import { previewReview, publishReview, type ReviewTools } from "./share-review.js";
 import type { ShareReviewRequest, ShareReviewPreview } from "../shared/types.js";
 import { ActivityHistory } from "./activity-history.js";
@@ -932,6 +933,7 @@ const accessTimeoutMs = 15_000;
  * "could not reach". What Git answered is kept with anything shaped like a credential masked.
  */
 async function remoteAccess(repoRoot: string, remote: string): Promise<{ access: RemoteAccess; detail?: string }> {
+  if(practiceProjects().registered(repoRoot))return {access:"denied",detail:"Practice projects do not connect to remotes."};
   const ownSsh = (await optionalGit(repoRoot, ["config", "--get", "core.sshCommand"])) || process.env.GIT_SSH_COMMAND || process.env.GIT_SSH;
   const env: NodeJS.ProcessEnv = {
     GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "", SSH_ASKPASS_REQUIRE: "never", GCM_INTERACTIVE: "never",
@@ -960,6 +962,7 @@ async function readRemote(snapshot: RepoSnapshot, request: ReadinessRequest): Pr
   if (!choice) return { status: "none", remotes: [...snapshot.remotes] };
   const pushUrl = (await optionalGit(snapshot.path, ["remote", "get-url", "--push", choice.name])) || snapshot.remoteUrls?.[choice.name] || "";
   const address = parseRemoteAddress(pushUrl);
+  if (practiceProjects().registered(snapshot.path)) return {status:'found',name:choice.name,url:displayUrl(pushUrl),protocol:address.protocol,host:address.host,path:address.path,source:choice.source,remotes:[...snapshot.remotes],access:'denied',detail:'Practice projects stay local; no account or network check was made.'};
   // A host that could read as an option is never handed to ssh.
   const sshHost = address.protocol === "ssh" && address.host && !address.host.startsWith("-") && !address.port ? address.host : undefined;
   let resolvedHost: string | undefined;
@@ -3392,6 +3395,7 @@ function failureReport(outcomes: StepOutcome[], failed: StepOutcome, detail: str
  * exactly as they were, which is why this never needs a plan or a confirmation.
  */
 export async function fetchRemotes(cwd: string): Promise<RepoSnapshot> {
+  if(practiceProjects().registered(cwd))return getSnapshot(cwd);
   if (await optionalGit(cwd, ["remote"])) await reportedGit(cwd, ["fetch", "--all", "--prune", "--quiet"]);
   return getSnapshot(cwd);
 }
@@ -3683,6 +3687,11 @@ export async function clearActivityHistory(cwd: string) { activityHistory().clea
 
 /** Recorded before execution and after each settled step, so a crash leaves uncertainty visible. */
 export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale) {
+  if (practiceProjects().registered(cwd)) {
+    if(!practiceProjects().owns(cwd))throw new Error('Practice ownership changed. No demonstration action will run here; open a verified practice project.');
+    const safeLocal = new Set(['status','diff','log','show','branch','switch','checkout','add','commit','merge','rebase','stash','revert','reset','ls-files','rev-parse']);
+    if ((await getSnapshot(cwd)).remotes.length || plan.steps.some(step=>['push','fetch','pull','add_remote','github_create_repo'].includes(step.operation) || (step.operation==='set_identity'&&step.args.scope==='global') || (step.operation==='git_command'&&!safeLocal.has(step.argv?.[0]??'')))) throw new Error('Practice stays local. Publishing, remote access and global settings are disabled here. Use a real project for collaboration.');
+  }
   if (plan.recovery) await validateHistoryRecovery(cwd, plan.recovery);
   if (plan.switchWork) await validateSwitchWork(cwd, plan.switchWork);
   const before = await getSnapshot(cwd);
@@ -3741,6 +3750,7 @@ export async function prepareHistoryRecovery(cwd: string, id: string, mode: Hist
 
 
 async function recordConflictActivity<T extends ConflictApplyResult | ConflictChoiceResult>(cwd: string, count: number, task: () => Promise<T>): Promise<T> {
+  if(practiceProjects().registered(cwd)&&!practiceProjects().owns(cwd))throw new Error('Practice ownership changed. No conflict files were written.');
   const before=await getSnapshot(cwd), history=activityHistory();
   const step=stepFrom('resolve_conflict',{},[],'en')!;
   const id=history.begin(bindPlan(before,sequenceDraft(Array.from({length:Math.max(1,count)},()=>step),'Resolve reviewed conflicts')),before);
@@ -3842,3 +3852,14 @@ const reviewTools: ReviewTools = {
 };
 export const previewShareReview=(cwd:string,request:ShareReviewRequest)=>previewReview(reviewTools,cwd,request);
 export const publishShareReview=(preview:ShareReviewPreview)=>publishReview(reviewTools,preview);
+
+
+function practiceProjects(){return new PracticeProjects(join(app.getPath('userData'),'gitcat-practice'),async(cwd,args)=>{
+  const result=await runCommand('git',args,cwd,60000,{GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_COUNT:'0'});
+  if(result.code!==0)throw new Error(result.stderr||'Practice setup failed');return result.stdout.trim();
+});}
+export async function createPractice(){const info=await practiceProjects().create();return getSnapshot(info.path);}
+export function getPracticeInfo(cwd:string){return practiceProjects().info(cwd);}
+export function setPracticeLesson(cwd:string,lesson:number){return practiceProjects().lesson(cwd,lesson);}
+export async function editPractice(cwd:string){const snapshot=await getSnapshot(cwd);if(snapshot.pending||snapshot.conflicts.length||snapshot.remotes.length)throw new Error('Finish the practice conflict first, and keep this project without remotes.');practiceProjects().edit(cwd);return getSnapshot(cwd);}
+export function removePractice(cwd:string){practiceProjects().remove(cwd);}

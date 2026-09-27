@@ -51,6 +51,11 @@ app.whenReady().then(async () => {
   ipcMain.handle('activity:list', (_, p) => service.getActivityHistory(p));
   ipcMain.handle('activity:retention', (_, days) => service.setActivityRetention(days));
   ipcMain.handle('activity:clear', (_, p) => service.clearActivityHistory(p));
+  ipcMain.handle('practice:info',(_,p)=>service.getPracticeInfo(p));
+  ipcMain.handle('practice:create',()=>service.createPractice());
+  ipcMain.handle('practice:lesson',(_,p,lesson)=>service.setPracticeLesson(p,lesson));
+  ipcMain.handle('practice:edit',(_,p)=>service.editPractice(p));
+  ipcMain.handle('practice:remove',(_,p)=>service.removePractice(p));
   const plans = new Map();
   let refreshError = false;
   // A second saved project whose folder is gone: it must stay listed and explain itself instead of vanishing.
@@ -855,6 +860,17 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.settings-modal .readiness-row[data-item="author"]').innerText`), /QA Recetas <recetas@example\.test>[\s\S]*configurado para todos los repositorios de este Mac/);
   await js(`document.querySelector('.settings-modal .readiness-section').scrollIntoView()`);
   await capture('settings-readiness-remote');
+  await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
+  await js(`document.querySelector('[aria-label="Crear proyecto de práctica desechable"]').click()`);
+  await waitFor(`document.querySelector('.practice-guide')`);
+  assert.match(await js(`document.querySelector('.practice-guide').innerText`),/sin remoto[\s\S]*no necesita IA/);
+  await js(`document.querySelector('.practice-guide .practice-actions button').click()`);
+  await waitFor(`document.querySelector('.practice-guide').innerText.includes('1 archivos sin guardar')`);
+  await js(`document.querySelector('.practice-guide select').value='4'; document.querySelector('.practice-guide select').dispatchEvent(new Event('change',{bubbles:true}))`);
+  await waitFor(`document.querySelector('.practice-guide p').innerText.includes('Dos ramas de ejemplo')`);
+  await capture('practice-lessons');
+  assert.equal(git('status','--porcelain').includes('.env'),true,'Practice edits leave the original project untouched');
+
   win.destroy();
   console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, a work overview separating edited, saved, integrated and published work with one next step, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');
   app.quit();

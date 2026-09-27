@@ -928,6 +928,11 @@ export type GitlineApi = {
   generateCommitDescription: (path: string, locale?: Locale, paths?: string[]) => Promise<CommitDescriptionResult>;
   /** Exactly what a save of these files would record, against the last saved version. */
   getSelectionDiff: (path: string, paths: string[], locale?: Locale) => Promise<CommitDetail>;
+  createPractice: ()=>Promise<RepoSnapshot>;
+  getPracticeInfo: (path:string)=>Promise<PracticeInfo|null>;
+  setPracticeLesson: (path:string,lesson:number)=>Promise<PracticeInfo>;
+  editPractice: (path:string)=>Promise<RepoSnapshot>;
+  removePractice: (path:string)=>Promise<void>;
   previewReview: (path:string, request:ShareReviewRequest)=>Promise<ShareReviewPreview>;
   publishReview: (path:string,id:string)=>Promise<{snapshot:RepoSnapshot;pullRequest:ReviewPullRequest}>;
   openReview: (url:string)=>Promise<void>;
@@ -983,3 +988,5 @@ export type SwitchWorkPreview = { snapshot: RepoSnapshot; target: string; occupi
 export type ShareReviewRequest = { remote:string;head:string;base:string;title:string;body:string };
 export type ReviewPullRequest = {url:string;state:'OPEN'|'CLOSED'|'MERGED';head:string;base:string};
 export type ShareReviewPreview = {id:string;repoPath:string;request:ShareReviewRequest;headHash:string;baseHash:string;publishedHash?:string;repository:string;remoteUrl:string;account:string;commits:{hash:string;subject:string}[];existing?:ReviewPullRequest;reviewable:boolean;checkedAt:string};
+
+export type PracticeInfo={id:string;path:string;lesson:number};

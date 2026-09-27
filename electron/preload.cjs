@@ -2,6 +2,11 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("gitcat", {
   platform: process.platform,
+  createPractice:()=>ipcRenderer.invoke("practice:create"),
+  getPracticeInfo:path=>ipcRenderer.invoke("practice:info",path),
+  setPracticeLesson:(path,lesson)=>ipcRenderer.invoke("practice:lesson",path,lesson),
+  editPractice:path=>ipcRenderer.invoke("practice:edit",path),
+  removePractice:path=>ipcRenderer.invoke("practice:remove",path),
   previewReview:(path,request)=>ipcRenderer.invoke("review:preview",path,request),
   publishReview:(path,id)=>ipcRenderer.invoke("review:publish",path,id),
   openReview:(url)=>ipcRenderer.invoke("review:open",url),

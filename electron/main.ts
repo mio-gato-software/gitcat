@@ -8,7 +8,7 @@ import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
+  createPractice, getPracticeInfo, setPracticeLesson, editPractice, removePractice, previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
   getLlmConfig, getSnapshot, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
   prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
   scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictGuide, type IssuedConflictProposal
@@ -489,6 +489,11 @@ app.whenReady().then(async () => {
     if (project.path !== pending.to) return { status: "invalid", path: pending.to, reason: "not_repository", detail: `git rev-parse --show-toplevel: ${project.path}` };
     return adoptLocation(pending.from, project, pending.fingerprint, pending.match);
   });
+  ipcMain.handle("practice:create",async(event)=>{assertTrustedSender(event);return adoptProject(await createPractice());});
+  ipcMain.handle("practice:info",(event,cwd:string)=>{assertTrustedSender(event);return getPracticeInfo(assertOpenedRepository(cwd));});
+  ipcMain.handle("practice:lesson",(event,cwd:string,lesson:unknown)=>{assertTrustedSender(event);if(typeof lesson!=='number')throw new Error('Invalid lesson');return setPracticeLesson(assertOpenedRepository(cwd),lesson);});
+  ipcMain.handle("practice:edit",(event,cwd:string)=>{assertTrustedSender(event);const path=assertOpenedRepository(cwd);return exclusive(path,()=>editPractice(path));});
+  ipcMain.handle("practice:remove",(event,cwd:string)=>{assertTrustedSender(event);const path=assertOpenedRepository(cwd);return exclusive(path,async()=>removePractice(path));});
   ipcMain.handle("review:preview",async(event,cwd:string,request:import('../shared/types.js').ShareReviewRequest)=>{
     assertTrustedSender(event);const path=assertOpenedRepository(cwd);
     if(!request || typeof request!=='object')throw new Error('Invalid review request');
