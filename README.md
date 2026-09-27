@@ -1,5 +1,7 @@
 # GitCat
 
+Plan de una posible publicación como proyecto de portafolio: [alcance, preparación y límites](docs/open-source-release-plan.md). Es un plan; no anuncia una versión pública ni cambia el uso personal actual.
+
 MVP de escritorio para trabajar con ramas Git desde una vista centrada en historial, autoría y rebase. La aplicación usa Electron + React + Vite y mantiene el proceso de Git separado del renderer.
 
 ## Ejecutar
