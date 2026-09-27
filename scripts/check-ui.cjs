@@ -196,6 +196,23 @@ app.whenReady().then(async () => {
     return nodes.filter(node => { const r = node.getBoundingClientRect(); return r.left < 0 || r.right > innerWidth || r.width < 20 || r.bottom > innerHeight; }).map(node => node.textContent || node.getAttribute('aria-label'));
   })()`), [], 'Primary controls fit the window');
 
+  const assertDialog = async () => {
+    assert.deepEqual(await js(`(() => {
+      const dialog = [...document.querySelectorAll('[aria-modal="true"]')].at(-1);
+      const nodes = [...dialog.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], summary, [tabindex]:not([tabindex="-1"])')].filter(n => n.tabIndex >= 0 && n.getClientRects().length);
+      const first = nodes[0], last = nodes.at(-1);
+      const initial = dialog.contains(document.activeElement);
+      last.focus(); last.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+      const forward = document.activeElement === first;
+      first.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+      const backward = document.activeElement === last;
+      const background = document.querySelector('.topbar');
+      const inert = Boolean(background?.closest('[inert]'));
+      first.focus();
+      return { initial, forward, backward, inert };
+    })()`), { initial: true, forward: true, backward: true, inert: true });
+  };
+
   await win.loadFile(path.join(root, 'dist/index.html'));
   await js(`localStorage.setItem('gitcat-locale', 'es')`);
   await win.loadFile(path.join(root, 'dist/index.html'));
@@ -216,6 +233,13 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.window-tab:not(.unavailable) [role="tab"]').click()`);
   await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
   const before = git('status', '--porcelain');
+  await js(`(() => { const button = document.querySelector('.branch-main'); button.focus(); button.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true })); })()`);
+  await waitFor(`document.querySelector('[role="menu"]')`);
+  assert.equal(await js(`document.activeElement.getAttribute('role')`), 'menuitem');
+  await js(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  await waitFor(`!document.querySelector('[role="menu"]')`);
+  assert.equal(await js(`document.activeElement.classList.contains('branch-main')`), true, 'Context menu restores keyboard focus');
+
   // The overview keeps edited, saved, integrated and published apart, and names one next step by intent.
   await waitFor(`document.querySelector('.work-overview')?.dataset.next === 'save_changes'`);
   const stage = (name) => js(`document.querySelector('.work-overview [data-stage="${name}"]').innerText`);
@@ -346,6 +370,7 @@ app.whenReady().then(async () => {
   const selectedDiff = await js(`document.querySelector('.selection-diff-modal .diff-view').innerText`);
   assert.match(selectedDiff, /updated menu/); assert.doesNotMatch(selectedDiff, /new-file/);
   await capture('selected-diff');
+  await assertDialog();
   await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
   await waitFor(`!document.querySelector('.selection-diff-modal')`);
   // Ignoring an untracked file previews the exact .gitignore line and writes nothing until confirmed.
@@ -371,6 +396,7 @@ app.whenReady().then(async () => {
   assert.doesNotMatch(disclosure, /new-file\.txt/, 'Only the ticked files are part of the description request');
   assert.equal(described.length, 0, 'Still nothing sent while the disclosure is open');
   await capture('sharing-disclosure');
+  await assertDialog();
   await js(`document.querySelector('.sharing-modal .sharing-accept').click()`);
   await waitFor(`document.querySelector('#commit-description')?.value === 'Update menu and add a new file'`);
   assert.deepEqual(described.at(-1), ['app.txt'], 'The description reads only the ticked files');
@@ -545,6 +571,14 @@ app.whenReady().then(async () => {
   // The guided connection: what a provider is, that it is billed by the provider, where the key comes from.
   await js(`[...document.querySelectorAll('.welcome-ai button')][0].click()`);
   await waitFor(`document.querySelector('.settings-modal.guided')`);
+  await assertDialog();
+  win.setSize(1280, 800);
+  win.webContents.setZoomFactor(1.5);
+  await js(`document.querySelector('.settings-modal .modal-actions button').focus()`);
+  assert.equal(await js(`(() => { const r = document.activeElement.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight && r.right <= innerWidth; })()`), true, 'Dialog primary actions reachable at 150% zoom on a laptop');
+  await capture('settings-large-text');
+  win.webContents.setZoomFactor(1);
+  win.setSize(1480, 940);
   const settingsText = () => js(`document.querySelector('.settings-modal').innerText`);
   await waitFor(`document.querySelector('.settings-modal .readiness-row[data-item="author"]')`);
   const guide = await settingsText();

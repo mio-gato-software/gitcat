@@ -1,3 +1,4 @@
+import { useDialog } from "./useDialog";
 import { CatMark, SleepingCat } from "./CatMark";
 import { NotificationCenter } from "./NotificationCenter";
 import { addNotification, type Notification } from "../shared/notifications";
@@ -1795,7 +1796,7 @@ export default function App() {
       {menu && snapshot && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu)} label={menu.work ? t("uncommittedHeading") : menu.commit ? t("commitActions", { hash: menu.commit.shortHash }) : t("actionsFor", { name: menu.branch ?? "" })} onClose={() => setMenu(undefined)} />}
       {sharingDialog && <SharingDialog key={sharingDialog.preview.repoPath} initial={sharingDialog.preview} paths={sharingDialog.paths}
         repoName={projects.find((project) => project.snapshot.path === sharingDialog.preview.repoPath)?.snapshot.name ?? sharingDialog.preview.repoPath}
-        covered={Boolean(selectedFile)} onAccept={acceptSharing} onClose={closeSharing}
+        onAccept={acceptSharing} onClose={closeSharing}
         onShowFile={(file) => { const change = snapshot?.changes.find((item) => item.path === file || item.from === file); if (change) setSelectedFile(change); }} />}
       {modalCommit && snapshot && <CommitModal commit={modalCommit.commit} initialFile={modalCommit.file} repoPath={snapshot.path} onClose={() => setModalCommit(undefined)} />}
       {selectedFile && snapshot && <FileDiffModal file={selectedFile} repoPath={snapshot.path} onClose={() => setSelectedFile(undefined)} />}
@@ -1944,9 +1945,9 @@ function SetupModal({ setup, onClose, onChoose, onClone, onStartTracking, onOpen
 
 function SetupFrame({ eyebrow, title, onClose, children }: { eyebrow: string; title: string; onClose: () => void; children: ReactNode }) {
   const { t } = useI18n();
-  useEscape(onClose);
+  const dialogRef = useDialog(onClose);
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-modal-title">
+    <div className="setup-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="setup-modal-title">
       <div className="modal-heading"><div><div className="eyebrow">{eyebrow}</div><h2 id="setup-modal-title">{title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div>
       {children}
     </div>
@@ -2380,7 +2381,12 @@ function BranchRow({ branch, label, variant, merged, selected, defaultBranch, co
   const protectedByPrefix = isProtectedBranch(branch.name);
   // Read once per render rather than per row: the panel redraws on every snapshot anyway.
   const stale = staleDays(branch, Date.now());
-  return <div onContextMenu={onContextMenu} className={`branch-row ${branch.isCurrent ? "current" : ""} ${selected ? "selected" : ""} ${merged ? "merged" : ""} ${branch.stackedOn ? "stacked" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onSwitchNow} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch, t)}\n${t("branchClickHint")}`}><span className="branch-color" style={{ background: colour }} />{branch.stackedOn ? <GitFork size={14} className="branch-stack-icon" /> : <GitBranch size={14} />}<span className="branch-label">{label}</span>{variant && <span className="branch-variant" title={t("variantPrefix", { name: branch.name })}>{t("variant")}</span>}{merged && <span className="branch-merged" role="img" aria-label={t("mergedBadge", { branch: defaultBranch ?? "" })} title={t("mergedTitle", { branch: defaultBranch ?? "" })}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={t("worktreeBadge", { path: branch.checkedOutIn })} title={t("worktreeBadge", { path: branch.checkedOutIn })}><FolderGit2 size={12} /></span>}{protectedByPrefix && <span className="branch-protected" role="img" aria-label={t("protectedBadge")} title={t("protectedTitle")}><ShieldCheck size={12} /></span>}{stale > 0 && <span className="branch-stale" role="img" aria-label={t("staleBadge", { days: stale })} title={t("staleTitle", { days: stale })}><Clock3 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">{t("current")}</span>}{isDefault && <span className="current-pill">{t("primary")}</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && <button className="branch-switch" onClick={onSwitch} disabled={busy} aria-label={t("switchBranch", { name: branch.name })} title={t("switchBranchTitle", { name: branch.name })}><ArrowLeftRight size={12} /></button>}{!branch.isCurrent && !isDefault && !protectedByPrefix && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={t("deleteBranch", { name: branch.name })} title={branch.mergedInto.length ? t("deleteMergedBranch", { name: branch.name, branches: branch.mergedInto.join(t("and")) }) : t("deleteUnmergedBranch", { name: branch.name })}><Trash2 size={12} /></button>}</div>;
+  return <div onContextMenu={onContextMenu} onKeyDown={(event) => {
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+      event.preventDefault(); const box = event.currentTarget.getBoundingClientRect();
+      event.currentTarget.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: box.left + 20, clientY: box.bottom }));
+    }
+  }} className={`branch-row ${branch.isCurrent ? "current" : ""} ${selected ? "selected" : ""} ${merged ? "merged" : ""} ${branch.stackedOn ? "stacked" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onSwitchNow} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch, t)}\n${t("branchClickHint")}`}><span className="branch-color" style={{ background: colour }} />{branch.stackedOn ? <GitFork size={14} className="branch-stack-icon" /> : <GitBranch size={14} />}<span className="branch-label">{label}</span>{variant && <span className="branch-variant" title={t("variantPrefix", { name: branch.name })}>{t("variant")}</span>}{merged && <span className="branch-merged" role="img" aria-label={t("mergedBadge", { branch: defaultBranch ?? "" })} title={t("mergedTitle", { branch: defaultBranch ?? "" })}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={t("worktreeBadge", { path: branch.checkedOutIn })} title={t("worktreeBadge", { path: branch.checkedOutIn })}><FolderGit2 size={12} /></span>}{protectedByPrefix && <span className="branch-protected" role="img" aria-label={t("protectedBadge")} title={t("protectedTitle")}><ShieldCheck size={12} /></span>}{stale > 0 && <span className="branch-stale" role="img" aria-label={t("staleBadge", { days: stale })} title={t("staleTitle", { days: stale })}><Clock3 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">{t("current")}</span>}{isDefault && <span className="current-pill">{t("primary")}</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && <button className="branch-switch" onClick={onSwitch} disabled={busy} aria-label={t("switchBranch", { name: branch.name })} title={t("switchBranchTitle", { name: branch.name })}><ArrowLeftRight size={12} /></button>}{!branch.isCurrent && !isDefault && !protectedByPrefix && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={t("deleteBranch", { name: branch.name })} title={branch.mergedInto.length ? t("deleteMergedBranch", { name: branch.name, branches: branch.mergedInto.join(t("and")) }) : t("deleteUnmergedBranch", { name: branch.name })}><Trash2 size={12} /></button>}</div>;
 }
 
 /**
@@ -2816,6 +2822,12 @@ function CommitRow({ commit, row, lanes, remotes, colour, byFamily, selected, he
     data-hash={commit.hash}
     onClick={onSelect}
     onDoubleClick={onOpen}
+    onKeyDown={(event) => {
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+        event.preventDefault(); event.stopPropagation(); const box = event.currentTarget.getBoundingClientRect();
+        onMenu(branchOf(first), box.left + 20, box.bottom);
+      }
+    }}
     onContextMenu={(event) => { event.preventDefault(); onMenu(branchOf(first), event.clientX, event.clientY); }}
   >
     <div className="commit-refs">
@@ -3293,20 +3305,8 @@ function DeliveryReviewModal({ review, snapshot, busy, onClose, onApply }: {
   review: { turnId: number; plan: ActionPlan }; snapshot?: RepoSnapshot; busy: boolean; onClose: () => void; onApply: () => Promise<void>;
 }) {
   const { t } = useI18n();
-  const container = useRef<HTMLElement>(null);
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    container.current?.focus();
-    return () => previous?.focus();
-  }, []);
-  useEscape(onClose);
-  return <div className="modal-backdrop"><section className="modal delivery-review-modal" ref={container} tabIndex={-1} onKeyDown={(event) => {
-      if (event.key !== "Tab") return;
-      const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
-      const first = buttons[0], last = buttons.at(-1);
-      if (event.shiftKey && (document.activeElement === first || document.activeElement === container.current)) { event.preventDefault(); last?.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-    }} role="dialog" aria-modal="true" aria-label={t("reviewDeliveryTitle")}>
+  const dialogRef = useDialog(onClose);
+  return <div className="modal-backdrop"><section className="modal delivery-review-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("reviewDeliveryTitle")}>
     <div className="modal-heading"><h2>{t("reviewDeliveryTitle")}</h2><button className="icon-button" onClick={onClose} aria-label={t("cancel")}><X size={18} /></button></div>
     <PlanCard plan={review.plan} snapshot={snapshot} busy={busy} onApply={onApply} onDismiss={onClose} />
   </section></div>;
@@ -3318,7 +3318,7 @@ function ConversationEntry({ turn, snapshot, busy, configured, onRecoveryAction,
   const { t } = useI18n();
   // A sequence reports itself step by step, marks included, so it needs no outer verdict icon or colour.
   const sequence = (turn.plan?.steps.length ?? 0) > 1;
-  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && <p>{turn.answer}</p>}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} snapshot={snapshot} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.completion ? <CompletionCard summary={turn.completion} output={turn.output} /> : turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
+  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading" role="status"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && <p>{turn.answer}</p>}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} snapshot={snapshot} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.completion ? <CompletionCard summary={turn.completion} output={turn.output} /> : turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error" role="alert"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
 }
 
 
@@ -3504,7 +3504,7 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange
   /** The last attempt from this window that did not connect. The saved connection's own trouble lives in `config`. */
   const [attempt, setAttempt] = useState<AiConnectionProblem>();
   const [error, setError] = useState<string>();
-  useEscape(onClose);
+  const dialogRef = useDialog(onClose);
   const model = modelChoice === "recommended" ? recommendedModel : customModel.trim();
   const storageLocked = config.secureStorage === false || Boolean(config.storedKeyUnreadable);
   const problem = attempt ?? config.lastProblem ?? (storageLocked && !config.configured ? { kind: "storage_unavailable" as const, detail: "", at: "" } : undefined);
@@ -3539,7 +3539,7 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange
   const disconnect = () => void run("disconnect", () => window.gitcat.saveLlmConfig({ apiKey: "", model: config.model, clearApiKey: true }), t("aiDisconnectedNotice"));
   const openPage = (page: "api_keys" | "billing") => { window.gitcat.openProviderPage(page).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason))); };
 
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="settings-modal guided" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="settings-modal guided" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div className="modal-heading"><div><div className="eyebrow">{t("settingsEyebrow")}</div><h2 id="settings-title">{t("settings")}</h2></div><button className="icon-button soft" onClick={onClose} aria-label={t("closeSettings")}><X size={17} /></button></div>
     <label>{t("language")}<select value={locale} onChange={(event) => onLocaleChange(event.target.value as Locale)}><option value="en">{t("english")}</option><option value="es">{t("spanish")}</option></select><small>{t("languageHelp")}</small></label>
 
@@ -3603,14 +3603,14 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange
 /** The name and email Git records with each commit here. Submitting prepares a plan; nothing is written until it is confirmed. */
 function IdentityModal({ dialog, onChange, onClose, onSubmit }: { dialog: IdentityDialog; onChange: (dialog: IdentityDialog) => void; onClose: () => void; onSubmit: () => void }) {
   const { t } = useI18n();
-  useEscape(onClose);
+  const dialogRef = useDialog(onClose);
   const now = (scope: IdentityScope) => {
     const values = scope === "global" ? dialog.author?.global : dialog.author?.repository;
     return dialog.author ? t("identityNow", { value: values && identityText(values) ? identityText(values) : t("identityNotSet") }) : undefined;
   };
   const option = (scope: IdentityScope, title: MessageKey, help: MessageKey) =>
     <label className="model-option identity-scope" data-scope={scope}><input type="radio" name="identity-scope" checked={dialog.scope === scope} onChange={() => onChange({ ...dialog, scope })} /><span><strong>{t(title)}</strong><small>{t(help)}</small>{now(scope) && <small className="identity-now">{now(scope)}</small>}</span></label>;
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal identity-modal" role="dialog" aria-modal="true" aria-labelledby="identity-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal identity-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="identity-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
     <div className="modal-heading"><div><div className="eyebrow">{t("gitOperation")}</div><h2 id="identity-modal-title">{t("identityTitle")}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div>
     <label>{t("identityName")}<input autoFocus value={dialog.user} onChange={(event) => onChange({ ...dialog, user: event.target.value })} maxLength={100} autoComplete="name" /></label>
     <label>{t("identityEmail")}<input type="email" value={dialog.email} onChange={(event) => onChange({ ...dialog, email: event.target.value })} maxLength={254} autoComplete="email" /><small>{t("identityHelp")}</small></label>
@@ -3629,14 +3629,14 @@ function IdentityModal({ dialog, onChange, onClose, onSubmit }: { dialog: Identi
  */
 function InputModal({ dialog, branches, onChange, onClose, onSubmit }: { dialog: InputDialog; branches: Branch[]; onChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
   const { t } = useI18n();
-  useEscape(onClose);
+  const dialogRef = useDialog(onClose);
   const creating = dialog.operation === "create_branch" || dialog.operation === "rename_branch";
   const options = useMemo(
     () => dialog.operation === "add_remote" ? [] : creating ? namingCompletions(branches) : branches.filter((branch) => !branch.isCurrent).map((branch) => branch.name),
     [creating, branches, dialog.operation]
   );
   const hint = useMemo(() => creating ? variantHint(dialog.value, branches) : undefined, [creating, dialog.value, branches]);
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal" role="dialog" aria-modal="true" aria-labelledby="input-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><div className="modal-heading"><div><div className="eyebrow">{t("gitOperation")}</div><h2 id="input-modal-title">{dialog.title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div><label>{dialog.label}<input autoFocus value={dialog.value} onChange={(event) => onChange(event.target.value)} list={options.length ? "branch-options" : undefined} maxLength={200} /></label>{options.length > 0 && <datalist id="branch-options">{options.map((option) => <option value={option} key={option} />)}</datalist>}{hint && <p className="naming-hint" role="status"><Lightbulb size={12} /><span>{t("repositoryUses", { prefix: hint.canonical, count: counted(t, hint.count, "branch", "branches"), suggestion: `${hint.canonical}/…` })} <button type="button" onClick={() => onChange(`${hint.canonical}/${dialog.value.trim().slice(hint.typed.length + 1)}`)}><code>{hint.canonical}/…</code></button></span></p>}<div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button><button className="primary-button" disabled={!dialog.value.trim()}><GitBranch size={14} /> {t("prepare")}</button></div></form></div>;
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="input-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><div className="modal-heading"><div><div className="eyebrow">{t("gitOperation")}</div><h2 id="input-modal-title">{dialog.title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div><label>{dialog.label}<input autoFocus value={dialog.value} onChange={(event) => onChange(event.target.value)} list={options.length ? "branch-options" : undefined} maxLength={200} /></label>{options.length > 0 && <datalist id="branch-options">{options.map((option) => <option value={option} key={option} />)}</datalist>}{hint && <p className="naming-hint" role="status"><Lightbulb size={12} /><span>{t("repositoryUses", { prefix: hint.canonical, count: counted(t, hint.count, "branch", "branches"), suggestion: `${hint.canonical}/…` })} <button type="button" onClick={() => onChange(`${hint.canonical}/${dialog.value.trim().slice(hint.typed.length + 1)}`)}><code>{hint.canonical}/…</code></button></span></p>}<div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button><button className="primary-button" disabled={!dialog.value.trim()}><GitBranch size={14} /> {t("prepare")}</button></div></form></div>;
 }
 
 function pendingLabel(kind: PendingOperationKind, t: Translate) {
@@ -3705,7 +3705,7 @@ function ConflictResolverModal({ guide, result, snapshot, busy, configured, onAp
   const { t } = useI18n();
   const [chosen, setChosen] = useState<Record<string, ConflictChoice>>({});
   const [compared, setCompared] = useState<string[]>([]);
-  useEscape(onClose);
+  const dialogRef = useDialog(onClose);
   // A fresh read keeps a choice only where it still fits and the file did not move on under it.
   const lastGuide = useRef(guide.id);
   useEffect(() => {
@@ -3743,7 +3743,7 @@ function ConflictResolverModal({ guide, result, snapshot, busy, configured, onAp
   const choiceLabel = (choice: ConflictChoice) => choice === "edited" ? t("choiceEdited") : choice === "delete" ? t("choiceDelete") : t("choiceKeep", { name: nameOf(choice) });
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="commit-modal wide conflict-guide" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+    <div className="commit-modal wide conflict-guide" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="guide-title">
       <div className="modal-heading">
         <div><div className="eyebrow">{t("guideEyebrow")}{guide.step && guide.total ? ` · ${t("guideProgress", { step: guide.step, total: guide.total })}` : ""}</div><h2 id="guide-title">{title}</h2></div>
         <button className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button>
@@ -3853,7 +3853,7 @@ function ConflictProposalModal({ proposal, result, busy, onApply, onReviewAgain,
   const { t } = useI18n();
   // Nothing starts ticked: the model's confidence is shown, but only a person's review accepts a file.
   const [accepted, setAccepted] = useState<string[]>([]);
-  useEscape(onClose);
+  const dialogRef = useDialog(onClose);
   const outcomeOf = (path: string) => result?.outcomes.find((outcome) => outcome.path === path);
   // A file that moved on since the review can never be written from this proposal; neither can any
   // file once the operation or the repository is not the one it was drafted for.
@@ -3864,7 +3864,7 @@ function ConflictProposalModal({ proposal, result, busy, onApply, onReviewAgain,
   const failed = result?.outcomes.find((outcome) => outcome.status === "failed");
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="commit-modal wide" role="dialog" aria-modal="true" aria-labelledby="proposal-title">
+    <div className="commit-modal wide" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="proposal-title">
       <div className="modal-heading">
         <div><div className="eyebrow">{t("proposedResolution")}</div><h2 id="proposal-title">{t("reviewBeforeAccepting")}</h2></div>
         <button className="icon-button soft" onClick={onClose} aria-label={t("dismissProposal")}><X size={17} /></button>
@@ -3963,7 +3963,7 @@ function CommitModal({ commit, initialFile, repoPath, onClose }: { commit: Commi
   const [selectedFile, setSelectedFile] = useState<FileChange>();
   const [fileDetail, setFileDetail] = useState<{ path: string; detail: CommitDetail }>();
   const [fileError, setFileError] = useState<{ path: string; message: string }>();
-  useEscape(onClose);
+  const dialogRef = useDialog(onClose);
   useEffect(() => {
     let live = true;
     setDetail(undefined);
@@ -3989,7 +3989,7 @@ function CommitModal({ commit, initialFile, repoPath, onClose }: { commit: Commi
   const selectedError = selectedFile && fileError?.path === selectedFile.path ? fileError.message : undefined;
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="commit-modal wide" role="dialog" aria-modal="true" aria-labelledby="commit-modal-title">
+    <div className="commit-modal wide" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="commit-modal-title">
       <div className="modal-heading">
         <div><div className="eyebrow">COMMIT {commit.shortHash}</div><h2 id="commit-modal-title">{commit.subject || t("commitWithoutMessage")}</h2></div>
         <button className="icon-button soft" onClick={onClose} aria-label={t("commitDetails")}><X size={17} /></button>
@@ -4024,7 +4024,7 @@ function FileDiffModal({ file, repoPath, onClose }: { file: FileChange; repoPath
   const { t } = useI18n();
   const [detail, setDetail] = useState<CommitDetail>();
   const [error, setError] = useState<string>();
-  useEscape(onClose);
+  const dialogRef = useDialog(onClose);
   useEffect(() => {
     let live = true;
     window.gitcat.getWorkingFileDiff(repoPath, file.path)
@@ -4034,7 +4034,7 @@ function FileDiffModal({ file, repoPath, onClose }: { file: FileChange; repoPath
   }, [repoPath, file.path]);
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="commit-modal wide" role="dialog" aria-modal="true" aria-labelledby="file-modal-title">
+    <div className="commit-modal wide" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="file-modal-title">
       <div className="modal-heading">
         <div><div className="eyebrow">{t("uncommittedChange", { status: changeStatus(file.code, t) })}</div><h2 id="file-modal-title">{file.path}</h2></div>
         <button className="icon-button soft" onClick={onClose} aria-label={t("closeDiffs")}><X size={17} /></button>
@@ -4053,7 +4053,7 @@ function SelectionDiffModal({ files, repoPath, onClose }: { files: FileChange[];
   const [error, setError] = useState<string>();
   const paths = files.map((file) => file.path);
   const key = paths.join("\0");
-  useEscape(onClose);
+  const dialogRef = useDialog(onClose);
   useEffect(() => {
     let live = true;
     setDetail(undefined); setError(undefined);
@@ -4064,7 +4064,7 @@ function SelectionDiffModal({ files, repoPath, onClose }: { files: FileChange[];
   }, [repoPath, key]);
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="commit-modal wide selection-diff-modal" role="dialog" aria-modal="true" aria-labelledby="selection-modal-title">
+    <div className="commit-modal wide selection-diff-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="selection-modal-title">
       <div className="modal-heading">
         <div><div className="eyebrow">{t("selectedDiffEyebrow", { count: files.length })}</div><h2 id="selection-modal-title">{t("selectedDiffTitle")}</h2></div>
         <button className="icon-button soft" onClick={onClose} aria-label={t("closeDiffs")}><X size={17} /></button>
@@ -4082,8 +4082,8 @@ function SelectionDiffModal({ files, repoPath, onClose }: { files: FileChange[];
  * what happens to each, the repository's exclusions, and what the local secret check can and cannot do.
  * Every change here is saved on this Mac straight away, and the list is read again so it stays true.
  */
-function SharingDialog({ initial, paths, repoName, covered, onAccept, onClose, onShowFile }: {
-  initial: AiSharingPreview; paths?: string[]; repoName: string; covered: boolean;
+function SharingDialog({ initial, paths, repoName, onAccept, onClose, onShowFile }: {
+  initial: AiSharingPreview; paths?: string[]; repoName: string;
   onAccept: () => Promise<void>; onClose: () => void; onShowFile: (path: string) => void;
 }) {
   const { t, locale } = useI18n();
@@ -4091,12 +4091,7 @@ function SharingDialog({ initial, paths, repoName, covered, onAccept, onClose, o
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
-  useEffect(() => {
-    // A file opened from here sits on top and closes first.
-    const listener = (event: KeyboardEvent) => { if (event.key === "Escape" && !covered) onClose(); };
-    window.addEventListener("keydown", listener);
-    return () => window.removeEventListener("keydown", listener);
-  }, [onClose, covered]);
+  const dialogRef = useDialog(onClose);
   const act = async (change: () => Promise<unknown>) => {
     setBusy(true); setError(undefined);
     try {
@@ -4119,7 +4114,7 @@ function SharingDialog({ initial, paths, repoName, covered, onAccept, onClose, o
     try { await onAccept(); } catch (reason) { setError(cleanError(reason, t("fallbackSharing"))); setBusy(false); }
   };
   return <div className="modal-backdrop">
-    <div className="commit-modal sharing-modal" role="dialog" aria-modal="true" aria-labelledby="sharing-title">
+    <div className="commit-modal sharing-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="sharing-title">
       <div className="modal-heading">
         <div><div className="eyebrow">{t("sharingEyebrow")}</div><h2 id="sharing-title">{t(preview.acknowledged ? "sharingReviewTitle" : "sharingTitle", { name: repoName })}</h2></div>
         <button className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button>
@@ -4167,20 +4162,14 @@ function SharingDialog({ initial, paths, repoName, covered, onAccept, onClose, o
   </div>;
 }
 
-function useEscape(onClose: () => void) {
-  useEffect(() => {
-    const listener = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
-    window.addEventListener("keydown", listener);
-    return () => window.removeEventListener("keydown", listener);
-  }, [onClose]);
-}
-
 /**
  * A menu at the pointer. It closes on a click elsewhere, on Escape, on scroll or on resize, and the
  * arrow keys move between its entries, so it behaves like the menus of the rest of the system.
  */
 function ContextMenu({ x, y, items, label, onClose }: { x: number; y: number; items: MenuEntry[]; label: string; onClose: () => void }) {
   const menu = useRef<HTMLDivElement>(null);
+  const opener = useRef(document.activeElement as HTMLElement | null);
+  useLayoutEffect(() => () => { if (opener.current?.isConnected) opener.current.focus(); }, []);
   const [position, setPosition] = useState({ left: x, top: y });
   useLayoutEffect(() => {
     const box = menu.current?.getBoundingClientRect();

@@ -108,3 +108,12 @@ button:disabled { opacity: .45; }
 @media (max-height: 760px) { .sidebar-mascot { display: none; } }
 @media (prefers-reduced-motion: reduce) { button { transition: none; } }
 
+
+/* Dialogs remain usable when browser zoom reduces the available CSS viewport. */
+[aria-modal="true"] { max-width: 100%; max-height: calc(100dvh - 36px); overflow: auto; overflow-wrap: anywhere; }
+.modal-actions { flex-wrap: wrap; }
+input:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--coral); outline-offset: 2px; }
+.branch-row:focus-within .branch-switch, .branch-row:focus-within .branch-delete { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
