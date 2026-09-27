@@ -2,6 +2,10 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("gitcat", {
   platform: process.platform,
+  getActivityHistory: (path) => ipcRenderer.invoke("activity:list", path),
+  setActivityRetention: (days) => ipcRenderer.invoke("activity:retention", days),
+  clearActivityHistory: (path) => ipcRenderer.invoke("activity:clear", path),
+  prepareHistoryRecovery: (path, id, mode, locale) => ipcRenderer.invoke("activity:recover", path, id, mode, locale),
   onOperationProgress: (listener) => {
     const receive = (_event, progress) => listener(progress);
     ipcRenderer.on("operation:progress", receive);

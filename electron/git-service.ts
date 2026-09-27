@@ -1,3 +1,5 @@
+import { ActivityHistory } from "./activity-history.js";
+import type { HistoryRecovery } from "../shared/types.js";
 import { operationContext, operationCheckpoint, operationPhase, inspectOperation, OperationCancelled } from "./operation-progress.js";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -2062,7 +2064,7 @@ export async function proposeConflictResolution(cwd: string, locale?: Locale): P
  * that were reviewed — before a single file is written, because an edit made while the review was
  * open must never be overwritten by a draft of the older file.
  */
-export async function applyConflictResolution(
+async function applyConflictResolutionBody(
   cwd: string, proposal: IssuedConflictProposal, accepted: string[], locale?: Locale
 ): Promise<ConflictApplyResult> {
   const language = normalizeLocale(locale);
@@ -2357,7 +2359,7 @@ const conflictChoices = new Set<ConflictChoice>(["ours", "theirs", "delete", "ed
  * settled one at a time; the first failure stops the run and is reported exactly, with the file put
  * back as it was.
  */
-export async function applyConflictChoices(
+async function applyConflictChoicesBody(
   cwd: string, guide: IssuedConflictGuide, requested: ConflictChoiceRequest[], locale?: Locale
 ): Promise<ConflictChoiceResult> {
   const language = normalizeLocale(locale);
@@ -3407,7 +3409,7 @@ function showsWithheld(plan: ActionPlan, outcomes: StepOutcome[]) {
  * produced, and the first failure stops the sequence: a half-finished merge must never be reported as
  * done, and the steps that never ran are named so the user knows exactly where things stand.
  */
-export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale): Promise<{ snapshot: RepoSnapshot; output: string; error?: string; outcomes: StepOutcome[]; withheldFromAssistant?: boolean }> {
+async function executePlanBody(cwd: string, plan: ActionPlan, locale?: Locale, activityId?: string): Promise<{ snapshot: RepoSnapshot; output: string; error?: string; outcomes: StepOutcome[]; withheldFromAssistant?: boolean }> {
   const language = normalizeLocale(locale);
   let snapshot = await getSnapshot(cwd);
   const selectionNow = plan.selection ? await selectionBinding(snapshot, currentVersions(snapshot, plan.selection.changes), plan.selection.target) : undefined;
@@ -3433,11 +3435,13 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
         validateStep(step, snapshot, language);
       }
       outcomes[index] = { ...outcomes[index], status: "completed", output: await runStep(cwd, step, plan, snapshot, language) };
+      activityHistory().step(activityId, index, outcomes[index], snapshot, await inspectOperation(() => getSnapshot(cwd)));
     } catch (error) {
       const detail = error instanceof Error ? error.message : localized(language, "Git no pudo completar la acción.", "Git could not complete the action.");
       outcomes[index] = { ...outcomes[index], status: "failed", output: detail };
       operationPhase("inspecting");
       const failedSnapshot = await inspectOperation(() => getSnapshot(cwd));
+      activityHistory().step(activityId, index, outcomes[index], snapshot, failedSnapshot);
       return {
         snapshot: failedSnapshot,
         output: executionReport(outcomes, language),
@@ -3667,4 +3671,88 @@ export async function verifyLlmConfig(): Promise<LlmConnectResult> {
   } catch (error) {
     return { ok: false, config: getLlmConfig(), problem: connectionProblem(error) };
   }
+}
+
+
+function activityHistory() { return new ActivityHistory(join(app.getPath("userData"), "gitcat-activity.json")); }
+export async function getActivityHistory(cwd: string) { const snapshot=await getSnapshot(cwd); return activityHistory().list(snapshot.path); }
+export function setActivityRetention(days: number) { activityHistory().retention(days); }
+export async function clearActivityHistory(cwd: string) { activityHistory().clear((await getSnapshot(cwd)).path); }
+
+/** Recorded before execution and after each settled step, so a crash leaves uncertainty visible. */
+export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale) {
+  if (plan.recovery) await validateHistoryRecovery(cwd, plan.recovery);
+  const before = await getSnapshot(cwd);
+  const history = activityHistory(), id = history.begin(plan, before);
+  try {
+    const result = await executePlanBody(cwd, plan, locale, id);
+    history.finish(id, result.snapshot, result.outcomes, result.error);
+    return result;
+  } catch (error) {
+    const after = await inspectOperation(() => getSnapshot(cwd)).catch(() => undefined);
+    // A missing result never proves rollback. Pending journal steps remain unknown.
+    history.finish(id, after, [], error instanceof Error ? error.message : String(error));
+    throw error;
+  }
+}
+
+async function validateHistoryRecovery(cwd: string, recovery: HistoryRecovery) {
+  if (!/^[a-f0-9]{40,64}$/.test(recovery.commit)) throw new Error("Invalid recovery reference.");
+  await checkedGit(cwd, ["cat-file", "-e", `${recovery.commit}^{commit}`]);
+  let snapshot = await getSnapshot(cwd);
+  if (recovery.mode === "restore") {
+    if (!recovery.branch || !isBranchNameSafe(recovery.branch) || snapshot.branches.some(b=>b.name===recovery.branch)) throw new Error("The recovery branch already exists or its name is invalid. No branch was overwritten.");
+    return;
+  }
+  if (snapshot.isDirty || snapshot.pending) throw new Error("Review or set aside your unfinished work first. Recovery will not combine it with other changes.");
+  const parents = (await checkedGit(cwd,["rev-list","--parents","-n","1",recovery.commit])).split(/\s+/);
+  if (parents.length !== 2) throw new Error("This saved version needs a specific recovery plan because it is an initial or merge commit.");
+  if ((await runGit(cwd,["merge-base","--is-ancestor",recovery.commit,"HEAD"])).code !== 0) throw new Error("That saved version is not part of the active branch. Create a recovery branch to review it.");
+  if (recovery.mode === "undo") {
+    if (snapshot.head !== recovery.commit) throw new Error("The branch has moved since that save. Review its history; the latest save can be kept as files only while it is still the tip.");
+    // Check all branch tips on every configured remote. Offline/permission failures block rewriting.
+    for (const remote of snapshot.remotes) await checkedGit(cwd,["fetch","--prune",remote,`+refs/heads/*:refs/remotes/${remote}/*`,`+refs/tags/*:refs/gitcat/remotes/${remote}/tags/*`]);
+    if ((await checkedGit(cwd,["for-each-ref",`--contains=${recovery.commit}`,"--format=%(refname)","refs/remotes","refs/gitcat/remotes"])).trim()) throw new Error("This saved version is published. Revert it with a new commit instead; shared history stays intact.");
+    snapshot=await getSnapshot(cwd);
+    if (snapshot.head!==recovery.commit || snapshot.isDirty || snapshot.pending) throw new Error("The project changed during the publication check. Review recovery again.");
+  }
+}
+
+export async function prepareHistoryRecovery(cwd: string, id: string, mode: HistoryRecovery['mode'], locale?: Locale) {
+  if (!["revert","undo","restore"].includes(mode)) throw new Error("Invalid recovery action.");
+  const snapshot=await getSnapshot(cwd);
+  const entry=activityHistory().list(snapshot.path).entries.find(e=>e.id===id);
+  if (!entry) throw new Error("This activity entry is no longer retained. Inspect the Git history for a saved reference.");
+  const commit = mode === "restore" ? entry.before.head : [...entry.steps].reverse().find(step=>step.status==='completed' && step.operation==='commit')?.afterHead;
+  if (!commit) throw new Error("This entry has no confirmed saved version for that recovery. Never-saved files cannot be recovered from this history.");
+  const recovery: HistoryRecovery={mode,commit,...(mode==='restore'?{branch:`recovered/${id.slice(0,8)}`}:{})};
+  await validateHistoryRecovery(cwd,recovery);
+  const current=await getSnapshot(cwd), language=normalizeLocale(locale);
+  const argv=mode==='restore'?['branch',recovery.branch!,commit]:mode==='revert'?['revert','--no-edit',commit]:['reset','--soft',`${commit}^`];
+  const summary=mode==='restore'?localized(language,'Crear una rama para revisar la versión anterior','Create a branch to review the earlier version'):mode==='revert'?localized(language,'Revertir el guardado con un nuevo commit','Revert the save with a new commit'):localized(language,'Deshacer el último guardado conservando los archivos','Undo the latest save while keeping files');
+  const effects=[localized(language,'Solo recupera versiones guardadas en Git. No guarda ni recupera archivos que nunca se guardaron.','Only versions saved in Git can be recovered. Never-saved files are not backed up or recovered.')];
+  if (mode==='undo') effects.push(localized(language,'Se comprueban ramas y etiquetas de los remotos configurados. GitCat no puede demostrar que nunca se compartió en otro lugar. Si alguien lo recibió, usa revertir.','Configured remote branches and tags are checked. GitCat cannot prove this was never shared elsewhere. If someone received it, use revert.'));
+  effects.push(mode==='restore'?localized(language,`Crea ${recovery.branch} en ${commit.slice(0,7)} sin cambiar de rama ni tocar tus archivos.`,`Creates ${recovery.branch} at ${commit.slice(0,7)} without switching branches or touching files.`):mode==='undo'?localized(language,'Mueve solo la punta de la rama al padre. Conserva exactamente el índice y los archivos; los cambios del guardado quedan preparados. No publica nada.','Moves only the branch tip to its parent. Keeps the index and files unchanged; the saved changes remain staged. Publishes nothing.'):localized(language,'Añade un commit inverso. Conserva el historial compartido; puede detenerse con conflictos. No publica nada.','Adds an inverse commit. Preserves shared history; may stop with conflicts. Publishes nothing.'));
+  return bindPlan(current,{...sequenceDraft([stepFrom('git_command',{},argv,language)!],summary,effects,language),summary,recovery,requiresConfirmation:true});
+}
+
+
+async function recordConflictActivity<T extends ConflictApplyResult | ConflictChoiceResult>(cwd: string, count: number, task: () => Promise<T>): Promise<T> {
+  const before=await getSnapshot(cwd), history=activityHistory();
+  const step=stepFrom('resolve_conflict',{},[],'en')!;
+  const id=history.begin(bindPlan(before,sequenceDraft(Array.from({length:Math.max(1,count)},()=>step),'Resolve reviewed conflicts')),before);
+  try {
+    const result=await task();
+    const outcomes: StepOutcome[]=result.outcomes.map(item=>({command:'',summary:'resolve_conflict',status:item.status==='applied'?'completed':item.status==='not_applied'?'skipped':'failed',output:''}));
+    history.finish(id,result.snapshot,outcomes,result.complete?undefined:'Conflict resolution did not complete. Review the remaining conflicts.');
+    return result;
+  } catch(error) {
+    history.finish(id,await getSnapshot(cwd).catch(()=>undefined),[],error instanceof Error?error.message:String(error)); throw error;
+  }
+}
+export async function applyConflictResolution(cwd: string, proposal: IssuedConflictProposal, accepted: string[], locale?: Locale): Promise<ConflictApplyResult> {
+  return recordConflictActivity(cwd,Array.isArray(accepted)?accepted.length:0,()=>applyConflictResolutionBody(cwd,proposal,accepted,locale));
+}
+export async function applyConflictChoices(cwd: string, guide: IssuedConflictGuide, requested: ConflictChoiceRequest[], locale?: Locale): Promise<ConflictChoiceResult> {
+  return recordConflictActivity(cwd,Array.isArray(requested)?requested.length:0,()=>applyConflictChoicesBody(cwd,guide,requested,locale));
 }

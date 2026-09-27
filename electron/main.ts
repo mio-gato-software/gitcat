@@ -8,7 +8,7 @@ import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
+  getActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
   getLlmConfig, getSnapshot, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
   prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
   scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictGuide, type IssuedConflictProposal
@@ -487,6 +487,14 @@ app.whenReady().then(async () => {
     }
     if (project.path !== pending.to) return { status: "invalid", path: pending.to, reason: "not_repository", detail: `git rev-parse --show-toplevel: ${project.path}` };
     return adoptLocation(pending.from, project, pending.fingerprint, pending.match);
+  });
+  ipcMain.handle("activity:list", (event, cwd: string) => { assertTrustedSender(event); return getActivityHistory(assertOpenedRepository(cwd)); });
+  ipcMain.handle("activity:retention", (event, days: unknown) => { assertTrustedSender(event); if (typeof days !== 'number') throw new Error('Invalid retention'); setActivityRetention(days); });
+  ipcMain.handle("activity:clear", (event, cwd: string) => { assertTrustedSender(event); return clearActivityHistory(assertOpenedRepository(cwd)); });
+  ipcMain.handle("activity:recover", async (event, cwd: string, id: unknown, mode: unknown, locale?: Locale) => {
+    assertTrustedSender(event); const path=assertOpenedRepository(cwd);
+    if (typeof id !== 'string' || !['revert','undo','restore'].includes(String(mode))) throw new Error('Invalid recovery request');
+    return rememberPlan(await tracked(event,path,'planning',()=>prepareHistoryRecovery(path,id,mode as 'revert'|'undo'|'restore',locale)));
   });
   ipcMain.handle("operation:list", (event) => { assertTrustedSender(event); return listOperations(); });
   ipcMain.handle("operation:cancel", (event, cwd: string, id: unknown) => {

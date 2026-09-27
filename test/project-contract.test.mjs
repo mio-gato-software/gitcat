@@ -799,7 +799,7 @@ test("the guided resolver works from repository facts, with the assistant as an 
   assert.match(main, /if \(!opensSafely\(absolute\)\) \{\n\s+shell\.showItemInFolder\(absolute\);/);
   assert.match(preload, /chooseConflictResolutions: \(path, guideId, choices, locale\) => ipcRenderer\.invoke\("conflicts:choose"/);
   assert.match(service, /if \(await conflictOperation\(repoRoot\) !== guide\.binding\.operation\)/);
-  assert.doesNotMatch(service.slice(service.indexOf("export async function describeConflicts"), service.indexOf("export async function applyConflictChoices")), /askProvider|isLlmConfigured/);
+  assert.doesNotMatch(service.slice(service.indexOf("export async function describeConflicts"), service.indexOf("async function applyConflictChoicesBody")), /askProvider|isLlmConfigured/);
   // The banner always offers the resolver; the assistant's draft only when one is configured.
   assert.match(app, /onGuide=\{\(\) => void openGuide\(\)\}/);
   assert.match(app, /blocked > 0 && configured && <button className="outline-button small" onClick=\{onResolve\}/);

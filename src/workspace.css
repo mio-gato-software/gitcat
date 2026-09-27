@@ -598,3 +598,6 @@
 
 .operation-status { display: flex; flex: none; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 16px; color: var(--text); background: var(--surface); border-top: 1px solid var(--border); font-size: 12px; }
 .operation-status small { flex: 1; min-width: 180px; color: var(--secondary); }
+.activity-history { color: var(--secondary); font-size: 13px; line-height: 1.5; }
+.activity-history select { margin: 8px; padding: 6px; }
+.activity-record { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 16px; }

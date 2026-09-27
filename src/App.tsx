@@ -1,3 +1,4 @@
+import { ActivityHistory } from "./ActivityHistory";
 import { OperationStatus, Elapsed } from "./OperationStatus";
 import { useDialog } from "./useDialog";
 import { CatMark, SleepingCat } from "./CatMark";
@@ -473,6 +474,7 @@ export default function App() {
   /** Ticked files the last generated description could not read, so the form can say so. */
   const [descriptionWithheld, setDescriptionWithheld] = useState<WithheldFile[]>([]);
   /** The disclosure on screen. `resolve` answers a request that is waiting for the person's decision. */
+  const [historyPath, setHistoryPath] = useState<string>();
   const [sharingDialog, setSharingDialog] = useState<{ preview: AiSharingPreview; paths?: string[]; resolve?: (accepted: boolean) => void }>();
   /** Repositories the person already agreed to share with the assistant, so the question is not asked again. */
   const sharingAcknowledged = useRef(new Set<string>());
@@ -1669,7 +1671,7 @@ export default function App() {
           </div>)}
           <button className="icon-button tab-add" onClick={() => setSetup({ kind: "choose" })} aria-label={t("addProjectTitle")} title={t("addProjectTitle")}><Plus size={16} /></button>
         </div>
-        <div className="top-actions"><button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
+        <div className="top-actions">{snapshot && <button className="icon-button" onClick={() => setHistoryPath(snapshot.path)} aria-label={locale === "es" ? "Actividad y recuperación" : "Activity and recovery"}><Clock3 size={17} /></button>}<button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
       </header>
       <NotificationCenter items={activity} onDismiss={dismissActivity} onClear={dismissAllActivity} t={t} />
 
@@ -1784,6 +1786,10 @@ export default function App() {
         <footer className="statusbar"><div className="status-left"><span className={`status-good ${snapshot.isDirty ? "has-changes" : ""}`}><CircleDot size={12} /> {snapshot.isDirty ? counted(t, snapshot.changes.length, "change", "changes") : t("noUncommittedChanges")}</span><span className="status-separator" /><span>{counted(t, branchCount.local, "localBranch", "localBranches")}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} ${t("remoteOnly")}` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> {t("lastRead", { date: formatDate(active.loadedAt, locale) })}</span><span className="remote-status" title={snapshot.remotes.length ? `${remoteTitle(snapshot, t)}\n${active.fetchedAt ? t("remoteCheckedAt", { date: formatDate(active.fetchedAt, locale) }) : t("remoteNotChecked")}` : remoteTitle(snapshot, t)}><Cloud size={12} /> {remoteLabel(snapshot, t)}</span><button className={`provider-status ${config.lastProblem ? "attention" : ""}`} onClick={openSettings} title={t("aiStatusTitle")}><Sparkles size={12} /> {config.configured ? t(config.lastProblem ? "statusAiAttention" : "statusAiConnected", { model: config.model }) : t("llmNotConfigured")}</button></div></footer>
       </>}
       <OperationStatus path={snapshot?.path} t={t} />
+      {historyPath && <ActivityHistory path={historyPath} locale={locale} onClose={() => setHistoryPath(undefined)} onRecover={(id, mode) => {
+        const path=historyPath; setHistoryPath(undefined);
+        void showPlan(locale === 'es' ? 'Revisar recuperación' : 'Review recovery', () => window.gitcat.prepareHistoryRecovery(path,id,mode,locale),path,true);
+      }} />}
       {deliveryReview && <DeliveryReviewModal review={deliveryReview} snapshot={projects.find((item) => item.snapshot.path === deliveryReview.plan.repoPath)?.snapshot} busy={planning}
         onClose={() => { updateTurn(deliveryReview.plan.repoPath, deliveryReview.turnId, (turn) => ({ ...turn, status: "cancelled", outcome: t("planDiscarded") })); setDeliveryReview(undefined); }}
         onApply={async () => { const review = deliveryReview; setDeliveryReview(undefined); await applyPlan(review.turnId, review.plan); }} />}

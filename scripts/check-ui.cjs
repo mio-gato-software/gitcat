@@ -46,6 +46,9 @@ app.whenReady().then(async () => {
   ipcMain.handle('operation:list', () => []);
   ipcMain.handle('operation:cancel', () => false);
   ipcMain.handle('repo:fetch', (_, p) => service.fetchRemotes(p));
+  ipcMain.handle('activity:list', (_, p) => service.getActivityHistory(p));
+  ipcMain.handle('activity:retention', (_, days) => service.setActivityRetention(days));
+  ipcMain.handle('activity:clear', (_, p) => service.clearActivityHistory(p));
   const plans = new Map();
   let refreshError = false;
   // A second saved project whose folder is gone: it must stay listed and explain itself instead of vanishing.
@@ -472,6 +475,12 @@ app.whenReady().then(async () => {
   assert.match(await stage('integrated'), /Estás en main/);
   assert.match(await js(`document.querySelector('.work-overview .overview-next').innerText`), /Conecta un sitio donde publicar[\s\S]*git remote add/);
   assert.match(await js(`document.querySelector('.overview-summary').innerText`), /Solo en este equipo/, 'A save is described as local, never as a backup');
+  await js(`document.querySelector('.top-actions .icon-button').click()`);
+  await waitFor(`document.querySelector('.activity-history .activity-record')`);
+  await assertDialog();
+  assert.match(await js(`document.querySelector('.activity-history').innerText`), /completado[\s\S]*Revisar una reversión/);
+  await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key:'Escape' }))`);
+  await waitFor(`!document.querySelector('.activity-history')`);
   // A push with nowhere to go is explained from the repository itself, with the way on, and the
   // assistant is not needed for it: no provider request is made.
   const headBeforePush = git('rev-parse', 'HEAD');
@@ -682,7 +691,7 @@ app.whenReady().then(async () => {
   connected = false; secureStorage = false;
   await win.loadFile(path.join(root, 'dist/index.html'));
   await waitFor(`document.querySelector('.welcome-card.first-run')`);
-  await js(`document.querySelector('.topbar .top-actions .icon-button').click()`);
+  await js(`document.querySelector('.topbar .top-actions .icon-button:last-child').click()`);
   await waitFor(`document.querySelector('.ai-problem[data-kind="storage_unavailable"]')`);
   assert.match(await js(`document.querySelector('.ai-problem').innerText`), /nunca como texto plano/);
   assert.equal(await js(`document.querySelector('.settings-modal input[type="password"]').disabled`), true);
@@ -821,7 +830,7 @@ app.whenReady().then(async () => {
   await capture('cloned-empty');
   // With a remote, Settings says where a publish goes and checks access read-only; this one is a
   // folder on this Mac, so nothing reaches a network.
-  await js(`document.querySelector('.top-actions .icon-button').click()`);
+  await js(`document.querySelector('.top-actions .icon-button:last-child').click()`);
   await waitFor(`document.querySelector('.settings-modal .readiness-access[data-access="ok"]')`);
   const remoteReadiness = await js(`document.querySelector('.settings-modal .readiness-row[data-item="remote"]').innerText`);
   for (const entry of [/Se publica en \S*empty-remote\.git/, /origin · una carpeta de este Mac · el destino que esta rama ya sigue|origin · una carpeta de este Mac · el habitual, origin/, /Acceso confirmado/, /Comprobar el acceso de nuevo/]) assert.match(remoteReadiness, entry);

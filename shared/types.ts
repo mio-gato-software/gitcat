@@ -439,6 +439,7 @@ export type StepOutcome = {
 };
 
 export type ActionPlan = {
+  recovery?: HistoryRecovery;
   id: string;
   repoPath: string;
   head: string;
@@ -926,6 +927,10 @@ export type GitlineApi = {
   generateCommitDescription: (path: string, locale?: Locale, paths?: string[]) => Promise<CommitDescriptionResult>;
   /** Exactly what a save of these files would record, against the last saved version. */
   getSelectionDiff: (path: string, paths: string[], locale?: Locale) => Promise<CommitDetail>;
+  getActivityHistory: (path: string) => Promise<{ retentionDays: number; entries: ActivityRecord[] }>;
+  setActivityRetention: (days: number) => Promise<void>;
+  clearActivityHistory: (path: string) => Promise<void>;
+  prepareHistoryRecovery: (path: string, id: string, mode: HistoryRecovery['mode'], locale?: Locale) => Promise<ActionPlan>;
   onOperationProgress: (listener: (progress: OperationProgress) => void) => () => void;
   listOperations: () => Promise<OperationProgress[]>;
   cancelOperation: (path: string, id: string) => Promise<boolean>;
@@ -956,3 +961,12 @@ export type OperationProgress = {
   state: 'running' | 'completed' | 'failed' | 'stopped';
   mutation: boolean; stopping: boolean; step?: number; total?: number;
 };
+
+export type ActivityRecord = {
+  id: string; repoPath: string; startedAt: string; finishedAt?: string;
+  state: 'running' | 'completed' | 'failed';
+  before: { head: string; branch: string }; after?: { head: string; branch: string };
+  steps: { operation: Operation; status: 'pending' | StepOutcome['status']; beforeHead?: string; afterHead?: string; at?: string }[];
+  error?: string;
+};
+export type HistoryRecovery = { mode: 'revert' | 'undo' | 'restore'; commit: string; branch?: string };
