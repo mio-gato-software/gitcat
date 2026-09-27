@@ -21,7 +21,7 @@ The direct Git controls work without an AI account or an internet connection whe
 You need [Git](https://git-scm.com/), npm, and Node.js 22 (version 22.13 or later) or Node.js 24+. There are no public installers yet. The development workflow is:
 
 ```bash
-git clone https://github.com/eliaquin/gitcat.git
+git clone https://github.com/mio-gato-software/gitcat.git
 cd gitcat
 npm ci
 npm run dev
