@@ -40,11 +40,23 @@ test("a fresh profile starts with no assistant, secure storage ready and the rec
   const config = service.getLlmConfig();
   assert.equal(config.configured, false);
   assert.equal(config.secureStorage, true);
-  assert.equal(config.model, connection.recommendedModel);
+  assert.equal(config.model, "gpt-6-luna");
   assert.equal(config.lastProblem, undefined);
   assert.ok(connection.supportedModels.some((model) => model.id === connection.recommendedModel && model.recommended));
   assert.equal(connection.isSupportedModel(connection.recommendedModel), true);
   assert.equal(connection.isSupportedModel("my-custom-model"), false);
+});
+
+test("empty or absent model settings use gpt-6-luna; an explicit saved model is retained", async () => {
+  const blank = await service.saveLlmConfig({ apiKey: "", model: "  ", clearApiKey: true });
+  assert.equal(blank.model, "gpt-6-luna");
+  writeFileSync(settingsFile, JSON.stringify({}));
+  service.loadLlmConfig();
+  assert.equal(service.getLlmConfig().model, "gpt-6-luna");
+  writeFileSync(settingsFile, JSON.stringify({ model: "gpt-5.6-luna" }));
+  service.loadLlmConfig();
+  assert.equal(service.getLlmConfig().model, "gpt-5.6-luna");
+  assert.equal(calls, 0);
 });
 
 test("provider failures are told apart from the provider's own answer", () => {

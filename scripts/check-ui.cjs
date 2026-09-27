@@ -80,7 +80,7 @@ app.whenReady().then(async () => {
   const connectAnswers = [];
   const connectRequests = [];
   const openedPages = [];
-  const llmConfig = () => ({ provider: 'openai', model: configured ? 'ui-test' : 'gpt-5.6-luna', configured: configured || connected, secureStorage });
+  const llmConfig = () => ({ provider: 'openai', model: configured ? 'ui-test' : 'gpt-6-luna', configured: configured || connected, secureStorage });
   ipcMain.handle('llm:get-config', () => llmConfig());
   ipcMain.handle('llm:save-config', (_, input) => {
     connectRequests.push({ model: input.model, hasKey: Boolean(input.apiKey) });
@@ -683,6 +683,8 @@ app.whenReady().then(async () => {
   const settingsText = () => js(`document.querySelector('.settings-modal').innerText`);
   await waitFor(`document.querySelector('.settings-modal .readiness-row[data-item="author"]')`);
   const guide = await settingsText();
+  assert.match(await js(`document.querySelector('.settings-modal .model-option').innerText`), /gpt-6-luna/);
+  assert.equal(await js(`document.querySelector('.settings-modal .model-option input').checked`), true, 'The default model is the recommended choice');
   // Without a project, Settings still says whether Git is ready and who saves would be signed as.
   for (const entry of [/Listo para guardar y publicar/, /Git \d[\d.]* está listo/, /Git todavía no sabe quién guarda/, /No es un inicio de sesión/]) assert.match(guide, entry);
   await js(`document.querySelector('.settings-modal .readiness-section').scrollIntoView()`);
@@ -725,7 +727,7 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.ai-problem').innerText`), /OpenAI tiene problemas ahora mismo[\s\S]*no tuyo/);
   await js(`[...document.querySelectorAll('.ai-problem button')].find((node) => node.innerText.includes('Reintentar')).click()`);
   await waitFor(`document.querySelector('.ai-status[data-state="connected"]')`);
-  assert.equal(connectRequests.at(-1).model, 'gpt-5.6-luna');
+  assert.equal(connectRequests.at(-1).model, 'gpt-6-luna');
   assert.equal(connectRequests.at(-1).hasKey, true);
   assert.equal(await js(`document.querySelector('.settings-modal input[type="password"]').value`), '', 'The key leaves the field once saved');
   await capture('settings-connected');

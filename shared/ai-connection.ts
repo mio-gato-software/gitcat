@@ -4,7 +4,7 @@ import type { AiProblemKind } from "./types.js";
  * The models GitCat is built and tested with, offered as a choice instead of an empty identifier
  * field. Any other identifier stays available as an advanced override; it is verified the same way.
  */
-export const recommendedModel = "gpt-5.6-luna";
+export const recommendedModel = "gpt-6-luna";
 export const supportedModels: readonly { id: string; recommended: boolean }[] = [{ id: recommendedModel, recommended: true }];
 
 export function isSupportedModel(model: string) {
