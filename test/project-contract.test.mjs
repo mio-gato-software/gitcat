@@ -768,7 +768,7 @@ test("resolver un conflicto con el modelo se propone, se revisa y solo entonces 
   assert.match(service, /todavía contiene marcas de conflicto/);
   assert.match(main, /const issuedProposals = new Map<string, IssuedConflictProposal>\(\)/);
   assert.match(main, /ipcMain\.handle\("conflicts:apply", async \(event, cwd: string, proposalId: unknown, accepted: unknown, locale\?: Locale\)/);
-  assert.match(main, /exclusive\(repoPath, \(\) => proposeConflictResolution\(repoPath, locale\)\)/);
+  assert.match(main, /tracked\(event, repoPath, "planning", \(\) => proposeConflictResolution\(repoPath, locale\)\)/);
   assert.match(main, /exclusive\(repoPath, \(\) => applyConflictResolution\(repoPath, proposal, accepted as string\[\], locale\)\)/);
   assert.match(service, /if \(!absolute\.startsWith\(`\$\{repoRoot\}\$\{sep\}`\)\) throw new Error\(localized\(locale, "La ruta no pertenece a este repositorio\."/);
   // Nunca en automático: hay un botón, y la propuesta se revisa archivo a archivo antes de aceptarla.

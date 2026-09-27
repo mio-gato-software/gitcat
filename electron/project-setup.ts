@@ -232,6 +232,7 @@ export async function startTracking(input: string, expected: { branch: string },
 export type CloneRequest = { url: string; parent: string; name: string };
 
 export type CloneOptions = {
+  onProgress?: (progress: { phase: string; percent: number }) => void;
   signal?: AbortSignal;
   /**
    * Test-only: accept an absolute path to a local repository as the source, so clones can be
@@ -365,7 +366,13 @@ export async function cloneRepository(request: CloneRequest, options: CloneOptio
     touch();
     spawnGit(preview.parent, [...guard, "clone", "--progress", "--", preview.url, staging], { group: true }).then((spawned) => {
       child = spawned;
-      const keep = (chunk: Buffer) => { touch(); output = (output + chunk.toString()).slice(-20_000); };
+      const keep = (chunk: Buffer) => {
+        touch(); output = (output + chunk.toString()).slice(-20_000);
+        // Only known Git counters cross IPC, never raw remote output or credentials.
+        const matches = [...chunk.toString().matchAll(/(Receiving objects|Resolving deltas|Updating files|Counting objects|Compressing objects):\s+(\d+)%/g)];
+        const match = matches[matches.length - 1];
+        if (match) options.onProgress?.({ phase: match[1], percent: Math.min(100, Number(match[2])) });
+      };
       spawned.stdout.on("data", keep);
       spawned.stderr.on("data", keep);
       spawned.on("error", (error) => finish({ code: null, error: errorText(error) }));

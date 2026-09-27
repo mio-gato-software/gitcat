@@ -3,6 +3,22 @@ export type Locale = "en" | "es";
 type MessageValues = Record<string, string | number>;
 
 const en = {
+  operation_planning: "Reading the project and preparing a plan",
+  operation_provider: "Waiting for the AI provider",
+  operation_fetching: "Checking the remote",
+  operation_executing: "Applying the confirmed plan",
+  operation_inspecting: "Checking the resulting project state",
+  operation_stopping: "Stop requested; waiting for the current work to settle",
+  operation_completed: "Operation completed",
+  operation_failed: "Operation needs attention. Review the result before trying again.",
+  operation_stopped: "Stop request settled. Review completed and skipped steps; nothing was rolled back.",
+  operationStep: "Step {{step}} of {{total}}",
+  operationMutationNote: "The current Git step is allowed to finish. Stopping skips later steps and checks the resulting state.",
+  operationReadNote: "Cancelling stops this request. Your draft remains available.",
+  operationStopNext: "Stop after current step",
+  operationCancelFailed: "Could not request a stop. The operation may still be running.",
+  operationClone: "Copying the project; waiting for Git and the remote",
+
   commitActions: "Commit {{hash}}",
   copiedToClipboard: "Copied to the clipboard",
   clipboardFailed: "The clipboard is not available right now.",
@@ -1122,6 +1138,22 @@ const en = {
 
 const es: { [K in keyof typeof en]: string } = {
   ...en,
+  operation_planning: "Leyendo el proyecto y preparando un plan",
+  operation_provider: "Esperando al proveedor de IA",
+  operation_fetching: "Consultando el remoto",
+  operation_executing: "Aplicando el plan confirmado",
+  operation_inspecting: "Comprobando el estado final del proyecto",
+  operation_stopping: "Se solicitó detener; esperando que termine el trabajo actual",
+  operation_completed: "Operación completada",
+  operation_failed: "La operación necesita atención. Revisa el resultado antes de reintentar.",
+  operation_stopped: "La solicitud de detener terminó. Revisa los pasos completados y omitidos; no se deshizo nada.",
+  operationStep: "Paso {{step}} de {{total}}",
+  operationMutationNote: "El paso actual de Git puede terminar. Detener omite los siguientes pasos y comprueba el estado final.",
+  operationReadNote: "Cancelar detiene esta solicitud. Tu borrador sigue disponible.",
+  operationStopNext: "Detener después del paso actual",
+  operationCancelFailed: "No se pudo solicitar detener. La operación puede seguir en curso.",
+  operationClone: "Copiando el proyecto; esperando a Git y al remoto",
+
   commitActions: "Commit {{hash}}",
   copiedToClipboard: "Copiado al portapapeles",
   clipboardFailed: "El portapapeles no está disponible ahora mismo.",

@@ -890,6 +890,7 @@ export type GitlineApi = {
   chooseCloneParent: (labels: { title: string; button: string }) => Promise<CloneParentResult>;
   previewClone: (url: string, parentId: string, name: string) => Promise<ClonePreview>;
   startClone: (url: string, parentId: string, name: string) => Promise<CloneResult>;
+  onCloneProgress: (listener: (progress: { phase: string; percent: number }) => void) => () => void;
   cancelClone: () => Promise<boolean>;
   restoreWorkspace: () => Promise<RestoredWorkspace>;
   saveWorkspace: (paths: string[], activePath?: string) => Promise<void>;
@@ -925,6 +926,9 @@ export type GitlineApi = {
   generateCommitDescription: (path: string, locale?: Locale, paths?: string[]) => Promise<CommitDescriptionResult>;
   /** Exactly what a save of these files would record, against the last saved version. */
   getSelectionDiff: (path: string, paths: string[], locale?: Locale) => Promise<CommitDetail>;
+  onOperationProgress: (listener: (progress: OperationProgress) => void) => () => void;
+  listOperations: () => Promise<OperationProgress[]>;
+  cancelOperation: (path: string, id: string) => Promise<boolean>;
   executePlan: (path: string, planId: string, locale?: Locale) => Promise<ExecutionResult>;
   /** What a request to the assistant would send from this repository, and whether sharing was agreed. */
   getAiSharing: (path: string, purpose: AiSharingPurpose, paths?: string[], locale?: Locale) => Promise<AiSharingPreview>;
@@ -943,4 +947,12 @@ export type GitlineApi = {
   /** Reads what Git needs to save and publish, without a repository or for the open one. Never changes configuration. */
   checkReadiness: (path: string | undefined, request?: ReadinessRequest) => Promise<ReadinessReport>;
   openHelpPage: (page: HelpPage) => Promise<void>;
+};
+
+/** Facts emitted by the main process. Percentages are never inferred from elapsed time. */
+export type OperationProgress = {
+  id: string; repoPath: string; startedAt: number;
+  phase: 'planning' | 'fetching' | 'executing' | 'inspecting' | 'provider';
+  state: 'running' | 'completed' | 'failed' | 'stopped';
+  mutation: boolean; stopping: boolean; step?: number; total?: number;
 };

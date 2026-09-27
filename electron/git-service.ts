@@ -1,3 +1,4 @@
+import { operationContext, operationCheckpoint, operationPhase, inspectOperation, OperationCancelled } from "./operation-progress.js";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, readlinkSync, accessSync, constants, copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
@@ -171,24 +172,35 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
     const child = spawn(executable, args, {
       cwd,
       env: commandEnv(searchPath, extraEnv),
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32"
     });
     let stdout = "";
     let stderr = "";
     let settled = false;
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
-      if (!settled) {
-        settled = true;
-        reject(new Error(`${command} ${args[0] ?? ""} excedió el tiempo máximo de espera.`));
-      }
-    }, timeoutMs);
+    const active = operationContext();
+    let stopped: Error | undefined;
+    const stop = (error: Error) => {
+      stopped = error;
+      const signal = (value: NodeJS.Signals) => {
+        try { if (process.platform !== "win32" && child.pid) process.kill(-child.pid, value); else child.kill(value); } catch { /* already exited */ }
+      };
+      signal("SIGTERM");
+      setTimeout(() => { if (!settled) signal("SIGKILL"); }, 2_000).unref();
+    };
+    const timer = setTimeout(() => stop(new Error(`${command} ${args[0] ?? ""} timed out. The final repository state must be checked; changes may have completed.`)), timeoutMs);
+    const cancel = () => stop(new OperationCancelled());
+    const canAbort = active && !active.mutation && !active.inspecting;
+    if (canAbort) {
+      active.signal.addEventListener("abort", cancel, { once: true });
+      if (active.signal.aborted) cancel();
+    }
+    const cleanup = () => { clearTimeout(timer); if (canAbort) active.signal.removeEventListener("abort", cancel); };
     child.stdout.on("data", (chunk: Buffer) => { if (stdout.length < 2_000_000) stdout += chunk.toString(); });
     child.stderr.on("data", (chunk: Buffer) => { if (stderr.length < 2_000_000) stderr += chunk.toString(); });
-    child.on("error", (error) => { if (!settled) { settled = true; clearTimeout(timer); reject(error); } });
+    child.on("error", (error) => { if (!settled) { settled = true; cleanup(); reject(error); } });
     child.on("close", (code) => {
-      if (!settled) { settled = true; clearTimeout(timer); resolvePromise({ stdout, stderr, code: code ?? 1 }); }
+      if (!settled) { settled = true; cleanup(); if (stopped) reject(stopped); else resolvePromise({ stdout, stderr, code: code ?? 1 }); }
     });
   });
 }
@@ -1154,6 +1166,7 @@ async function callProvider(body: Record<string, unknown>, timeoutMs = 180_000, 
     if (saved) llmProblem = undefined;
     return payload;
   } catch (error) {
+    if (error instanceof OperationCancelled) throw error;
     if (saved && !(error instanceof ProviderError && error.reason === "not_configured")) llmProblem = connectionProblem(error);
     throw error;
   }
@@ -1162,7 +1175,12 @@ async function callProvider(body: Record<string, unknown>, timeoutMs = 180_000, 
 async function sendToProvider(body: Record<string, unknown>, timeoutMs: number, credentials: LlmConfigInput): Promise<ProviderResponse> {
   const model = credentials.model.trim() || MODEL_FALLBACK;
   if (!credentials.apiKey.trim()) throw new ProviderError("not_configured", LLM_REQUIRED);
+  operationCheckpoint();
+  operationPhase("provider");
+  const active = operationContext();
   const controller = new AbortController();
+  const cancel = () => controller.abort();
+  active?.signal.addEventListener("abort", cancel, { once: true });
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
   try {
@@ -1172,18 +1190,21 @@ async function sendToProvider(body: Record<string, unknown>, timeoutMs: number, 
       body: JSON.stringify({ model, store: false, ...body }),
       signal: controller.signal
     });
+    if (!response.ok) {
+      const raw = maskKeys(await response.text().catch(() => ""));
+      throw new ProviderError("error", `The provider responded ${response.status}: ${raw.slice(0, 300)}`, { status: response.status, body: raw.slice(0, 4_000) });
+    }
+    return await response.json();
   } catch (error) {
+    if (active?.signal.aborted) throw new OperationCancelled();
+    if (error instanceof ProviderError) throw error;
     throw controller.signal.aborted
       ? new ProviderError("timeout", `El proveedor no respondió en ${Math.max(1, Math.round(timeoutMs / 1000))} s.`, { cause: error })
       : new ProviderError("unreachable", `No se pudo contactar con el proveedor: ${error instanceof Error ? error.message : "error de red"}`, { cause: error });
   } finally {
     clearTimeout(timeout);
+    active?.signal.removeEventListener("abort", cancel);
   }
-  if (!response.ok) {
-    const raw = maskKeys(await response.text().catch(() => ""));
-    throw new ProviderError("error", `El proveedor respondió ${response.status}: ${raw.slice(0, 300)}`, { status: response.status, body: raw.slice(0, 4_000) });
-  }
-  return response.json();
 }
 
 /** A provider problem, told apart by kind so the interface can say what happened without parsing a message. */
@@ -3400,6 +3421,12 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
   const outcomes: StepOutcome[] = plan.steps.map((step) => ({ command: step.command, summary: step.summary, status: "skipped", output: "" }));
 
   for (const [index, step] of plan.steps.entries()) {
+    if (operationContext()?.signal.aborted) {
+      operationPhase("inspecting");
+      return { snapshot: await inspectOperation(() => getSnapshot(cwd)), output: executionReport(outcomes, language),
+        error: localized(language, "Se detuvo antes del siguiente paso. Los cambios completados siguen hechos; no se deshizo nada.", "Stopped before the next step. Completed changes remain; nothing was rolled back."), outcomes };
+    }
+    operationPhase("executing", index + 1, plan.steps.length);
     try {
       if (index > 0) {
         snapshot = await getSnapshot(cwd);
@@ -3409,7 +3436,8 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
     } catch (error) {
       const detail = error instanceof Error ? error.message : localized(language, "Git no pudo completar la acción.", "Git could not complete the action.");
       outcomes[index] = { ...outcomes[index], status: "failed", output: detail };
-      const failedSnapshot = await getSnapshot(cwd);
+      operationPhase("inspecting");
+      const failedSnapshot = await inspectOperation(() => getSnapshot(cwd));
       return {
         snapshot: failedSnapshot,
         output: executionReport(outcomes, language),
@@ -3419,7 +3447,8 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
       };
     }
   }
-  return { snapshot: await getSnapshot(cwd), output: executionReport(outcomes, language), outcomes, ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {}) };
+  operationPhase("inspecting");
+  return { snapshot: await inspectOperation(() => getSnapshot(cwd)), output: executionReport(outcomes, language), outcomes, ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {}) };
 }
 
 /**

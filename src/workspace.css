@@ -595,3 +595,6 @@
 .completion-card.status-partial, .completion-card.status-failed, .completion-card.status-not_run { border-color: #644b2c; }
 .completion-card.status-partial .completion-header svg, .completion-card.status-failed .completion-header svg, .completion-card.status-not_run .completion-header svg { color: #e6a64f; }
 .completion-next { margin: 0; color: var(--text); }
+
+.operation-status { display: flex; flex: none; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 16px; color: var(--text); background: var(--surface); border-top: 1px solid var(--border); font-size: 12px; }
+.operation-status small { flex: 1; min-width: 180px; color: var(--secondary); }

@@ -1,3 +1,4 @@
+import { OperationStatus, Elapsed } from "./OperationStatus";
 import { useDialog } from "./useDialog";
 import { CatMark, SleepingCat } from "./CatMark";
 import { NotificationCenter } from "./NotificationCenter";
@@ -1048,6 +1049,10 @@ export default function App() {
       return plan;
     } catch (error) {
       const message = cleanError(error, t("fallbackPrepareAction"));
+      if (message.includes("Operation stopped.")) {
+        updateTurn(path, turnId, (turn) => ({ ...turn, outcome: t("operation_stopped"), status: "cancelled" }));
+        return undefined;
+      }
       updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
       await recoverFrom(path, {
         command: question,
@@ -1117,7 +1122,7 @@ export default function App() {
   };
 
   const propose = async (text: string) => {
-    if (!snapshot || !text.trim()) return;
+    if (!snapshot || !text.trim() || planning) return;
     const question = text.trim();
     const path = snapshot.path;
     const context = conversationContext(conversations[path] ?? []);
@@ -1778,6 +1783,7 @@ export default function App() {
         </main>
         <footer className="statusbar"><div className="status-left"><span className={`status-good ${snapshot.isDirty ? "has-changes" : ""}`}><CircleDot size={12} /> {snapshot.isDirty ? counted(t, snapshot.changes.length, "change", "changes") : t("noUncommittedChanges")}</span><span className="status-separator" /><span>{counted(t, branchCount.local, "localBranch", "localBranches")}{branchCount.remoteOnly ? `, ${branchCount.remoteOnly} ${t("remoteOnly")}` : ""}</span></div><div className="status-right"><span><Clock3 size={12} /> {t("lastRead", { date: formatDate(active.loadedAt, locale) })}</span><span className="remote-status" title={snapshot.remotes.length ? `${remoteTitle(snapshot, t)}\n${active.fetchedAt ? t("remoteCheckedAt", { date: formatDate(active.fetchedAt, locale) }) : t("remoteNotChecked")}` : remoteTitle(snapshot, t)}><Cloud size={12} /> {remoteLabel(snapshot, t)}</span><button className={`provider-status ${config.lastProblem ? "attention" : ""}`} onClick={openSettings} title={t("aiStatusTitle")}><Sparkles size={12} /> {config.configured ? t(config.lastProblem ? "statusAiAttention" : "statusAiConnected", { model: config.model }) : t("llmNotConfigured")}</button></div></footer>
       </>}
+      <OperationStatus path={snapshot?.path} t={t} />
       {deliveryReview && <DeliveryReviewModal review={deliveryReview} snapshot={projects.find((item) => item.snapshot.path === deliveryReview.plan.repoPath)?.snapshot} busy={planning}
         onClose={() => { updateTurn(deliveryReview.plan.repoPath, deliveryReview.turnId, (turn) => ({ ...turn, status: "cancelled", outcome: t("planDiscarded") })); setDeliveryReview(undefined); }}
         onApply={async () => { const review = deliveryReview; setDeliveryReview(undefined); await applyPlan(review.turnId, review.plan); }} />}
@@ -2004,6 +2010,9 @@ function CloneModal({ onClose, onRemoteLogin, onCloned }: { onClose: () => void;
   const [preview, setPreview] = useState<ClonePreview>();
   const [running, setRunning] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [cloneStarted, setCloneStarted] = useState(0);
+  const [cloneProgress, setCloneProgress] = useState<{ phase: string; percent: number }>();
+  useEffect(() => window.gitcat.onCloneProgress(setCloneProgress), []);
   const [outcome, setOutcome] = useState<CloneOutcomeShown>();
   const [error, setError] = useState<string>();
   const [attempt, setAttempt] = useState(0);
@@ -2036,6 +2045,7 @@ function CloneModal({ onClose, onRemoteLogin, onCloned }: { onClose: () => void;
   };
   const start = async () => {
     if (!parent || !preview?.ok || running) return;
+    setCloneStarted(Date.now()); setCloneProgress(undefined);
     setRunning(true); setCancelling(false); setOutcome(undefined); setError(undefined);
     try {
       const result = await window.gitcat.startClone(url, parent.id, name);
@@ -2075,6 +2085,7 @@ function CloneModal({ onClose, onRemoteLogin, onCloned }: { onClose: () => void;
         {outcome.detail && <details className="unavailable-detail"><summary>{t("systemDetail")}</summary><code>{outcome.detail}</code></details>}
       </div>}
       {error && <p className="setup-problem" role="alert">{error}</p>}
+      {running && <p role="status">{t("operationClone")} · <Elapsed since={cloneStarted} />{cloneProgress && <> · {cloneProgress.phase}: {cloneProgress.percent}%</>}</p>}
       <div className="modal-actions">
         {running ? <button type="button" className="outline-button" onClick={() => void cancel()} disabled={cancelling}>{cancelling ? <LoaderCircle className="spin" size={14} /> : <X size={14} />} {t(cancelling ? "cloneCancelling" : "cloneCancel")}</button> : <>
           <button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button>

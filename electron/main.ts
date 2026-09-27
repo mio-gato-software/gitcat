@@ -1,3 +1,4 @@
+import { trackOperation, cancelOperation, listOperations, operationCheckpoint } from "./operation-progress.js";
 import { legacyAppName, migrateProfileFiles, profilePath } from "./app-identity.js";
 import { exclusive } from "./repository-queue.js";
 import { opensSafely } from "./conflict-guide.js";
@@ -47,6 +48,11 @@ let persistedWorkspace: WorkspaceRecord = emptyWorkspace();
 const unavailableProjects = new Map<string, UnavailableProject>();
 /** A folder offered as a project's new location that GitCat could not vouch for, waiting for the person's answer. */
 const pendingLocations = new Map<string, { from: string; to: string; match: RepositoryMatch; fingerprint: RepoFingerprint }>();
+
+function tracked<T>(event: Electron.IpcMainInvokeEvent, path: string, phase: import("../shared/types.js").OperationProgress["phase"], task: () => Promise<T>, mutation = false) {
+  return trackOperation(path, phase, (progress) => { if (!event.sender.isDestroyed()) event.sender.send("operation:progress", progress); },
+    () => exclusive(path, () => { operationCheckpoint(); return task(); }), mutation);
+}
 
 function workspacePath() { return join(app.getPath("userData"), "gitcat-workspace.json"); }
 
@@ -411,7 +417,7 @@ app.whenReady().then(async () => {
     if (activeClone) throw new Error("A copy is already in progress. Wait for it or cancel it first.");
     const controller = activeClone = new AbortController();
     try {
-      const outcome = await cloneRepository(request, { signal: controller.signal });
+      const outcome = await cloneRepository(request, { signal: controller.signal, onProgress: (progress) => { if (!event.sender.isDestroyed()) event.sender.send("clone:progress", progress); } });
       if (outcome.status !== "cloned") return outcome;
       return { status: "cloned", project: adoptProject(await getSnapshot(outcome.path)), empty: outcome.empty };
     } finally {
@@ -482,6 +488,11 @@ app.whenReady().then(async () => {
     if (project.path !== pending.to) return { status: "invalid", path: pending.to, reason: "not_repository", detail: `git rev-parse --show-toplevel: ${project.path}` };
     return adoptLocation(pending.from, project, pending.fingerprint, pending.match);
   });
+  ipcMain.handle("operation:list", (event) => { assertTrustedSender(event); return listOperations(); });
+  ipcMain.handle("operation:cancel", (event, cwd: string, id: unknown) => {
+    assertTrustedSender(event);
+    return typeof id === "string" && cancelOperation(assertOpenedRepository(cwd), id);
+  });
   ipcMain.handle("repo:snapshot", (event, cwd: string) => {
     assertTrustedSender(event);
     return getSnapshot(assertOpenedRepository(cwd));
@@ -489,7 +500,7 @@ app.whenReady().then(async () => {
   ipcMain.handle("repo:fetch", (event, cwd: string) => {
     assertTrustedSender(event);
     const repoPath = assertOpenedRepository(cwd);
-    return exclusive(repoPath, () => fetchRemotes(repoPath));
+    return tracked(event, repoPath, "fetching", () => fetchRemotes(repoPath), true);
   });
   ipcMain.handle("history:load", (event, cwd: string, request: HistoryRequest) => {
     assertTrustedSender(event);
@@ -517,7 +528,7 @@ app.whenReady().then(async () => {
   ipcMain.handle("conflicts:propose", async (event, cwd: string, locale?: Locale) => {
     assertTrustedSender(event);
     const repoPath = assertOpenedRepository(cwd);
-    return rememberProposal(await exclusive(repoPath, () => proposeConflictResolution(repoPath, locale)));
+    return rememberProposal(await tracked(event, repoPath, "planning", () => proposeConflictResolution(repoPath, locale)));
   });
   ipcMain.handle("conflicts:apply", async (event, cwd: string, proposalId: unknown, accepted: unknown, locale?: Locale) => {
     assertTrustedSender(event);
@@ -583,7 +594,7 @@ app.whenReady().then(async () => {
     const failure = assertFailure(reported);
     const repoPath = assertOpenedRepository(cwd);
     const { record, known } = failureRecord(repoPath, failure);
-    return rememberPlan(await exclusive(repoPath, async () => planRecovery(repoPath, failure, context, locale, await describeFailure(repoPath, failure, record, known))));
+    return rememberPlan(await tracked(event, repoPath, "planning", async () => planRecovery(repoPath, failure, context, locale, await describeFailure(repoPath, failure, record, known))));
   });
   ipcMain.handle("action:describe-failure", async (event, cwd: string, reported: unknown) => {
     assertTrustedSender(event);
@@ -597,7 +608,7 @@ app.whenReady().then(async () => {
     const repoPath = assertOpenedRepository(cwd);
     const record = typeof planId === "string" ? failedPlans.get(planId) : undefined;
     if (!record || record.plan.repoPath !== repoPath) throw new Error(localized(locale, "Ese intento ya no está disponible. Actualiza y prepara la acción de nuevo.", "That attempt is no longer available. Refresh and prepare the action again."));
-    return rememberPlan(await exclusive(repoPath, () => prepareRetry(repoPath, record, locale)));
+    return rememberPlan(await tracked(event, repoPath, "planning", () => prepareRetry(repoPath, record, locale)));
   });
   ipcMain.handle("action:plan", async (event, cwd: string, request: string, context?: ConversationMessage[], locale?: Locale) => {
     assertTrustedSender(event);
@@ -607,12 +618,12 @@ app.whenReady().then(async () => {
       !message || !["user", "assistant"].includes(message.role) || typeof message.content !== "string"
     ))) throw new Error("El contexto de conversación no es válido.");
     const repoPath = assertOpenedRepository(cwd);
-    return rememberPlan(await exclusive(repoPath, () => planAction(repoPath, request, context, locale)));
+    return rememberPlan(await tracked(event, repoPath, "planning", () => planAction(repoPath, request, context, locale)));
   });
   ipcMain.handle("action:prepare", async (event, cwd: string, operation: Operation, args?: Record<string, string>, locale?: Locale) => {
     assertTrustedSender(event);
     const repoPath = assertOpenedRepository(cwd);
-    return rememberPlan(await exclusive(repoPath, () => prepareOperation(repoPath, operation, args, locale)));
+    return rememberPlan(await tracked(event, repoPath, "planning", () => prepareOperation(repoPath, operation, args, locale)));
   });
   ipcMain.handle("action:prepare-delivery", async (event, cwd: string, request: DeliveryRequest, locale?: Locale) => {
     assertTrustedSender(event);
@@ -625,19 +636,19 @@ app.whenReady().then(async () => {
       stateId: request.stateId, mergeToDefault: request.mergeToDefault, message: request.message, secretsReviewed: request.secretsReviewed === true,
       ...(request.selection ? { selection: request.selection.map((item) => ({ path: item.path, version: item.version })) } : {})
     };
-    return rememberPlan(await exclusive(repoPath, () => prepareBranchDelivery(repoPath, delivery, locale)));
+    return rememberPlan(await tracked(event, repoPath, "planning", () => prepareBranchDelivery(repoPath, delivery, locale)));
   });
   ipcMain.handle("action:prepare-merge-to-default", async (event, cwd: string, branch: string, locale?: Locale) => {
     assertTrustedSender(event);
     if (typeof branch !== "string") throw new Error("La rama que quieres fusionar no es válida.");
     const repoPath = assertOpenedRepository(cwd);
-    return rememberPlan(await exclusive(repoPath, () => prepareMergeToDefault(repoPath, branch, locale)));
+    return rememberPlan(await tracked(event, repoPath, "planning", () => prepareMergeToDefault(repoPath, branch, locale)));
   });
   ipcMain.handle("commit:generate-description", async (event, cwd: string, locale?: Locale, paths?: unknown) => {
     assertTrustedSender(event);
     const selected = paths === undefined ? undefined : assertPathList(paths);
     const repoPath = assertOpenedRepository(cwd);
-    return exclusive(repoPath, () => generateCommitDescription(repoPath, locale, selected));
+    return tracked(event, repoPath, "planning", () => generateCommitDescription(repoPath, locale, selected));
   });
   ipcMain.handle("commit:selection-diff", (event, cwd: string, paths: unknown, locale?: Locale) => {
     assertTrustedSender(event);
@@ -652,7 +663,7 @@ app.whenReady().then(async () => {
     issuedPlans.delete(planId);
     if (plan.repoPath !== repoPath) throw new Error("El plan pertenece a otro repositorio.");
     try {
-      const result = await exclusive(repoPath, () => executePlan(repoPath, plan, locale));
+      const result = await tracked(event, repoPath, "executing", () => executePlan(repoPath, plan, locale), true);
       if (result.error) rememberFailure({ plan, outcomes: result.outcomes, stale: false });
       return result;
     } catch (error) {

@@ -2,12 +2,24 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("gitcat", {
   platform: process.platform,
+  onOperationProgress: (listener) => {
+    const receive = (_event, progress) => listener(progress);
+    ipcRenderer.on("operation:progress", receive);
+    return () => ipcRenderer.removeListener("operation:progress", receive);
+  },
+  listOperations: () => ipcRenderer.invoke("operation:list"),
+  cancelOperation: (path, id) => ipcRenderer.invoke("operation:cancel", path, id),
   selectProject: (intent, labels) => ipcRenderer.invoke("project:select", intent, labels),
   startTracking: (setupId) => ipcRenderer.invoke("project:start-tracking", setupId),
   openParentProject: (setupId) => ipcRenderer.invoke("project:open-parent", setupId),
   chooseCloneParent: (labels) => ipcRenderer.invoke("clone:choose-parent", labels),
   previewClone: (url, parentId, name) => ipcRenderer.invoke("clone:preview", url, parentId, name),
   startClone: (url, parentId, name) => ipcRenderer.invoke("clone:start", url, parentId, name),
+  onCloneProgress: (listener) => {
+    const receive = (_event, progress) => listener(progress);
+    ipcRenderer.on("clone:progress", receive);
+    return () => ipcRenderer.removeListener("clone:progress", receive);
+  },
   cancelClone: () => ipcRenderer.invoke("clone:cancel"),
   restoreWorkspace: () => ipcRenderer.invoke("workspace:restore"),
   saveWorkspace: (paths, activePath) => ipcRenderer.invoke("workspace:save", paths, activePath),

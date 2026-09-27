@@ -43,6 +43,9 @@ app.whenReady().then(async () => {
 
   const service = await import(pathToFileURL(path.join(root, 'dist-electron/electron/git-service.js')));
   const snapshot = await service.getSnapshot(repo);
+  ipcMain.handle('operation:list', () => []);
+  ipcMain.handle('operation:cancel', () => false);
+  ipcMain.handle('repo:fetch', (_, p) => service.fetchRemotes(p));
   const plans = new Map();
   let refreshError = false;
   // A second saved project whose folder is gone: it must stay listed and explain itself instead of vanishing.
@@ -231,6 +234,18 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.notification-preview.warning')`);
   assert.equal(await js(`Boolean(document.querySelector('.unavailable-project'))`), true, 'A failed retry keeps the project listed');
   await js(`document.querySelector('.window-tab:not(.unavailable) [role="tab"]').click()`);
+  await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
+  const operationEvent = { id:'ui-progress', repoPath:snapshot.path, startedAt:Date.now()-2000, phase:'executing', state:'running', mutation:true, stopping:false, step:1, total:3 };
+  win.webContents.send('operation:progress', operationEvent);
+  await waitFor(`document.querySelector('.operation-status')`);
+  assert.match(await js(`document.querySelector('.operation-status').innerText`), /Paso 1 de 3[\s\S]*Detener después del paso actual/);
+  await js(`document.querySelector('.window-tab.unavailable [role="tab"]').click()`);
+  await waitFor(`!document.querySelector('.operation-status')`);
+  await js(`document.querySelector('.window-tab:not(.unavailable) [role="tab"]').click()`);
+  await waitFor(`document.querySelector('.operation-status')`);
+  win.webContents.send('operation:progress', { ...operationEvent, state:'stopped', stopping:true });
+  await waitFor(`document.querySelector('.operation-status')?.innerText.includes('no se deshizo nada')`);
+  await js(`document.querySelector('.operation-status button').click()`);
   await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
   const before = git('status', '--porcelain');
   await js(`(() => { const button = document.querySelector('.branch-main'); button.focus(); button.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true })); })()`);
