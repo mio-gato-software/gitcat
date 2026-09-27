@@ -350,7 +350,8 @@ test("the interface asks before the first content-bearing request and keeps the 
   // Opening the save flow only writes a description on its own once sharing was agreed.
   assert.match(app, /void sharingAgreed\(path\)\.then\(\(agreed\) => \{ if \(agreed/);
   // A flagged ticked file keeps the save behind an explicit review, and the manual message still works.
-  assert.match(app, /disabled=\{stale \|\| mustReview \|\|/);
+  assert.match(app, /if \(flaggedTicked\.length && !secretsReviewed\) \{ pointTo\("secrets"\); return; \}/);
+  assert.match(app, /if \(!message\) \{ pointTo\("description"\); return; \}/);
   assert.match(app, /t\("secretReviewedSave"\)/);
   assert.match(app, /t\("secretDetectorLimits"\)/);
   assert.match(app, /turn\.private && \(turn\.error \|\| turn\.outcome\) \? privateOutputNote/);

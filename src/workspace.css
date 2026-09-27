@@ -298,6 +298,7 @@
 .commit-form-actions .ghost-button { display: inline-flex; flex: none; align-items: center; gap: 6px; }
 .commit-form-actions .primary-button { flex: 1 1 160px; }
 .file-inclusion-note { margin: 10px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.55; }
+.save-description-required { color: var(--amber); }
 .diff-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; color: var(--muted); font-size: 11px; }
 .diff-toolbar code { min-width: 0; overflow: hidden; color: var(--secondary); font-family: var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .diff-toolbar .ghost-button { flex: none; }
@@ -432,8 +433,15 @@
 .statusbar .provider-status.attention { color: var(--amber, #e6a64f); }
 @media (max-width: 1280px) { .status-right > .provider-status { display: none; } }
 
-/* Settings: a guided, optional AI connection and the three sign-ins told apart. */
-.settings-modal.guided { width: min(520px, calc(100vw - 32px)); }
+/* Settings: keep configuration and repository readiness visible side by side. */
+.settings-modal.guided { display: flex; flex-direction: column; width: min(1040px, calc(100vw - 48px)); height: min(820px, calc(100vh - 48px)); max-height: none; padding: 24px 28px 18px; overflow: hidden; }
+.settings-modal .modal-heading { flex: none; margin-bottom: 18px; }
+.settings-content { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; flex: 1; min-height: 0; }
+.settings-column { min-width: 0; min-height: 0; padding-right: 8px; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; }
+.settings-secondary { padding-left: 28px; border-left: 1px solid var(--hover); }
+.settings-language > label { margin-top: 0; }
+.settings-modal > .modal-actions { flex: none; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--hover); }
+.settings-column > .settings-section:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 .settings-section { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--hover); }
 .settings-section h3 { margin: 0; color: var(--text); font-size: 13px; }
 .settings-section-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
@@ -472,6 +480,12 @@
 .account-row strong { color: var(--text); }
 .account-row span { color: var(--muted); line-height: 1.5; }
 .account-row button { align-self: flex-start; margin-top: 4px; margin-left: -8px; }
+@media (max-width: 900px) {
+  .settings-modal.guided { width: min(620px, calc(100vw - 32px)); height: min(820px, calc(100vh - 32px)); padding: 20px; }
+  .settings-content { display: block; padding-right: 6px; overflow-y: auto; }
+  .settings-column { padding: 0; overflow: visible; }
+  .settings-secondary { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--hover); border-left: 0; }
+}
 
 /* Getting a first project in: three ways to start, and a preview before anything is written. */
 .start-options { display: grid; gap: 8px; text-align: left; }

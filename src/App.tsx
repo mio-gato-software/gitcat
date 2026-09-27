@@ -470,6 +470,8 @@ export default function App() {
   const [deliveryMerge, setDeliveryMerge] = useState(false);
   /** The version of every listed file when the save was started, so a later edit to a ticked file asks for a fresh look. */
   const [deliveryBaseline, setDeliveryBaseline] = useState<{ path: string; versions: Record<string, string> }>();
+  const [saveAttention, setSaveAttention] = useState<{ path: string; target: "description" | "selection" | "secrets" | "stale"; sequence: number }>();
+  const saveAttentionSequence = useRef(0);
   /** Files left out of the next save, per repository. Everything listed is included until someone unticks it. */
   const [excludedByRepo, setExcludedByRepo] = useState<Record<string, string[]>>({});
   const [selectionDiffOpen, setSelectionDiffOpen] = useState(false);
@@ -1529,31 +1531,39 @@ export default function App() {
     } finally { setGeneratingDescription(false); }
   };
 
-  const beginDelivery = (merge: boolean) => {
+  /** Sends the ticked files with the version of each that is on screen; the save is bound to exactly those. */
+  const prepareCommit = (merge = deliveryMerge) => {
     if (!snapshot || planning || generatingDescription) return;
-    setDeliveryMerge(merge);
-    setDeliveryBaseline({ path: snapshot.path, versions: Object.fromEntries(snapshot.changes.map((change) => [change.path, change.version ?? ""])) });
+    const pointTo = (target: "description" | "selection" | "secrets" | "stale") =>
+      setSaveAttention({ path: snapshot.path, target, sequence: ++saveAttentionSequence.current });
+    if (deliveryStale) { pointTo("stale"); return; }
+    if (!selectedChanges.length) { pointTo("selection"); return; }
+    if (flaggedTicked.length && !secretsReviewed) { pointTo("secrets"); return; }
+    const message = commitMessage.trim();
+    if (!message) { pointTo("description"); return; }
+    if (message.length > 120 || !snapshot.changes.length) return;
+    const path = snapshot.path;
+    const selection = selectedChanges.map((change) => ({ path: change.path, version: change.version ?? "" }));
+    void showPlan(t(merge ? "saveAndIntegrate" : "saveChanges", { target: snapshot.defaultBranch ?? "" }),
+      () => window.gitcat.prepareBranchDelivery(path, { stateId: snapshot.stateId, message, mergeToDefault: merge, selection, secretsReviewed }, locale), path, true);
+  };
+
+  const beginDelivery = (merge: boolean, refreshReview = false) => {
+    if (!snapshot || planning || generatingDescription) return;
+    const continuing = deliveryBaseline?.path === snapshot.path && !refreshReview;
+    const includeIntegration = continuing ? merge || deliveryMerge : merge;
+    setDeliveryMerge(includeIntegration);
+    if (!continuing) setDeliveryBaseline({ path: snapshot.path, versions: Object.fromEntries(snapshot.changes.map((change) => [change.path, change.version ?? ""])) });
     if (snapshot.isDirty) {
       openCommitForm();
-      // Opening the save never sends anything on its own before sharing was agreed: the form stays
-      // manual, and the generate button asks first.
+      if (!refreshReview) prepareCommit(includeIntegration);
+      // An agreed assistant may offer a draft; opening this flow never shares code without consent.
       const path = snapshot.path;
       if (config.configured && !commitMessage.trim()) void sharingAgreed(path).then((agreed) => { if (agreed && snapshotRef.current?.path === path) void generateDescription(); });
     } else if (merge) {
       void showPlan(t("integrateInto", { target: snapshot.defaultBranch ?? "" }),
         () => window.gitcat.prepareBranchDelivery(snapshot.path, { stateId: snapshot.stateId, mergeToDefault: true }, locale), snapshot.path, true);
     }
-  };
-
-  /** Sends the ticked files with the version of each that is on screen; the save is bound to exactly those. */
-  const prepareCommit = () => {
-    const message = commitMessage.trim();
-    if (!snapshot?.changes.length || !selectedChanges.length || !message || message.length > 120) return;
-    if (flaggedTicked.length && !secretsReviewed) return;
-    const path = snapshot.path;
-    const selection = selectedChanges.map((change) => ({ path: change.path, version: change.version ?? "" }));
-    void showPlan(t(deliveryMerge ? "saveAndIntegrate" : "saveChanges", { target: snapshot.defaultBranch ?? "" }),
-      () => window.gitcat.prepareBranchDelivery(path, { stateId: snapshot.stateId, message, mergeToDefault: deliveryMerge, selection, secretsReviewed }, locale), path, true);
   };
 
   const setExcluded = (path: string, next: string[]) => setExcludedByRepo((items) => ({ ...items, [path]: next }));
@@ -1801,7 +1811,7 @@ export default function App() {
             </div>
             {inspectorTab === "details" ? <div className="inspector-body">
               {activeFocus?.kind === "wip"
-                ? <ChangesView readiness={readiness} snapshot={snapshot} secrets={secretFindings} secretsReviewed={secretsReviewed} onSecretsReviewed={(reviewed) => setSecretsReviewedKey(reviewed ? secretsKey : undefined)} descriptionWithheld={descriptionWithheld} merge={deliveryMerge} configured={config.configured} stale={deliveryStale} onReviewAgain={() => beginDelivery(deliveryMerge)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} message={commitMessage} generating={generatingDescription} busy={planning} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={prepareCommit}
+                ? <ChangesView readiness={readiness} snapshot={snapshot} secrets={secretFindings} secretsReviewed={secretsReviewed} onSecretsReviewed={(reviewed) => setSecretsReviewedKey(reviewed ? secretsKey : undefined)} descriptionWithheld={descriptionWithheld} merge={deliveryMerge} configured={config.configured} stale={deliveryStale} attention={saveAttention?.path === snapshot.path ? saveAttention : undefined} onReviewAgain={() => beginDelivery(deliveryMerge, true)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} message={commitMessage} generating={generatingDescription} busy={planning} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={() => prepareCommit()}
                     excluded={excluded} onToggle={toggleIncluded} onToggleAll={setAllIncluded} onIgnore={ignoreFile} onShowSelected={() => setSelectionDiffOpen(true)} />
                 : activeFocus
                   ? <CommitInspector key={activeFocus.commit.hash} commit={activeFocus.commit} snapshot={snapshot} known={graphCommits} onFocus={(commit) => focusOn({ kind: "commit", commit }, true)} onOpen={(file) => setModalCommit({ commit: activeFocus.commit, file })} />
@@ -3263,14 +3273,23 @@ function FileList({ files, stats, onOpen, selection }: { files: FileChange[]; st
  * the ticked files into a saved version. Unticked files are listed too, so leaving one out is a
  * visible decision rather than something that happens to it.
  */
-function ChangesView({ readiness, snapshot, secrets, secretsReviewed, onSecretsReviewed, descriptionWithheld, message, generating, busy, onOpenFile, onMessageChange, onGenerate, onPrepare, merge, configured, stale, onReviewAgain, onMergeChange, excluded, onToggle, onToggleAll, onIgnore, onShowSelected }: {
+function ChangesView({ readiness, snapshot, secrets, secretsReviewed, onSecretsReviewed, descriptionWithheld, message, generating, busy, onOpenFile, onMessageChange, onGenerate, onPrepare, merge, configured, stale, attention, onReviewAgain, onMergeChange, excluded, onToggle, onToggleAll, onIgnore, onShowSelected }: {
   readiness: ReadinessState; snapshot: RepoSnapshot; secrets: SecretFinding[]; secretsReviewed: boolean; onSecretsReviewed: (reviewed: boolean) => void; descriptionWithheld: WithheldFile[];
   message: string; generating: boolean; busy: boolean;
   onOpenFile: (file: FileChange) => void; onMessageChange: (message: string) => void; onGenerate: () => void; onPrepare: () => void;
-  merge: boolean; configured: boolean; stale: boolean; onReviewAgain: () => void; onMergeChange: (value: boolean) => void;
+  merge: boolean; configured: boolean; stale: boolean; attention?: { path: string; target: "description" | "selection" | "secrets" | "stale"; sequence: number }; onReviewAgain: () => void; onMergeChange: (value: boolean) => void;
   excluded: Set<string>; onToggle: (file: FileChange) => void; onToggleAll: (include: boolean) => void; onIgnore: (file: FileChange) => void; onShowSelected: () => void;
 }) {
   const { t } = useI18n();
+  const viewRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!attention || attention.path !== snapshot.path) return;
+    const selector = attention.target === "description" ? "#commit-description"
+      : attention.target === "selection" ? ".select-all input"
+      : attention.target === "secrets" ? ".secret-warning input[type='checkbox']"
+      : ".delivery-stale button";
+    viewRef.current?.querySelector<HTMLElement>(selector)?.focus();
+  }, [attention?.sequence, snapshot.path]);
   const hasChanges = snapshot.changes.length > 0;
   const canMerge = snapshot.defaultBranch && snapshot.defaultBranch !== snapshot.currentBranch;
   const selected = snapshot.changes.filter((change) => !excluded.has(change.path));
@@ -3279,13 +3298,12 @@ function ChangesView({ readiness, snapshot, secrets, secretsReviewed, onSecretsR
   const flagged = new Set(secrets.map((finding) => finding.path));
   // Only the ticked files decide the save; a flagged file left out is already safe from it.
   const flaggedTicked = selected.filter((change) => flagged.has(change.path));
-  const mustReview = flaggedTicked.length > 0 && !secretsReviewed;
   // Before the first save, or whenever Git or the author is missing, the checklist says so up front;
   // otherwise one line under the form says who the save will be signed as.
   const report = readiness.report?.repoPath === snapshot.path ? readiness.report : undefined;
   const needsSetup = Boolean(report && (report.git.status !== "ok" || report.author.status !== "ok"));
   const author = report?.author.status === "ok" ? report.author : undefined;
-  return <div className="changes-view">
+  return <div className="changes-view" ref={viewRef}>
     <div className="detail-head"><span className="detail-kind"><PencilLine size={13} />{t("uncommittedHeading")}</span><span className="detail-branch" title={snapshot.currentBranch}><GitBranch size={12} />{snapshot.currentBranch}</span></div>
     {(needsSetup || (!snapshot.head && report)) && <ReadinessChecklist readiness={readiness} items={["git", "author"]} t={t} compact title={t("readinessSaveTitle")} />}
     {hasChanges ? <>
@@ -3306,7 +3324,8 @@ function ChangesView({ readiness, snapshot, secrets, secretsReviewed, onSecretsR
       </div>}
       <div className="commit-form">
         <div className="commit-form-heading"><h3>{t("saveDescription")}</h3><button className="outline-button small" onClick={onGenerate} disabled={!configured || generating || busy || !selected.length}>{generating ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{t(generating ? "generatingSaveDescription" : "generateDescription")}</button></div>
-        <label htmlFor="commit-description" className="visually-hidden">{t("commitMessage")}</label><textarea id="commit-description" value={message} onChange={(event) => onMessageChange(event.target.value)} maxLength={120} rows={3} placeholder={t("commitPlaceholder")} disabled={generating || busy} />
+        <label htmlFor="commit-description" className="visually-hidden">{t("commitMessage")}</label><textarea id="commit-description" value={message} onChange={(event) => onMessageChange(event.target.value)} maxLength={120} rows={3} placeholder={t("commitPlaceholder")} aria-describedby={attention?.target === "description" && !message.trim() ? "save-description-required" : undefined} disabled={generating || busy} />
+        {attention?.target === "description" && !message.trim() && <p id="save-description-required" className="file-inclusion-note save-description-required" role="status">{t(configured ? "saveDescriptionOrGenerate" : "saveDescriptionRequired")}</p>}
         <div className="commit-form-meta"><span>{t(configured ? "editableDescription" : "manualSaveDescription")}</span><span>{message.length}/120</span></div>
         {author && !needsSetup && <p className="commit-author-note"><UserRound size={11} />{t("readinessCommitAuthor", { identity: identityText({ name: author.name?.value, email: author.email?.value }), origin: authorOrigin(author, t) })}</p>}
         {descriptionWithheld.length > 0 && <p className="file-inclusion-note withheld-note">{t("descriptionWithheld", { files: withheldText(descriptionWithheld, t) })}</p>}
@@ -3316,7 +3335,7 @@ function ChangesView({ readiness, snapshot, secrets, secretsReviewed, onSecretsR
         {!selected.length && <p className="file-inclusion-note selection-empty" role="status">{t("tickFilesToSave")}</p>}
         <div className="commit-form-actions">
           <button className="ghost-button" onClick={onShowSelected} disabled={!selected.length}><FileDiff size={14} />{t("showSelectedDiff")}</button>
-          <button className="primary-button" onClick={onPrepare} disabled={stale || mustReview || !selected.length || !message.trim() || generating || busy}><ShieldCheck size={14} />{t(merge && canMerge ? "reviewSaveAndMerge" : "reviewSave")}</button>
+          <button className="primary-button" onClick={onPrepare} disabled={generating || busy}><ShieldCheck size={14} />{t(merge && canMerge ? "reviewSaveAndMerge" : "reviewSave")}</button>
         </div>
         <p className="file-inclusion-note">{t("selectedFilesNote")}</p>
       </div>
@@ -3627,7 +3646,9 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div className="settings-modal guided" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div className="modal-heading"><div><div className="eyebrow">{t("settingsEyebrow")}</div><h2 id="settings-title">{t("settings")}</h2></div><button className="icon-button soft" onClick={onClose} aria-label={t("closeSettings")}><X size={17} /></button></div>
-    <label>{t("language")}<select value={locale} onChange={(event) => onLocaleChange(event.target.value as Locale)}><option value="en">{t("english")}</option><option value="es">{t("spanish")}</option></select><small>{t("languageHelp")}</small></label>
+    <div className="settings-content">
+      <div className="settings-column settings-primary">
+        <div className="settings-language"><label>{t("language")}<select value={locale} onChange={(event) => onLocaleChange(event.target.value as Locale)}><option value="en">{t("english")}</option><option value="es">{t("spanish")}</option></select><small>{t("languageHelp")}</small></label></div>
 
     <section className="settings-section ai-section" aria-labelledby="ai-section-title">
       <div className="settings-section-heading"><h3 id="ai-section-title">{t("aiSectionTitle")}</h3>
@@ -3666,6 +3687,8 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange
         {(!config.configured || changed) && <button type="button" className="primary-button" onClick={connect} disabled={Boolean(busy) || config.secureStorage === false}>{busy === "connect" ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />} {t(config.configured ? "saveAndVerify" : "connectAndVerify")}</button>}
       </div>
     </section>
+      </div>
+      <div className="settings-column settings-secondary">
 
     <section className="settings-section readiness-section" aria-labelledby="readiness-title">
       <h3 id="readiness-title">{t("readinessTitle")}</h3>
@@ -3682,6 +3705,8 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange
       <div className="account-row"><UserRound size={14} /><div><strong>{t("accountAuthorTitle")}</strong><span>{t("accountAuthorCopy")}</span></div></div>
       <div className="account-row"><Cloud size={14} /><div><strong>{t("accountRemoteTitle")}</strong><span>{t("accountRemoteCopy")}</span></div></div>
     </section>
+      </div>
+    </div>
     <div className="modal-actions"><button className="ghost-button" onClick={onClose}>{t("close")}</button></div>
   </div></div>;
 }

@@ -478,6 +478,13 @@ app.whenReady().then(async () => {
   assert.equal(await js(`document.querySelector('#commit-description').value`), '');
   assert.equal(await js(`document.querySelector('.delivery-option input').checked`), false, 'Primary save does not also integrate');
   assert.equal(git('status', '--porcelain'), before, 'Opening save never changes Git');
+  await js(`document.querySelector('.delivery-actions .primary-button').click()`);
+  await waitFor(`document.activeElement?.id === 'commit-description'`);
+  assert.match(await js(`document.querySelector('.save-description-required').innerText`), /descripción breve|genera una/);
+  assert.equal(await js(`document.querySelector('.commit-form-actions .primary-button').disabled`), false, 'Review save explains missing input instead of becoming a dead button');
+  await js(`document.querySelector('.commit-form-actions .primary-button').click()`);
+  await waitFor(`document.activeElement?.id === 'commit-description'`);
+  assert.equal(git('status', '--porcelain'), before, 'A missing description never saves work');
   await js(`document.querySelector('.overview-more').click()`);
   await waitFor(`document.querySelector('.context-menu [role="menuitem"]')`);
   await js(`document.querySelector('.context-menu [role="menuitem"]').click()`);
@@ -503,7 +510,7 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.commit-author-note').innerText`), /Se guarda como GitCat QA <qa@example\.test>, configurado solo para este repositorio/);
   assert.equal(await js(`Boolean(document.querySelector('.changes-view .readiness-checklist'))`), false, 'Nothing to set up, so no checklist in the way');
   await capture('changes');
-  await js(`document.querySelector('.commit-form-actions .primary-button').click()`);
+  await js(`document.querySelector('.delivery-actions .primary-button').click()`);
   await waitFor(`document.querySelector('.delivery-review-modal')`);
   await capture('review');
   assert.equal(git('branch', '--show-current'), 'feature/new-menu');
@@ -679,7 +686,26 @@ app.whenReady().then(async () => {
   assert.equal(await js(`(() => { const r = document.activeElement.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight && r.right <= innerWidth; })()`), true, 'Dialog primary actions reachable at 150% zoom on a laptop');
   await capture('settings-large-text');
   win.webContents.setZoomFactor(1);
+  win.setSize(800, 700);
+  await waitFor(`innerWidth <= 820`);
+  assert.equal(await js(`(() => {
+    const modal = document.querySelector('.settings-modal');
+    const ai = modal.querySelector('.ai-section').getBoundingClientRect();
+    const readiness = modal.querySelector('.readiness-section').getBoundingClientRect();
+    return readiness.top > ai.top && modal.querySelector('.modal-actions').getBoundingClientRect().bottom <= innerHeight;
+  })()`), true, 'Settings stacks sections and keeps Close visible in a compact window');
   win.setSize(1480, 940);
+  await waitFor(`innerWidth >= 1400`);
+  const settingsLayout = await js(`(() => {
+    const modal = document.querySelector('.settings-modal');
+    const ai = modal.querySelector('.ai-section').getBoundingClientRect();
+    const readiness = modal.querySelector('.readiness-section').getBoundingClientRect();
+    const bounds = modal.getBoundingClientRect();
+    return { width: bounds.width, height: bounds.height, aiRight: ai.right, readinessLeft: readiness.left, footerVisible: modal.querySelector('.modal-actions').getBoundingClientRect().bottom <= innerHeight };
+  })()`);
+  assert.ok(settingsLayout.width >= 900 && settingsLayout.height <= 820, 'Settings uses a broad, bounded dialog on a desktop window');
+  assert.ok(settingsLayout.aiRight < settingsLayout.readinessLeft, 'AI setup and repository readiness use separate columns');
+  assert.equal(settingsLayout.footerVisible, true, 'Settings close action stays visible below scrolling content');
   const settingsText = () => js(`document.querySelector('.settings-modal').innerText`);
   await waitFor(`document.querySelector('.settings-modal .readiness-row[data-item="author"]')`);
   const guide = await settingsText();

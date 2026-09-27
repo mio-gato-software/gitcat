@@ -564,7 +564,8 @@ test("la descripción de commit usa el diff real y conserva la confirmación", a
   assert.match(main, /ipcMain\.handle\("commit:generate-description"/);
   assert.match(preload, /generateCommitDescription/);
   assert.match(app, /t\(generating \? "generatingSaveDescription" : "generateDescription"\)/);
-  assert.match(app, /window\.gitcat\.prepareBranchDelivery\(path, \{ stateId: snapshot\.stateId, message, mergeToDefault: deliveryMerge, selection, secretsReviewed \}, locale\)/);
+  assert.match(app, /showPlan\(t\(merge \? "saveAndIntegrate" : "saveChanges"/);
+  assert.match(app, /window\.gitcat\.prepareBranchDelivery\(path, \{ stateId: snapshot\.stateId, message, mergeToDefault: merge, selection, secretsReviewed \}, locale\)/);
   assert.match(app, /window\.gitcat\.generateCommitDescription\(repoPath, locale, paths\)/);
   assert.match(preload, /generateCommitDescription: \(path, locale, paths\) => ipcRenderer\.invoke\("commit:generate-description", path, locale, paths\)/);
 });
