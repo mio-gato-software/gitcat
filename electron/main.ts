@@ -8,7 +8,7 @@ import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  getActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
+  getSwitchWork, prepareSwitchWork, getActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
   getLlmConfig, getSnapshot, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
   prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
   scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictGuide, type IssuedConflictProposal
@@ -487,6 +487,16 @@ app.whenReady().then(async () => {
     }
     if (project.path !== pending.to) return { status: "invalid", path: pending.to, reason: "not_repository", detail: `git rev-parse --show-toplevel: ${project.path}` };
     return adoptLocation(pending.from, project, pending.fingerprint, pending.match);
+  });
+  ipcMain.handle("switch-work:read", (event, cwd: string, target: unknown) => {
+    assertTrustedSender(event); if (typeof target !== 'string') throw new Error('Invalid branch'); return getSwitchWork(assertOpenedRepository(cwd),target);
+  });
+  ipcMain.handle("switch-work:prepare", async (event, cwd: string, input: unknown, locale?: Locale) => {
+    assertTrustedSender(event); const path=assertOpenedRepository(cwd);
+    if (!input || typeof input!=='object') throw new Error('Invalid switch request');
+    const request=input as import('../shared/types.js').SwitchWorkRequest;
+    if (!["carry","set_aside","restore"].includes(request.mode) || ['target','label','stash'].some(k=>request[k as 'target']!==undefined && typeof request[k as 'target']!=='string')) throw new Error('Invalid switch request');
+    return rememberPlan(await tracked(event,path,'planning',()=>prepareSwitchWork(path,{mode:request.mode,target:request.target,label:request.label,stash:request.stash,includeUntracked:request.includeUntracked===true},locale)));
   });
   ipcMain.handle("activity:list", (event, cwd: string) => { assertTrustedSender(event); return getActivityHistory(assertOpenedRepository(cwd)); });
   ipcMain.handle("activity:retention", (event, days: unknown) => { assertTrustedSender(event); if (typeof days !== 'number') throw new Error('Invalid retention'); setActivityRetention(days); });

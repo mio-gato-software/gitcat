@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("gitcat", {
   platform: process.platform,
+  getSwitchWork: (path, target) => ipcRenderer.invoke("switch-work:read", path, target),
+  prepareSwitchWork: (path, request, locale) => ipcRenderer.invoke("switch-work:prepare", path, request, locale),
   getActivityHistory: (path) => ipcRenderer.invoke("activity:list", path),
   setActivityRetention: (days) => ipcRenderer.invoke("activity:retention", days),
   clearActivityHistory: (path) => ipcRenderer.invoke("activity:clear", path),

@@ -46,6 +46,8 @@ app.whenReady().then(async () => {
   ipcMain.handle('operation:list', () => []);
   ipcMain.handle('operation:cancel', () => false);
   ipcMain.handle('repo:fetch', (_, p) => service.fetchRemotes(p));
+  ipcMain.handle('switch-work:read', (_, p, target) => service.getSwitchWork(p,target));
+  ipcMain.handle('switch-work:prepare', async (_, p, request, locale) => { const plan=await service.prepareSwitchWork(p,request,locale); plans.set(plan.id,plan); return plan; });
   ipcMain.handle('activity:list', (_, p) => service.getActivityHistory(p));
   ipcMain.handle('activity:retention', (_, days) => service.setActivityRetention(days));
   ipcMain.handle('activity:clear', (_, p) => service.clearActivityHistory(p));
@@ -251,6 +253,14 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.operation-status button').click()`);
   await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
   const before = git('status', '--porcelain');
+  await js(`document.querySelector('.branch-switch').click()`);
+  await waitFor(`document.querySelector('.switch-work fieldset')`);
+  await assertDialog();
+  assert.match(await js(`document.querySelector('.switch-work').innerText`), /Trabajo sin terminar[\s\S]*app.txt[\s\S]*new-file.txt[\s\S]*Incluir archivos nuevos/);
+  assert.equal(git('status','--porcelain'),before,'Reviewing a switch does not stash or save work');
+  await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
+  await waitFor(`!document.querySelector('.switch-work')`);
+
   await js(`(() => { const button = document.querySelector('.branch-main'); button.focus(); button.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true })); })()`);
   await waitFor(`document.querySelector('[role="menu"]')`);
   assert.equal(await js(`document.activeElement.getAttribute('role')`), 'menuitem');
@@ -475,7 +485,7 @@ app.whenReady().then(async () => {
   assert.match(await stage('integrated'), /Estás en main/);
   assert.match(await js(`document.querySelector('.work-overview .overview-next').innerText`), /Conecta un sitio donde publicar[\s\S]*git remote add/);
   assert.match(await js(`document.querySelector('.overview-summary').innerText`), /Solo en este equipo/, 'A save is described as local, never as a backup');
-  await js(`document.querySelector('.top-actions .icon-button').click()`);
+  await js(`document.querySelector('[data-action="activity"]').click()`);
   await waitFor(`document.querySelector('.activity-history .activity-record')`);
   await assertDialog();
   assert.match(await js(`document.querySelector('.activity-history').innerText`), /completado[\s\S]*Revisar una reversión/);

@@ -439,6 +439,7 @@ export type StepOutcome = {
 };
 
 export type ActionPlan = {
+  switchWork?: SwitchWorkRequest;
   recovery?: HistoryRecovery;
   id: string;
   repoPath: string;
@@ -927,6 +928,8 @@ export type GitlineApi = {
   generateCommitDescription: (path: string, locale?: Locale, paths?: string[]) => Promise<CommitDescriptionResult>;
   /** Exactly what a save of these files would record, against the last saved version. */
   getSelectionDiff: (path: string, paths: string[], locale?: Locale) => Promise<CommitDetail>;
+  getSwitchWork: (path: string, target: string) => Promise<SwitchWorkPreview>;
+  prepareSwitchWork: (path: string, request: SwitchWorkRequest, locale?: Locale) => Promise<ActionPlan>;
   getActivityHistory: (path: string) => Promise<{ retentionDays: number; entries: ActivityRecord[] }>;
   setActivityRetention: (days: number) => Promise<void>;
   clearActivityHistory: (path: string) => Promise<void>;
@@ -970,3 +973,6 @@ export type ActivityRecord = {
   error?: string;
 };
 export type HistoryRecovery = { mode: 'revert' | 'undo' | 'restore'; commit: string; branch?: string };
+
+export type SwitchWorkRequest = { mode: 'carry' | 'set_aside' | 'restore'; target?: string; label?: string; includeUntracked?: boolean; stash?: string };
+export type SwitchWorkPreview = { snapshot: RepoSnapshot; target: string; occupied?: string; blockers: string[]; entries: { hash: string; label: string }[] };

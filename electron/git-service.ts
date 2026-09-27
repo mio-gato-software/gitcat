@@ -1,5 +1,5 @@
 import { ActivityHistory } from "./activity-history.js";
-import type { HistoryRecovery } from "../shared/types.js";
+import type { HistoryRecovery, SwitchWorkRequest, SwitchWorkPreview } from "../shared/types.js";
 import { operationContext, operationCheckpoint, operationPhase, inspectOperation, OperationCancelled } from "./operation-progress.js";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -3682,6 +3682,7 @@ export async function clearActivityHistory(cwd: string) { activityHistory().clea
 /** Recorded before execution and after each settled step, so a crash leaves uncertainty visible. */
 export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale) {
   if (plan.recovery) await validateHistoryRecovery(cwd, plan.recovery);
+  if (plan.switchWork) await validateSwitchWork(cwd, plan.switchWork);
   const before = await getSnapshot(cwd);
   const history = activityHistory(), id = history.begin(plan, before);
   try {
@@ -3755,4 +3756,64 @@ export async function applyConflictResolution(cwd: string, proposal: IssuedConfl
 }
 export async function applyConflictChoices(cwd: string, guide: IssuedConflictGuide, requested: ConflictChoiceRequest[], locale?: Locale): Promise<ConflictChoiceResult> {
   return recordConflictActivity(cwd,Array.isArray(requested)?requested.length:0,()=>applyConflictChoicesBody(cwd,guide,requested,locale));
+}
+
+
+async function setAsideEntries(cwd: string) {
+  const raw=await checkedGit(cwd,['stash','list','--format=%H%x00%gs']);
+  return raw.split('\n').flatMap(line=>{const [hash,label]=line.split('\0');return /^[a-f0-9]{40,64}$/.test(hash) && label?.includes('GitCat set aside:')?[{hash,label}]:[];});
+}
+export async function getSwitchWork(cwd: string, target: string): Promise<SwitchWorkPreview> {
+  const snapshot=await getSnapshot(cwd);
+  if (!isBranchNameSafe(target)) throw new Error('Invalid branch name.');
+  const branch=snapshot.branches.find(b=>b.name===target);
+  if (!branch) throw new Error('That branch no longer exists. Refresh the branch list.');
+  const blockers=branch.presence==='remote'?snapshot.changes:await integrationBlockers(snapshot,snapshot.changes,target);
+  return {snapshot,target,occupied:branch.checkedOutIn,blockers:blockers.map(c=>c.path),entries:await setAsideEntries(cwd)};
+}
+async function validateSwitchWork(cwd: string, request: SwitchWorkRequest) {
+  if (!['carry','set_aside','restore'].includes(request.mode)) throw new Error('Invalid unfinished-work choice.');
+  const snapshot=await getSnapshot(cwd);
+  if (snapshot.pending || snapshot.conflicts.length) throw new Error('Finish or abort the current Git operation before moving unfinished work.');
+  if (request.mode==='restore') {
+    if (snapshot.isDirty) throw new Error('Review or save current edits first. Restoring will not mix them with the set-aside work.');
+    if (!(await setAsideEntries(cwd)).some(e=>e.hash===request.stash)) throw new Error('That set-aside entry is no longer available. Read the list again.');
+    return;
+  }
+  const preview=await getSwitchWork(cwd,request.target??'');
+  if (preview.occupied) throw new Error(`That branch is open in ${preview.occupied}. Open that folder as a project, or keep working here. No files were moved.`);
+  if (snapshot.currentBranch===request.target) throw new Error('You are already on that branch.');
+  if (request.mode==='carry' && preview.blockers.length) throw new Error(`These edits overlap the destination: ${preview.blockers.join(', ')}. Save or set them aside first.`);
+  if (request.mode==='set_aside') {
+    if (!snapshot.head || !snapshot.isDirty) throw new Error('Save the first version before setting work aside, or review the current clean state.');
+    if (!request.label?.trim() || request.label.length>120 || /[\r\n\0]/.test(request.label)) throw new Error('Give the set-aside work a short name.');
+    const selected=snapshot.changes.filter(c=>request.includeUntracked || !isUntracked(c));
+    if (!selected.length) throw new Error('Only new files are present. Include new files to set them aside.');
+    const untracked=snapshot.changes.filter(isUntracked);
+    if (!request.includeUntracked && preview.blockers.some(p=>untracked.some(c=>c.path===p))) throw new Error('New files would block the switch. Include them in the set-aside entry or keep working here.');
+    const staged=await checkedGit(cwd,['ls-files','--stage']);
+    if (selected.some(c=>staged.split('\n').some(line=>line.startsWith('160000 ') && line.endsWith('\t'+c.path)))) throw new Error('A submodule has unfinished work. Save or set it aside inside that submodule first.');
+  }
+}
+export async function prepareSwitchWork(cwd: string, request: SwitchWorkRequest, locale?: Locale) {
+  await validateSwitchWork(cwd,request);
+  const snapshot=await getSnapshot(cwd),language=normalizeLocale(locale);
+  let steps:PlanStep[], summary:string, effects:string[];
+  if (request.mode==='restore') {
+    steps=[stepFrom('git_command',{},['stash','apply','--index',request.stash!],language)!];
+    summary=localized(language,`Restaurar trabajo apartado en ${snapshot.currentBranch}`,`Restore set-aside work on ${snapshot.currentBranch}`);
+    effects=[localized(language,'Restaura los archivos y lo que estaba preparado. Puede detenerse con conflictos; la entrada se conserva, incluso si falla. Revisa los archivos antes de volver a aplicar.','Restores files and their staged state. It may stop with conflicts; the entry is retained even on failure. Review the files before applying it again.')];
+  } else {
+    const target=request.target!;
+    steps=[stepFrom('checkout',{name:target},[],language)!];
+    summary=localized(language,`Cambiar de ${snapshot.currentBranch} a ${target}`,`Switch from ${snapshot.currentBranch} to ${target}`);
+    effects=[localized(language,`La rama activa será ${target}. No se publica nada.`,`The active branch will be ${target}. Nothing is published.`)];
+    if (request.mode==='carry') effects.push(localized(language,`Los ${snapshot.changes.length} archivos sin guardar te acompañan a ${target}, conservando el índice.`,`The ${snapshot.changes.length} unsaved files come with you to ${target}, keeping the index.`));
+    else {
+      const label=`GitCat set aside: ${request.label!.trim()} [${snapshot.currentBranch}]`;
+      steps.unshift(stepFrom('git_command',{},['stash','push',...(request.includeUntracked?['--include-untracked']:[]),'-m',label],language)!);
+      effects.push(localized(language,`Aparta los cambios seguidos${request.includeUntracked?' y archivos nuevos':''} como “${request.label}”. Conserva el estado preparado para restaurarlo. Los archivos ignorados${request.includeUntracked?'':' y nuevos'} permanecen en la carpeta. Si el cambio de rama falla, la entrada sigue disponible.`,`Sets aside tracked edits${request.includeUntracked?' and new files':''} as “${request.label}”, preserving staged state for restoration. Ignored files${request.includeUntracked?'':' and new files'} remain in the folder. If switching fails, the entry remains available.`));
+    }
+  }
+  return bindPlan(snapshot,{...sequenceDraft(steps,summary,effects,language),summary,switchWork:request,requiresConfirmation:true});
 }
