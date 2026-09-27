@@ -9,7 +9,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   createPractice, getPracticeInfo, setPracticeLesson, editPractice, removePractice, previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
-  getLlmConfig, getSnapshot, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
+  getLlmConfig, getSnapshot, openWorktree, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
   prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
   scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictGuide, type IssuedConflictProposal
 } from "./git-service.js";
@@ -534,6 +534,12 @@ app.whenReady().then(async () => {
   ipcMain.handle("operation:cancel", (event, cwd: string, id: unknown) => {
     assertTrustedSender(event);
     return typeof id === "string" && cancelOperation(assertOpenedRepository(cwd), id);
+  });
+  ipcMain.handle("worktree:open", async (event, cwd: string, target: unknown, locale?: Locale) => {
+    assertTrustedSender(event);
+    const source = assertOpenedRepository(cwd);
+    if (typeof target !== "string") throw new Error("Invalid worktree path.");
+    return adoptProject(await openWorktree(source, target, locale));
   });
   ipcMain.handle("repo:snapshot", (event, cwd: string) => {
     assertTrustedSender(event);

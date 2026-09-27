@@ -153,7 +153,21 @@ export type Conflict = {
   kind: ConflictKind;
 };
 
+export type Worktree = {
+  path: string;
+  head: string;
+  branch?: string;
+  isCurrent: boolean;
+  isMain: boolean;
+  detached: boolean;
+  bare: boolean;
+  locked?: string;
+  prunable?: string;
+};
+
 export type RepoSnapshot = {
+  /** All working folders reported by Git, including detached and unavailable entries. */
+  worktrees?: Worktree[];
   path: string;
   name: string;
   head: string;
@@ -899,6 +913,7 @@ export type GitlineApi = {
   retryProject: (path: string) => Promise<ProjectRetryResult>;
   locateProject: (path: string, labels: { title: string; button: string }) => Promise<ProjectLocateResult>;
   confirmLocateProject: (candidateId: string) => Promise<ProjectLocateResult>;
+  openWorktree: (path: string, target: string, locale?: Locale) => Promise<RepoSnapshot>;
   getSnapshot: (path: string) => Promise<RepoSnapshot>;
   fetchRemotes: (path: string) => Promise<RepoSnapshot>;
   loadHistory: (path: string, request: HistoryRequest) => Promise<HistoryPage>;

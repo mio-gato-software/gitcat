@@ -612,3 +612,14 @@
 .practice-guide select { max-width: 100%; background: var(--canvas); color: var(--text); padding: 5px; }
 .practice-guide code { overflow-wrap: anywhere; }
 .practice-welcome { margin: 18px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+
+.worktrees-button { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: inherit; padding: 5px 7px; cursor: pointer; }
+.worktrees-dialog { width: min(680px, calc(100vw - 32px)); }
+.worktrees-dialog h2 { display: flex; align-items: center; gap: 8px; }
+.worktree-list { list-style: none; padding: 0; display: grid; gap: 8px; }
+.worktree-list li { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.worktree-list li.current { border-color: var(--mint); }
+.worktree-list li > svg { flex-shrink: 0; margin-top: 3px; }
+.worktree-info { min-width: 0; flex: 1; display: grid; gap: 5px; }
+.worktree-info code, .worktree-info span { overflow-wrap: anywhere; font-size: 12px; }
+.worktree-list button { flex-shrink: 0; }

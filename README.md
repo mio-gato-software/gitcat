@@ -46,6 +46,7 @@ Los artefactos aparecen en `release/`. El build local no usa una identidad de de
 ## Alcance del MVP
 
 - Proyectos abiertos en pestañas independientes.
+- Worktrees visibles desde el botón del árbol: carpeta, rama, ubicación actual y estados separado/protegido/no disponible. Se abren en su propia pestaña sin cambiar ramas ni mover cambios; los worktrees vinculados y las ramas usadas en otra carpeta llevan un árbol.
 - Ramas locales, rama actual, ahead/behind y remotos.
 - Resumen de dónde está el trabajo, bajo la barra del repositorio: cambios en este equipo, guardados locales, integración en la rama principal y lo publicado en el remoto (con cuándo se comprobó), más un único siguiente paso con su término de Git como ayuda. Guardar no se presenta como copia de seguridad ni una fusión local como publicada.
 - Historial de commits con autor, correo, fecha y referencias.

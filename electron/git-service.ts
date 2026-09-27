@@ -11,7 +11,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
 import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
-import { parseWorktrees } from "./worktrees.js";
+import { parseWorktrees, parseWorktreeList } from "./worktrees.js";
 import { stackCandidates } from "./stacked-branches.js";
 import { parseNameStatus, parseNumstat, parseShortstat } from "./diff-status.js";
 import { parseRemoteUrls } from "./remotes.js";
@@ -435,6 +435,23 @@ export function relocateRepositoryMemory(from: string, to: string) {
   if (next !== memory) saveMemory(next);
 }
 
+/** Open only a fresh, registered working folder from the same Git common directory. */
+export async function openWorktree(cwd: string, target: string, language: Locale = "en"): Promise<RepoSnapshot> {
+  const source = await getSnapshot(cwd);
+  const entry = source.worktrees?.find(item => item.path === target);
+  const fail = () => new Error(localized(language,
+    "Ese worktree ya no está disponible para abrir. Actualiza la lista y revisa su carpeta; tu trabajo sigue en la carpeta actual.",
+    "That worktree is no longer available to open. Refresh the list and check its folder; your work remains in the current folder."));
+  if (!entry || entry.bare || entry.prunable !== undefined) throw fail();
+  try {
+    const common = async (path: string) => realpathSync(resolve(path, await checkedGit(path, ["rev-parse", "--git-common-dir"])));
+    if (await common(source.path) !== await common(target)) throw fail();
+    const next = await getSnapshot(target);
+    if (next.path !== target || !next.worktrees?.some(item => item.isCurrent && item.path === target)) throw fail();
+    return next;
+  } catch (error) { throw new Error(fail().message, { cause: error }); }
+}
+
 export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
   const head = await optionalGit(repoRoot, ["rev-parse", "HEAD"]);
@@ -484,7 +501,9 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     branches.push({ name, remoteRef: remote.ref, presence: "remote", mergedInto: [], ahead: 0, behind: 0, isCurrent: false, lastCommit: remote.lastCommit });
   }
   await markStacking(repoRoot, branches);
-  const worktrees = parseWorktrees(await optionalGit(repoRoot, ["worktree", "list", "--porcelain"]), repoRoot);
+  const worktreeRaw = await checkedGit(repoRoot, ["worktree", "list", "--porcelain", "-z"], true);
+  const worktreeList = parseWorktreeList(worktreeRaw, repoRoot);
+  const worktrees = parseWorktrees(worktreeRaw, repoRoot);
   for (const branch of branches) branch.checkedOutIn = worktrees.get(branch.name);
   const defaultBranchResolution = await resolveDefaultBranch(repoRoot, remotes, localNames);
   const defaultBranch = defaultBranchResolution?.name;
@@ -497,7 +516,7 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   // A file can change while keeping exactly the same status code. Bind reviews to its
   // contents, the staged version, the branch refs and checkout, not just "M file.txt".
   const fingerprint = createHash("sha256").update(JSON.stringify([
-    head, currentBranch, statusRaw, branchRaw, remoteBranchRaw, pending, [...worktrees], stageRaw
+    head, currentBranch, statusRaw, branchRaw, remoteBranchRaw, pending, worktreeList, stageRaw
   ]));
   for (const change of changes) {
     // Each change also gets a version of its own: the commit and branch it sits on, its status, the
@@ -527,6 +546,7 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
 
   return {
     path: repoRoot,
+    worktrees: worktreeList,
     name: basename(repoRoot),
     head,
     stateId: fingerprint.digest("hex"),

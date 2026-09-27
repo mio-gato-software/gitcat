@@ -163,7 +163,7 @@ test("el panel ordena por actividad, marca lo ya integrado y dice qué worktree 
   assert.match(styles, /\.branch-row\.merged \.branch-main \{ opacity/);
   // Los worktrees salen del porcelain de Git y llegan a la fila, al tooltip y al modelo.
   assert.match(types, /checkedOutIn\?: string/);
-  assert.match(service, /\["worktree", "list", "--porcelain"\]/);
+  assert.match(service, /\["worktree", "list", "--porcelain", "-z"\]/);
   assert.match(service, /branch\.checkedOutIn = worktrees\.get\(branch\.name\)/);
   assert.match(service, /checkedOutIn: branch\.checkedOutIn \?\? null/);
   assert.match(app, /t\("worktreeUse", \{ path: branch\.checkedOutIn \}\)/);

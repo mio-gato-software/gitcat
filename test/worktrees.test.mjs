@@ -1,0 +1,60 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { registerHooks } from 'node:module';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, renameSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+registerHooks({ resolve(s,c,n) { return s === 'electron' ? { url: new URL('./helpers/electron-stub.mjs', import.meta.url).href, shortCircuit:true } : n(s,c); } });
+const service = await import('../dist-electron/electron/git-service.js');
+const { parseWorktreeList } = await import('../dist-electron/electron/worktrees.js');
+function fixture(t) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'gitcat-worktrees-')));
+  t.after(() => rmSync(root, { recursive:true, force:true }));
+  const repo = join(root, 'main');
+  execFileSync('git',['init','-q','-b','main',repo]);
+  const git = (...args) => execFileSync('git',args,{cwd:repo,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+  git('config','user.name','QA'); git('config','user.email','qa@example.test');
+  writeFileSync(join(repo,'file'),'base'); git('add','.'); git('commit','-qm','base');
+  return {root,repo,git};
+}
+test('NUL worktree records preserve unusual paths, lock reasons and detached/bare entries', () => {
+  const path = '/tmp/space ñ\nfolder ';
+  const entries = parseWorktreeList(['worktree /repo','bare','','worktree '+path,'HEAD abc','detached','locked moving disk','','worktree /gone','HEAD def','branch refs/heads/topic','prunable gitdir missing','',''].join('\0'), path);
+  assert.equal(entries[0].bare,true); assert.equal(entries[0].isMain,true);
+  assert.equal(entries[1].path,path); assert.equal(entries[1].isCurrent,true);
+  assert.equal(entries[1].detached,true); assert.equal(entries[1].locked,'moving disk');
+  assert.equal(entries[2].branch,'topic'); assert.equal(entries[2].prunable,'gitdir missing');
+});
+test('real snapshots expose main, linked and detached worktrees; opening preserves each index and edits', async t => {
+  const {root,repo,git} = fixture(t);
+  const linked = join(root,'linked ñ\nfolder'); const detached = join(root,'detached');
+  git('worktree','add','-b','topic',linked); git('worktree','add','--detach',detached);
+  git('worktree','lock','--reason','external drive',linked);
+  writeFileSync(join(repo,'file'),'main staged'); git('add','file'); writeFileSync(join(repo,'file'),'main unsaved');
+  writeFileSync(join(linked,'file'),'linked unsaved');
+  const index = git('write-tree'); const state = await service.getSnapshot(repo);
+  assert.equal(state.worktrees.length,3);
+  assert.equal(state.worktrees.find(w=>w.path===linked).locked,'external drive');
+  assert.equal(state.worktrees.find(w=>w.path===detached).detached,true);
+  assert.equal(state.branches.find(b=>b.name==='topic').checkedOutIn,linked);
+  const opened = await service.openWorktree(repo,linked);
+  assert.equal(opened.path,linked); assert.equal(opened.currentBranch,'topic'); assert.equal(opened.isDirty,true);
+  assert.equal(opened.worktrees.find(w=>w.isCurrent).isMain,false);
+  assert.equal(git('branch','--show-current'),'main'); assert.equal(git('write-tree'),index);
+  assert.equal(readFileSync(join(repo,'file'),'utf8'),'main unsaved');
+  assert.equal(readFileSync(join(linked,'file'),'utf8'),'linked unsaved');
+  assert.equal((await service.openWorktree(repo,detached)).currentBranch,'HEAD');
+});
+test('opening rejects unregistered, vanished and replaced worktree folders', async t => {
+  const {root,repo,git} = fixture(t); const linked = join(root,'linked');
+  await assert.rejects(service.openWorktree(repo,root),/no longer available/);
+  git('worktree','add','-b','topic',linked);
+  git('worktree','lock',linked);
+  await service.getSnapshot(repo);
+  renameSync(linked,join(root,'moved'));
+  await assert.rejects(service.openWorktree(repo,linked),/no longer available/);
+  execFileSync('git',['init','-q',linked]);
+  await assert.rejects(service.openWorktree(repo,linked),/no longer available/);
+  assert.equal(git('branch','--show-current'),'main');
+});

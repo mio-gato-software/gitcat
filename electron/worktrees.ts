@@ -1,20 +1,31 @@
 import { resolve } from "node:path";
+import type { Worktree } from "../shared/types.js";
 
-/**
- * Which worktree holds each branch, read from `git worktree list --porcelain`. The repository the
- * window has open is left out on purpose: that branch is the current one and is already marked as
- * such, so what remains is exactly the set Git would refuse to check out here.
- */
-export function parseWorktrees(raw: string, repoRoot: string) {
-  const byBranch = new Map<string, string>();
-  let path = "";
-  for (const line of raw.split("\n")) {
-    // A blank line closes a record, so a stray "branch" can never be attributed to the previous path.
-    if (!line.trim()) { path = ""; continue; }
-    if (line.startsWith("worktree ")) { path = resolve(line.slice("worktree ".length).trim()); continue; }
-    if (!line.startsWith("branch ")) continue;
-    const name = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
-    if (name && path && path !== repoRoot) byBranch.set(name, path);
+/** NUL porcelain preserves spaces, newlines and non-ASCII paths without Git quoting. */
+export function parseWorktreeList(raw: string, repoRoot: string): Worktree[] {
+  const entries: Worktree[] = [];
+  let entry: Worktree | undefined;
+  for (const field of raw.split(raw.includes("\0") ? "\0" : "\n")) {
+    if (!field) { entry = undefined; continue; }
+    if (field.startsWith("worktree ")) {
+      const path = resolve(field.slice(9));
+      entry = { path, head: "", isCurrent: path === resolve(repoRoot), isMain: entries.length === 0, detached: false, bare: false };
+      entries.push(entry);
+    } else if (entry) {
+      if (field.startsWith("HEAD ")) entry.head = field.slice(5);
+      else if (field.startsWith("branch refs/heads/")) entry.branch = field.slice(18);
+      else if (field === "detached") entry.detached = true;
+      else if (field === "bare") entry.bare = true;
+      else if (field === "locked" || field.startsWith("locked ")) entry.locked = field.slice(7);
+      else if (field === "prunable" || field.startsWith("prunable ")) entry.prunable = field.slice(9);
+    }
   }
-  return byBranch;
+  return entries;
+}
+
+/** The opened folder is excluded from branch occupancy guards. */
+export function parseWorktrees(raw: string, repoRoot: string) {
+  return new Map(parseWorktreeList(raw, repoRoot)
+    .filter(entry => entry.branch && !entry.isCurrent)
+    .map(entry => [entry.branch!, entry.path]));
 }

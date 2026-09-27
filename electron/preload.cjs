@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("gitcat", {
   platform: process.platform,
+  openWorktree: (path, target, locale) => ipcRenderer.invoke("worktree:open", path, target, locale),
   createPractice:()=>ipcRenderer.invoke("practice:create"),
   getPracticeInfo:path=>ipcRenderer.invoke("practice:info",path),
   setPracticeLesson:(path,lesson)=>ipcRenderer.invoke("practice:lesson",path,lesson),

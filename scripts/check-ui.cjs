@@ -41,7 +41,13 @@ app.whenReady().then(async () => {
   fs.writeFileSync(path.join(repo, 'app.txt'), 'updated menu\n');
   fs.writeFileSync(path.join(repo, 'new-file.txt'), 'new file\n');
 
+  const linkedWorktree = path.join(scratch, 'Linked worktree');
+  const detachedWorktree = path.join(scratch, 'Detached worktree');
+  git('worktree', 'add', '-b', 'qa/worktree', linkedWorktree);
+  git('worktree', 'add', '--detach', detachedWorktree);
+  fs.writeFileSync(path.join(linkedWorktree, 'worktree-only.txt'), 'separate edits');
   const service = await import(pathToFileURL(path.join(root, 'dist-electron/electron/git-service.js')));
+  ipcMain.handle('worktree:open', (_, source, target, locale) => service.openWorktree(source, target, locale));
   const snapshot = await service.getSnapshot(repo);
   ipcMain.handle('operation:list', () => []);
   ipcMain.handle('operation:cancel', () => false);
@@ -244,6 +250,21 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.notification-preview.warning')`);
   assert.equal(await js(`Boolean(document.querySelector('.unavailable-project'))`), true, 'A failed retry keeps the project listed');
   await js(`document.querySelector('.window-tab:not(.unavailable) [role="tab"]').click()`);
+  await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
+  // Worktrees are visible independently of branch filtering, and open without checking out a branch.
+  await js(`document.querySelector('.worktrees-button').click()`);
+  await waitFor(`document.querySelector('.worktrees-dialog')`);
+  assert.equal(await js(`document.querySelectorAll('.worktree-list li').length`), 3);
+  assert.match(await js(`document.querySelector('.worktree-list').innerText`), /Abierto aquí[\s\S]*sin rama activa|sin rama activa[\s\S]*Abierto aquí/);
+  await assertDialog();
+  await capture('worktrees');
+  await js(`[...document.querySelectorAll('.worktree-list button')].find(button => button.getAttribute('aria-label').includes('Linked worktree')).click()`);
+  await waitFor(`document.querySelector('.window-tab.active')?.innerText.includes('Linked worktree')`);
+  assert.equal(git('branch', '--show-current'), 'feature/new-menu');
+  assert.equal(fs.readFileSync(path.join(repo, 'app.txt'), 'utf8'), 'updated menu\n');
+  assert.equal(fs.readFileSync(path.join(linkedWorktree, 'worktree-only.txt'), 'utf8'), 'separate edits');
+  assert.equal(await js(`Boolean(document.querySelector('.window-tab.active svg[aria-label="Worktree vinculado"]'))`), true);
+  await js(`document.querySelector('.window-tab.active .tab-close').click(); document.querySelector('.window-tab:not(.unavailable) [role="tab"]').click()`);
   await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
   const operationEvent = { id:'ui-progress', repoPath:snapshot.path, startedAt:Date.now()-2000, phase:'executing', state:'running', mutation:true, stopping:false, step:1, total:3 };
   win.webContents.send('operation:progress', operationEvent);
@@ -872,7 +893,7 @@ app.whenReady().then(async () => {
   assert.equal(git('status','--porcelain').includes('.env'),true,'Practice edits leave the original project untouched');
 
   win.destroy();
-  console.log('PASS: unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, a work overview separating edited, saved, integrated and published work with one next step, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');
+  console.log('PASS: worktree list, safe opening with separate edits and tree tab badges; unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, a work overview separating edited, saved, integrated and published work with one next step, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));
