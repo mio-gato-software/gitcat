@@ -31,6 +31,7 @@ for (const [platform, name] of [["win32", "Windows"], ["darwin", "macOS"], ["lin
       platform === "darwin" ? "appMenu" : "fileMenu", "editMenu", "viewMenu", "windowMenu"
     ]);
     const help = installed.find((item) => item.role === "help");
+    assert.equal(help.label, platform === "darwin" ? "Help" : "&Help");
     assert.equal(help.submenu.find((item) => item.label === "About GitCat").role, "about");
   });
 }

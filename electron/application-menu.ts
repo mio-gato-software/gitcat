@@ -27,7 +27,7 @@ export function installApplicationMenu(
     { role: "editMenu" },
     { role: "viewMenu" },
     { role: "windowMenu" },
-    { role: "help", label: "&Help", submenu: [{ role: "about", label: "About GitCat" }] }
+    { role: "help", label: runtime.platform === "darwin" ? "Help" : "&Help", submenu: [{ role: "about", label: "About GitCat" }] }
   ];
   menu.setApplicationMenu(menu.buildFromTemplate(template));
 }
