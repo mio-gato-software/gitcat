@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, join, relative, sep, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -110,7 +110,11 @@ test("un permiso retirado se distingue de una carpeta que dejó de ser repositor
 
   chmodSync(locked, 0o000);
   try {
-    const restored = await restoreProjects(saved, getSnapshot);
+    // Windows chmod does not revoke read permission; inject the same OS error at the loader boundary.
+    const restored = await restoreProjects(saved, process.platform === "win32" ? async path => {
+      if (path === locked) throw Object.assign(new Error("Access denied"), { code: "EACCES" });
+      return getSnapshot(path);
+    } : getSnapshot);
     assert.deepEqual(reasons(restored), { [locked]: "permission", [plain]: "not_repository" });
     assert.deepEqual(restored.record.paths, [locked, plain]);
     assert.equal(restored.activePath, locked);
@@ -159,10 +163,10 @@ test("una carpeta sin su .git dentro de otro repositorio no se confunde con el p
   assert.equal(picked.project.path, outer);
 });
 
-test("un proyecto guardado a través de un enlace se guarda con la ruta que usa Git", { skip: process.platform === "win32" }, async () => {
+test("un proyecto guardado a través de un enlace se guarda con la ruta que usa Git", async () => {
   const repo = makeRepo(join(scratch, "linked-target"));
   const link = join(scratch, "linked");
-  symlinkSync(repo, link);
+  symlinkSync(repo, link, process.platform === "win32" ? "junction" : "dir");
   const restored = await restoreProjects(record([link], link, { [link]: { roots: ["abc"], remotes: [] } }), getSnapshot);
   assert.deepEqual(restored.record.paths, [repo]);
   assert.equal(restored.activePath, repo);
@@ -175,9 +179,9 @@ test("el archivo del workspace se sanea sin perder referencias", () => {
     activePath: "/b",
     fingerprints: { "/a": { roots: ["r1", 3], remotes: ["github.com/x/y"] }, "/gone": { roots: ["r2"] }, "/b": "nope" }
   });
-  assert.deepEqual(parsed.paths, ["/a", "/b", "/d"]);
-  assert.equal(parsed.activePath, "/b");
-  assert.deepEqual(parsed.fingerprints, { "/a": { roots: ["r1"], remotes: ["github.com/x/y"] } });
+  assert.deepEqual(parsed.paths, ["/a", "/b", "/d"].map(path => resolve(path)));
+  assert.equal(parsed.activePath, resolve("/b"));
+  assert.deepEqual(parsed.fingerprints, { [resolve("/a")]: { roots: ["r1"], remotes: ["github.com/x/y"] } });
   assert.deepEqual(parseWorkspace(null), { paths: [], activePath: undefined, fingerprints: {} });
   assert.equal(parseWorkspace({ paths: ["/a"], activePath: "/z" }).activePath, undefined);
 });

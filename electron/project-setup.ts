@@ -1,4 +1,4 @@
-import type { ChildProcess } from "node:child_process";
+import { signalProcessTree } from "./process-tree.js";
 import { accessSync, constants, existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -301,16 +301,6 @@ export type CloneOutcome =
   | { status: "failed"; reason: CloneFailureReason; detail: string; cleaned: boolean; leftAt?: string }
   | { status: "invalid"; problem: Extract<ClonePreview, { ok: false }>["problem"]; detail?: string };
 
-/** Stops Git and every helper it started: they share the group Git was started in. */
-function signal(child: ChildProcess, name: NodeJS.Signals) {
-  try {
-    if (process.platform !== "win32" && child.pid) process.kill(-child.pid, name);
-    else child.kill(name);
-  } catch {
-    child.kill(name);
-  }
-}
-
 /** Removes the folder GitCat made for this clone, and only that folder. */
 function removeStaging(staging: string) {
   try { rmSync(staging, { recursive: true, force: true }); } catch { /* reported below */ }
@@ -353,8 +343,8 @@ export async function cloneRepository(request: CloneRequest, options: CloneOptio
       stop ??= reason;
       // Before Git has started there is nothing to stop yet; it is stopped as soon as it exists.
       if (!child) return;
-      signal(child, "SIGTERM");
-      setTimeout(() => { if (!settled && child) signal(child, "SIGKILL"); }, 3_000).unref();
+      signalProcessTree(child, "SIGTERM");
+      setTimeout(() => { if (!settled && child) signalProcessTree(child, "SIGKILL"); }, 3_000).unref();
     };
     const onAbort = () => halt("cancelled");
     const touch = () => {

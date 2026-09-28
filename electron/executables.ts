@@ -1,8 +1,8 @@
 import { accessSync, constants, statSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { posix, win32 } from "node:path";
 
-export function pathEntries(value: string | undefined): string[] {
-  return (value ?? "").split(delimiter).map((entry) => entry.trim()).filter(Boolean);
+export function pathEntries(value: string | undefined, platform: NodeJS.Platform = process.platform): string[] {
+  return (value ?? "").split(platform === "win32" ? win32.delimiter : posix.delimiter).map((entry) => entry.trim()).filter(Boolean);
 }
 
 /**
@@ -12,6 +12,7 @@ export function pathEntries(value: string | undefined): string[] {
  */
 export function wellKnownToolDirectories(platform: NodeJS.Platform, home: string): string[] {
   if (platform === "win32") return [];
+  const { join } = posix;
   const shared = ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin", join(home, ".local", "bin"), join(home, "bin")];
   return platform === "darwin"
     ? ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/opt/local/bin", ...shared]
@@ -47,7 +48,7 @@ export function findExecutable(
     if (!directory || seen.has(directory)) continue;
     seen.add(directory);
     for (const candidate of names) {
-      const full = join(directory, candidate);
+      const full = (platform === "win32" ? win32 : posix).join(directory, candidate);
       if (isExecutable(full)) return full;
     }
   }

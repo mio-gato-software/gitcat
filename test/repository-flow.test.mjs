@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -84,8 +84,8 @@ test("los nombres de rama peligrosos se rechazan", () => {
 });
 
 test("una ruta local nunca se convierte en propietario ni repositorio remoto", () => {
-  const validation = repository.validateRepositoryFields({ localPath: "/mio-gato-software", protocol: "ssh" });
-  assert.equal(validation.fields.localPath, "/mio-gato-software");
+  const validation = repository.validateRepositoryFields({ localPath: resolve("/mio-gato-software"), protocol: "ssh" });
+  assert.equal(validation.fields.localPath, resolve("/mio-gato-software"));
   assert.equal(validation.fields.owner, undefined);
   assert.equal(validation.fields.repository, undefined);
   assert.deepEqual(validation.issues.map((issue) => issue.field).sort(), ["host", "owner", "repository"]);
@@ -116,7 +116,7 @@ test("normaliza y genera el esquema JSON exacto", () => {
     host: "github.com",
     owner: "eliaquin",
     repository: "mio-gato-software",
-    localPath: "/mio-gato-software",
+    localPath: resolve("/mio-gato-software"),
     protocol: "ssh",
     sshHost: "github.com",
     remoteUrl: "git@github.com:eliaquin/mio-gato-software.git",

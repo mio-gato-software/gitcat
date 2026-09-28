@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -14,7 +14,7 @@ const present = (...paths) => {
 
 test("las herramientas se buscan más allá del PATH que hereda una app de escritorio", () => {
   // El PATH que launchd entrega a una app abierta desde Finder.
-  const launchd = pathEntries("/usr/bin:/bin:/usr/sbin:/sbin");
+  const launchd = pathEntries("/usr/bin:/bin:/usr/sbin:/sbin", "darwin");
   const directories = [...launchd, ...wellKnownToolDirectories("darwin", "/Users/persona")];
   // gh vive en Homebrew: invisible con el PATH heredado, encontrado al ampliar la búsqueda.
   assert.equal(findExecutable("gh", launchd, present("/opt/homebrew/bin/gh"), "darwin"), undefined);
@@ -38,9 +38,9 @@ test("un nombre con separador se comprueba tal cual, sin recorrer directorios", 
 test("en Windows se prueban las extensiones ejecutables", () => {
   assert.deepEqual(executableNames("gh", "linux"), ["gh"]);
   assert.deepEqual(executableNames("gh", "win32", ".EXE;.CMD"), ["gh", "gh.EXE", "gh.CMD"]);
-  const tools = join("C:", "tools");
-  assert.equal(findExecutable("gh", [tools], present(join(tools, "gh.EXE")), "win32"), join(tools, "gh.EXE"));
-  assert.equal(findExecutable("gh", [tools], present(join(tools, "gh")), "linux"), join(tools, "gh"));
+  const tools = win32.join("C:\\", "tools");
+  assert.equal(findExecutable("gh", [tools], present(win32.join(tools, "gh.EXE")), "win32"), win32.join(tools, "gh.EXE"));
+  assert.equal(findExecutable("gh", ["/tools"], present("/tools/gh"), "linux"), "/tools/gh");
 });
 
 test("los directorios conocidos dependen de la plataforma", () => {

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { rmSync, chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -510,7 +510,7 @@ test("pedir un commit no pregunta el mensaje: se escribe a partir del diff real"
   assert.match(requests[1].input, /auto\.txt/);
 
   git("checkout", "--", ".");
-  execFileSync("rm", ["-f", join(repo, "auto.txt")]);
+  rmSync(join(repo, "auto.txt"), { force: true });
 });
 
 test("un commit planificado sin cambios locales lo dice en vez de inventar un mensaje", async () => {

@@ -7,6 +7,7 @@ import { operationContext, operationCheckpoint, operationPhase, inspectOperation
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, readlinkSync, accessSync, constants, copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { signalProcessTree } from "./process-tree.js";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
@@ -187,11 +188,8 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
     let stopped: Error | undefined;
     const stop = (error: Error) => {
       stopped = error;
-      const signal = (value: NodeJS.Signals) => {
-        try { if (process.platform !== "win32" && child.pid) process.kill(-child.pid, value); else child.kill(value); } catch { /* already exited */ }
-      };
-      signal("SIGTERM");
-      setTimeout(() => { if (!settled) signal("SIGKILL"); }, 2_000).unref();
+      signalProcessTree(child, "SIGTERM");
+      setTimeout(() => { if (!settled) signalProcessTree(child, "SIGKILL"); }, 2_000).unref();
     };
     const timer = setTimeout(() => stop(new Error(`${command} ${args[0] ?? ""} timed out. The final repository state must be checked; changes may have completed.`)), timeoutMs);
     const cancel = () => stop(new OperationCancelled());

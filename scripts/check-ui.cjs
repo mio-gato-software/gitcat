@@ -1,15 +1,28 @@
 // Renderer smoke test using an isolated, disposable Git repository and profile.
 // Run with npm run test:ui; no personal repository, settings or API key is used.
-const { app, BrowserWindow, ipcMain } = require('electron');
+const electron = require('electron');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const assert = require('node:assert/strict');
 
 const root = path.resolve(__dirname, '..');
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gitcat-design-'));
+// Chromium locks profile files on Windows until the process has exited.
+if (typeof electron === 'string') {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gitcat-design-'));
+  const result = spawnSync(electron, [__filename], {
+    env: { ...process.env, GITCAT_UI_SCRATCH: scratch }, windowsHide: true, stdio: 'inherit', timeout: 600_000
+  });
+  fs.rmSync(scratch, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  if (result.error) console.error(result.error);
+  process.exit(result.status ?? 1);
+}
+const { app, BrowserWindow, ipcMain } = electron;
+const scratch = process.env.GITCAT_UI_SCRATCH;
+if (!scratch) throw new Error('Run this check through Node to isolate and clean up its profile.');
+const deadline = setTimeout(() => { console.error('UI check timed out'); app.exit(1); }, 590_000);
 const repo = path.join(scratch, 'GitCat');
 const screenshots = process.env.GITCAT_UI_SCREENSHOTS;
 fs.mkdirSync(repo);
@@ -196,7 +209,7 @@ app.whenReady().then(async () => {
   const win = new BrowserWindow({ width: 1480, height: 940, show: false, webPreferences: { preload: path.join(root, 'electron/preload.cjs') } });
   const js = code => win.webContents.executeJavaScript(code).catch((error) => { if (process.env.GITCAT_UI_DEBUG) console.error('JS FAILED:', code.slice(0, 300)); throw error; });
   const waitFor = async expression => {
-    for (let attempt = 0; attempt < 100; attempt++) {
+    for (let attempt = 0; attempt < 400; attempt++) {
       // Only the truth of the expression crosses back: a form element, for one, cannot be cloned.
       if (await js(`Boolean(${expression})`)) return;
       await new Promise(resolve => setTimeout(resolve, 50));
@@ -709,7 +722,7 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.settings-modal .model-option').innerText`), /gpt-6-luna/);
   assert.equal(await js(`document.querySelector('.settings-modal .model-option input').checked`), true, 'The default model is the recommended choice');
   // Without a project, Settings still says whether Git is ready and who saves would be signed as.
-  for (const entry of [/Listo para guardar y publicar/, /Git \d[\d.]* está listo/, /Git todavía no sabe quién guarda/, /No es un inicio de sesión/]) assert.match(guide, entry);
+  for (const entry of [/Listo para guardar y publicar/, /Git \d\S* está listo/, /Git todavía no sabe quién guarda/, /No es un inicio de sesión/]) assert.match(guide, entry);
   await js(`document.querySelector('.settings-modal .readiness-section').scrollIntoView()`);
   await capture('settings-readiness');
   await js(`document.querySelector('.settings-modal .modal-heading').scrollIntoView()`);
@@ -812,7 +825,7 @@ app.whenReady().then(async () => {
   // with the way to set one. The name, the email and where they apply are reviewed before anything is written.
   await waitFor(`document.querySelector('.changes-view .readiness-row[data-item="author"][data-state="missing"]')`);
   const firstSaveChecklist = await js(`document.querySelector('.changes-view .readiness-checklist').innerText`);
-  for (const entry of [/Antes de tu primer guardado/i, /Git \d[\d.]* está listo/, /Git todavía no sabe quién guarda/, /Poner nombre y correo…/]) assert.match(firstSaveChecklist, entry);
+  for (const entry of [/Antes de tu primer guardado/i, /Git \d\S* está listo/, /Git todavía no sabe quién guarda/, /Poner nombre y correo…/]) assert.match(firstSaveChecklist, entry);
   await capture('first-save-checklist');
   await js(`[...document.querySelectorAll('.changes-view .readiness-actions button')].find((node) => node.innerText.includes('Poner nombre y correo')).click()`);
   await waitFor(`document.querySelectorAll('.identity-modal .identity-scope').length === 2`);
@@ -860,7 +873,9 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelectorAll('.clone-form input')[1].value === 'demo'`);
   await js(`document.querySelector('.setup-parent button').click()`);
   await waitFor(`document.querySelector('.setup-preview')`);
-  assert.match(await js(`document.querySelector('.setup-preview').innerText`), new RegExp(`La copia se creará en[\\s\\S]*Proyectos/demo[\\s\\S]*No se toca nada más`));
+  const clonePreview = await js(`document.querySelector('.setup-preview').innerText`);
+  assert.match(clonePreview, /La copia se creará en[\s\S]*No se toca nada más/);
+  assert.ok(clonePreview.includes(path.join(cloneParent, 'demo')), 'The preview names the exact destination on this platform');
   await setText('.clone-form label:nth-of-type(2) input', 'ocupada');
   await waitFor(`document.querySelector('.clone-form .setup-problem')?.dataset.problem === 'destination_not_empty'`);
   assert.match(await js(`document.querySelector('.clone-form .setup-problem').innerText`), /nunca mezcla una copia con archivos que ya existen/);
@@ -921,4 +936,4 @@ app.whenReady().then(async () => {
   console.log('PASS: worktree list, safe opening with separate edits and tree tab badges; unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, a work overview separating edited, saved, integrated and published work with one next step, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, saving without secret warnings, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
-app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));
+app.on('will-quit', () => clearTimeout(deadline));
