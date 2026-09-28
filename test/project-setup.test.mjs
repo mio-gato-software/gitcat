@@ -138,7 +138,7 @@ test("folders inside a repository, broken repositories and whole home folders ar
   assert.equal((await inspectFolder(join(base, "plain.txt"))).problem, "not_folder");
 });
 
-test("clone addresses are checked on this Mac before Git runs", () => {
+test("clone addresses are checked on this computer before Git runs", () => {
   const ok = (url) => { const check = parseCloneUrl(url); assert.equal(check.ok, true, `${url} is accepted`); return check.source; };
   const refused = (url, problem) => { const check = parseCloneUrl(url); assert.equal(check.ok, false, `${url} is refused`); assert.equal(check.problem, problem, url); };
   assert.deepEqual(ok("https://github.com/octo/hello-world.git"), { url: "https://github.com/octo/hello-world.git", protocol: "https", host: "github.com", path: "octo/hello-world.git" });

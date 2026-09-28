@@ -27,7 +27,7 @@ const repo = path.join(scratch, 'GitCat');
 const screenshots = process.env.GITCAT_UI_SCREENSHOTS;
 fs.mkdirSync(repo);
 app.setPath('userData', path.join(scratch, 'profile'));
-// Git reads a disposable global configuration and no system one, so this Mac's own identity and
+// Git reads a disposable global configuration and no system one, so this computer's own identity and
 // helpers never leak into what the checks show, and setting a global identity writes only here.
 const globalGitConfig = path.join(scratch, 'global.gitconfig');
 fs.writeFileSync(globalGitConfig, '');
@@ -502,7 +502,7 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.context-menu [role="menuitem"]').click()`);
   await waitFor(`document.querySelector('.delivery-option input').checked`);
   assert.equal(git('status', '--porcelain'), before, 'Choosing integration still waits for review');
-  // Asking for one shows what would leave this Mac, file by file, before anything is sent.
+  // Asking for one shows what would leave this computer, file by file, before anything is sent.
   await js(`document.querySelector('.commit-form-heading button').click()`);
   await waitFor(`document.querySelector('.sharing-modal')`);
   const disclosure = await js(`document.querySelector('.sharing-modal').innerText`);
@@ -564,7 +564,7 @@ app.whenReady().then(async () => {
   // The stopped push is never told as a success: its step is shown as stopped, with Git's words folded away.
   assert.match(await js(`document.querySelector('.completion-card[data-status="failed"]').innerText`), /no se completó[\s\S]*Se detuvo aquí/);
   const recoveryText = await js(`document.querySelector('.recovery-card[data-kind="no_remote"]').innerText`);
-  for (const entry of [/aún no tiene dónde publicarse/, /Comprobado en este Mac/, /Se detuvo aquí/, /Tus commits están a salvo/, /Conectar un remoto/]) assert.match(recoveryText, entry);
+  for (const entry of [/aún no tiene dónde publicarse/, /Comprobado en este equipo/, /Se detuvo aquí/, /Tus commits están a salvo/, /Conectar un remoto/]) assert.match(recoveryText, entry);
   assert.equal(recoverCalls, 0, 'A failure GitCat can prove needs no assistant');
   await js(`document.querySelector('.recovery-card').scrollIntoView()`);
   await capture('recovery-card');
@@ -830,7 +830,7 @@ app.whenReady().then(async () => {
   await js(`[...document.querySelectorAll('.changes-view .readiness-actions button')].find((node) => node.innerText.includes('Poner nombre y correo')).click()`);
   await waitFor(`document.querySelectorAll('.identity-modal .identity-scope').length === 2`);
   const identityText = await js(`document.querySelector('.identity-modal').innerText`);
-  for (const entry of [/Solo este repositorio/, /Todos los repositorios de este Mac/, /Ahora: sin configurar/, /no es un inicio de sesión/]) assert.match(identityText, entry);
+  for (const entry of [/Solo este repositorio/, /Todos los repositorios de este equipo/, /Ahora: sin configurar/, /no es un inicio de sesión/]) assert.match(identityText, entry);
   assert.equal(await js(`document.querySelector('.identity-scope[data-scope="local"] input').checked`), true, 'This repository only is the default');
   await setText('.identity-modal label:nth-of-type(1) input', 'QA Recetas');
   await setText('.identity-modal label:nth-of-type(2) input', 'recetas@example.test');
@@ -840,7 +840,7 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.identity-modal .primary-button').click()`);
   await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
   const identityPlan = await js(`document.querySelector('.plan-card').textContent`);
-  for (const entry of [/todos los repositorios de este Mac como QA Recetas <recetas@example\.test>/, /Todavía no hay una identidad global/, /conservan su autor/, /git config --global user\.name/]) assert.match(identityPlan, entry);
+  for (const entry of [/todos los repositorios de este equipo como QA Recetas <recetas@example\.test>/, /Todavía no hay una identidad global/, /conservan su autor/, /git config --global user\.name/]) assert.match(identityPlan, entry);
   assert.equal(fs.readFileSync(globalGitConfig, 'utf8'), '', 'Nothing is written before the confirmation');
   await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
   for (let attempt = 0; attempt < 100 && !fs.readFileSync(globalGitConfig, 'utf8').includes('recetas@example.test'); attempt++) await new Promise(resolve => setTimeout(resolve, 50));
@@ -848,7 +848,7 @@ app.whenReady().then(async () => {
   assert.throws(() => execFileSync('git', ['config', '--local', 'user.name'], { cwd: plain, stdio: 'ignore' }), 'The global choice leaves the repository settings alone');
   await js(`document.querySelector('.inspector-tabs button').click()`);
   await waitFor(`document.querySelector('.changes-view .readiness-row[data-item="author"][data-state="ok"]')`);
-  assert.match(await js(`document.querySelector('.changes-view .readiness-row[data-item="author"]').innerText`), /QA Recetas <recetas@example\.test>[\s\S]*configurado para todos los repositorios de este Mac/);
+  assert.match(await js(`document.querySelector('.changes-view .readiness-row[data-item="author"]').innerText`), /QA Recetas <recetas@example\.test>[\s\S]*configurado para todos los repositorios de este equipo/);
   await capture('first-save-author-set');
 
   // Cloning: the address is checked while it is typed, the destination is previewed, a folder with
@@ -913,12 +913,12 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.work-overview [data-stage="published"]').innerText`), /Publicado en origin[\s\S]*Aún no hay nada que publicar/);
   await capture('cloned-empty');
   // With a remote, Settings says where a publish goes and checks access read-only; this one is a
-  // folder on this Mac, so nothing reaches a network.
+  // folder on this computer, so nothing reaches a network.
   await js(`document.querySelector('.top-actions .icon-button:last-child').click()`);
   await waitFor(`document.querySelector('.settings-modal .readiness-access[data-access="ok"]')`);
   const remoteReadiness = await js(`document.querySelector('.settings-modal .readiness-row[data-item="remote"]').innerText`);
-  for (const entry of [/Se publica en \S*empty-remote\.git/, /origin · una carpeta de este Mac · el destino que esta rama ya sigue|origin · una carpeta de este Mac · el habitual, origin/, /Acceso confirmado/, /Comprobar el acceso de nuevo/]) assert.match(remoteReadiness, entry);
-  assert.match(await js(`document.querySelector('.settings-modal .readiness-row[data-item="author"]').innerText`), /QA Recetas <recetas@example\.test>[\s\S]*configurado para todos los repositorios de este Mac/);
+  for (const entry of [/Se publica en \S*empty-remote\.git/, /origin · una carpeta de este equipo · el destino que esta rama ya sigue|origin · una carpeta de este equipo · el habitual, origin/, /Acceso confirmado/, /Comprobar el acceso de nuevo/]) assert.match(remoteReadiness, entry);
+  assert.match(await js(`document.querySelector('.settings-modal .readiness-row[data-item="author"]').innerText`), /QA Recetas <recetas@example\.test>[\s\S]*configurado para todos los repositorios de este equipo/);
   await js(`document.querySelector('.settings-modal .readiness-section').scrollIntoView()`);
   await capture('settings-readiness-remote');
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);

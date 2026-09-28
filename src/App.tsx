@@ -529,7 +529,7 @@ export default function App() {
     const kept = saved.filter((path) => listed.has(path));
     if (kept.length !== saved.length) setExcludedByRepo((items) => ({ ...items, [snapshot.path]: kept }));
   }, [snapshot?.path, snapshot?.stateId]);
-  // Git and the commit author, read on this Mac for the project on screen (or for this Mac alone on Welcome).
+  // Git and the commit author, read on this computer for the project on screen (or for this computer alone on Welcome).
   const readiness = useReadiness(snapshot?.path, { key: `${readinessEpoch}:${snapshot?.head ?? ""}`, enabled: workspaceReady });
   const conversation = snapshot ? conversations[snapshot.path] ?? [] : [];
   const planning = conversation.some((turn) => turn.status === "loading" || turn.status === "executing");
@@ -864,7 +864,7 @@ export default function App() {
   };
 
   /**
-   * The Refresh button: "am I up to date?". It reads this Mac's copy first, so the answer never waits
+   * The Refresh button: "am I up to date?". It reads this computer's copy first, so the answer never waits
    * on the network, then asks the remote for news. Neither step changes a branch or a file. When the
    * remote cannot be reached, the local view is still current and the assistant is asked for a way on.
    *
@@ -1053,7 +1053,7 @@ export default function App() {
 
   /**
    * Whether a request may read this repository. The first time, the disclosure explains what would
-   * leave the Mac and lists the files; declining sends nothing and leaves every Git control working.
+   * leave the computer and lists the files; declining sends nothing and leaves every Git control working.
    */
   const ensureSharing = async (path: string, purpose: AiSharingPurpose, paths?: string[]) => {
     if (sharingAcknowledged.current.has(path)) return true;
@@ -3460,7 +3460,7 @@ function RecoveryCard({ report, assistant, kept, busy, configured, retryable, on
   </div>;
 }
 
-/** Before a publish is confirmed: where it goes, whether this Mac can reach it, and which account it uses. */
+/** Before a publish is confirmed: where it goes, whether this computer can reach it, and which account it uses. */
 function PublishReadiness({ repoPath, remote }: { repoPath: string; remote?: string }) {
   const { t } = useI18n();
   const readiness = useReadiness(repoPath, { access: true, remote });
@@ -4142,9 +4142,9 @@ function SelectionDiffModal({ files, repoPath, onClose }: { files: FileChange[];
 }
 
 /**
- * The disclosure: what leaves this Mac for the configured provider, which files this request reads and
+ * The disclosure: what leaves this computer for the configured provider, which files this request reads and
  * what happens to each, the repository's exclusions, and what the local secret check can and cannot do.
- * Every change here is saved on this Mac straight away, and the list is read again so it stays true.
+ * Every change here is saved on this computer straight away, and the list is read again so it stays true.
  */
 function SharingDialog({ initial, paths, repoName, onAccept, onClose, onShowFile }: {
   initial: AiSharingPreview; paths?: string[]; repoName: string;

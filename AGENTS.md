@@ -47,9 +47,11 @@ specialized workflow first.
 - This repository is currently for the owner's personal use. Keep this assumption until the owner
   explicitly changes it.
 - A request to change the application includes standing authorization to make the updated app
-  available immediately on the owner's Mac. After implementing and validating an app change, run
-  `npm run install:mac`, gracefully quit the running GitCat app, and open
-  `/Applications/GitCat.app`. Verify that the installed app starts successfully.
+  available immediately on the owner's current platform. After implementing and validating an app
+  change, use that platform's installer and verify that the installed app starts successfully.
+  On macOS, run `npm run install:mac`, gracefully quit GitCat, and open `/Applications/GitCat.app`.
+  On Windows, run `npm run dist:win`, gracefully quit GitCat, install the generated setup executable,
+  and reopen the installed app. Preserve the existing app profile on every platform.
 - Complete this delivery without asking for another installation or restart confirmation. Do not
   stop at source changes or a build when the installed app still needs updating.
 - Preserve user data and repository work. If validation or installation exposes a new blocking

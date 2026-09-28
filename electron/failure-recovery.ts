@@ -160,7 +160,7 @@ export function recoveryActions(kind: FailureKind, facts: RecoveryFacts, evidenc
       break;
     case "divergent":
       if (!facts.upstream || facts.behind === 0) {
-        // The remote has work this Mac has not seen yet. Reading it first is safe and settles the numbers.
+        // The remote has work this computer has not seen yet. Reading it first is safe and settles the numbers.
         actions.push(prepare("fetch", "fetch"));
         needsJudgment = Boolean(facts.upstream);
         break;

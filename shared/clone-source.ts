@@ -4,7 +4,7 @@ import type { CloneUrlProblem } from "./types.js";
  * Addresses a person may clone from. Only the network transports people actually paste are accepted:
  * https://, ssh://, and the scp-like user@host:path that GitHub shows for SSH. Everything Git could
  * read as an option, a local path, or a transport helper ("ext::", "fd::", "file://") is refused
- * here, before Git runs, because those are how an address turns into a command on this Mac.
+ * here, before Git runs, because those are how an address turns into a command on this computer.
  * The renderer uses this to answer while the person types; the main process checks again.
  */
 export type CloneSource = { url: string; protocol: "https" | "ssh"; host: string; path: string };

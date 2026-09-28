@@ -105,7 +105,7 @@ export type AiSharingPurpose = "planning" | "description" | "conflicts" | "recov
  */
 export type AiSharingFile = { path: string; status: "sent" | "reviewed" | "excluded" | "likely_secret"; findings: SecretFinding[] };
 
-/** Everything the disclosure shows before repository content leaves this Mac for the configured provider. */
+/** Everything the disclosure shows before repository content leaves this computer for the configured provider. */
 export type AiSharingPreview = {
   repoPath: string;
   provider: "openai";
@@ -116,7 +116,7 @@ export type AiSharingPreview = {
   acknowledged: boolean;
   acknowledgedAt?: string;
   purpose: AiSharingPurpose;
-  /** Path patterns this repository never shares, stored on this Mac rather than in the repository. */
+  /** Path patterns this repository never shares, stored on this computer rather than in the repository. */
   exclusions: string[];
   /** The files this request would read, and what happens to each one. */
   files: AiSharingFile[];
@@ -497,7 +497,7 @@ export type AssistantUnavailable = "not_configured" | "timeout" | "unreachable" 
 /**
  * Why the AI assistant could not be connected or stopped answering, told apart so the interface can
  * say it in plain words and offer the way on: fix the key, pick another model, set up billing on the
- * provider, wait for the provider, check the network, or unlock this Mac's secure storage.
+ * provider, wait for the provider, check the network, or unlock this computer's secure storage.
  */
 export type AiProblemKind =
   | "invalid_key" | "unknown_model" | "no_access" | "billing" | "rate_limited"
@@ -515,9 +515,9 @@ export type LlmConfig = {
   model: string;
   /** A key is saved and was verified with the provider when it was saved. */
   configured: boolean;
-  /** Whether this Mac can encrypt a key. Without it no key is saved: never as plain text. */
+  /** Whether this computer can encrypt a key. Without it no key is saved: never as plain text. */
   secureStorage: boolean;
-  /** A key was saved before, but this Mac's secure storage cannot unlock it right now. It is kept. */
+  /** A key was saved before, but this computer's secure storage cannot unlock it right now. It is kept. */
   storedKeyUnreadable?: boolean;
   /** The last request with the saved key that failed; the next one that works clears it. */
   lastProblem?: AiConnectionProblem;
@@ -537,7 +537,7 @@ export type HelpPage = "github_ssh_keys" | "git_download" | "gh_install";
 /** Where a Git setting comes from, as `git config --show-scope` names it. */
 export type ConfigScope = "local" | "worktree" | "global" | "system" | "command";
 
-/** Which settings file `set_identity` writes: this repository's, or the one every repository on this Mac reads. */
+/** Which settings file `set_identity` writes: this repository's, or the one every repository on this computer reads. */
 export type IdentityScope = "local" | "global";
 
 export type GitToolReadiness =
@@ -557,24 +557,24 @@ export type AuthorReadiness = {
   /** The values Git will actually use, and the settings file each one comes from. */
   name?: { value: string; scope: ConfigScope };
   email?: { value: string; scope: ConfigScope };
-  /** What this repository sets for itself, and what every repository on this Mac falls back to. */
+  /** What this repository sets for itself, and what every repository on this computer falls back to. */
   repository: IdentityValues;
   global: IdentityValues;
   /** The repository sets its own values and they differ from the global ones. */
   overridesGlobal: boolean;
 };
 
-/** Whether this Mac can reach and read the remote with the sign-in it already has, from Git's own answer. */
+/** Whether this computer can reach and read the remote with the sign-in it already has, from Git's own answer. */
 export type RemoteAccess = "ok" | "denied" | "not_found" | "credentials" | "offline" | "host_key" | "unknown" | "not_checked";
 export type RemoteProtocol = "https" | "ssh" | "local" | "other";
-/** What keeps an HTTPS sign-in on this Mac, by kind only. Its contents are never read. */
+/** What keeps an HTTPS sign-in on this computer, by kind only. Its contents are never read. */
 export type CredentialHelper = "gh" | "osxkeychain" | "manager" | "store" | "cache" | "other" | "none";
 
 export type AccountReadiness = {
   /** GitHub CLI is not installed, is installed with nobody signed in, or has accounts. */
   gh: "missing" | "signed_out" | "signed_in";
   accounts: { login: string; active: boolean }[];
-  /** Who the SSH key on this Mac signs in as, from the host's own greeting. */
+  /** Who the SSH key on this computer signs in as, from the host's own greeting. */
   sshLogin?: string;
   /** The account this remote is proven to use, when GitCat could tell, and how it knows. */
   verified?: string;
@@ -608,7 +608,7 @@ export type RemoteReadiness =
     account?: AccountReadiness;
   };
 
-/** What Git needs before a first save or a publish, read from this Mac. Checking never changes anything. */
+/** What Git needs before a first save or a publish, read from this computer. Checking never changes anything. */
 export type ReadinessReport = {
   repoPath?: string;
   checkedAt: string;
@@ -620,7 +620,7 @@ export type ReadinessReport = {
 export type ReadinessRequest = {
   /** A remote to check instead of the one GitCat would pick. */
   remote?: string;
-  /** Contact the remote to check access. Without it, only this Mac is read. */
+  /** Contact the remote to check access. Without it, only this computer is read. */
   access?: boolean;
 };
 
@@ -851,7 +851,7 @@ export type StartTrackingResult =
   | { status: "changed"; result: ProjectSelectResult }
   | { status: "failed"; detail: string; cleaned: boolean };
 
-/** Why an address cannot be cloned from. Checked on this Mac before Git is ever run. */
+/** Why an address cannot be cloned from. Checked on this computer before Git is ever run. */
 export type CloneUrlProblem = "empty" | "too_long" | "spaces" | "option" | "local" | "transport_helper" | "insecure" | "credentials" | "unsupported" | "malformed";
 
 export type CloneDestinationProblem = "name_invalid" | "parent_missing" | "parent_not_writable" | "destination_not_empty" | "destination_is_file";
