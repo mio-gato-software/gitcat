@@ -1,0 +1,107 @@
+name: Desktop build
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# The caller supplies the run context, including its own GITHUB_RUN_NUMBER.
+jobs:
+  desktop:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-2025
+            platform: win
+            arch: x64
+          - name: macOS Apple Silicon
+            os: macos-15
+            platform: mac
+            arch: arm64
+          - name: macOS Intel
+            os: macos-15-intel
+            platform: mac
+            arch: x64
+    defaults:
+      run:
+        shell: bash
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      GITCAT_UI_SCREENSHOTS: release/ui-screenshots
+      GITCAT_UI_DEBUG: '1'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          architecture: ${{ matrix.arch }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Calculate CI app version
+        run: |
+          version=$(node scripts/ci-version.mjs)
+          echo "GITCAT_BUILD_VERSION=$version" >> "$GITHUB_ENV"
+          echo "GitCat version: $version" >> "$GITHUB_STEP_SUMMARY"
+      - name: Install macOS icon renderer
+        if: runner.os == 'macOS'
+        run: command -v rsvg-convert || brew install librsvg
+      - name: Lint
+        run: npm run lint
+      - name: Type check
+        run: npm run typecheck
+      - name: Unit and integration tests
+        run: npm test
+      - name: Build application
+        run: npm run build
+      - name: Desktop UI checks
+        run: node scripts/check-ui.cjs
+      - name: Welcome layout checks
+        run: node scripts/check-welcome.cjs
+      - name: Generate app icon
+        run: npm run icons
+      - name: Package unsigned application
+        run: npx --no-install electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never --config.extraMetadata.version="$GITCAT_BUILD_VERSION"
+      - name: Verify packaged app version
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { join } from 'node:path';
+          import { extractFile } from '@electron/asar';
+          const resources = process.platform === 'win32'
+            ? 'release/win-unpacked/resources'
+            : `release/mac${process.arch === 'arm64' ? '-arm64' : ''}/GitCat.app/Contents/Resources`;
+          const metadata = JSON.parse(extractFile(join(resources, 'app.asar'), 'package.json').toString());
+          assert.equal(metadata.version, process.env.GITCAT_BUILD_VERSION, 'About must show the CI version');
+          console.log(`Packaged GitCat ${metadata.version}`);
+          NODE
+      - name: Upload installers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: GitCat-${{ env.GITCAT_BUILD_VERSION }}-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Upload UI diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: UI-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
+          path: release/ui-screenshots/
+          if-no-files-found: ignore
+          retention-days: 7
