@@ -9,7 +9,7 @@ registerHooks({ resolve(s,c,n) { return s === 'electron' ? { url: new URL('./hel
 const service = await import('../dist-electron/electron/git-service.js');
 const { parseWorktreeList } = await import('../dist-electron/electron/worktrees.js');
 function fixture(t) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'gitcat-worktrees-')));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'gitcat-worktrees-')));
   t.after(() => rmSync(root, { recursive:true, force:true }));
   const repo = join(root, 'main');
   execFileSync('git',['init','-q','-b','main',repo]);

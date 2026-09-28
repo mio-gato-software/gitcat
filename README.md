@@ -54,6 +54,12 @@ npm run test:welcome
 
 `npm run check` runs the lint, type, unit, and UI checks together. Unit fixtures use disposable Git configuration so personal identity, hooks, signing and line-ending preferences do not change their results. The UI checks build the app and use disposable app profiles; the main UI check also uses disposable repositories. `npm run test:welcome` checks both languages at desktop, compact and zoomed sizes.
 
+### Continuous integration
+
+[Desktop CI](https://github.com/mio-gato-software/gitcat/actions/workflows/desktop-ci.yml) runs on every pull request and push to `main`, and can also be started manually. Separate native Windows x64, macOS Apple Silicon, and macOS Intel jobs run lint, type checks, the full test suite, desktop UI and welcome-layout checks, and package the application.
+
+Successful jobs attach unsigned Windows setup/portable executables or macOS DMG/ZIP builds to the workflow run for 14 days. UI screenshots are retained for 7 days to help diagnose failures. These are test builds, not signed public releases; the workflow does not publish releases or install anything on your computer. Personal Windows installation remains part of the local delivery workflow.
+
 `npm run package:dir` creates an unpacked local build. Packaging scripts for macOS, Windows, and Linux are in `package.json`. The macOS packaging scripts currently produce unsigned builds; I do not have a signing certificate or notarized public release.
 
 On Windows, run `npm run dist:win` to create both an installer (`release/GitCat-<version>-win-<arch>-setup.exe`) and a portable app (`release/GitCat-<version>-win-<arch>-portable.exe`). The portable app runs without installation. Windows builds are unsigned and require Git to be installed separately.

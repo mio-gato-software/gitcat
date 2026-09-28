@@ -22,7 +22,7 @@ let providerCalls = 0;
 globalThis.fetch = async () => { providerCalls += 1; throw new Error("no provider in this test"); };
 
 function repository() {
-  const repo = realpathSync(mkdtempSync(join(tmpdir(), "gitcat-guide-")));
+  const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "gitcat-guide-")));
   const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   git("init", "-q", "-b", "main", ".");
   git("config", "user.email", "t@t.t");

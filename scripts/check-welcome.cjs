@@ -29,7 +29,8 @@ app.whenReady().then(async () => {
   ipcMain.handle('llm:get-config', () => ({ provider: 'openai', model: 'test', configured: false, secureStorage: true }));
   ipcMain.handle('operation:list', () => []);
   ipcMain.handle('readiness:check', () => ({ checkedAt: new Date().toISOString(), git: gitMissing ? { status: 'missing', searched: 0 } : { status: 'ok', version: 'test' } }));
-  const win = new BrowserWindow({ width: 1480, height: 940, show: false, webPreferences: { preload: path.join(root, 'electron/preload.cjs'), contextIsolation: true, sandbox: true } });
+  // Hosted Macs may have a small display; still exercise the requested desktop sizes.
+  const win = new BrowserWindow({ width: 1480, height: 940, show: false, enableLargerThanScreen: true, webPreferences: { backgroundThrottling: false, preload: path.join(root, 'electron/preload.cjs'), contextIsolation: true, sandbox: true } });
   win.webContents.on('console-message', (_event, details) => { if (details.level === 'error') errors.push(details.message); });
   const js = code => win.webContents.executeJavaScript(code);
   const ready = async () => {
@@ -45,9 +46,17 @@ app.whenReady().then(async () => {
     await win.loadFile(path.join(root, 'dist/index.html'));
     await ready();
     for (const [name, width, height, zoom] of [['wide', 1480, 940, 1], ['laptop', 1280, 800, 1], ['minimum', 1080, 700, 1], ['compact', 800, 700, 1], ['zoom', 1280, 800, 1.5]]) {
-      win.setContentSize(width, height);
       win.webContents.setZoomFactor(zoom);
-      await new Promise(resolve => setTimeout(resolve, 100));
+      win.setContentSize(width, height);
+      // Zoom and native resizing are asynchronous. Wait for the actual viewport and
+      // a rendered frame before asserting layout, including after a locale reload.
+      const viewport = Math.round(width / zoom);
+      for (let attempt = 0; attempt < 100; attempt++) {
+        if (await js(`innerWidth === ${viewport}`)) break;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      assert.equal(await js('innerWidth'), viewport, `${locale}/${name}: requested viewport`);
+      await js('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
       const size = await js(`(() => {
         const card = document.querySelector('.first-run'); card.scrollTop = 0;
         const bounds = card.getBoundingClientRect();

@@ -38,7 +38,7 @@ function errorCode(error: unknown) {
 }
 
 function realpath(path: string) {
-  try { return realpathSync(path); } catch { return resolve(path); }
+  try { return realpathSync.native(path); } catch { return resolve(path); }
 }
 
 function invalid(path: string, problem: FolderProblem, detail?: string): FolderState {

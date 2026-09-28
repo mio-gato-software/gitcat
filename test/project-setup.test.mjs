@@ -17,7 +17,7 @@ const { parseCloneUrl, suggestedFolderName, folderNameProblem } = await import(p
 
 // Real folders throughout; the realpath keeps macOS's /var → /private/var link out of the comparisons.
 function scratch(t, prefix = "gitcat-setup-") {
-  const path = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  const path = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
   t.after(() => rmSync(path, { recursive: true, force: true }));
   return path;
 }

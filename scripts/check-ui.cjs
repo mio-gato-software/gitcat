@@ -11,7 +11,8 @@ const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');
 // Chromium locks profile files on Windows until the process has exited.
 if (typeof electron === 'string') {
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gitcat-design-'));
+  // Match Git's canonical paths, including Windows 8.3 aliases and macOS /var.
+  const scratch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'gitcat-design-')));
   const result = spawnSync(electron, [__filename], {
     env: { ...process.env, GITCAT_UI_SCRATCH: scratch }, windowsHide: true, stdio: 'inherit', timeout: 600_000
   });
@@ -206,7 +207,8 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('clone:cancel', () => { cloneController?.abort(); return Boolean(cloneController); });
 
-  const win = new BrowserWindow({ width: 1480, height: 940, show: false, webPreferences: { preload: path.join(root, 'electron/preload.cjs') } });
+  // Hosted Macs may have a small display; still exercise the requested desktop sizes.
+  const win = new BrowserWindow({ width: 1480, height: 940, show: false, enableLargerThanScreen: true, webPreferences: { backgroundThrottling: false, preload: path.join(root, 'electron/preload.cjs') } });
   const js = code => win.webContents.executeJavaScript(code).catch((error) => { if (process.env.GITCAT_UI_DEBUG) console.error('JS FAILED:', code.slice(0, 300)); throw error; });
   const waitFor = async expression => {
     for (let attempt = 0; attempt < 400; attempt++) {
@@ -214,7 +216,10 @@ app.whenReady().then(async () => {
       if (await js(`Boolean(${expression})`)) return;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
-    if (process.env.GITCAT_UI_DEBUG) console.error((await js(`document.body.innerText`)).slice(0, 3000));
+    if (process.env.GITCAT_UI_DEBUG) {
+      console.error((await js(`document.body.innerText`)).slice(0, 3000));
+      console.error('Fixture Git status:', git('status', '--porcelain'));
+    }
     throw new Error(`UI did not become ready: ${expression}`);
   };
   const capture = async name => {
@@ -245,6 +250,10 @@ app.whenReady().then(async () => {
   };
 
   await win.loadFile(path.join(root, 'dist/index.html'));
+  // macOS can clamp the constructor size to its virtual screen before the
+  // larger-than-screen option takes effect. Resize explicitly after creation.
+  win.setContentSize(1480, 940);
+  await waitFor('innerWidth === 1480');
   await js(`localStorage.setItem('gitcat-locale', 'es')`);
   await win.loadFile(path.join(root, 'dist/index.html'));
   // Five commits plus the uncommitted work, drawn as its own row above HEAD.
@@ -587,8 +596,11 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('aside.sidebar').textContent.includes('outside') || (window.dispatchEvent(new Event('focus')), false)`);
   // Credential-like files appear normally in the save list, with no secret warning or review gate.
   fs.writeFileSync(path.join(repo, '.env'), 'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n');
-  await js(`document.querySelector('.inspector-tabs button').click()`);
-  await waitFor(`document.querySelector('.inspector .change-list')?.textContent.includes('.env') || (window.dispatchEvent(new Event('focus')), false)`);
+  // Background reads preserve a selected commit. Wait for the new working row,
+  // then select it explicitly instead of relying on incidental selection timing.
+  await waitFor(`document.querySelector('.commit-row.wip') || (window.dispatchEvent(new Event('focus')), false)`);
+  await js(`document.querySelector('.commit-row.wip').click()`);
+  await waitFor(`document.querySelector('.inspector .change-list')?.textContent.includes('.env')`);
   assert.equal(await js(`Boolean(document.querySelector('.secret-warning, .change-badge.secret'))`), false);
   assert.doesNotMatch(await js(`document.querySelector('.changes-view').innerText`), /posible secreto|Revisé estos archivos/);
   await capture('save-without-secret-warning');

@@ -34,7 +34,7 @@ const answerFor = (paths) => queue.push(JSON.stringify({
 
 /** A real repository stopped in a merge where every file in `files` conflicts. */
 function conflictedRepository(files = ["a.txt", "b.txt"]) {
-  const repo = realpathSync(mkdtempSync(join(tmpdir(), "gitcat-apply-")));
+  const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "gitcat-apply-")));
   const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
   git("init", "-q", "-b", "main", ".");
   git("config", "user.email", "t@t.t");

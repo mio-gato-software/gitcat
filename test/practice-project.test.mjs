@@ -6,6 +6,26 @@ const git=(cwd,...args)=>execFileSync('git',args,{cwd,encoding:'utf8',stdio:['ig
 function fixture(t){const root=mkdtempSync(join(tmpdir(),'gitcat-practice-test-'));t.after(()=>rmSync(root,{recursive:true,force:true}));const store=new PracticeProjects(join(root,'owned'),async(path,args)=>git(path,...args));return {root,store};}
 test('practice creates actual isolated Git state without identity or remote setup',async t=>{const{store}=fixture(t);const info=await store.create();assert.equal(git(info.path,'remote'),'');assert.equal(git(info.path,'config','user.email'),'practice@example.invalid');assert.equal(git(info.path,'branch','--show-current'),'main');assert.equal(git(info.path,'status','--porcelain'),'');assert.equal(git(info.path,'config','commit.gpgSign'),'false');assert.ok(git(info.path,'branch','--list','practice/conflict-*').includes('practice/conflict-ours'));store.edit(info.path);assert.match(git(info.path,'status','--porcelain'),/story.txt/);});
 test('skipped lessons resume after reopening and replay creates a separate project',async t=>{const{root,store}=fixture(t);const first=await store.create();store.lesson(first.path,4);const reopened=new PracticeProjects(join(root,'owned'),async(path,args)=>git(path,...args));assert.equal(reopened.info(first.path).lesson,4);const second=await reopened.create();assert.notEqual(first.path,second.path);assert.equal(reopened.info(first.path).lesson,4);reopened.remove(second.path);assert.equal(existsSync(first.path),true);assert.equal(existsSync(second.path),false);});
+test('existing practice records remain usable when a parent folder has a path alias', async t => {
+  const { root, store } = fixture(t);
+  const info = await store.create();
+  const alias = join(root, 'owned-alias');
+  symlinkSync(join(root, 'owned'), alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const registry = join(root, 'owned', 'projects.json');
+  const records = JSON.parse(readFileSync(registry, 'utf8'));
+  const aliasedPath = join(alias, `practice-${info.id}`);
+  records[0].path = aliasedPath;
+  writeFileSync(registry, JSON.stringify(records));
+  assert.equal(store.registered(info.path), true);
+  assert.equal(store.owns(info.path), true);
+  assert.equal(store.info(aliasedPath).path, info.path);
+  assert.equal(store.lesson(info.path, 3).lesson, 3);
+  store.edit(aliasedPath);
+  assert.match(git(info.path, 'status', '--porcelain'), /story.txt/);
+  store.remove(info.path);
+  assert.equal(existsSync(info.path), false);
+  assert.deepEqual(JSON.parse(readFileSync(registry, 'utf8')), []);
+});
 test('cleanup and example editing refuse personal folders, forged markers and symlink targets', async t => {
   const { root, store } = fixture(t);
   const personalFolder = join(root, 'personal');

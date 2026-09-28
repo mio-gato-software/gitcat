@@ -46,6 +46,11 @@ specialized workflow first.
 
 - This repository is currently for the owner's personal use. Keep this assumption until the owner
   explicitly changes it.
+- Every application change must include updating the owner's installed Windows version of GitCat.
+  After validation, run `npm run dist:win`, gracefully quit GitCat, install the generated setup
+  executable, reopen the installed app, and verify startup. Preserve settings and repository work.
+  This is standing authorization; do not ask again. If Windows delivery is unavailable from the
+  current host, report the concrete blocker and do not claim the app update is complete.
 - A request to change the application includes standing authorization to make the updated app
   available immediately on the owner's current platform. After implementing and validating an app
   change, use that platform's installer and verify that the installed app starts successfully.
