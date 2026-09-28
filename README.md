@@ -31,7 +31,7 @@ On first launch, choose **Create a practice project** to try editing, saving, br
 
 Remote actions use your existing Git access. Sharing a branch for GitHub review also requires the [GitHub CLI](https://cli.github.com/) and a signed-in account.
 
-The app is built with Electron, React, TypeScript, and Vite. The renderer uses a preload bridge to request operations from the Electron main process, which checks repository state and runs Git. I use GitCat on macOS. Windows x64 builds have passed the full unit suite, desktop UI and welcome-layout checks, and installed-app startup and local Git checks. Linux has not been verified for public distribution.
+The app is built for Windows, macOS, and Linux with Electron, React, TypeScript, and Vite. The renderer uses a preload bridge to request operations from the Electron main process, which checks repository state and runs Git. Windows x64 builds have passed the full unit suite, desktop UI and welcome-layout checks, and installed-app startup and local Git checks. macOS is also used for personal development; Linux has not been verified for public distribution.
 
 ## Optional AI assistant
 

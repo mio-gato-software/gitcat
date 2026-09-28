@@ -1,7 +1,7 @@
 import type { SecretFinding, SecretKind, WithheldFile } from "../shared/types.js";
 
 /**
- * The local checks every piece of repository content passes before it may leave the Mac for the
+ * The local checks every piece of repository content passes before it may leave the computer for the
  * configured provider. They run here, without the network, and they only ever report where something
  * looks like a credential (a path, a line and a kind) — never the matched text itself, so a finding can
  * be shown, logged or handed to the model without repeating the secret it describes.
@@ -95,7 +95,7 @@ export function scanText(path: string, text: string): SecretFinding[] {
 export type DiffFinding = SecretFinding & { side: "added" | "removed" | "context" };
 
 /**
- * Likely credentials in one file's unified diff. Every line of it would leave the Mac, including the
+ * Likely credentials in one file's unified diff. Every line of it would leave the computer, including the
  * context and the removed lines, so all of them are read; each finding carries the line number of the
  * version it appears in and which side it is on, because removing a secret is not adding one.
  */

@@ -4,7 +4,7 @@ import type {
 
 /**
  * A new developer used to learn that Git was missing, that it did not know their name, or that the
- * remote refused them only when a save or a publish failed. These are facts this Mac can prove
+ * remote refused them only when a save or a publish failed. These are facts this computer can prove
  * beforehand, so they are read and explained up front. Everything here parses what Git, ssh and gh
  * print; none of it changes configuration, and a credential is never read, only the kind of helper
  * that keeps it.
@@ -136,7 +136,7 @@ const accessPatterns: [RemoteAccess, RegExp][] = [
 
 /**
  * Tells what `git ls-remote` meant from what it printed. A refusal is about the sign-in, an
- * unreachable host is about the network, and neither says anything about the work on this Mac.
+ * unreachable host is about the network, and neither says anything about the work on this computer.
  */
 export function classifyAccess(result: { code: number; output: string } | { timedOut: true }): RemoteAccess {
   if ("timedOut" in result) return "offline";

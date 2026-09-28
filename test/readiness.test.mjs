@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-// Before a first save or a publish, GitCat reads what Git needs from this Mac: Git itself, who saves
+// Before a first save or a publish, GitCat reads what Git needs from this computer: Git itself, who saves
 // are attributed to, and whether the remote can be reached with the sign-in already here. Every Git
 // setting these tests touch lives in a disposable HOME; this machine's own configuration is never read
 // or written.
@@ -73,7 +73,7 @@ test("cuando el repositorio y la configuración global difieren, se informa la i
   assert.deepEqual(fallback.author.name, { value: "Ana Global", scope: "global" });
   assert.equal(fallback.author.overridesGlobal, false);
 
-  // Without a repository, only this Mac's settings count.
+  // Without a repository, only this computer's settings count.
   const outside = await service.checkReadiness(undefined);
   assert.equal(outside.repoPath, undefined);
   assert.deepEqual(outside.author.email, { value: "ana@personal.example", scope: "global" });
@@ -208,9 +208,9 @@ test("la identidad global se revisa antes de escribirse y solo cambia la configu
   const plan = await service.prepareOperation(own, "set_identity", { user: " Ana Gato ", email: "ana@example.com", scope: "global" }, "en");
   assert.equal(plan.command, 'git config --global user.name "Ana Gato" && git config --global user.email "ana@example.com"');
   assert.equal(plan.requiresConfirmation, true);
-  assert.match(plan.summary, /every repository on this Mac/);
+  assert.match(plan.summary, /every repository on this computer/);
   const effects = plan.effects.join("\n");
-  assert.match(effects, /No global identity is set on this Mac yet/);
+  assert.match(effects, /No global identity is set on this computer yet/);
   assert.match(effects, /This repository has its own identity \(Repo Propio <repo@example\.com>\) and keeps using it/);
   assert.match(effects, /existing commits keep their author/);
   assert.equal(readFileSync(globalConfig, "utf8"), "", "Preparing writes nothing");
@@ -224,11 +224,11 @@ test("la identidad global se revisa antes de escribirse y solo cambia la configu
   assert.deepEqual(after.author.global, { name: "Ana Gato", email: "ana@example.com" });
   assert.equal(after.author.name.scope, "local");
 
-  // Repository scope stays the default and names what the rest of this Mac keeps.
+  // Repository scope stays the default and names what the rest of this computer keeps.
   const plain = repository("gitcat-ready-local-");
   const local = await service.prepareOperation(plain, "set_identity", { user: "Solo Aquí", email: "aqui@example.com" }, "en");
   assert.equal(local.command, 'git config user.name "Solo Aquí" && git config user.email "aqui@example.com"');
-  assert.match(local.effects.join("\n"), /Other repositories on this Mac keep using Ana Gato <ana@example\.com>/);
+  assert.match(local.effects.join("\n"), /Other repositories on this computer keep using Ana Gato <ana@example\.com>/);
   assert.equal((await service.executePlan(plain, local, "en")).error, undefined);
   assert.equal(git(plain, "config", "--local", "user.email"), "aqui@example.com");
   assert.match(readFileSync(globalConfig, "utf8"), /ana@example\.com/);

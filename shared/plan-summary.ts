@@ -189,7 +189,7 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         break;
       case "set_identity":
         summary.local.push(args.scope === "global"
-          ? say(`Signs future commits in every repository on this Mac as ${args.user} <${args.email}>.`, `Firma los próximos commits de todos los repositorios de este Mac como ${args.user} <${args.email}>.`)
+          ? say(`Signs future commits in every repository on this computer as ${args.user} <${args.email}>.`, `Firma los próximos commits de todos los repositorios de este equipo como ${args.user} <${args.email}>.`)
           : say(`Signs future commits in this project as ${args.user} <${args.email}>.`, `Firma los próximos commits de este proyecto como ${args.user} <${args.email}>.`));
         break;
       case "add_remote":

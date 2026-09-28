@@ -348,7 +348,7 @@
 .unavailable-detail { margin-top: 12px; color: var(--muted); font-size: 10px; }
 .unavailable-detail summary { cursor: pointer; margin-bottom: 6px; }
 
-/* What the assistant sees: the disclosure before content leaves this Mac, and its later review. */
+/* What the assistant sees: the disclosure before content leaves this computer, and its later review. */
 .sharing-modal { width: min(680px, 100%); max-height: calc(100vh - 36px); overflow: auto; }
 .sharing-copy { margin: 0 0 10px; color: var(--secondary); font-size: 11.5px; line-height: 1.6; }
 .sharing-section { margin-top: 16px; padding: 12px; background: var(--raised); border: 1px solid var(--border); border-radius: 8px; }

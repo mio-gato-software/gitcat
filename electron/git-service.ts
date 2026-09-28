@@ -931,7 +931,7 @@ async function checkedGh(args: string[], cwd: string, host?: string) {
   return result.stdout.trim();
 }
 
-/** The settings files user.name and user.email come from, read the way Git reads them. Without a repository, only this Mac's. */
+/** The settings files user.name and user.email come from, read the way Git reads them. Without a repository, only this computer's. */
 async function readAuthor(cwd: string | undefined): Promise<AuthorReadiness> {
   const result = await runGit(cwd ?? homedir(), ["config", "--show-scope", "--get-regexp", "^user\\.(name|email)$"], 10_000).catch(() => undefined);
   return authorReadiness(parseIdentityConfig(result?.stdout ?? ""), { repository: Boolean(cwd) });
@@ -946,7 +946,7 @@ async function configValues(cwd: string, key: string) {
 const accessTimeoutMs = 15_000;
 
 /**
- * Reads the remote's branch list with the sign-in this Mac already has, and nothing else: no prompt
+ * Reads the remote's branch list with the sign-in this computer already has, and nothing else: no prompt
  * can appear, a first-time SSH host is not trusted on the person's behalf, and a hang ends as
  * "could not reach". What Git answered is kept with anything shaped like a credential masked.
  */
@@ -1009,7 +1009,7 @@ async function readRemote(snapshot: RepoSnapshot, request: ReadinessRequest): Pr
 
 /**
  * What Git needs before a first save or a publish: Git itself, who saves are attributed to, and where
- * a publish goes with the access this Mac has. It only reads; a recheck is always safe.
+ * a publish goes with the access this computer has. It only reads; a recheck is always safe.
  */
 export async function checkReadiness(cwd: string | undefined, request: ReadinessRequest = {}): Promise<ReadinessReport> {
   const checkedAt = new Date().toISOString();
@@ -1037,9 +1037,9 @@ async function identityEffects(snapshot: RepoSnapshot, args: Record<string, stri
   return [
     current
       ? localized(language, `Sustituye ${global ? "la identidad global" : "la identidad de este repositorio"}: ${current}.`, `Replaces the ${global ? "global identity" : "identity set for this repository"}: ${current}.`)
-      : localized(language, global ? "Todavía no hay una identidad global en este Mac; esto la crea." : "Este repositorio todavía no tiene una identidad propia; esto la crea.", global ? "No global identity is set on this Mac yet; this creates one." : "This repository has no identity of its own yet; this creates one."),
+      : localized(language, global ? "Todavía no hay una identidad global en este equipo; esto la crea." : "Este repositorio todavía no tiene una identidad propia; esto la crea.", global ? "No global identity is set on this computer yet; this creates one." : "This repository has no identity of its own yet; this creates one."),
     ...(global && repositoryOwn ? [localized(language, `Este repositorio tiene su propia identidad (${repositoryOwn}) y la seguirá usando: la del repositorio tiene prioridad.`, `This repository has its own identity (${repositoryOwn}) and keeps using it: a repository's own setting takes precedence.`)] : []),
-    ...(!global && globalOwn ? [localized(language, `Los demás repositorios de este Mac siguen usando ${globalOwn}.`, `Other repositories on this Mac keep using ${globalOwn}.`)] : []),
+    ...(!global && globalOwn ? [localized(language, `Los demás repositorios de este equipo siguen usando ${globalOwn}.`, `Other repositories on this computer keep using ${globalOwn}.`)] : []),
     localized(language, "Solo afecta a los próximos commits: los que ya existen conservan su autor. No es un inicio de sesión y no se envía nada.", "Only future commits use it: existing commits keep their author. It is not a sign-in and nothing is sent anywhere.")
   ];
 }
@@ -1571,7 +1571,7 @@ export async function getAiSharing(cwd: string, purpose: AiSharingPurpose, paths
   };
 }
 
-/** The person read what leaves the Mac for this repository and agreed to it. Remembered on this Mac. */
+/** The person read what leaves the computer for this repository and agreed to it. Remembered on this computer. */
 export async function acknowledgeAiSharing(cwd: string) {
   const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
   const now = new Date().toISOString();
@@ -2565,7 +2565,7 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     resolve_conflict: [localized(locale, `Resolver ${args.path} quedándose con ${args.side === "theirs" ? "el otro lado" : args.side === "ours" ? "nuestro lado" : "el archivo tal cual está"}`, `Resolve ${args.path} by keeping ${args.side === "theirs" ? "the other side" : args.side === "ours" ? "our side" : "the file as it is"}`), localized(locale, "Marca el conflicto de un archivo como resuelto. No modifica el contenido de ningún archivo.", "Marks a file conflict as resolved. It does not change file content."), "medium"],
     commit: [localized(locale, `Crear commit “${args.message ?? ""}”`, `Create commit “${args.message ?? ""}”`), localized(locale, "Añade todos los cambios y crea un commit.", "Stages all changes and creates a commit."), "high"],
     set_identity: args.scope === "global"
-      ? [localized(locale, `Firmar los commits de todos los repositorios de este Mac como ${args.user} <${args.email}>`, `Sign commits in every repository on this Mac as ${args.user} <${args.email}>`), localized(locale, "Guarda el nombre y el correo que Git anota en cada commit en tu configuración global de Git, para todos los repositorios de este Mac que no tengan los suyos. Tus archivos y tu historial no cambian.", "Saves the name and email Git records with each commit in your global Git settings, for every repository on this Mac that does not set its own. Your files and history do not change."), "high"]
+      ? [localized(locale, `Firmar los commits de todos los repositorios de este equipo como ${args.user} <${args.email}>`, `Sign commits in every repository on this computer as ${args.user} <${args.email}>`), localized(locale, "Guarda el nombre y el correo que Git anota en cada commit en tu configuración global de Git, para todos los repositorios de este equipo que no tengan los suyos. Tus archivos y tu historial no cambian.", "Saves the name and email Git records with each commit in your global Git settings, for every repository on this computer that does not set its own. Your files and history do not change."), "high"]
       : [localized(locale, `Firmar los commits de este repositorio como ${args.user} <${args.email}>`, `Sign commits in this repository as ${args.user} <${args.email}>`), localized(locale, "Guarda el nombre y el correo que Git anota en cada commit, solo para este repositorio. Tus archivos y tu historial no cambian.", "Saves the name and email Git records with each commit, for this repository only. Your files and history do not change."), "medium"],
     add_remote: [localized(locale, `Conectar este repositorio con ${args.url} como ${args.name}`, `Connect this repository to ${args.url} as ${args.name}`), localized(locale, "Añade la dirección donde se puede publicar este repositorio. Todavía no se envía nada: publicar es otro paso que confirmas aparte.", "Adds the address where this repository can be published. Nothing is sent yet: publishing is a separate step you confirm."), "medium"],
     ignore_path: [localized(locale, `Ignorar los cambios futuros de ${args.path}`, `Ignore future changes to ${args.path}`), localized(locale, "Añade una línea a .gitignore para que Git deje de listar este archivo nuevo. El archivo se queda en tu disco tal como está.", "Adds one line to .gitignore so Git stops listing this new file. The file stays on your disk exactly as it is."), "medium"],
@@ -3116,7 +3116,7 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
     const user = args.user?.trim() ?? "";
     if (!user || user.length > 100 || /[\p{Cc}<>]/u.test(user)) throw new Error(localized(language, "Escribe el nombre con el que quieres firmar tus commits.", "Type the name you want your commits signed with."));
     if (!args.email || args.email.length > 254 || !/^[^\s<>@]+@[^\s<>@]+$/.test(args.email)) throw new Error(localized(language, "Escribe un correo con la forma nombre@dominio.", "Type an email in the form name@domain."));
-    // Only the two places a person can pick: this repository, or every repository on this Mac.
+    // Only the two places a person can pick: this repository, or every repository on this computer.
     if (args.scope !== undefined && args.scope !== "local" && args.scope !== "global") throw new Error(localized(language, "Elige si el nombre y el correo son para este repositorio o para todos.", "Choose whether the name and email are for this repository or for all of them."));
   }
   if (operation === "add_remote") {
@@ -3287,7 +3287,7 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
       await checkedGit(cwd, ["config", global ? "--global" : "--local", "user.name", args.user]);
       await checkedGit(cwd, ["config", global ? "--global" : "--local", "user.email", args.email]);
       return global
-        ? localized(locale, `Los commits de los repositorios de este Mac sin identidad propia se firmarán como ${args.user} <${args.email}>.`, `Commits in repositories on this Mac without their own identity will be signed as ${args.user} <${args.email}>.`)
+        ? localized(locale, `Los commits de los repositorios de este equipo sin identidad propia se firmarán como ${args.user} <${args.email}>.`, `Commits in repositories on this computer without their own identity will be signed as ${args.user} <${args.email}>.`)
         : localized(locale, `Los commits de este repositorio se firmarán como ${args.user} <${args.email}>.`, `Commits in this repository will be signed as ${args.user} <${args.email}>.`);
     }
     case "add_remote": return reportedGit(cwd, ["remote", "add", args.name, args.url]);

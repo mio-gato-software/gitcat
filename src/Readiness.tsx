@@ -7,7 +7,7 @@ import type { MessageKey, Translate } from "./i18n";
 
 /**
  * The readiness checklist: Git, who saves are attributed to, and where a publish goes with the access
- * this Mac has. It only shows what the main process read; every way on is an existing, confirmable
+ * this computer has. It only shows what the main process read; every way on is an existing, confirmable
  * path (the identity review, connecting a remote) or plain guidance for Terminal, never a change made
  * here. Checking again is always safe because checking never changes anything.
  */
@@ -30,7 +30,7 @@ export type ReadinessState = {
   recheck: (access?: boolean) => Promise<void>;
 };
 
-/** Reads readiness for a repository (or for this Mac when there is none), again whenever `key` changes. */
+/** Reads readiness for a repository (or for this computer when there is none), again whenever `key` changes. */
 export function useReadiness(path: string | undefined, { access = false, remote, key, enabled = true }: { access?: boolean; remote?: string; key?: unknown; enabled?: boolean } = {}): ReadinessState {
   const [state, setState] = useState<{ path?: string; report?: ReadinessReport }>({});
   const [loading, setLoading] = useState(false);
@@ -119,7 +119,7 @@ export function ReadinessChecklist({ readiness, items, t, compact = false, title
       ? <Row key="git" item="git" state="ok" icon={TerminalSquare} title={t("readinessGit_ok", { version: git.version })}>{!compact && <span className="readiness-detail">{git.path}</span>}</Row>
       : <Row key="git" item="git" state="missing" icon={TerminalSquare} title={t(git.status === "missing" ? "readinessGit_missing" : "readinessGit_unusable")}>
         <span>{t(git.status === "missing" ? "readinessGit_missingHelp" : "readinessGit_unusableHelp")}</span>
-        <Terminal command="xcode-select --install" />
+        {window.gitcat.platform === "darwin" && <><span>{t("readinessGit_installMac")}</span><Terminal command="xcode-select --install" /></>}
         <div className="readiness-actions">{page("git_download", "readinessGetGit")}{recheckButton()}</div>
         {git.status === "unusable" && <details className="recovery-detail"><summary>{t("technicalDetails")}</summary><pre>{git.detail}</pre></details>}
       </Row>);
@@ -159,7 +159,7 @@ export function ReadinessChecklist({ readiness, items, t, compact = false, title
         <div className="readiness-access" data-access={remote.access}>
           <strong>{loading && remote.access === "not_checked" ? <><LoaderCircle className="spin" size={11} /> {t("readinessAccessChecking")}</> : t(`readinessAccess_${remote.access}` as MessageKey, { host })}</strong>
           {!(loading && remote.access === "not_checked") && <span>{t(accessHelpKey(remote.access, remote.protocol), { host })}</span>}
-          {remote.access === "credentials" && remote.protocol === "https" && <><Terminal command={github ? "gh auth login" : `git config --global credential.helper osxkeychain`} />{remote.helper && <span className="readiness-detail">{t("readinessHelper", { helper: t(`readinessHelper_${remote.helper}` as MessageKey) })}</span>}</>}
+          {remote.access === "credentials" && remote.protocol === "https" && <>{github && <Terminal command="gh auth login" />}{remote.helper && <span className="readiness-detail">{t("readinessHelper", { helper: t(`readinessHelper_${remote.helper}` as MessageKey) })}</span>}</>}
           {remote.access === "denied" && remote.protocol === "ssh" && <Terminal command="ssh-keygen -t ed25519" />}
           {remote.access === "denied" && remote.protocol === "https" && github && <Terminal command="gh auth switch" />}
           {remote.access === "host_key" && <Terminal command={`ssh -T git@${remote.host ?? host}`} />}

@@ -299,7 +299,7 @@ test("removed credentials are still withheld from AI requests", async () => {
   writeFileSync(join(repo, "config.js"), `export const accessKey = "${AWS}";\n`);
   git("add", "-A"); git("commit", "-qm", "oops");
   writeFileSync(join(repo, "config.js"), "export const accessKey = process.env.ACCESS_KEY;\n");
-  // It still leaves the Mac in the diff's removed line, so the assistant does not read it.
+  // It still leaves the computer in the diff's removed line, so the assistant does not read it.
   assert.equal((await service.getAiSharing(repo, "planning")).files[0].status, "likely_secret");
 });
 

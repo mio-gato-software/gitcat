@@ -9,7 +9,7 @@ import type { GitProtocol } from "../shared/types.js";
 export type IdentityMemory = { account?: string; sshHost?: string; confirmedAt: string };
 export type RepositoryMemory = { host?: string; owner?: string; protocol?: GitProtocol; remote?: string; confirmedAt: string };
 /**
- * What the person decided about sharing one repository with the assistant. It lives on this Mac, never
+ * What the person decided about sharing one repository with the assistant. It lives on this computer, never
  * inside the repository: `acknowledgedAt` is when they agreed that its content may go to the provider,
  * `exclusions` are path patterns it must never read, and `reviewed` holds the flagged files they looked
  * at and chose to share, each bound to the version they saw — an edit makes it a new question.
