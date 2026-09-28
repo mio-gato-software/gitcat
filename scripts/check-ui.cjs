@@ -11,7 +11,8 @@ const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '..');
 // Chromium locks profile files on Windows until the process has exited.
 if (typeof electron === 'string') {
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gitcat-design-'));
+  // Match Git's canonical paths, including Windows 8.3 aliases and macOS /var.
+  const scratch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'gitcat-design-')));
   const result = spawnSync(electron, [__filename], {
     env: { ...process.env, GITCAT_UI_SCRATCH: scratch }, windowsHide: true, stdio: 'inherit', timeout: 600_000
   });
