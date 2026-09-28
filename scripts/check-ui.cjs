@@ -210,8 +210,8 @@ app.whenReady().then(async () => {
   // Hosted Macs may have a small display; still exercise the requested desktop sizes.
   const win = new BrowserWindow({ width: 1480, height: 940, show: false, enableLargerThanScreen: true, webPreferences: { backgroundThrottling: false, preload: path.join(root, 'electron/preload.cjs') } });
   const js = code => win.webContents.executeJavaScript(code).catch((error) => { if (process.env.GITCAT_UI_DEBUG) console.error('JS FAILED:', code.slice(0, 300)); throw error; });
-  const waitFor = async expression => {
-    for (let attempt = 0; attempt < 400; attempt++) {
+  const waitFor = async (expression, timeoutMs = 20_000) => {
+    for (let attempt = 0; attempt < Math.ceil(timeoutMs / 50); attempt++) {
       // Only the truth of the expression crosses back: a form element, for one, cannot be cloned.
       if (await js(`Boolean(${expression})`)) return;
       await new Promise(resolve => setTimeout(resolve, 50));
@@ -589,6 +589,9 @@ app.whenReady().then(async () => {
   for (let attempt = 0; attempt < 100 && git('branch', '--show-current') !== 'feature/search'; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(git('branch', '--show-current'), 'feature/search');
   await waitFor(`document.querySelector('.toolbar-field.branch strong')?.textContent === 'feature/search'`);
+  // A background read can show the new branch while checkout is still collecting
+  // its final result. Finish that action before simulating work in another tool.
+  await waitFor(`document.querySelectorAll('.toolbar-tools .tool-button')[2]?.disabled === false`, 60_000);
   // Work done outside GitCat appears on its own when the window comes back, without pressing Refresh.
   assert.equal(await js(`Boolean(document.querySelector('.activity-strip'))`), false, 'No branch review strip');
   git('branch', 'outside/terminal');

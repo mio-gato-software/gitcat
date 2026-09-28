@@ -16,9 +16,15 @@ I built GitCat for my own use and am sharing the result publicly in case it is u
 
 The direct Git controls work without an AI account or an internet connection when the action itself is local. Remote operations still need access to the remote.
 
+## Download GitCat
+
+Download the newest preview from the [public Releases page](https://github.com/mio-gato-software/gitcat/releases). Choose the Windows installer or portable executable, or the DMG/ZIP for your Mac's processor (Apple Silicon or Intel). No GitHub account is needed to download these release files.
+
+Previews are published automatically after all Windows and Mac checks pass on `main`. Each preview identifies its source commit, includes SHA-256 checksums, and stays available alongside older previews. These builds are unsigned, and the Mac builds are not notarized, so your operating system may display a security warning. Install [Git](https://git-scm.com/) separately.
+
 ## Try it from source
 
-You need [Git](https://git-scm.com/), npm, and Node.js 22 (version 22.13 or later) or Node.js 24+. There are no public installers yet. The development workflow is:
+You need [Git](https://git-scm.com/), npm, and Node.js 22 (version 22.13 or later) or Node.js 24+. The development workflow is:
 
 ```bash
 git clone https://github.com/mio-gato-software/gitcat.git
@@ -58,7 +64,9 @@ npm run test:welcome
 
 [Desktop CI](https://github.com/mio-gato-software/gitcat/actions/workflows/desktop-ci.yml) runs on every pull request and push to `main`, and can also be started manually. Separate native Windows x64, macOS Apple Silicon, and macOS Intel jobs run lint, type checks, the full test suite, desktop UI and welcome-layout checks, and package the application.
 
-Successful jobs attach unsigned Windows setup/portable executables or macOS DMG/ZIP builds to the workflow run for 14 days. UI screenshots are retained for 7 days to help diagnose failures. These are test builds, not signed public releases; the workflow does not publish releases or install anything on your computer. Personal Windows installation remains part of the local delivery workflow.
+Successful jobs attach unsigned Windows setup/portable executables or macOS DMG/ZIP builds to the workflow run for 14 days. UI screenshots are retained for 7 days to help diagnose failures. Once all three jobs pass on `main`, a separate job publishes all six installers and their checksums as a public GitHub prerelease. It uploads to a draft first, so an interrupted upload is not presented as a complete preview. Pull requests never publish. A manual run on `main` can retry publication; already published commits are left intact. Release downloads do not have the Actions artifacts' 14-day expiry.
+
+The workflow does not install anything on your computer. Personal Windows installation remains part of the local delivery workflow.
 
 `npm run package:dir` creates an unpacked local build. Packaging scripts for macOS, Windows, and Linux are in `package.json`. The macOS packaging scripts currently produce unsigned builds; I do not have a signing certificate or notarized public release.
 
