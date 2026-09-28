@@ -1,0 +1,14 @@
+---
+description: Deliver every GitCat application change to the owner's installed Windows app.
+alwaysApply: true
+---
+
+# Windows delivery
+
+- Every application change includes rebuilding and updating the owner's installed Windows GitCat.
+- Follow the validation and delivery instructions in `AGENTS.md`: run `npm run dist:win`, gracefully
+  quit GitCat, install the generated setup executable, reopen the installed app, and verify startup.
+- Preserve the existing app profile, settings, and repository work.
+- Installation and restart are already authorized; do not ask for confirmation again.
+- If Windows delivery is blocked, explain the concrete blocker instead of claiming completion.
+- Documentation-only changes do not require rebuilding the application.
