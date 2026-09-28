@@ -11,7 +11,7 @@ import { addNotification, type Notification } from "../shared/notifications";
 import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
-  AlertTriangle, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronDown, ChevronRight, CircleDot,
+  AlertTriangle, Archive, ArchiveRestore, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronDown, ChevronRight, CircleDot,
   Clock3, Cloud, CloudDownload, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
   FolderOpen, FolderPlus, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
   ListTree, LoaderCircle, Maximize2, MessageCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen, Palette, Pencil, PencilLine, Plus,
@@ -1124,6 +1124,9 @@ export default function App() {
       }
     }
     const labels: Partial<Record<Operation, string>> = {
+      sync_remote: t("syncRemote", { ref: args.ref }),
+      stash_push: t("stashTitle"),
+      stash_pop: t("stashPopTitle"),
       checkout: t("switchBranch", { name: args.name }),
       create_branch: args.from ? t("createNamedBranchFrom", { name: args.name, hash: args.from.slice(0, 7) }) : t("createNamedBranch", { name: args.name }),
       delete_branch: t("deleteNamedBranch", { name: args.name }),
@@ -1144,7 +1147,14 @@ export default function App() {
       github_create_repo: t("createPrivateRepo", { owner: args.owner, name: args.name, host: args.host })
     };
     const path = snapshot.path;
-    await showPlan(question ?? labels[operation] ?? t("prepareGitOperation"), () => window.gitcat.prepareOperation(path, operation, args, locale), path);
+    await showPlan(question ?? labels[operation] ?? t("prepareGitOperation"), async () => {
+      try {
+        return await window.gitcat.prepareOperation(path, operation, args, locale);
+      } finally {
+        // Remote preparation fetches before binding the plan; show those same facts during review.
+        if (operation === "sync_remote") await refreshProject(path, false);
+      }
+    }, path);
   };
 
   const prepareMergeToDefault = async (name: string) => {
@@ -1418,6 +1428,15 @@ export default function App() {
    */
   const switchBranch = async (name: string) => {
     if (!snapshot || planning) return;
+    if (name.startsWith("refs/remotes/")) {
+      await prepare("sync_remote", { ref: name.slice("refs/remotes/".length) });
+      return;
+    }
+    const remoteOnly = snapshot.branches.find(branch => branch.name === name && branch.presence === "remote");
+    if (remoteOnly?.remoteRef) {
+      await prepare("sync_remote", { ref: remoteOnly.remoteRef });
+      return;
+    }
     const path = snapshot.path;
     const turnId = addTurn(path, t("branchSwitchQuestion", { name }), false);
     try {
@@ -1612,18 +1631,21 @@ export default function App() {
       return entries;
     }
 
-    const branch = target.branch ? snapshot.branches.find((item) => item.name === target.branch) : undefined;
+    const remoteRef = target.branch?.startsWith("refs/remotes/") ? target.branch.slice("refs/remotes/".length) : undefined;
+    const branch = target.branch ? snapshot.branches.find((item) => remoteRef ? item.remoteRef === remoteRef || item.upstream === remoteRef : item.name === target.branch) ?? (remoteRef && snapshot.remoteRefs?.includes(remoteRef) ? { name: remoteRef.slice([...snapshot.remotes].sort((a, b) => b.length - a.length).find(remote => remoteRef.startsWith(`${remote}/`))!.length + 1), remoteRef, presence: "remote" as const, isCurrent: false, ahead: 0, behind: 0, mergedInto: [] } : undefined) : undefined;
     if (branch) {
       const name = branch.name;
-      const local = branch.presence !== "remote";
+      const local = branch.presence !== "remote" && !remoteRef;
       entries.push({ key: "branch-heading", heading: name });
-      if (!branch.isCurrent) entries.push({ key: "switch", icon: ArrowLeftRight, label: t("switchBranch", { name }), onSelect: () => void switchBranch(name), hint: t("doubleClickHint") });
-      if (branch.isCurrent && branch.upstream) entries.push({ key: "pull", icon: ArrowDownToLine, label: t("pullLatest"), onSelect: () => void prepare("pull") });
-      if (branch.isCurrent) entries.push({ key: "push", icon: ArrowUpFromLine, label: t(branch.upstream ? "pushBranch" : "publishBranch"), onSelect: () => void prepare("push") });
-      // An already-contained branch would merge nothing, and the default branch is never rewritten from here.
-      if (!branch.isCurrent && current !== "HEAD" && !branch.mergedInto.includes(current)) entries.push({ key: "merge", icon: GitMerge, label: t("mergeBranchTo", { name, target: current }), onSelect: () => void prepare("merge", { name }) });
+      if (remoteRef) entries.push({ key: "sync-remote", icon: CloudDownload, label: t("syncRemote", { ref: remoteRef }), onSelect: () => void prepare("sync_remote", { ref: remoteRef }), hint: t("doubleClickRemoteHint") });
+      if (!branch.isCurrent && !remoteRef) entries.push({ key: "switch", icon: ArrowLeftRight, label: t("switchBranch", { name }), onSelect: () => void switchBranch(branch.presence === "remote" ? `refs/remotes/${branch.remoteRef}` : name), hint: t("doubleClickHint") });
+      if (branch.isCurrent && !remoteRef && branch.upstream) entries.push({ key: "pull", icon: ArrowDownToLine, label: t("pullLatest"), onSelect: () => void prepare("pull") });
+      if (branch.isCurrent && !remoteRef) entries.push({ key: "push", icon: ArrowUpFromLine, label: t(branch.upstream ? "pushBranch" : "publishBranch"), onSelect: () => void prepare("push") });
+      // An already-contained branch would merge nothing. Rebase is always reviewed before rewriting history.
+      if (!remoteRef && !branch.isCurrent && current !== "HEAD" && !branch.mergedInto.includes(current)) entries.push({ key: "merge", icon: GitMerge, label: t("mergeBranchTo", { name, target: current }), onSelect: () => void prepare("merge", { name }) });
       if (local && base && name !== base && base !== current && !branch.mergedInto.includes(base)) entries.push({ key: "merge-default", icon: GitMerge, label: t("mergeBranchTo", { name, target: base }), onSelect: () => void prepareMergeToDefault(name) });
-      if (!branch.isCurrent && local && current !== "HEAD" && current !== base) entries.push({ key: "rebase", icon: GitFork, label: t("rebaseCurrentOnto", { branch: current, onto: name }), onSelect: () => void prepare("rebase", { onto: name }) });
+      const onto = remoteRef ? `refs/remotes/${remoteRef}` : local ? name : `refs/remotes/${branch.remoteRef}`;
+      if ((!branch.isCurrent || remoteRef) && current !== "HEAD") entries.push({ key: "rebase", icon: GitFork, label: t("rebaseCurrentOnto", { branch: current, onto: remoteRef ?? name }), onSelect: () => void prepare("rebase", { onto }) });
       if (base && name !== base) entries.push({ key: "explain-branch", icon: MessageSquareText, label: t("explainBranch"), onSelect: () => ask(t("explainBranchQuestion", { branch: name, base })), disabled: !config.configured, hint: assistantHint });
       if (local && name !== base) entries.push({ key: "rename", icon: Pencil, label: t("renameBranchAction"), onSelect: () => setInputDialog({ operation: "rename_branch", title: t("renameNamedBranchTitle", { name }), label: t("branchName"), value: name, from: name }) });
       if (!branch.isCurrent && local && name !== base && !isProtectedBranch(name)) entries.push({ key: "delete", icon: Trash2, label: t("deleteBranch", { name }), onSelect: () => void prepare("delete_branch", { name }), danger: true });
@@ -1702,6 +1724,8 @@ export default function App() {
             onFetch={() => void refreshEverything("fetch")}
             onPull={() => void prepare("pull")}
             onPush={() => void prepare("push")}
+            onStash={() => void prepare("stash_push")}
+            onStashPop={() => void prepare("stash_pop")}
             onBranch={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
             actions={actions}
           />}
@@ -2383,7 +2407,21 @@ function PresenceBadge({ branch }: { branch: Branch }) {
   return <span className={`branch-presence ${branch.presence}`} title={detail} aria-label={detail} role="img">
     {branch.presence !== "remote" && <Laptop size={12} />}
     {branch.presence !== "local" && <Cloud size={12} />}
+    {branch.presence === "both" && <BranchSyncBadge branch={branch} />}
   </span>;
+}
+
+function branchSyncText(branch: Branch, t: Translate) {
+  const ahead = branch.remoteAhead ?? branch.ahead;
+  const behind = branch.remoteBehind ?? branch.behind;
+  return t(ahead && behind ? "copiesDiverged" : ahead ? "copyAhead" : behind ? "copyBehind" : "copiesSynced", { ahead, behind, ref: branch.remoteRef ?? branch.upstream ?? "" });
+}
+
+function BranchSyncBadge({ branch }: { branch: Branch }) {
+  const { t } = useI18n();
+  const ahead = branch.remoteAhead ?? branch.ahead;
+  const behind = branch.remoteBehind ?? branch.behind;
+  return <span className={`branch-sync-badge ${ahead && behind ? "diverged" : ""}`} title={branchSyncText(branch, t)} aria-label={branchSyncText(branch, t)} role="img">{ahead && behind ? <GitFork size={11} /> : ahead ? <ArrowUpFromLine size={11} /> : behind ? <ArrowDownToLine size={11} /> : <Check size={11} />}</span>;
 }
 
 /**
@@ -2693,6 +2731,7 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
         row={rows.get(commit.hash)}
         lanes={lanes}
         remotes={snapshot.remotes}
+        branches={snapshot.branches}
         colour={byFamily ? familyColour(rows.get(commit.hash)?.family ?? "") : branchColor(index)}
         byFamily={byFamily}
         register={(node) => { if (node) buttons.current.set(commit.hash, node); else buttons.current.delete(commit.hash); }}
@@ -2808,8 +2847,8 @@ function ChangeStats({ additions, deletions, files, binary = false }: { addition
   </span>;
 }
 
-function CommitRow({ commit, row, lanes, remotes, colour, byFamily, selected, head, marker, work, register, onSelect, onOpen, onCheckout, onMenu }: {
-  commit: Commit; row?: GraphRow; lanes: number; remotes: string[]; colour: string; byFamily: boolean;
+function CommitRow({ commit, row, lanes, remotes, branches, colour, byFamily, selected, head, marker, work, register, onSelect, onOpen, onCheckout, onMenu }: {
+  commit: Commit; row?: GraphRow; lanes: number; remotes: string[]; branches: Branch[]; colour: string; byFamily: boolean;
   selected: boolean; head: boolean; marker: string;
   work?: { summary: string; count: number; branch: string };
   register: (node: HTMLButtonElement | null) => void; onSelect: () => void; onOpen: () => void;
@@ -2837,17 +2876,18 @@ function CommitRow({ commit, row, lanes, remotes, colour, byFamily, selected, he
   }, [stackOpen]);
   const pr = pullRequestReference(commit.subject);
   const merge = commit.parents.length > 1;
-  const chipTitle = (chip: RefChip) => chip.kind === "remote" ? `${chip.label} · ${t("remoteOnlyTitle")}` : chip.label;
+  const chipBranch = (chip: RefChip) => branches.find(branch => branch.presence !== "remote" && (chip.kind === "remote" ? branch.remoteRef === chip.ref : branch.name === chip.label));
+  const chipTitle = (chip: RefChip) => `${chip.ref ?? chip.label} · ${t(chip.kind === "remote" ? "remoteCopyTitle" : chip.remoteRefs?.length ? "branchBoth" : "localCopyTitle")}${chipBranch(chip)?.remoteRef ? ` · ${branchSyncText(chipBranch(chip)!, t)}` : ""}`;
   const node = work ? "wip" : merge ? "merge" : "avatar";
   // A branch label is the branch: a double click moves there, a right click is about that branch.
-  const branchOf = (chip?: RefChip) => chip && chip.kind !== "tag" ? chip.label : undefined;
+  const branchOf = (chip?: RefChip) => chip && chip.kind !== "tag" ? chip.ref ? `refs/remotes/${chip.ref}` : chip.label : undefined;
   const chipEvents = (chip: RefChip) => chip.kind === "tag" ? {} : {
-    onDoubleClick: (event: ReactMouseEvent) => { event.stopPropagation(); if (chip.kind !== "head") onCheckout(chip.label); },
-    onContextMenu: (event: ReactMouseEvent) => { event.preventDefault(); event.stopPropagation(); onMenu(chip.label, event.clientX, event.clientY); }
+    onDoubleClick: (event: ReactMouseEvent) => { event.stopPropagation(); if (chip.kind !== "head") onCheckout(branchOf(chip)!); },
+    onContextMenu: (event: ReactMouseEvent) => { event.preventDefault(); event.stopPropagation(); onMenu(branchOf(chip), event.clientX, event.clientY); }
   };
   const size = node === "merge" ? 10 : 20;
-  const chipTag = (chip: RefChip) => <span className={`ref-tag ${chip.kind}`} key={`${chip.kind}:${chip.label}`} title={`${chipTitle(chip)}${chip.kind === "tag" ? "" : `\n${t(chip.kind === "head" ? "currentBranchHint" : "doubleClickSwitchHint")}`}`} {...chipEvents(chip)}>
-    {chip.kind === "head" ? <Check size={11} /> : chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <GitBranch size={11} />}<span>{chip.label}</span>
+  const chipTag = (chip: RefChip) => <span className={`ref-tag ${chip.kind} ${chipBranch(chip)?.remoteAhead && chipBranch(chip)?.remoteBehind ? "diverged" : ""}`} key={`${chip.kind}:${chip.ref ?? chip.label}`} title={`${chip.kind === "tag" ? chip.label : chipTitle(chip)}${chip.kind === "tag" ? "" : `\n${t(chip.kind === "remote" || chip.remoteRefs?.length ? "doubleClickRemoteHint" : chip.kind === "head" ? "currentBranchHint" : "doubleClickSwitchHint")}`}`} {...chipEvents(chip)}>
+    {chip.kind === "head" && <Check size={11} />}{chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <Laptop size={11} />}{chip.remoteRefs?.map(ref => <span className="ref-cloud" key={ref} title={`${ref} · ${t("doubleClickRemoteHint")}`} onDoubleClick={event => { event.stopPropagation(); onCheckout(`refs/remotes/${ref}`); }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onMenu(`refs/remotes/${ref}`, event.clientX, event.clientY); }}><Cloud size={11} /></span>)}<span>{chip.kind === "remote" ? chip.ref : chip.label}</span>{chipBranch(chip)?.remoteRef && <BranchSyncBadge branch={chipBranch(chip)!} />}
   </span>;
   return <div
     className={`commit-row ${selected ? "selected" : ""} ${head ? "head" : ""} ${work ? "wip" : ""}`}
@@ -2916,9 +2956,9 @@ function changeStatus(code: string, t: Translate) {
  * The repository bar: where you are, the everyday Git verbs, and the next step for this branch. The
  * verbs still go through a plan, so a click here explains itself before anything changes.
  */
-function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, onRefresh, onFetch, onPull, onPush, onBranch, actions }: {
+function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, onRefresh, onFetch, onPull, onPush, onStash, onStashPop, onBranch, actions }: {
   snapshot: RepoSnapshot; busy: boolean; refreshing: boolean; fetching: boolean; refreshDisabled: boolean;
-  onRefresh: () => void; onFetch: () => void; onPull: () => void; onPush: () => void; onBranch: () => void;
+  onRefresh: () => void; onFetch: () => void; onPull: () => void; onPush: () => void; onStash: () => void; onStashPop: () => void; onBranch: () => void;
   actions: ReactNode;
 }) {
   const { t } = useI18n();
@@ -2940,6 +2980,8 @@ function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, on
       {tool(CloudDownload, t("fetch"), onFetch, refreshDisabled || !snapshot.remotes.length, snapshot.remotes.length ? t("fetchTitle") : t("noRemoteFetchTitle"), fetching)}
       {tool(ArrowDownToLine, t("pull"), onPull, busy, t("pullTitle"))}
       {tool(ArrowUpFromLine, t("push"), onPush, busy, t("pushTitle"))}
+      {tool(Archive, t("stash"), onStash, busy || !snapshot.isDirty || !snapshot.head || Boolean(snapshot.pending) || Boolean(snapshot.conflicts.length), t("stashTitle"))}
+      {tool(ArchiveRestore, t("stashPop", { count: snapshot.stashCount ?? 0 }), onStashPop, busy || !snapshot.stashCount || snapshot.isDirty || Boolean(snapshot.pending) || Boolean(snapshot.conflicts.length), snapshot.isDirty ? t("stashPopDirty") : t("stashPopTitle"))}
       <span className="tool-divider" aria-hidden="true" />
       {tool(GitBranchPlus, t("branchTool"), onBranch, busy, t("newBranch"))}
     </div>
@@ -3347,8 +3389,8 @@ function CommitInspector({ commit, snapshot, known, onFocus, onOpen }: {
           : <code key={parent}>{parent.slice(0, 7)}</code>;
       })}</div>}
     </div>
-    {chips.length > 0 && <div className="detail-refs">{chips.map((chip) => <span className={`ref-tag ${chip.kind}`} key={`${chip.kind}:${chip.label}`} title={chip.kind === "remote" ? `${chip.label} · ${t("remoteOnlyTitle")}` : chip.label}>
-      {chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <GitBranch size={11} />}{chip.label}
+    {chips.length > 0 && <div className="detail-refs">{chips.map((chip) => <span className={`ref-tag ${chip.kind}`} key={`${chip.kind}:${chip.ref ?? chip.label}`} title={chip.kind === "remote" ? `${chip.ref} · ${t("remoteCopyTitle")}` : chip.label}>
+      {chip.kind === "head" && <Check size={11} />}{chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <Laptop size={11} />}{chip.remoteRefs?.length ? <Cloud size={11} /> : null}{chip.ref ?? chip.label}
     </span>)}</div>}
     {commit.parents.length > 1 && <p className="detail-note"><GitMerge size={12} />{t("mergeDetails", { hash: commit.parents[0].slice(0, 7) })}</p>}
     {error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}

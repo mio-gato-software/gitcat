@@ -7,6 +7,9 @@ export type Branch = {
   upstream?: string;
   /** The remote-tracking ref this branch corresponds to, such as "origin/main". */
   remoteRef?: string;
+  /** Comparison with remoteRef, including counterparts without a configured upstream. */
+  remoteAhead?: number;
+  remoteBehind?: number;
   presence: BranchPresence;
   /**
    * Reference branches whose history already contains this branch's tip, so its work is integrated
@@ -161,6 +164,10 @@ export type Worktree = {
 };
 
 export type RepoSnapshot = {
+  /** Exact remote-tracking names, including branches with copies on several remotes. */
+  remoteRefs?: string[];
+  /** Entries available to restore with Stash pop, including entries created outside GitCat. */
+  stashCount?: number;
   /** All working folders reported by Git, including detached and unavailable entries. */
   worktrees?: Worktree[];
   path: string;
@@ -382,6 +389,9 @@ export type ConflictChoiceResult = {
 };
 
 export type Operation =
+  | "sync_remote"
+  | "stash_push"
+  | "stash_pop"
   | "status"
   | "checkout"
   | "create_branch"

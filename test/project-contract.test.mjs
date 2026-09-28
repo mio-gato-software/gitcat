@@ -722,15 +722,16 @@ test("solo se recuerdan decisiones confirmadas, nunca estado del entorno", async
   assert.doesNotMatch(memory, /toolDirectories|isExecutableFile|ghVersion/);
 });
 
-test("una rama que está en local y en el remoto es un chip, no dos", async () => {
+test("las copias en el mismo commit comparten nombre y conservan el destino remoto", async () => {
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
   const chips = await readFile(join(root, "shared/ref-chips.ts"), "utf8");
   // Pintar "feature/x" y "origin/feature/x" gastaba todo el ancho diciendo el mismo nombre dos veces,
   // y truncaba ambos por el camino. Se agrupan por el nombre sin remoto.
   assert.match(chips, /const label = remote \? name\.slice\(remote\.length \+ 1\) : name;/);
   assert.match(chips, /note\(label, remote \? "remote" : "local"\)/);
-  // Lo que solo existe en el remoto conserva su marca: eso no lo tienes aquí.
-  assert.match(app, /chip\.kind === "remote" \? `\$\{chip\.label\} · \$\{t\("remoteOnlyTitle"\)\}`/);
+  // Una copia remota puede tener una contraparte local en otro commit; se muestra el destino exacto.
+  assert.match(app, /chip\.ref \?\? chip\.label/);
+  assert.match(app, /chip\.kind === "remote" \? "remoteCopyTitle"/);
   assert.match(chips, /origin\/HEAD/, "el puntero simbólico se sigue descartando");
 });
 

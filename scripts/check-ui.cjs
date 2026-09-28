@@ -14,7 +14,7 @@ if (typeof electron === 'string') {
   // Match Git's canonical paths, including Windows 8.3 aliases and macOS /var.
   const scratch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'gitcat-design-')));
   const result = spawnSync(electron, [__filename], {
-    env: { ...process.env, GITCAT_UI_SCRATCH: scratch }, windowsHide: true, stdio: 'inherit', timeout: 600_000
+    env: { ...process.env, GITCAT_UI_SCRATCH: scratch }, windowsHide: true, stdio: 'inherit', timeout: 900_000
   });
   fs.rmSync(scratch, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   if (result.error) console.error(result.error);
@@ -23,7 +23,7 @@ if (typeof electron === 'string') {
 const { app, BrowserWindow, ipcMain } = electron;
 const scratch = process.env.GITCAT_UI_SCRATCH;
 if (!scratch) throw new Error('Run this check through Node to isolate and clean up its profile.');
-const deadline = setTimeout(() => { console.error('UI check timed out'); app.exit(1); }, 590_000);
+const deadline = setTimeout(() => { console.error('UI check timed out'); app.exit(1); }, 890_000);
 const repo = path.join(scratch, 'GitCat');
 const screenshots = process.env.GITCAT_UI_SCREENSHOTS;
 fs.mkdirSync(repo);
@@ -420,7 +420,21 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.sidebar')`);
   assert.equal(git('status', '--porcelain'), before, 'Reading the graph and its details never mutates Git');
   // Refresh answers "am I up to date?" on its own; Fetch stays beside it because people look for it by name.
-  assert.deepEqual(JSON.parse(await js(`JSON.stringify([...document.querySelectorAll('.toolbar-tools .tool-button')].map((node) => node.innerText.trim()))`)), ['Actualizar', 'Fetch', 'Pull', 'Push', 'Rama']);
+  assert.deepEqual(JSON.parse(await js(`JSON.stringify([...document.querySelectorAll('.toolbar-tools .tool-button')].map((node) => node.innerText.trim()))`)), ['Actualizar', 'Fetch', 'Pull', 'Push', 'Stash', 'Pop (0)', 'Rama']);
+  assert.equal(await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Stash').disabled`), false);
+  assert.equal(await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Pop (0)').disabled`), true);
+  await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Stash').click()`);
+  await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
+  assert.equal(git('status', '--porcelain'), before, 'Stash is reviewed before clearing files');
+  await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
+  await waitFor(`[...document.querySelectorAll('.tool-button')].some(node => node.innerText.trim() === 'Pop (1)' && !node.disabled)`);
+  assert.equal(git('status', '--porcelain'), '');
+  assert.equal(git('branch', '--show-current'), 'feature/new-menu');
+  await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Pop (1)').click()`);
+  await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
+  await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
+  await waitFor(`[...document.querySelectorAll('.tool-button')].some(node => node.innerText.trim() === 'Stash' && !node.disabled)`);
+  assert.equal(git('status', '--porcelain'), before, 'Pop restores the original edits and new file');
   // Graph columns resize from their header edges, remember the width, and reset on a double click.
   const refsCell = () => js(`Math.round(document.querySelector('.graph-columns > span').getBoundingClientRect().width)`);
   const rowRefs = () => js(`Math.round(document.querySelector('.commit-row .commit-refs').getBoundingClientRect().width)`);
@@ -553,6 +567,13 @@ app.whenReady().then(async () => {
   assert.equal(git('branch', '--show-current'), 'main');
   assert.equal(git('status', '--porcelain'), '');
   assert.equal(git('show', 'main:new-file.txt'), 'new file');
+  // Rebase must also be available when the current branch is the repository default.
+  await waitFor(`document.querySelectorAll('.toolbar-tools .tool-button')[2]?.disabled === false`, 60_000);
+  await waitFor(`[...document.querySelectorAll('.ref-tag')].some(node => node.textContent === 'feature/search')`);
+  await js(`[...document.querySelectorAll('.ref-tag')].find(node => node.textContent === 'feature/search').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 450, clientY: 300 }))`);
+  await waitFor(`document.querySelector('.context-menu')`);
+  assert.match(await js(`document.querySelector('.context-menu').innerText`), /Mover main encima de feature\/search \(rebase\)/);
+  await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
   // Saved and integrated here is still not published anywhere, and the overview says so.
   await waitFor(`document.querySelector('.work-overview')?.dataset.next === 'connect_remote'`);
   assert.match(await stage('saved'), /Solo en este equipo[\s\S]*no es una copia de seguridad hasta que se publica/);
@@ -958,6 +979,40 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.practice-guide p').innerText.includes('Dos ramas de ejemplo')`);
   await capture('practice-lessons');
   assert.equal(git('status','--porcelain').includes('.env'),true,'Practice edits leave the original project untouched');
+
+  // The graph preserves the clicked remote identity and reviews a divergent update before applying it.
+  const copies = path.join(scratch, 'Copies');
+  const copiesRemote = path.join(scratch, 'copies-remote.git');
+  const copiesWriter = path.join(scratch, 'copies-writer');
+  const at = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  at(scratch, 'init', '-q', '-b', 'main', copies);
+  at(copies, 'config', 'user.name', 'QA'); at(copies, 'config', 'user.email', 'qa@example.test');
+  fs.writeFileSync(path.join(copies, 'base.txt'), 'base'); at(copies, 'add', '.'); at(copies, 'commit', '-qm', 'base');
+  at(scratch, 'clone', '-q', '--bare', copies, copiesRemote);
+  at(copies, 'remote', 'add', 'origin', copiesRemote); at(copies, 'fetch', '-q');
+  at(scratch, 'clone', '-q', copiesRemote, copiesWriter);
+  at(copiesWriter, 'config', 'user.name', 'QA'); at(copiesWriter, 'config', 'user.email', 'qa@example.test');
+  fs.writeFileSync(path.join(copies, 'local.txt'), 'local'); at(copies, 'add', '.'); at(copies, 'commit', '-qm', 'local');
+  const localTip = at(copies, 'rev-parse', 'HEAD');
+  fs.writeFileSync(path.join(copiesWriter, 'remote.txt'), 'remote'); at(copiesWriter, 'add', '.'); at(copiesWriter, 'commit', '-qm', 'remote'); at(copiesWriter, 'push', '-q');
+  const remoteTip = at(copiesWriter, 'rev-parse', 'HEAD'); at(copies, 'fetch', '-q');
+  restored = { projects: [await service.getSnapshot(copies)], unavailable: [], order: [copies], activePath: copies };
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await waitFor(`document.querySelector('.ref-tag.remote')?.textContent === 'origin/main'`);
+  assert.equal(await js(`Boolean(document.querySelector('.ref-tag.head .lucide-laptop'))`), true);
+  assert.match(await js(`document.querySelector('.ref-tag.head').title`), /Copia local[\s\S]*Copias divergidas: 1 commits locales y 1 remotos/);
+  await capture('copies-diverged');
+  await js(`document.querySelector('.ref-tag.remote').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
+  assert.equal(at(copies, 'rev-parse', 'HEAD'), localTip, 'Remote double click prepares an update for review');
+  assert.equal(await js(`Boolean(document.querySelector('.plan-stale'))`), false, 'Fetched facts are shown beside the prepared plan');
+  assert.match(await js(`document.querySelector('.plan-goal').innerText`), /origin\/main[\s\S]*conservando tus commits locales/);
+  await capture('copies-update-review');
+  await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
+  await waitFor(`!document.querySelector('.plan-card .plan-actions .primary-button') && !document.querySelector('.branch-sync-badge.diverged')`);
+  at(copies, 'merge-base', '--is-ancestor', localTip, 'HEAD'); at(copies, 'merge-base', '--is-ancestor', remoteTip, 'HEAD');
+  assert.equal(at(copies, 'rev-parse', 'origin/main'), remoteTip);
+  await capture('copies-updated');
 
   win.destroy();
   console.log('PASS: worktree list, safe opening with separate edits and tree tab badges; unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, a work overview separating edited, saved, integrated and published work with one next step, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, saving without secret warnings, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');

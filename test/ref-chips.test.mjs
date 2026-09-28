@@ -9,7 +9,7 @@ const root = join(import.meta.dirname, '..');
 test('a release tag never covers the branch whose tip it marks', () => {
   // Git decorates a tagged tip as "tag: v1.0.64, origin/main" when the local branch is behind.
   assert.deepEqual(refChips(['tag: v1.0.64', 'origin/main', 'origin/HEAD'], ['origin']), [
-    { label: 'main', kind: 'remote' },
+    { label: 'main', kind: 'remote', ref: 'origin/main' },
     { label: 'v1.0.64', kind: 'tag' }
   ]);
 });
@@ -23,6 +23,16 @@ test('a tag named like a branch keeps both labels', () => {
   assert.deepEqual(refChips(['main', 'tag: main'], ['origin']), [
     { label: 'main', kind: 'local' },
     { label: 'main', kind: 'tag' }
+  ]);
+});
+
+test('remote chips retain exact identities and colocated copies keep a cloud target', () => {
+  assert.deepEqual(refChips(['main', 'origin/main', 'mirror/main'], ['origin', 'mirror']), [
+    { label: 'main', kind: 'local', remoteRefs: ['origin/main', 'mirror/main'] }
+  ]);
+  assert.deepEqual(refChips(['origin/main', 'mirror/main'], ['origin', 'mirror']), [
+    { label: 'main', kind: 'remote', ref: 'origin/main' },
+    { label: 'main', kind: 'remote', ref: 'mirror/main' }
   ]);
 });
 

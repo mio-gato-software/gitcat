@@ -1,4 +1,4 @@
-export type RefChip = { label: string; kind: "head" | "local" | "remote" | "tag" };
+export type RefChip = { label: string; kind: "head" | "local" | "remote" | "tag"; ref?: string; remoteRefs?: string[] };
 
 /** Branches lead, the checked-out one first; a tag is a bookmark and only follows. */
 const rank: Record<RefChip["kind"], number> = { head: 0, local: 1, remote: 2, tag: 3 };
@@ -6,7 +6,8 @@ const rank: Record<RefChip["kind"], number> = { head: 0, local: 1, remote: 2, ta
 /**
  * The refs worth showing, once each. `feature/x` and `origin/feature/x` are one branch that happens to
  * exist in two places, so drawing both spent the whole width saying the same name twice and truncated
- * it in the process. A remote-only ref keeps its own mark, because that one you do not have here.
+ * it in the process. Colocated copies keep their exact remote targets behind the cloud icons. When
+ * their tips differ, each remote copy retains its own exact identity, even across several remotes.
  *
  * "origin/HEAD" is a symbolic pointer rather than a branch anyone can visit, and the "HEAD -> "
  * decoration is a statement about the checkout, not part of any name.
@@ -19,6 +20,7 @@ export function refChips(refs: string[], remotes: string[]): RefChip[] {
   const order: string[] = [];
   const found = new Map<string, { head: boolean; local: boolean; remote: boolean }>();
   const tags: string[] = [];
+  const remoteCopies = new Map<string, string[]>();
   const note = (label: string, key: "head" | "local" | "remote") => {
     if (!found.has(label)) { found.set(label, { head: false, local: false, remote: false }); order.push(label); }
     found.get(label)![key] = true;
@@ -33,14 +35,17 @@ export function refChips(refs: string[], remotes: string[]): RefChip[] {
       continue;
     }
     if (remotes.some((remote) => name === `${remote}/HEAD`)) continue;
-    const remote = remotes.find((candidate) => name.startsWith(`${candidate}/`));
+    const remote = [...remotes].sort((a, b) => b.length - a.length).find((candidate) => name.startsWith(`${candidate}/`));
     const label = remote ? name.slice(remote.length + 1) : name;
+    if (remote) remoteCopies.set(label, [...new Set([...(remoteCopies.get(label) ?? []), name])]);
     note(label, remote ? "remote" : "local");
     if (head) note(label, "head");
   }
-  const branches = order.map((label): RefChip => {
+  const branches = order.flatMap((label): RefChip[] => {
     const flags = found.get(label)!;
-    return { label, kind: flags.head ? "head" : flags.local ? "local" : "remote" };
+    const copies = remoteCopies.get(label) ?? [];
+    if (flags.local) return [{ label, kind: flags.head ? "head" : "local", ...(copies.length ? { remoteRefs: copies } : {}) }];
+    return copies.map(ref => ({ label, kind: "remote", ref }));
   });
   return [...branches, ...tags.map((label): RefChip => ({ label, kind: "tag" }))]
     .map((chip, index) => ({ chip, index }))
