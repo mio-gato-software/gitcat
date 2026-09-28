@@ -55,6 +55,11 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+      - name: Calculate CI app version
+        run: |
+          version=$(node scripts/ci-version.mjs)
+          echo "GITCAT_BUILD_VERSION=$version" >> "$GITHUB_ENV"
+          echo "GitCat version: $version" >> "$GITHUB_STEP_SUMMARY"
       - name: Install macOS icon renderer
         if: runner.os == 'macOS'
         run: command -v rsvg-convert || brew install librsvg
@@ -73,11 +78,24 @@ jobs:
       - name: Generate app icon
         run: npm run icons
       - name: Package unsigned application
-        run: npx --no-install electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+        run: npx --no-install electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never --config.extraMetadata.version="$GITCAT_BUILD_VERSION"
+      - name: Verify packaged app version
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { join } from 'node:path';
+          import { extractFile } from '@electron/asar';
+          const resources = process.platform === 'win32'
+            ? 'release/win-unpacked/resources'
+            : `release/mac${process.arch === 'arm64' ? '-arm64' : ''}/GitCat.app/Contents/Resources`;
+          const metadata = JSON.parse(extractFile(join(resources, 'app.asar'), 'package.json').toString());
+          assert.equal(metadata.version, process.env.GITCAT_BUILD_VERSION, 'About must show the CI version');
+          console.log(`Packaged GitCat ${metadata.version}`);
+          NODE
       - name: Upload installers
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: GitCat-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
+          name: GitCat-${{ env.GITCAT_BUILD_VERSION }}-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
           path: |
             release/*.exe
             release/*.dmg
@@ -110,6 +128,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Calculate CI app version
+        run: |
+          version=$(node scripts/ci-version.mjs)
+          echo "GITCAT_BUILD_VERSION=$version" >> "$GITHUB_ENV"
       - name: Download installers from this run
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -120,9 +142,9 @@ jobs:
         shell: bash
         run: |
           node --input-type=module <<'NODE'
-          import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+          import { readdirSync, statSync, writeFileSync } from 'node:fs';
           import assert from 'node:assert/strict';
-          const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
+          const version = process.env.GITCAT_BUILD_VERSION;
           const builds = [
             ['Windows installer', `GitCat-${version}-win-x64-setup.exe`],
             ['Windows portable', `GitCat-${version}-win-x64-portable.exe`],
@@ -133,7 +155,7 @@ jobs:
           ];
           assert.deepEqual(readdirSync('public-preview').sort(), builds.map(([, name]) => name).sort(), 'All six installers must be present');
           for (const [, name] of builds) assert.ok(statSync(`public-preview/${name}`).size > 0, `${name} is empty`);
-          const tag = `preview-${process.env.GITHUB_SHA}`;
+          const tag = `preview-${version}`;
           const base = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}`;
           writeFileSync('preview-notes.md', [
             'An automated preview of GitCat. These installers passed the Windows x64, Apple Silicon Mac, and Intel Mac test and build jobs.',
@@ -144,6 +166,7 @@ jobs:
             '',
             'SHA256SUMS.txt contains checksums for all six downloads. Older previews remain available on the Releases page.',
             '',
+            `Version: ${version}`,
             `Commit: ${process.env.GITHUB_SHA}`,
             `Validation: ${base}/actions/runs/${process.env.GITHUB_RUN_ID}`,
           ].join('\n'));
@@ -152,7 +175,7 @@ jobs:
       - name: Publish complete preview
         shell: bash
         run: |
-          tag="preview-${GITHUB_SHA}"
+          tag="preview-${GITCAT_BUILD_VERSION}"
           # Resume an interrupted draft, but leave an already published build intact.
           if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
             if [ "$draft" = false ]; then
@@ -161,7 +184,7 @@ jobs:
             fi
           else
             gh release create "$tag" --target "$GITHUB_SHA" --draft --prerelease --latest=false \
-              --title "GitCat preview ${GITHUB_SHA:0:7}" --notes-file preview-notes.md
+              --title "GitCat ${GITCAT_BUILD_VERSION} preview" --notes-file preview-notes.md
           fi
           gh release upload "$tag" public-preview/* --clobber
           gh release edit "$tag" --draft=false --prerelease --latest=false --notes-file preview-notes.md
