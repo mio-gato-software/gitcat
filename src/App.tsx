@@ -2417,10 +2417,12 @@ function branchSyncText(branch: Branch, t: Translate) {
   return t(ahead && behind ? "copiesDiverged" : ahead ? "copyAhead" : behind ? "copyBehind" : "copiesSynced", { ahead, behind, ref: branch.remoteRef ?? branch.upstream ?? "" });
 }
 
-function BranchSyncBadge({ branch }: { branch: Branch }) {
+function BranchSyncBadge({ branch, hideSynced = false }: { branch: Branch; hideSynced?: boolean }) {
   const { t } = useI18n();
   const ahead = branch.remoteAhead ?? branch.ahead;
   const behind = branch.remoteBehind ?? branch.behind;
+  // The current graph label already has a check; its tooltip still explains matching copies.
+  if (hideSynced && !ahead && !behind) return null;
   return <span className={`branch-sync-badge ${ahead && behind ? "diverged" : ""}`} title={branchSyncText(branch, t)} aria-label={branchSyncText(branch, t)} role="img">{ahead && behind ? <GitFork size={11} /> : ahead ? <ArrowUpFromLine size={11} /> : behind ? <ArrowDownToLine size={11} /> : <Check size={11} />}</span>;
 }
 
@@ -2887,7 +2889,7 @@ function CommitRow({ commit, row, lanes, remotes, branches, colour, byFamily, se
   };
   const size = node === "merge" ? 10 : 20;
   const chipTag = (chip: RefChip) => <span className={`ref-tag ${chip.kind} ${chipBranch(chip)?.remoteAhead && chipBranch(chip)?.remoteBehind ? "diverged" : ""}`} key={`${chip.kind}:${chip.ref ?? chip.label}`} title={`${chip.kind === "tag" ? chip.label : chipTitle(chip)}${chip.kind === "tag" ? "" : `\n${t(chip.kind === "remote" || chip.remoteRefs?.length ? "doubleClickRemoteHint" : chip.kind === "head" ? "currentBranchHint" : "doubleClickSwitchHint")}`}`} {...chipEvents(chip)}>
-    {chip.kind === "head" && <Check size={11} />}{chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <Laptop size={11} />}{chip.remoteRefs?.map(ref => <span className="ref-cloud" key={ref} title={`${ref} · ${t("doubleClickRemoteHint")}`} onDoubleClick={event => { event.stopPropagation(); onCheckout(`refs/remotes/${ref}`); }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onMenu(`refs/remotes/${ref}`, event.clientX, event.clientY); }}><Cloud size={11} /></span>)}<span>{chip.kind === "remote" ? chip.ref : chip.label}</span>{chipBranch(chip)?.remoteRef && <BranchSyncBadge branch={chipBranch(chip)!} />}
+    {chip.kind === "head" && <span role="img" aria-label={t("currentBranchHint")} title={t("currentBranchHint")}><Check size={11} /></span>}{chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <Laptop size={11} />}{chip.remoteRefs?.map(ref => <span className="ref-cloud" key={ref} title={`${ref} · ${t("doubleClickRemoteHint")}`} onDoubleClick={event => { event.stopPropagation(); onCheckout(`refs/remotes/${ref}`); }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onMenu(`refs/remotes/${ref}`, event.clientX, event.clientY); }}><Cloud size={11} /></span>)}<span>{chip.kind === "remote" ? chip.ref : chip.label}</span>{chipBranch(chip)?.remoteRef && <BranchSyncBadge branch={chipBranch(chip)!} hideSynced={chip.kind === "head"} />}
   </span>;
   return <div
     className={`commit-row ${selected ? "selected" : ""} ${head ? "head" : ""} ${work ? "wip" : ""}`}

@@ -990,6 +990,13 @@ app.whenReady().then(async () => {
   fs.writeFileSync(path.join(copies, 'base.txt'), 'base'); at(copies, 'add', '.'); at(copies, 'commit', '-qm', 'base');
   at(scratch, 'clone', '-q', '--bare', copies, copiesRemote);
   at(copies, 'remote', 'add', 'origin', copiesRemote); at(copies, 'fetch', '-q');
+  restored = { projects: [await service.getSnapshot(copies)], unavailable: [], order: [copies], activePath: copies };
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await waitFor(`document.querySelector('.ref-tag.head .ref-cloud')`);
+  assert.equal(await js(`document.querySelectorAll('.commit-row .ref-tag.head .lucide-check').length`), 1, 'Current matching copies need only one check');
+  assert.match(await js(`document.querySelector('.ref-tag.head').title`), /Las copias local y remota coinciden/);
+  assert.equal(await js(`document.querySelectorAll('.branch-presence .branch-sync-badge .lucide-check').length`), 1, 'Sidebar still shows matching copies');
+  await capture('copies-synced');
   at(scratch, 'clone', '-q', copiesRemote, copiesWriter);
   at(copiesWriter, 'config', 'user.name', 'QA'); at(copiesWriter, 'config', 'user.email', 'qa@example.test');
   fs.writeFileSync(path.join(copies, 'local.txt'), 'local'); at(copies, 'add', '.'); at(copies, 'commit', '-qm', 'local');
@@ -1001,6 +1008,8 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.ref-tag.remote')?.textContent === 'origin/main'`);
   assert.equal(await js(`Boolean(document.querySelector('.ref-tag.head .lucide-laptop'))`), true);
   assert.match(await js(`document.querySelector('.ref-tag.head').title`), /Copia local[\s\S]*Copias divergidas: 1 commits locales y 1 remotos/);
+  assert.equal(await js(`document.querySelectorAll('.commit-row .ref-tag.head .lucide-check').length`), 1);
+  assert.equal(await js(`Boolean(document.querySelector('.ref-tag.head .branch-sync-badge.diverged .lucide-git-fork'))`), true, 'Divergence stays visible on the current branch');
   await capture('copies-diverged');
   await js(`document.querySelector('.ref-tag.remote').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
   await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
@@ -1012,6 +1021,7 @@ app.whenReady().then(async () => {
   await waitFor(`!document.querySelector('.plan-card .plan-actions .primary-button') && !document.querySelector('.branch-sync-badge.diverged')`);
   at(copies, 'merge-base', '--is-ancestor', localTip, 'HEAD'); at(copies, 'merge-base', '--is-ancestor', remoteTip, 'HEAD');
   assert.equal(at(copies, 'rev-parse', 'origin/main'), remoteTip);
+  assert.equal(await js(`Boolean(document.querySelector('.ref-tag.head .branch-sync-badge .lucide-arrow-up-from-line'))`), true, 'Outgoing commits stay visible on the current branch');
   await capture('copies-updated');
 
   win.destroy();

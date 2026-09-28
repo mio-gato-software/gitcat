@@ -18,9 +18,11 @@ The direct Git controls work without an AI account or an internet connection whe
 
 ## Download GitCat
 
-Download the newest preview from the [public Releases page](https://github.com/mio-gato-software/gitcat/releases). Choose the Windows installer or portable executable, or the DMG/ZIP for your Mac's processor (Apple Silicon or Intel). No GitHub account is needed to download these release files.
+Download the newest preview from the [public Releases page](https://github.com/mio-gato-software/gitcat/releases). Choose the Windows installer or portable executable. No GitHub account is needed to download these release files.
 
-Previews are published automatically after all Windows and Mac checks pass on `main`. Each preview identifies its source commit, includes SHA-256 checksums, and stays available alongside older previews. These builds are unsigned, and the Mac builds are not notarized, so your operating system may display a security warning. Install [Git](https://git-scm.com/) separately.
+Previews are published automatically after all Windows and Mac checks pass on `main`. Each preview identifies its source commit, includes SHA-256 checksums, and stays available alongside older previews. Windows builds are unsigned, so Windows may display a security warning. Install [Git](https://git-scm.com/) separately.
+
+Mac downloads are unavailable until Developer ID signing, Apple notarization, and Gatekeeper verification are in place. Previous unsigned Mac downloads were withdrawn because macOS can report them as damaged. Mac users can build from source for local use.
 
 ## Try it from source
 
@@ -62,11 +64,11 @@ npm run test:welcome
 
 ### Continuous integration
 
-[Desktop CI](https://github.com/mio-gato-software/gitcat/actions/workflows/desktop-ci.yml) runs on every pull request and push to `main`, and can also be started manually. Separate native Windows x64, macOS Apple Silicon, and macOS Intel jobs run lint, type checks, the full test suite, desktop UI and welcome-layout checks, and package the application.
+[Desktop PR checks](https://github.com/mio-gato-software/gitcat/actions/workflows/desktop-pr.yml) runs on pull requests. [Desktop CI](https://github.com/mio-gato-software/gitcat/actions/workflows/desktop-ci.yml) runs on pushes to `main` and can also be started manually. Separate native Windows x64, macOS Apple Silicon, and macOS Intel jobs run lint, type checks, the full test suite, desktop UI and welcome-layout checks, and package the application.
 
-Successful jobs attach unsigned Windows setup/portable executables or macOS DMG/ZIP builds to the workflow run for 14 days. UI screenshots are retained for 7 days to help diagnose failures. Once all three jobs pass on `main`, a separate job publishes all six installers and their checksums as a public GitHub prerelease. It uploads to a draft first, so an interrupted upload is not presented as a complete preview. Pull requests never publish. Re-running a failed job resumes publication of the same version; already published versions are left intact. A new manual run on `main` produces a new version, even for the same commit. Release downloads do not have the Actions artifacts' 14-day expiry.
+Successful Windows jobs attach unsigned setup/portable executables to the workflow run for 14 days. Mac jobs validate unpacked app builds without uploading downloadable apps. UI screenshots are retained for 7 days to help diagnose failures. Once all three jobs pass on `main`, a separate job publishes both Windows downloads and their checksums as a public GitHub prerelease. It uploads to a draft first, so an interrupted upload is not presented as a complete preview. Pull requests never publish. Re-running a failed job resumes publication of the same version; already published versions are left intact. A new manual run on `main` produces a new version, even for the same commit. Release downloads do not have the Actions artifacts' 14-day expiry.
 
-CI versions use `major.minor.<workflow run number>` (for example, `0.1.42`). Keep `package.json` and its lockfile at `major.minor.0`; only change major/minor intentionally. CI injects the patch through electron-builder's `extraMetadata.version` when packaging, without editing or committing either source file. Help → About, installer filenames, and the public `preview-0.1.42` tag all identify the same version. Every platform in a run shares it, and retries keep it. PR builds and failed runs consume numbers, so public previews may have gaps. The counter continues across major/minor changes; keep the Desktop CI workflow identity to preserve it. Version components are checked against Windows' 65535 limit.
+CI versions use `major.minor.<workflow run number>` (for example, `0.1.42`). Keep `package.json` and its lockfile at `major.minor.0`; only change major/minor intentionally. CI injects the patch through electron-builder's `extraMetadata.version` when packaging, without editing or committing either source file. Help → About, installer filenames, and the public `preview-0.1.42` tag all identify the same version. Every platform in a run shares it, and retries keep it. PR checks use a separate counter. Failed release runs consume numbers, so public previews may have gaps. The counter continues across major/minor changes; keep the Desktop CI workflow identity to preserve it. Version components are checked against Windows' 65535 limit.
 
 Local builds continue to use the source version unless a version override is explicitly passed to electron-builder. To install an exact CI version, download its installer from the workflow artifacts or the public Releases page.
 
