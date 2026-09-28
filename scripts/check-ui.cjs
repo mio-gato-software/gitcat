@@ -127,12 +127,11 @@ app.whenReady().then(async () => {
     return { description: 'Update menu and add a new file', stateId: current.stateId, selection: current.changes.filter((change) => paths.includes(change.path)).map((change) => ({ path: change.path, version: change.version })) };
   });
   ipcMain.handle('commit:selection-diff', (_, p, paths, locale) => service.getSelectionDiff(p, paths, locale));
-  // Sharing decisions and the secret check are the real service's, kept in this disposable profile.
+  // Sharing decisions are the real service's, kept in this disposable profile.
   ipcMain.handle('sharing:get', (_, p, purpose, paths, locale) => service.getAiSharing(p, purpose, paths, locale));
   ipcMain.handle('sharing:acknowledge', (_, p) => service.acknowledgeAiSharing(p));
   ipcMain.handle('sharing:set-exclusions', (_, p, exclusions, locale) => service.setAiSharingExclusions(p, exclusions, locale));
   ipcMain.handle('sharing:review', (_, p, file, share, locale) => service.setAiSharingReview(p, file, share, locale));
-  ipcMain.handle('changes:scan-secrets', (_, p) => service.scanChangesForSecrets(p));
   ipcMain.handle('action:prepare-delivery', async (_, p, request, locale) => {
     const plan = await service.prepareBranchDelivery(p, request, locale);
     plans.set(plan.id, plan); return plan;
@@ -573,15 +572,13 @@ app.whenReady().then(async () => {
   git('branch', 'outside/terminal');
   // A read is skipped while GitCat is still finishing the checkout, so focus is offered until one lands.
   await waitFor(`document.querySelector('aside.sidebar').textContent.includes('outside') || (window.dispatchEvent(new Event('focus')), false)`);
-  // A new .env with a key is flagged beside the files to save, by file and kind only, before any review.
+  // Credential-like files appear normally in the save list, with no secret warning or review gate.
   fs.writeFileSync(path.join(repo, '.env'), 'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n');
   await js(`document.querySelector('.inspector-tabs button').click()`);
-  await waitFor(`document.querySelector('.secret-warning') || (window.dispatchEvent(new Event('focus')), false)`);
-  const warning = await js(`document.querySelector('.secret-warning').innerText`);
-  for (const entry of [/parecen contener una contraseña/, /\.env/, /clave de acceso de AWS/, /Dejar fuera/, /Ignorar archivo/, /Revisé estos archivos/]) assert.match(warning, entry);
-  assert.doesNotMatch(await js(`document.body.innerText`), /AKIAIOSFODNN7EXAMPLE/, 'The secret itself is never shown');
-  assert.match(await js(`document.querySelector('.inspector .change-row .change-badge.secret').textContent`), /posible secreto/);
-  await capture('secret-warning');
+  await waitFor(`document.querySelector('.inspector .change-list')?.textContent.includes('.env') || (window.dispatchEvent(new Event('focus')), false)`);
+  assert.equal(await js(`Boolean(document.querySelector('.secret-warning, .change-badge.secret'))`), false);
+  assert.doesNotMatch(await js(`document.querySelector('.changes-view').innerText`), /posible secreto|Revisé estos archivos/);
+  await capture('save-without-secret-warning');
 
   // A merge that stopped on a text conflict, a modify/delete and a binary file, with no assistant
   // configured: the resolver explains both versions by name and settles everything on its own.
@@ -921,7 +918,7 @@ app.whenReady().then(async () => {
   assert.equal(git('status','--porcelain').includes('.env'),true,'Practice edits leave the original project untouched');
 
   win.destroy();
-  console.log('PASS: worktree list, safe opening with separate edits and tree tab badges; unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, a work overview separating edited, saved, integrated and published work with one next step, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, local secret warning, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');
+  console.log('PASS: worktree list, safe opening with separate edits and tree tab badges; unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, a work overview separating edited, saved, integrated and published work with one next step, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, saving without secret warnings, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');
   app.quit();
 }).catch(error => { console.error(error); app.exit(1); });
 app.on('will-quit', () => fs.rmSync(scratch, { recursive: true, force: true }));

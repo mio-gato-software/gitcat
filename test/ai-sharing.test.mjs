@@ -162,7 +162,7 @@ test("planning sends placeholders for excluded and secret files and tells the pl
   assertNoSecrets(JSON.stringify(result), "plan");
 });
 
-test("a planned commit writes its message from the filtered diff and warns about the secrets it would save", async () => {
+test("a planned commit filters outbound content without adding secret warnings to the save", async () => {
   const { repo } = fixture();
   await service.acknowledgeAiSharing(repo);
   queue.push(plan({ intent: "git_operation", steps: [step("commit")], summary: "Commit", rationale: "…", risk: "high", reply: "" }));
@@ -173,8 +173,8 @@ test("a planned commit writes its message from the filtered diff and warns about
   assert.match(requests[1].input, /GitCat withheld the content of id_ed25519/);
   assert.match(requests[1].input, /ordinary-visible-change/);
   assert.equal(result.allowed, true, result.rationale);
-  assert.deepEqual([...new Set(result.secrets.map((finding) => finding.path))].sort(), [".env", "config.js", "id_ed25519"]);
-  assert.ok(result.effects.some((effect) => /look like they hold a credential/.test(effect) && /config\.js \(line 2: AWS access key\)/.test(effect)));
+  assert.equal(result.secrets, undefined);
+  assert.doesNotMatch(JSON.stringify(result.effects ?? []), /credential|secret/i);
   assertNoSecrets(JSON.stringify(result), "plan");
 });
 
@@ -261,38 +261,36 @@ test("conflict proposals never send excluded or secret files, and say why they w
   assertNoSecrets(JSON.stringify(proposal.skipped), "skipped reasons");
 });
 
-test("saving likely secrets is a question with choices until the person says they reviewed them", async () => {
-  const { repo, git } = fixture();
-  const snapshot = await service.getSnapshot(repo);
-  const selection = snapshot.changes.filter((change) => ["notes.md", ".env"].includes(change.path)).map((change) => ({ path: change.path, version: change.version }));
-  const asked = await service.prepareBranchDelivery(repo, { stateId: snapshot.stateId, mergeToDefault: false, message: "save", selection }, "en");
-  assert.equal(asked.kind, "question");
-  assert.equal(asked.allowed, false);
-  assert.match(asked.rationale, /Nothing was saved/);
-  assert.match(asked.rationale, /untick them|ignore the new ones|save anyway/);
-  assert.deepEqual(asked.secrets.map((finding) => [finding.path, finding.line ?? null, finding.kind]), [
-    [".env", null, "credential_file"], [".env", 1, "secret_assignment"], [".env", 2, "api_key"]
-  ]);
-  assertNoSecrets(JSON.stringify(asked), "save question");
-  assert.equal(git("status", "--porcelain").includes("?? .env"), true, "nothing was saved");
+for (const selectedOnly of [true, false]) {
+  test(`saving credential-like files needs no secret review (${selectedOnly ? "selected" : "all"} files)`, async () => {
+    const { repo, git } = fixture();
+    const snapshot = await service.getSnapshot(repo);
+    const selection = snapshot.changes.filter((change) => ["notes.md", ".env"].includes(change.path)).map((change) => ({ path: change.path, version: change.version }));
+    const prepared = await service.prepareBranchDelivery(repo, {
+      stateId: snapshot.stateId, mergeToDefault: false, message: "Save configuration",
+      ...(selectedOnly ? { selection } : {})
+    }, "en");
+    assert.equal(prepared.kind, "plan");
+    assert.equal(prepared.allowed, true, prepared.rationale);
+    assert.equal(prepared.requiresConfirmation, true, "normal save confirmation still applies");
+    assert.equal(prepared.secrets, undefined);
+    assert.doesNotMatch(JSON.stringify(prepared.effects), /credential|secret/i);
+    assert.equal(git("status", "--porcelain").includes("?? .env"), true, "preparing does not save anything");
 
-  const reviewed = await service.prepareBranchDelivery(repo, { stateId: snapshot.stateId, mergeToDefault: false, message: "save", selection, secretsReviewed: true }, "en");
-  assert.equal(reviewed.allowed, true, reviewed.rationale);
-  assert.ok(reviewed.effects.some((effect) => /look like they hold a credential/.test(effect)));
-  const withoutSecrets = await service.prepareBranchDelivery(repo, { stateId: snapshot.stateId, mergeToDefault: false, message: "save", selection: selection.filter((item) => item.path === "notes.md") }, "en");
-  assert.equal(withoutSecrets.allowed, true);
-  assert.equal(withoutSecrets.secrets, undefined);
+    const diff = await service.getSelectionDiff(repo, ["config.js", "notes.md"], "en");
+    assert.equal(diff.secrets, undefined);
+    assert.ok(diff.diff.includes(AWS), "the local diff still shows the actual file contents");
 
-  // The review before saving and the warning beside the files come from the same local check.
-  const diff = await service.getSelectionDiff(repo, ["config.js", "notes.md"], "en");
-  assert.deepEqual(diff.secrets, [{ path: "config.js", line: 2, kind: "aws_access_key" }]);
-  const all = await service.scanChangesForSecrets(repo);
-  assert.deepEqual([...new Set(all.map((finding) => finding.path))].sort(), [".env", "config.js", "id_ed25519"]);
-  assertNoSecrets(JSON.stringify(all), "scan");
-  assert.equal(requests.length, 0, "the check is local");
-});
+    const result = await service.executePlan(repo, prepared, "en");
+    assert.equal(result.error, undefined);
+    assert.equal(result.outcomes[0].status, "completed");
+    assert.equal(git("show", "HEAD:.env"), `DATABASE_PASSWORD=${PASSWORD}\nOPENAI_API_KEY=${OPENAI}\n`);
+    assert.equal(git("status", "--porcelain").includes("config.js"), selectedOnly, "files left out remain unsaved");
+    assert.equal(requests.length, 0, "manual saves do not contact the AI provider");
+  });
+}
 
-test("removing a secret is not flagged as saving one", async () => {
+test("removed credentials are still withheld from AI requests", async () => {
   const repo = realpathSync(mkdtempSync(join(tmpdir(), "gitcat-sharing-removal-")));
   const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
   git("init", "-q", "-b", "main");
@@ -301,7 +299,6 @@ test("removing a secret is not flagged as saving one", async () => {
   writeFileSync(join(repo, "config.js"), `export const accessKey = "${AWS}";\n`);
   git("add", "-A"); git("commit", "-qm", "oops");
   writeFileSync(join(repo, "config.js"), "export const accessKey = process.env.ACCESS_KEY;\n");
-  assert.deepEqual(await service.scanChangesForSecrets(repo), []);
   // It still leaves the Mac in the diff's removed line, so the assistant does not read it.
   assert.equal((await service.getAiSharing(repo, "planning")).files[0].status, "likely_secret");
 });
@@ -349,13 +346,13 @@ test("the interface asks before the first content-bearing request and keeps the 
   assert.match(app, /if \(!\(await ensureSharing\(repoPath, "description", paths\)\)\) return;/);
   // Opening the save flow only writes a description on its own once sharing was agreed.
   assert.match(app, /void sharingAgreed\(path\)\.then\(\(agreed\) => \{ if \(agreed/);
-  // A flagged ticked file keeps the save behind an explicit review, and the manual message still works.
-  assert.match(app, /if \(flaggedTicked\.length && !secretsReviewed\) \{ pointTo\("secrets"\); return; \}/);
+  // Manual saves require a description but no heuristic secret review.
+  assert.doesNotMatch(app, /secret-warning|secretBadge|secretsReviewed|scanChangesForSecrets/);
+  assert.doesNotMatch(main + preload, /changes:scan-secrets|scanChangesForSecrets/);
   assert.match(app, /if \(!message\) \{ pointTo\("description"\); return; \}/);
-  assert.match(app, /t\("secretReviewedSave"\)/);
   assert.match(app, /t\("secretDetectorLimits"\)/);
   assert.match(app, /turn\.private && \(turn\.error \|\| turn\.outcome\) \? privateOutputNote/);
-  for (const channel of ["sharing:get", "sharing:acknowledge", "sharing:set-exclusions", "sharing:review", "changes:scan-secrets"]) {
+  for (const channel of ["sharing:get", "sharing:acknowledge", "sharing:set-exclusions", "sharing:review"]) {
     assert.match(main, new RegExp(`ipcMain\\.handle\\("${channel}", \\(event[^)]*\\) => \\{\\n    assertTrustedSender\\(event\\);`));
     assert.match(preload, new RegExp(`ipcRenderer\\.invoke\\("${channel}"`));
   }

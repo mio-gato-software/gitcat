@@ -11,7 +11,7 @@ import {
   createPractice, getPracticeInfo, setPracticeLesson, editPractice, removePractice, previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
   getLlmConfig, getSnapshot, openWorktree, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
   prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
-  scanChangesForSecrets, setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictGuide, type IssuedConflictProposal
+  setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictGuide, type IssuedConflictProposal
 } from "./git-service.js";
 import { localized } from "./i18n.js";
 import { remoteNamePattern } from "./repository-plan.js";
@@ -681,7 +681,7 @@ app.whenReady().then(async () => {
       !item || typeof item.path !== "string" || !item.path || typeof item.version !== "string"))) throw new Error("Invalid delivery request.");
     const repoPath = assertOpenedRepository(cwd);
     const delivery: DeliveryRequest = {
-      stateId: request.stateId, mergeToDefault: request.mergeToDefault, message: request.message, secretsReviewed: request.secretsReviewed === true,
+      stateId: request.stateId, mergeToDefault: request.mergeToDefault, message: request.message,
       ...(request.selection ? { selection: request.selection.map((item) => ({ path: item.path, version: item.version })) } : {})
     };
     return rememberPlan(await tracked(event, repoPath, "planning", () => prepareBranchDelivery(repoPath, delivery, locale)));
@@ -738,10 +738,6 @@ app.whenReady().then(async () => {
     assertTrustedSender(event);
     if (typeof file !== "string" || !file || typeof share !== "boolean") throw new Error("La revisión no es válida.");
     return setAiSharingReview(assertOpenedRepository(cwd), file, share, locale);
-  });
-  ipcMain.handle("changes:scan-secrets", (event, cwd: string) => {
-    assertTrustedSender(event);
-    return scanChangesForSecrets(assertOpenedRepository(cwd));
   });
   ipcMain.handle("llm:get-config", (event) => { assertTrustedSender(event); return getLlmConfig(); });
   ipcMain.handle("llm:save-config", (event, input: LlmConfigInput) => { assertTrustedSender(event); return connectLlm(input); });

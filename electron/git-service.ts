@@ -1351,10 +1351,9 @@ async function getWorkingTreeDiff(snapshot: RepoSnapshot, paths?: string[], disp
 
 /**
  * One changed file as it would reach the provider: the exact text — its diff, or the whole file when
- * Git does not track it yet — and what the local checks found in it. `credential` is about the name,
- * `exists` says whether the file is on disk now, which decides whether a save records it at all.
+ * Git does not track it yet — and what the local checks found in it. `credential` is about the name.
  */
-type ChangeChunk = { path: string; text: string; credential: boolean; findings: DiffFinding[]; exists: boolean };
+type ChangeChunk = { path: string; text: string; credential: boolean; findings: DiffFinding[] };
 
 /** One file of a request after the sharing rules: what the model reads when its content may go out. */
 type OutboundFile = AiSharingFile & { text: string };
@@ -1409,7 +1408,7 @@ async function changeChunks(snapshot: RepoSnapshot, paths?: string[]): Promise<C
       const absolute = resolve(snapshot.path, name);
       const exists = onDisk(absolute);
       const credential = mayBeCredentialFile(name) && isCredentialFile(name, exists ? readForNameCheck(absolute) : undefined);
-      chunks.push({ path: name, text: text.startsWith("\n") ? text : `\n${text}`, credential, findings: scanDiff(name, text), exists });
+      chunks.push({ path: name, text: text.startsWith("\n") ? text : `\n${text}`, credential, findings: scanDiff(name, text) });
     });
   }
   const untracked = (await checkedGit(snapshot.path, ["ls-files", "--others", "--exclude-standard", "-z", ...(paths ? ["--", ...scope] : [])], true))
@@ -1420,22 +1419,22 @@ async function changeChunks(snapshot: RepoSnapshot, paths?: string[]): Promise<C
     const header = `\n--- /dev/null\n+++ b/${relativePath}\n@@ archivo nuevo @@\n`;
     try {
       if (lstatSync(absolutePath).isSymbolicLink()) {
-        chunks.push({ path: relativePath, text: `\n+++ b/${relativePath}\n[enlace simbólico omitido]`, credential: false, findings: [], exists: true });
+        chunks.push({ path: relativePath, text: `\n+++ b/${relativePath}\n[enlace simbólico omitido]`, credential: false, findings: [] });
         continue;
       }
       const content = readFileSync(absolutePath);
       if (content.includes(0)) {
-        chunks.push({ path: relativePath, text: `${header}[archivo binario omitido]`, credential: isCredentialFile(relativePath), findings: [], exists: true });
+        chunks.push({ path: relativePath, text: `${header}[archivo binario omitido]`, credential: isCredentialFile(relativePath), findings: [] });
         continue;
       }
       const text = content.toString("utf8");
       chunks.push({
         path: relativePath, text: `${header}${text}`, credential: isCredentialFile(relativePath, text),
-        findings: scanText(relativePath, text).map((finding) => ({ ...finding, side: "added" as const })), exists: true
+        findings: scanText(relativePath, text).map((finding) => ({ ...finding, side: "added" as const }))
       });
     } catch (reason) {
       // A file too large for a single Buffer, or unreadable: reported, never silently dropped.
-      chunks.push({ path: relativePath, text: `\n+++ b/${relativePath}\n[no se pudo leer: ${reason instanceof Error ? reason.message : "error desconocido"}]`, credential: isCredentialFile(relativePath), findings: [], exists: true });
+      chunks.push({ path: relativePath, text: `\n+++ b/${relativePath}\n[no se pudo leer: ${reason instanceof Error ? reason.message : "error desconocido"}]`, credential: isCredentialFile(relativePath), findings: [] });
     }
   }
   return chunks;
@@ -1497,17 +1496,6 @@ async function modelWorkingTreeDiff(snapshot: RepoSnapshot, paths?: string[]) {
   const diff = files.map(modelText).filter(Boolean).join("\n");
   if (!diff.trim()) throw new Error("No hay un diff de texto disponible para describir.");
   return { diff, files, withheld: withheldFiles(files) };
-}
-
-/**
- * Likely credentials a save of these files would newly record: credential files that will exist after
- * the save, and anything in the lines it adds. A secret that is only being removed is not one of them.
- */
-function saveFindings(chunks: ChangeChunk[]): SecretFinding[] {
-  return chunks.flatMap((chunk) => [
-    ...(chunk.credential && chunk.exists ? [{ path: chunk.path, kind: "credential_file" as const }] : []),
-    ...plainFindings(chunk.findings.filter((finding) => finding.side === "added"))
-  ]);
 }
 
 /**
@@ -1627,12 +1615,6 @@ export async function setAiSharingReview(cwd: string, file: string, share: boole
   saveMemory(rememberSharing(memory, snapshot.path, { reviewed }, now));
 }
 
-/** Likely credentials among every uncommitted change, for the warning beside the files to save. */
-export async function scanChangesForSecrets(cwd: string): Promise<SecretFinding[]> {
-  const snapshot = await getSnapshot(cwd);
-  return snapshot.isDirty ? saveFindings(await changeChunks(snapshot)) : [];
-}
-
 /** A read-only command that prints a file the assistant may not read keeps its output out of the conversation. */
 function argvShowsWithheld(argv: string[], exclusions: string[]) {
   return argv.slice(1).some((token) => {
@@ -1714,8 +1696,7 @@ export async function getSelectionDiff(cwd: string, paths: string[], locale?: Lo
   const snapshot = await getSnapshot(cwd);
   const selection = currentSelection(snapshot, paths, language);
   const diff = await getWorkingTreeDiff(snapshot, selection.paths, true).catch(() => "");
-  const secrets = saveFindings(await changeChunks(snapshot, selection.paths));
-  return { hash: "", files: selection.selected, stats: {}, ...cutDiff(diff), ...(secrets.length ? { secrets } : {}) };
+  return { hash: "", files: selection.selected, stats: {}, ...cutDiff(diff) };
 }
 
 /** Everything the model is allowed to reason about: verified repository facts, never raw guesses. */
@@ -1828,16 +1809,10 @@ async function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot, locale
   if (proposed.some((step) => !step)) return refused(localized(locale, "El plan incluye una operación que no está permitida.", "The plan includes an operation that is not allowed."), "llm", plan.summary);
   const steps = await writeCommitMessages(proposed as PlanStep[], snapshot, locale, notes);
   if ("blocker" in steps) return asking(steps.blocker, plan.summary);
-  // A planned commit saves every change, so whatever looks like a credential among them is named on the card.
-  const secrets = steps.some((step) => step.operation === "commit" && !step.paths) ? saveFindings(await changeChunks(snapshot)) : [];
-  const effects = [
-    ...(renameEffects(steps, snapshot, locale) ?? []),
-    ...(secrets.length ? [savingSecretsEffect(secrets, locale)] : [])
-  ];
+  const effects = renameEffects(steps, snapshot, locale) ?? [];
   const draft = sequenceDraft(steps, plan.rationale || "", effects.length ? effects : undefined, locale);
   return {
     ...draft,
-    ...(secrets.length ? { secrets } : {}),
     summary: plan.summary || draft.summary,
     rationale: plan.rationale || draft.rationale,
     risk: highestRisk(draft.risk, plan.risk),
@@ -1936,13 +1911,6 @@ function bindPlan(snapshot: RepoSnapshot, draft: PlanDraft): ActionPlan {
 /** A plan that says which files the model could not read while preparing it. */
 function withNotes(draft: PlanDraft, notes: SharingNotes): PlanDraft {
   return notes.withheld.length ? { ...draft, withheld: notes.withheld } : draft;
-}
-
-/** The card line for a save that records something that looks like a credential. */
-function savingSecretsEffect(secrets: SecretFinding[], language: Locale) {
-  return localized(language,
-    `Atención: esto guarda archivos que parecen contener una credencial: ${secretsText(secrets, language)}. Una vez publicada, sacarla del historial es difícil; si es real, conviene cambiarla por una nueva.`,
-    `Heads up: this saves files that look like they hold a credential: ${secretsText(secrets, language)}. Once published it is hard to remove from history; if it is real, it is worth replacing it with a new one.`);
 }
 
 /**
@@ -2883,18 +2851,6 @@ export async function prepareBranchDelivery(cwd: string, request: DeliveryReques
   if (selection && !await selectionHasChanges(snapshot, selection.paths)) fail(
     "Los archivos marcados ya coinciden con la última versión guardada, así que no hay nada que guardar de ellos (pasa, por ejemplo, cuando se deshace en el archivo un cambio que estaba preparado). Marca otros archivos o déjalos como están.",
     "The ticked files already match the last saved version, so there is nothing to save from them (this happens, for example, when a staged edit was undone in the file itself). Tick other files, or leave them as they are.");
-  // Before anything else is prepared: a save that would record what looks like a credential is a
-  // question with choices, and only a person who looked at it can turn it into a plan.
-  const secrets = saveFindings(await changeChunks(snapshot, selection?.paths));
-  if (secrets.length && request.secretsReviewed !== true) {
-    return bindPlan(snapshot, {
-      ...refused(localized(language,
-        `No se guardó nada. Estos archivos parecen contener una contraseña, una clave o un token: ${secretsText(secrets, language)}. Guardarlos los deja en el historial del repositorio, donde es difícil borrarlos una vez publicados. Puedes dejarlos fuera del guardado (desmarcarlos), pedir a Git que ignore los archivos nuevos, o revisarlos y guardarlos de todas formas si sabes que no son secretos reales.`,
-        `Nothing was saved. These files look like they hold a password, a key or a token: ${secretsText(secrets, language)}. Saving puts them in the repository history, where they are hard to remove once published. You can leave them out of the save (untick them), ask Git to ignore the new ones, or review them and save anyway if you know they are not real secrets.`),
-        "guardrail", localized(language, "Revisa los posibles secretos antes de guardar", "Review the likely secrets before saving"), "question"),
-      secrets
-    });
-  }
   const message = request.message?.trim() ?? "";
   const commit = stepFrom("commit", { message }, [], language)!;
   const steps = [selection ? { ...commit, paths: selection.paths, command: selectedCommitCommand(message, selection.paths) } : commit];
@@ -2912,7 +2868,6 @@ export async function prepareBranchDelivery(cwd: string, request: DeliveryReques
   const effects = selection ? selectionEffects(selection, snapshot.currentBranch, language) : [localized(language,
     `Se guardarán todos los ${snapshot.changes.length} archivos listados, incluidos los nuevos, en ${snapshot.currentBranch}.`,
     `All ${snapshot.changes.length} listed files, including new files, will be saved on ${snapshot.currentBranch}.`)];
-  if (secrets.length) effects.push(savingSecretsEffect(secrets, language));
   effects.push(localized(language, "La operación es local: no publica cambios ni elimina tu rama.", "This is local: it does not publish changes or delete your branch."));
   if (request.mergeToDefault) effects.push(localized(language,
     `Al terminar estarás en ${target}. Si hay conflictos, la integración se detendrá y el commit guardado seguirá en ${snapshot.currentBranch}.`,
@@ -2926,7 +2881,7 @@ export async function prepareBranchDelivery(cwd: string, request: DeliveryReques
     : localized(language, `Guardar cambios en ${snapshot.currentBranch}`, `Save changes on ${snapshot.currentBranch}`);
   const reviewed = selection ? selectedVersions(selection.selected) : undefined;
   const bound = reviewed ? { changes: reviewed, binding: await selectionBinding(snapshot, reviewed, request.mergeToDefault ? target : undefined), ...(request.mergeToDefault ? { target } : {}) } : undefined;
-  const plan = bindPlan(snapshot, { ...draft, summary, ...(bound ? { selection: bound } : {}), ...(secrets.length ? { secrets } : {}) });
+  const plan = bindPlan(snapshot, { ...draft, summary, ...(bound ? { selection: bound } : {}) });
   validateExecution(plan, snapshot, language, bound?.binding);
   return plan;
 }

@@ -121,13 +121,6 @@ function findingDetail(finding: SecretFinding, t: Translate) {
   return finding.line ? t("secretAtLine", { line: finding.line, kind }) : kind;
 }
 
-/** Findings grouped by file: "config/.env (credential file; line 3: AWS access key)". */
-function findingsText(findings: SecretFinding[], t: Translate) {
-  const byPath = new Map<string, SecretFinding[]>();
-  for (const finding of findings) byPath.set(finding.path, [...(byPath.get(finding.path) ?? []), finding]);
-  return [...byPath].map(([path, items]) => `${path} (${items.slice(0, 4).map((item) => findingDetail(item, t)).join("; ")}${items.length > 4 ? "; …" : ""})`).join(", ");
-}
-
 function withheldText(files: WithheldFile[], t: Translate) {
   return files.map((file) => `${file.path} (${t(file.reason === "excluded" ? "withheldExcluded" : "withheldSecret")})`).join(", ");
 }
@@ -470,7 +463,7 @@ export default function App() {
   const [deliveryMerge, setDeliveryMerge] = useState(false);
   /** The version of every listed file when the save was started, so a later edit to a ticked file asks for a fresh look. */
   const [deliveryBaseline, setDeliveryBaseline] = useState<{ path: string; versions: Record<string, string> }>();
-  const [saveAttention, setSaveAttention] = useState<{ path: string; target: "description" | "selection" | "secrets" | "stale"; sequence: number }>();
+  const [saveAttention, setSaveAttention] = useState<{ path: string; target: "description" | "selection" | "stale"; sequence: number }>();
   const saveAttentionSequence = useRef(0);
   /** Files left out of the next save, per repository. Everything listed is included until someone unticks it. */
   const [excludedByRepo, setExcludedByRepo] = useState<Record<string, string[]>>({});
@@ -488,10 +481,6 @@ export default function App() {
   const [sharingDialog, setSharingDialog] = useState<{ preview: AiSharingPreview; paths?: string[]; resolve?: (accepted: boolean) => void }>();
   /** Repositories the person already agreed to share with the assistant, so the question is not asked again. */
   const sharingAcknowledged = useRef(new Set<string>());
-  /** Likely credentials among the uncommitted files, found on this Mac, for the repository on screen. */
-  const [secretScan, setSecretScan] = useState<{ path: string; findings: SecretFinding[] }>();
-  /** The flagged ticked files, at their versions, that the person said they looked at and want to save. */
-  const [secretsReviewedKey, setSecretsReviewedKey] = useState<string>();
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [panes, setPanes] = useState<PaneWidths | undefined>(readPaneWidths);
   const requestSequence = useRef(0);
@@ -527,27 +516,6 @@ export default function App() {
   excludedRef.current = excludedByRepo;
   const excluded = useMemo(() => new Set(snapshot ? excludedByRepo[snapshot.path] ?? [] : []), [snapshot?.path, excludedByRepo]);
   const selectedChanges = useMemo(() => snapshot?.changes.filter((change) => !excluded.has(change.path)) ?? [], [snapshot, excluded]);
-  const secretFindings = useMemo(() => secretScan && snapshot && secretScan.path === snapshot.path ? secretScan.findings : [], [secretScan, snapshot?.path]);
-  const flaggedTicked = useMemo(() => {
-    const ticked = new Set(selectedChanges.map((change) => change.path));
-    return secretFindings.filter((finding) => ticked.has(finding.path));
-  }, [secretFindings, selectedChanges]);
-  // The review holds for exactly these flagged files at these versions; an edit or another tick asks again.
-  const secretsKey = flaggedTicked.length
-    ? JSON.stringify(selectedChanges.filter((change) => flaggedTicked.some((finding) => finding.path === change.path)).map((change) => [change.path, change.version ?? ""]))
-    : "";
-  const secretsReviewed = Boolean(secretsKey) && secretsReviewedKey === secretsKey;
-
-  // The check runs on this Mac whenever the uncommitted work changes; nothing is sent anywhere.
-  useEffect(() => {
-    if (!snapshot?.isDirty) return;
-    const path = snapshot.path;
-    let live = true;
-    window.gitcat.scanChangesForSecrets(path)
-      .then((findings) => { if (live) setSecretScan({ path, findings }); })
-      .catch(() => { /* the warning is an extra; the save review still runs its own check */ });
-    return () => { live = false; };
-  }, [snapshot?.path, snapshot?.stateId]);
   // Only the ticked files matter: an edit to a file that was left out does not make the review stale.
   const deliveryStale = Boolean(snapshot && deliveryBaseline?.path === snapshot.path
     && selectedChanges.some((change) => deliveryBaseline.versions[change.path] !== change.version));
@@ -691,7 +659,6 @@ export default function App() {
     setDeliveryMerge(false);
     setGeneratingDescription(false);
     setDescriptionWithheld([]);
-    setSecretsReviewedKey(undefined);
   }, [activeId]);
 
   useEffect(() => {
@@ -1424,7 +1391,7 @@ export default function App() {
         const outcome = result.output || completion.headline;
         updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome, completion, output: result.output, private: result.withheldFromAssistant, status: "completed" }));
         addActivity({ label: t("actionExecuted"), detail: completion.headline, tone: "success" });
-        if (plan.steps.some((step) => step.operation === "commit")) { setCommitMessage(""); setDeliveryBaseline(undefined); setDescriptionWithheld([]); setSecretsReviewedKey(undefined); }
+        if (plan.steps.some((step) => step.operation === "commit")) { setCommitMessage(""); setDeliveryBaseline(undefined); setDescriptionWithheld([]); }
       }
     } catch (error) {
       const message = cleanError(error, t("fallbackGitAction"));
@@ -1534,18 +1501,17 @@ export default function App() {
   /** Sends the ticked files with the version of each that is on screen; the save is bound to exactly those. */
   const prepareCommit = (merge = deliveryMerge) => {
     if (!snapshot || planning || generatingDescription) return;
-    const pointTo = (target: "description" | "selection" | "secrets" | "stale") =>
+    const pointTo = (target: "description" | "selection" | "stale") =>
       setSaveAttention({ path: snapshot.path, target, sequence: ++saveAttentionSequence.current });
     if (deliveryStale) { pointTo("stale"); return; }
     if (!selectedChanges.length) { pointTo("selection"); return; }
-    if (flaggedTicked.length && !secretsReviewed) { pointTo("secrets"); return; }
     const message = commitMessage.trim();
     if (!message) { pointTo("description"); return; }
     if (message.length > 120 || !snapshot.changes.length) return;
     const path = snapshot.path;
     const selection = selectedChanges.map((change) => ({ path: change.path, version: change.version ?? "" }));
     void showPlan(t(merge ? "saveAndIntegrate" : "saveChanges", { target: snapshot.defaultBranch ?? "" }),
-      () => window.gitcat.prepareBranchDelivery(path, { stateId: snapshot.stateId, message, mergeToDefault: merge, selection, secretsReviewed }, locale), path, true);
+      () => window.gitcat.prepareBranchDelivery(path, { stateId: snapshot.stateId, message, mergeToDefault: merge, selection }, locale), path, true);
   };
 
   const beginDelivery = (merge: boolean, refreshReview = false) => {
@@ -1811,7 +1777,7 @@ export default function App() {
             </div>
             {inspectorTab === "details" ? <div className="inspector-body">
               {activeFocus?.kind === "wip"
-                ? <ChangesView readiness={readiness} snapshot={snapshot} secrets={secretFindings} secretsReviewed={secretsReviewed} onSecretsReviewed={(reviewed) => setSecretsReviewedKey(reviewed ? secretsKey : undefined)} descriptionWithheld={descriptionWithheld} merge={deliveryMerge} configured={config.configured} stale={deliveryStale} attention={saveAttention?.path === snapshot.path ? saveAttention : undefined} onReviewAgain={() => beginDelivery(deliveryMerge, true)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} message={commitMessage} generating={generatingDescription} busy={planning} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={() => prepareCommit()}
+                ? <ChangesView readiness={readiness} snapshot={snapshot} descriptionWithheld={descriptionWithheld} merge={deliveryMerge} configured={config.configured} stale={deliveryStale} attention={saveAttention?.path === snapshot.path ? saveAttention : undefined} onReviewAgain={() => beginDelivery(deliveryMerge, true)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} message={commitMessage} generating={generatingDescription} busy={planning} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={() => prepareCommit()}
                     excluded={excluded} onToggle={toggleIncluded} onToggleAll={setAllIncluded} onIgnore={ignoreFile} onShowSelected={() => setSelectionDiffOpen(true)} />
                 : activeFocus
                   ? <CommitInspector key={activeFocus.commit.hash} commit={activeFocus.commit} snapshot={snapshot} known={graphCommits} onFocus={(commit) => focusOn({ kind: "commit", commit }, true)} onOpen={(file) => setModalCommit({ commit: activeFocus.commit, file })} />
@@ -3166,8 +3132,6 @@ function ChangeSummary({ files, stats }: { files: FileChange[]; stats?: Record<s
 /** The uncommitted list's include/exclude controls. Commit details show the same list without them. */
 type FileSelection = {
   excluded: Set<string>;
-  /** Files the local check found a likely credential in. */
-  flagged?: Set<string>;
   disabled: boolean;
   onToggle: (file: FileChange) => void;
   onToggleAll: (include: boolean) => void;
@@ -3203,7 +3167,6 @@ function FileList({ files, stats, onOpen, selection }: { files: FileChange[]; st
           <span className="change-status"><Icon size={14} /><span className="visually-hidden">{status}</span></span>
           <span className="change-path">{folder && <span className="change-folder">{folder}</span>}<span className="change-name">{label}</span></span>
           {partly && <span className="change-badge">{t("partlyStagedBadge")}</span>}
-          {selection.flagged?.has(file.path) && <span className="change-badge secret" title={t("secretBadgeTitle")}>{t("secretBadge")}</span>}
           {counts && <ChangeStats additions={counts.additions} deletions={counts.deletions} binary={counts.binary} />}
         </button>
         {untracked && <button className="mini-icon change-ignore" onClick={() => selection.onIgnore(file)} disabled={selection.disabled} aria-label={t("ignoreFutureChanges", { path: file.path })} title={t("ignoreFutureChangesTitle")}><EyeOff size={13} /></button>}
@@ -3273,11 +3236,11 @@ function FileList({ files, stats, onOpen, selection }: { files: FileChange[]; st
  * the ticked files into a saved version. Unticked files are listed too, so leaving one out is a
  * visible decision rather than something that happens to it.
  */
-function ChangesView({ readiness, snapshot, secrets, secretsReviewed, onSecretsReviewed, descriptionWithheld, message, generating, busy, onOpenFile, onMessageChange, onGenerate, onPrepare, merge, configured, stale, attention, onReviewAgain, onMergeChange, excluded, onToggle, onToggleAll, onIgnore, onShowSelected }: {
-  readiness: ReadinessState; snapshot: RepoSnapshot; secrets: SecretFinding[]; secretsReviewed: boolean; onSecretsReviewed: (reviewed: boolean) => void; descriptionWithheld: WithheldFile[];
+function ChangesView({ readiness, snapshot, descriptionWithheld, message, generating, busy, onOpenFile, onMessageChange, onGenerate, onPrepare, merge, configured, stale, attention, onReviewAgain, onMergeChange, excluded, onToggle, onToggleAll, onIgnore, onShowSelected }: {
+  readiness: ReadinessState; snapshot: RepoSnapshot; descriptionWithheld: WithheldFile[];
   message: string; generating: boolean; busy: boolean;
   onOpenFile: (file: FileChange) => void; onMessageChange: (message: string) => void; onGenerate: () => void; onPrepare: () => void;
-  merge: boolean; configured: boolean; stale: boolean; attention?: { path: string; target: "description" | "selection" | "secrets" | "stale"; sequence: number }; onReviewAgain: () => void; onMergeChange: (value: boolean) => void;
+  merge: boolean; configured: boolean; stale: boolean; attention?: { path: string; target: "description" | "selection" | "stale"; sequence: number }; onReviewAgain: () => void; onMergeChange: (value: boolean) => void;
   excluded: Set<string>; onToggle: (file: FileChange) => void; onToggleAll: (include: boolean) => void; onIgnore: (file: FileChange) => void; onShowSelected: () => void;
 }) {
   const { t } = useI18n();
@@ -3286,7 +3249,6 @@ function ChangesView({ readiness, snapshot, secrets, secretsReviewed, onSecretsR
     if (!attention || attention.path !== snapshot.path) return;
     const selector = attention.target === "description" ? "#commit-description"
       : attention.target === "selection" ? ".select-all input"
-      : attention.target === "secrets" ? ".secret-warning input[type='checkbox']"
       : ".delivery-stale button";
     viewRef.current?.querySelector<HTMLElement>(selector)?.focus();
   }, [attention?.sequence, snapshot.path]);
@@ -3295,9 +3257,6 @@ function ChangesView({ readiness, snapshot, secrets, secretsReviewed, onSecretsR
   const selected = snapshot.changes.filter((change) => !excluded.has(change.path));
   const leftOut = snapshot.changes.length - selected.length;
   const partly = selected.filter(isPartlyStaged).length;
-  const flagged = new Set(secrets.map((finding) => finding.path));
-  // Only the ticked files decide the save; a flagged file left out is already safe from it.
-  const flaggedTicked = selected.filter((change) => flagged.has(change.path));
   // Before the first save, or whenever Git or the author is missing, the checklist says so up front;
   // otherwise one line under the form says who the save will be signed as.
   const report = readiness.report?.repoPath === snapshot.path ? readiness.report : undefined;
@@ -3309,19 +3268,8 @@ function ChangesView({ readiness, snapshot, secrets, secretsReviewed, onSecretsR
     {hasChanges ? <>
       {!snapshot.head && <p className="file-inclusion-note first-save-note" role="note">{t("firstSaveNote")}</p>}
       <ChangeSummary files={selected} />
-      <FileList files={snapshot.changes} onOpen={onOpenFile} selection={{ excluded, flagged, disabled: busy || generating, onToggle, onToggleAll, onIgnore }} />
+      <FileList files={snapshot.changes} onOpen={onOpenFile} selection={{ excluded, disabled: busy || generating, onToggle, onToggleAll, onIgnore }} />
       {partly > 0 && <p className="file-inclusion-note partly-staged">{t("partlyStagedNote", { count: partly })}</p>}
-      {flaggedTicked.length > 0 && <div className="secret-warning" role="alert">
-        <strong><AlertTriangle size={13} />{t("secretWarningTitle", { count: flaggedTicked.length })}</strong>
-        <span>{t("secretWarningBody")}</span>
-        <ul>{flaggedTicked.map((change) => <li key={change.path}>
-          <div><code>{change.path}</code><small>{secrets.filter((finding) => finding.path === change.path).slice(0, 4).map((finding) => findingDetail(finding, t)).join("; ")}</small></div>
-          <button className="ghost-button small" onClick={() => onToggle(change)} disabled={busy || generating}>{t("secretLeaveOut")}</button>
-          {isUntracked(change) && <button className="ghost-button small" onClick={() => onIgnore(change)} disabled={busy || generating}><EyeOff size={12} />{t("secretIgnore")}</button>}
-        </li>)}</ul>
-        <label className="delivery-option"><input type="checkbox" checked={secretsReviewed} disabled={busy} onChange={(event) => onSecretsReviewed(event.target.checked)} /><span>{t("secretReviewedSave")}</span></label>
-        <small>{t("secretDetectorLimits")}</small>
-      </div>}
       <div className="commit-form">
         <div className="commit-form-heading"><h3>{t("saveDescription")}</h3><button className="outline-button small" onClick={onGenerate} disabled={!configured || generating || busy || !selected.length}>{generating ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{t(generating ? "generatingSaveDescription" : "generateDescription")}</button></div>
         <label htmlFor="commit-description" className="visually-hidden">{t("commitMessage")}</label><textarea id="commit-description" value={message} onChange={(event) => onMessageChange(event.target.value)} maxLength={120} rows={3} placeholder={t("commitPlaceholder")} aria-describedby={attention?.target === "description" && !message.trim() ? "save-description-required" : undefined} disabled={generating || busy} />
@@ -4182,7 +4130,6 @@ function SelectionDiffModal({ files, repoPath, onClose }: { files: FileChange[];
       </div>
       {error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}
       {!detail && !error && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> {t("readingFile")}</div>}
-      {detail?.secrets && detail.secrets.length > 0 && <div className="modal-note attention" role="alert"><AlertTriangle size={15} /><span>{t("selectionSecrets", { files: findingsText(detail.secrets, t) })}</span></div>}
       {detail && (detail.diff.trim() ? <DiffView diff={detail.diff} truncated={detail.truncated} /> : <p className="detail-note">{t("selectedDiffEmpty")}</p>)}
     </div>
   </div>;

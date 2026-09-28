@@ -80,11 +80,6 @@ export type SelectedChange = { path: string; version: string };
  */
 export type DeliveryRequest = {
   stateId: string; mergeToDefault: boolean; message?: string; selection?: SelectedChange[];
-  /**
-   * The person looked at the likely secrets the review flagged in the files being saved and chose to
-   * save them anyway. Without it, a save that would record one comes back as a question, not a plan.
-   */
-  secretsReviewed?: boolean;
 };
 
 /** The shape a local check recognised. Never the matched text: a finding must be safe to show and log. */
@@ -232,8 +227,6 @@ export type CommitDetail = {
   diff: string;
   /** A diff too large to hand over whole was cut, and says so rather than looking complete. */
   truncated: boolean;
-  /** For a review before saving: likely credentials among what the save would record. */
-  secrets?: SecretFinding[];
 };
 
 export type ConflictResolution = {
@@ -484,8 +477,6 @@ export type ActionPlan = {
   selection?: { changes: SelectedChange[]; binding: string; target?: string };
   /** Files whose content the model did not read while preparing this, so the answer says what it is missing. */
   withheld?: WithheldFile[];
-  /** Likely credentials in what this plan would save. The review shows them before anything is confirmed. */
-  secrets?: SecretFinding[];
   /** Nothing was sent: the person has not yet agreed to share this repository with the assistant. */
   sharingRequired?: boolean;
   risk: "low" | "medium" | "high";
@@ -967,8 +958,6 @@ export type GitlineApi = {
   setAiSharingExclusions: (path: string, exclusions: string[], locale?: Locale) => Promise<string[]>;
   /** Shares one flagged file at its current version after the person reviewed it, or stops sharing it. */
   setAiSharingReview: (path: string, file: string, share: boolean, locale?: Locale) => Promise<void>;
-  /** Likely credentials among the uncommitted changes, found on this Mac. */
-  scanChangesForSecrets: (path: string) => Promise<SecretFinding[]>;
   getLlmConfig: () => Promise<LlmConfig>;
   /** Verifies the key and model with the provider and saves them only when they answer. */
   saveLlmConfig: (config: LlmConfigInput) => Promise<LlmConnectResult>;
