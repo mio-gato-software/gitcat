@@ -2,8 +2,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import electron from "electron";
-import { Resvg } from "@resvg/resvg-js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const buildDir = join(root, "build");
@@ -17,6 +15,7 @@ function has(command) {
 if (!existsSync(svg)) throw new Error(`No existe ${svg}`);
 if (process.platform === "win32") {
   // Windows packaging must not depend on Unix tools or a working GPU context.
+  const { Resvg } = await import("@resvg/resvg-js");
   mkdirSync(buildDir, { recursive: true });
   const image = new Resvg(readFileSync(svg), { fitTo: { mode: "width", value: 1024 } }).render();
   writeFileSync(png, image.asPng());
@@ -27,7 +26,7 @@ if (!has("rsvg-convert")) {
   // Packaging prefers icon.png over SVG. Always refresh it, even on a Mac
   // without librsvg, otherwise an old brand icon silently ships again.
   mkdirSync(buildDir, { recursive: true });
-  execFileSync(electron, [join(root, "scripts", "render-icon.cjs"), svg, png], { stdio: "inherit" });
+  execFileSync(join(root, "node_modules", ".bin", "electron"), [join(root, "scripts", "render-icon.cjs"), svg, png], { stdio: "inherit" });
   console.log(`Ícono raster generado con Electron: ${png}`);
   process.exit(0);
 }
