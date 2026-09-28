@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, renameSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 registerHooks({ resolve(s,c,n) { return s === 'electron' ? { url: new URL('./helpers/electron-stub.mjs', import.meta.url).href, shortCircuit:true } : n(s,c); } });
 const service = await import('../dist-electron/electron/git-service.js');
@@ -19,7 +19,7 @@ function fixture(t) {
   return {root,repo,git};
 }
 test('NUL worktree records preserve unusual paths, lock reasons and detached/bare entries', () => {
-  const path = '/tmp/space ñ\nfolder ';
+  const path = resolve('/tmp/space ñ\nfolder ');
   const entries = parseWorktreeList(['worktree /repo','bare','','worktree '+path,'HEAD abc','detached','locked moving disk','','worktree /gone','HEAD def','branch refs/heads/topic','prunable gitdir missing','',''].join('\0'), path);
   assert.equal(entries[0].bare,true); assert.equal(entries[0].isMain,true);
   assert.equal(entries[1].path,path); assert.equal(entries[1].isCurrent,true);
@@ -28,7 +28,7 @@ test('NUL worktree records preserve unusual paths, lock reasons and detached/bar
 });
 test('real snapshots expose main, linked and detached worktrees; opening preserves each index and edits', async t => {
   const {root,repo,git} = fixture(t);
-  const linked = join(root,'linked ñ\nfolder'); const detached = join(root,'detached');
+  const linked = join(root, process.platform === 'win32' ? 'linked ñ folder' : 'linked ñ\nfolder'); const detached = join(root,'detached');
   git('worktree','add','-b','topic',linked); git('worktree','add','--detach',detached);
   git('worktree','lock','--reason','external drive',linked);
   writeFileSync(join(repo,'file'),'main staged'); git('add','file'); writeFileSync(join(repo,'file'),'main unsaved');

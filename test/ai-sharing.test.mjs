@@ -335,7 +335,7 @@ test("sharing choices are remembered per repository, sanitized and moved with th
 });
 
 test("the interface asks before the first content-bearing request and keeps the manual save path", async () => {
-  const { readFile } = await import("node:fs/promises");
+  const { readFile } = await import("./helpers/source.mjs");
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
   const preload = await readFile(join(root, "electron/preload.cjs"), "utf8");
   const main = await readFile(join(root, "electron/main.ts"), "utf8");

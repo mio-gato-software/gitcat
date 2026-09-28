@@ -1,5 +1,5 @@
 import { accessSync, constants, existsSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, resolve, win32 } from "node:path";
+import { basename, dirname, resolve, posix, win32 } from "node:path";
 import type { ProjectUnavailableReason, RepoSnapshot, RepositoryMatch, UnavailableProject } from "../shared/types.js";
 
 /**
@@ -68,7 +68,7 @@ export function volumeRoot(path: string, platform: NodeJS.Platform = process.pla
     const root = win32.parse(path).root;
     return root && root !== "\\" && root !== "/" ? root : undefined;
   }
-  const parts = resolve(path).split("/").filter(Boolean);
+  const parts = posix.resolve(path).split("/").filter(Boolean);
   const take = (count: number) => parts.length >= count ? `/${parts.slice(0, count).join("/")}` : undefined;
   if (platform === "darwin") return parts[0] === "Volumes" ? take(2) : undefined;
   if (parts[0] === "media" || (parts[0] === "run" && parts[1] === "media")) return take(parts[0] === "run" ? 4 : 3);

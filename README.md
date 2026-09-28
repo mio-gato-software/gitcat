@@ -31,7 +31,7 @@ On first launch, choose **Create a practice project** to try editing, saving, br
 
 Remote actions use your existing Git access. Sharing a branch for GitHub review also requires the [GitHub CLI](https://cli.github.com/) and a signed-in account.
 
-The app is built with Electron, React, TypeScript, and Vite. The renderer uses a preload bridge to request operations from the Electron main process, which checks repository state and runs Git. I use GitCat on macOS. Windows x64 builds have been smoke-tested for startup and local Git access, but the full test suite still has Windows portability failures. Linux has not been verified for public distribution.
+The app is built with Electron, React, TypeScript, and Vite. The renderer uses a preload bridge to request operations from the Electron main process, which checks repository state and runs Git. I use GitCat on macOS. Windows x64 builds have passed the full unit suite, desktop UI and welcome-layout checks, and installed-app startup and local Git checks. Linux has not been verified for public distribution.
 
 ## Optional AI assistant
 
@@ -49,9 +49,10 @@ npm run typecheck
 npm test
 npm run build
 npm run test:ui
+npm run test:welcome
 ```
 
-`npm run check` runs the lint, type, unit, and UI checks together. The UI check builds the app and uses a disposable repository and app profile.
+`npm run check` runs the lint, type, unit, and UI checks together. Unit fixtures use disposable Git configuration so personal identity, hooks, signing and line-ending preferences do not change their results. The UI checks build the app and use disposable app profiles; the main UI check also uses disposable repositories. `npm run test:welcome` checks both languages at desktop, compact and zoomed sizes.
 
 `npm run package:dir` creates an unpacked local build. Packaging scripts for macOS, Windows, and Linux are in `package.json`. The macOS packaging scripts currently produce unsigned builds; I do not have a signing certificate or notarized public release.
 

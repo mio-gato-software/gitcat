@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -75,7 +75,7 @@ test("el worktree de cada rama sale del porcelain, y el repositorio abierto no s
     "worktree /repo-suelto", "HEAD 123", "detached", ""
   ].join("\n");
   const found = worktrees.parseWorktrees(raw, "/repo");
-  assert.deepEqual([...found], [["feature/menu-import-openai", "/wt-a"]]);
+  assert.deepEqual([...found], [["feature/menu-import-openai", resolve("/wt-a")]]);
   assert.equal(found.has("main"), false);
 });
 

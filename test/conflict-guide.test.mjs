@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { rmSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -321,7 +321,7 @@ test("only a file in conflict inside the repository can be opened in an editor",
   const r = mergeConflicts();
   assert.equal(await service.conflictFileToOpen(r.repo, "text.txt", "en"), join(r.repo, "text.txt"));
   await assert.rejects(service.conflictFileToOpen(r.repo, "../outside.txt", "en"), /no longer in conflict/);
-  execFileSync("rm", [join(r.repo, "gone-here.txt")]);
+  rmSync(join(r.repo, "gone-here.txt"));
   await assert.rejects(service.conflictFileToOpen(r.repo, "gone-here.txt", "en"), /not on disk/);
   await service.applyConflictChoices(r.repo, await service.describeConflicts(r.repo, "en"), [{ path: "text.txt", choice: "ours" }], "en");
   await assert.rejects(service.conflictFileToOpen(r.repo, "text.txt", "en"), /no longer in conflict/);

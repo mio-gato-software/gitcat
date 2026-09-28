@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 registerHooks({ resolve(specifier, context, next) { return specifier === "electron" ? { url: pathToFileURL(join(root, "test/helpers/electron-stub.mjs")).href, shortCircuit: true } : next(specifier, context); } });
-const { getSnapshot, loadHistory, prepareBranchDelivery, executePlan } = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
+const { getSnapshot, loadHistory, prepareBranchDelivery, executePlan, runGit } = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
 const { inspectFolder, startTracking, previewClone, cloneRepository, classifyCloneFailure, isProtectedFolder } =
   await import(pathToFileURL(join(root, "dist-electron/electron/project-setup.js")));
 const { parseCloneUrl, suggestedFolderName, folderNameProblem } = await import(pathToFileURL(join(root, "dist-electron/shared/clone-source.js")));
@@ -84,8 +84,8 @@ test("the person's init.defaultBranch names the first branch", async (t) => {
   mkdirSync(folder);
   writeFileSync(join(folder, "a.txt"), "a\n");
   writeFileSync(join(home, ".gitconfig"), "[init]\n\tdefaultBranch = trunk\n");
-  const previous = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM };
-  Object.assign(process.env, { HOME: home, XDG_CONFIG_HOME: join(home, ".config"), GIT_CONFIG_NOSYSTEM: "1" });
+  const previous = { GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL, HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM };
+  Object.assign(process.env, { GIT_CONFIG_GLOBAL: join(home, ".gitconfig"), HOME: home, XDG_CONFIG_HOME: join(home, ".config"), GIT_CONFIG_NOSYSTEM: "1" });
   t.after(() => { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
   const inspection = await inspectFolder(folder);
   assert.equal(inspection.preview.branch, "trunk");
@@ -262,7 +262,7 @@ async function silentServer(t) {
   return { url: `https://127.0.0.1:${server.address().port}/octo/slow.git`, connected: () => sockets.size > 0 };
 }
 
-test("a cancelled clone stops Git and removes only the folder it created", async (t) => {
+test("a cancelled clone stops Git and removes only the folder it created", { timeout: 20_000 }, async (t) => {
   const parent = scratch(t);
   writeFileSync(join(parent, "keep.txt"), "mine\n");
   const { url, connected } = await silentServer(t);
@@ -271,13 +271,15 @@ test("a cancelled clone stops Git and removes only the folder it created", async
   for (let attempt = 0; attempt < 200 && !connected(); attempt++) await new Promise((resolve) => setTimeout(resolve, 25));
   assert.ok(connected(), "Git is waiting on the remote");
   assert.equal(listing(parent).some((name) => name.startsWith(".slow.gitcat-clone-")), true, "the partial copy lives in a folder of its own");
+  const stoppedAt = Date.now();
   controller.abort();
   const outcome = await running;
+  assert.ok(Date.now() - stoppedAt < 10_000, "cancellation also stops transport helpers promptly");
   assert.deepEqual(outcome, { status: "cancelled", cleaned: true });
   assert.deepEqual(listing(parent), ["keep.txt"], "the partial copy is gone and nothing else was touched");
 });
 
-test("a stalled or unreachable clone reports why and leaves nothing behind", async (t) => {
+test("a stalled or unreachable clone reports why and leaves nothing behind", { timeout: 20_000 }, async (t) => {
   const parent = scratch(t);
   const { url } = await silentServer(t);
   const stalled = await cloneRepository({ url, parent, name: "stalled" }, { idleTimeoutMs: 300 });
@@ -299,6 +301,15 @@ test("a stalled or unreachable clone reports why and leaves nothing behind", asy
   assert.equal(classifyCloneFailure("git@github.com: Permission denied (publickey)."), "auth");
   assert.equal(classifyCloneFailure("Host key verification failed."), "host_key");
   assert.equal(classifyCloneFailure("fatal: unable to access 'https://x/': Could not resolve host: x"), "network");
+});
+
+test("a timed-out Git command also stops its network helper", { timeout: 20_000 }, async (t) => {
+  const folder = scratch(t);
+  const { url } = await silentServer(t);
+  const startedAt = Date.now();
+  await assert.rejects(runGit(folder, ["ls-remote", url], 1_000), /timed out/);
+  assert.ok(Date.now() - startedAt < 10_000, "the helper must not keep Git's pipes open");
+  assert.deepEqual(listing(folder), []);
 });
 
 test("opening, starting and cloning go through trusted IPC with the strict address check", async () => {
