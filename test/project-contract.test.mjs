@@ -29,8 +29,8 @@ test("el instalador de mac construye el app y lo reemplaza en Applications", asy
   assert.match(preview, /npm run build/);
   assert.match(preview, /npm run icons/);
   assert.match(preview, /npm exec -- electron-builder --mac --dir --(?:arm64|x64)/);
-  assert.match(preview, /release\/mac-(?:arm64|x64)\/GitCat\.app/);
-  assert.match(preview, /\.test-applications\/GitCat\.app/);
+  assert.match(preview, /release[\\/]mac-(?:arm64|x64)[\\/]GitCat\.app/);
+  assert.match(preview, /\.test-applications[\\/]GitCat\.app/);
   assert.match(script, /execFileSync\("\/usr\/bin\/ditto"/);
   assert.match(script, /renameSync\(temporaryDestination, destination\)/);
 });
@@ -41,6 +41,23 @@ test("el build tiene un asset de icono reproducible", async () => {
   assert.match(icon, /viewBox="0 0 1024 1024"/);
   assert.match(icon, /<path/);
   assert.doesNotMatch(icon, /<image|<script|href=/);
+});
+
+test("Windows conserva el instalador y la app portable en archivos distintos", async () => {
+  const { build } = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+  assert.deepEqual(build.win.target, ["nsis", "portable"]);
+  const expand = value => value.replace(/\$\{(\w+)\}/g, (_, key) => ({ productName: build.productName, version: "0.1.0", os: "win", arch: "x64", ext: "exe" })[key]);
+  assert.equal(expand(build.nsis.artifactName), "GitCat-0.1.0-win-x64-setup.exe");
+  assert.equal(expand(build.portable.artifactName), "GitCat-0.1.0-win-x64-portable.exe");
+  assert.notEqual(expand(build.nsis.artifactName), expand(build.portable.artifactName));
+});
+
+test("Windows rasteriza el icono sin una shell Unix ni una GPU", { skip: process.platform !== "win32" }, async () => {
+  execFileSync(process.execPath, [join(root, "scripts/generate-icons.mjs")], { cwd: root, stdio: "pipe" });
+  const png = await readFile(join(root, "build/icon.png"));
+  assert.equal(png.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+  assert.equal(png.readUInt32BE(16), 1024);
+  assert.equal(png.readUInt32BE(20), 1024);
 });
 
 test("la capa de Git evita ejecutar comandos libres", async () => {
