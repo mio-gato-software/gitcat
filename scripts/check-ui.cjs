@@ -115,9 +115,18 @@ app.whenReady().then(async () => {
   ipcMain.handle('history:load', (_, p, request) => service.loadHistory(p, request));
   ipcMain.handle('commit:detail', (_, p, hash) => service.getCommitDetail(p, hash));
   ipcMain.handle('commit:file-diff', (_, p, file) => service.getWorkingFileDiff(p, file));
-  ipcMain.handle('repo:snapshot', (_, p) => {
+  const snapshotReads = new Map();
+  ipcMain.handle('repo:snapshot', async (_, p) => {
     if (refreshError) throw new Error('A long example error for notification layout. '.repeat(30));
-    return service.getSnapshot(p || repo);
+    const request = Symbol();
+    const started = Date.now();
+    snapshotReads.set(request, started);
+    try { return await service.getSnapshot(p || repo); }
+    finally {
+      snapshotReads.delete(request);
+      const elapsed = Date.now() - started;
+      if (process.env.GITCAT_UI_DEBUG && elapsed > 5000) console.error(`Snapshot read took ${elapsed}ms`);
+    }
   });
   // The guided resolver runs on the real service; guides are kept here the way the main process keeps them.
   const guides = new Map();
@@ -210,7 +219,9 @@ app.whenReady().then(async () => {
   // Hosted Macs may have a small display; still exercise the requested desktop sizes.
   const win = new BrowserWindow({ width: 1480, height: 940, show: false, enableLargerThanScreen: true, webPreferences: { backgroundThrottling: false, preload: path.join(root, 'electron/preload.cjs') } });
   const js = code => win.webContents.executeJavaScript(code).catch((error) => { if (process.env.GITCAT_UI_DEBUG) console.error('JS FAILED:', code.slice(0, 300)); throw error; });
-  const waitFor = async (expression, timeoutMs = 20_000) => {
+  // A snapshot starts many Git processes in sequence. Hosted Windows runners can
+  // take more than 20 seconds for a read; keep each wait bounded by a minute.
+  const waitFor = async (expression, timeoutMs = 60_000) => {
     for (let attempt = 0; attempt < Math.ceil(timeoutMs / 50); attempt++) {
       // Only the truth of the expression crosses back: a form element, for one, cannot be cloned.
       if (await js(`Boolean(${expression})`)) return;
@@ -219,6 +230,7 @@ app.whenReady().then(async () => {
     if (process.env.GITCAT_UI_DEBUG) {
       console.error((await js(`document.body.innerText`)).slice(0, 3000));
       console.error('Fixture Git status:', git('status', '--porcelain'));
+      console.error('Pending snapshot ages (ms):', [...snapshotReads.values()].map(started => Date.now() - started));
     }
     throw new Error(`UI did not become ready: ${expression}`);
   };
