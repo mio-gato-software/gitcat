@@ -442,7 +442,7 @@ export async function openWorktree(cwd: string, target: string, language: Locale
     "That worktree is no longer available to open. Refresh the list and check its folder; your work remains in the current folder."));
   if (!entry || entry.bare || entry.prunable !== undefined) throw fail();
   try {
-    const common = async (path: string) => realpathSync(resolve(path, await checkedGit(path, ["rev-parse", "--git-common-dir"])));
+    const common = async (path: string) => realpathSync.native(resolve(path, await checkedGit(path, ["rev-parse", "--git-common-dir"])));
     if (await common(source.path) !== await common(target)) throw fail();
     const next = await getSnapshot(target);
     if (next.path !== target || !next.worktrees?.some(item => item.isCurrent && item.path === target)) throw fail();
@@ -1051,7 +1051,7 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
 
   let sourcePath: string;
   try {
-    sourcePath = realpathSync(repositoryPlan.localPath);
+    sourcePath = realpathSync.native(repositoryPlan.localPath);
     if (!statSync(sourcePath).isDirectory()) return blocked(`localPath "${repositoryPlan.localPath}" is not a directory`, "repository.localPath");
     accessSync(sourcePath, constants.R_OK | constants.W_OK);
   } catch {
@@ -2460,11 +2460,11 @@ export async function conflictFileToOpen(cwd: string, file: string, locale?: Loc
   const absolute = resolve(repoRoot, file);
   let real: string;
   try {
-    real = realpathSync(absolute);
+    real = realpathSync.native(absolute);
   } catch {
     throw new Error(localized(language, `${file} no está en el disco: uno de los lados lo borró. Elige qué versión conservar o mantén el borrado.`, `${file} is not on disk: one side deleted it. Choose which version to keep, or keep the deletion.`));
   }
-  const realRoot = realpathSync(repoRoot);
+  const realRoot = realpathSync.native(repoRoot);
   if (!real.startsWith(`${realRoot}${sep}`) || !statSync(real).isFile()) {
     throw new Error(localized(language, "La ruta no pertenece a este repositorio.", "The path does not belong to this repository."));
   }
@@ -3203,7 +3203,7 @@ function validateGithubPlan(plan: ActionPlan, locale?: Locale) {
 async function executeGithubRepositoryPlan(plan: ActionPlan, locale?: Locale) {
   const language = normalizeLocale(locale);
   validateGithubPlan(plan, language);
-  const source = realpathSync(plan.args.source);
+  const source = realpathSync.native(plan.args.source);
   const snapshot = await getSnapshot(source);
   if (snapshot.path !== plan.targetPath || snapshot.head !== plan.targetHead || snapshot.stateId !== plan.targetStateId) {
     throw new Error(localized(language, "El repositorio de origen cambió desde la validación. Prepara la acción de nuevo.", "The source repository changed after validation. Prepare the action again."));

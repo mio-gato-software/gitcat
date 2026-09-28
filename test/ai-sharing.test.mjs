@@ -59,7 +59,7 @@ function assertNoSecrets(text, where) {
  * untracked private key, an excluded folder, and an ordinary change the assistant may read.
  */
 function fixture() {
-  const repo = realpathSync(mkdtempSync(join(tmpdir(), "gitcat-sharing-")));
+  const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "gitcat-sharing-")));
   const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
   git("init", "-q", "-b", "main");
   git("config", "user.email", "t@example.test");
@@ -224,7 +224,7 @@ test("recovery redacts credentials that a failure printed", async () => {
 });
 
 test("conflict proposals never send excluded or secret files, and say why they were skipped", async () => {
-  const repo = realpathSync(mkdtempSync(join(tmpdir(), "gitcat-sharing-conflict-")));
+  const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "gitcat-sharing-conflict-")));
   const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
   git("init", "-q", "-b", "main");
   git("config", "user.email", "t@example.test");
@@ -291,7 +291,7 @@ for (const selectedOnly of [true, false]) {
 }
 
 test("removed credentials are still withheld from AI requests", async () => {
-  const repo = realpathSync(mkdtempSync(join(tmpdir(), "gitcat-sharing-removal-")));
+  const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "gitcat-sharing-removal-")));
   const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
   git("init", "-q", "-b", "main");
   git("config", "user.email", "t@example.test");

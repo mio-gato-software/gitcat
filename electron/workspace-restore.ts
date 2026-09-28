@@ -133,7 +133,7 @@ export function classifyFailure(path: string, error: unknown, options: InspectOp
 
 function sameLocation(saved: string, root: string) {
   if (resolve(saved) === resolve(root)) return true;
-  try { return realpathSync(saved) === resolve(root); } catch { return false; }
+  try { return realpathSync.native(saved) === realpathSync.native(root); } catch { return false; }
 }
 
 export function unavailableProject(path: string, reason: ProjectUnavailableReason, detail: string | undefined, options: InspectOptions = {}): UnavailableProject {

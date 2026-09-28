@@ -206,7 +206,8 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('clone:cancel', () => { cloneController?.abort(); return Boolean(cloneController); });
 
-  const win = new BrowserWindow({ width: 1480, height: 940, show: false, webPreferences: { preload: path.join(root, 'electron/preload.cjs') } });
+  // Hosted Macs may have a small display; still exercise the requested desktop sizes.
+  const win = new BrowserWindow({ width: 1480, height: 940, show: false, enableLargerThanScreen: true, webPreferences: { backgroundThrottling: false, preload: path.join(root, 'electron/preload.cjs') } });
   const js = code => win.webContents.executeJavaScript(code).catch((error) => { if (process.env.GITCAT_UI_DEBUG) console.error('JS FAILED:', code.slice(0, 300)); throw error; });
   const waitFor = async expression => {
     for (let attempt = 0; attempt < 400; attempt++) {

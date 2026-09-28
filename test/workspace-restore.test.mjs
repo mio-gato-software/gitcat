@@ -23,7 +23,7 @@ const { emptyMemory, recallRepository, relocateRepository, rememberRepository } 
   await import(pathToFileURL(join(root, "dist-electron/electron/memory.js")));
 
 // Real folders throughout; the realpath keeps macOS's /var → /private/var link out of the comparisons.
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), "gitcat-workspace-")));
+const scratch = realpathSync.native(mkdtempSync(join(tmpdir(), "gitcat-workspace-")));
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
 
 function makeRepo(path, remote) {
