@@ -2,6 +2,7 @@ import { trackOperation, cancelOperation, listOperations, operationCheckpoint } 
 import { legacyAppName, migrateProfileFiles, profilePath } from "./app-identity.js";
 import { exclusive } from "./repository-queue.js";
 import { opensSafely } from "./conflict-guide.js";
+import { installApplicationMenu } from "./application-menu.js";
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -336,11 +337,7 @@ async function createWindow() {
 
 app.whenReady().then(async () => {
   app.setName("GitCat");
-  app.setAboutPanelOptions({ applicationName: "GitCat" });
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    ...(process.platform === "darwin" ? [{ role: "appMenu" as const, label: "GitCat" }] : [{ role: "fileMenu" as const }]),
-    { role: "editMenu" }, { role: "viewMenu" }, { role: "windowMenu" }
-  ]));
+  installApplicationMenu(app, Menu, process);
   migrateProfileFiles(app.getPath("userData"));
   loadLlmConfig();
   loadMemory();
