@@ -246,6 +246,10 @@ app.whenReady().then(async () => {
   };
 
   await win.loadFile(path.join(root, 'dist/index.html'));
+  // macOS can clamp the constructor size to its virtual screen before the
+  // larger-than-screen option takes effect. Resize explicitly after creation.
+  win.setContentSize(1480, 940);
+  await waitFor('innerWidth === 1480');
   await js(`localStorage.setItem('gitcat-locale', 'es')`);
   await win.loadFile(path.join(root, 'dist/index.html'));
   // Five commits plus the uncommitted work, drawn as its own row above HEAD.
