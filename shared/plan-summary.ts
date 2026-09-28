@@ -62,7 +62,7 @@ function readsOnly(step: PlanStep) {
 }
 
 /** Steps that make commits on the branch they run on, which then are not on any remote until published. */
-const writesHistory = new Set(["commit", "merge", "rebase", "continue_operation", "skip_operation"]);
+const writesHistory = new Set(["commit", "merge", "sync_remote", "rebase", "continue_operation", "skip_operation"]);
 
 const pendingNames = (say: Say): Record<string, string> => ({
   merge: say("merge", "fusión"), rebase: say("rebase", "rebase"), cherry_pick: say("cherry-pick", "cherry-pick"),
@@ -104,6 +104,21 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
     const here = on && on !== "HEAD" ? on : say("this branch", "esta rama");
     const upstreamRemote = remoteOf(branchNamed(on)?.upstream, remotes);
     switch (step.operation) {
+      case "sync_remote":
+        summary.local.push(say(`Brings commits from ${args.ref} into ${args.name}, keeping your local commits.`, `Trae los commits de ${args.ref} a ${args.name}, conservando tus commits locales.`));
+        summary.from ??= args.ref; summary.to ??= args.name;
+        if (args.mode === "merge") conflictProne.push(say("merge", "fusión"));
+        break;
+      case "stash_push":
+        summary.local.push(say("Sets staged changes, unstaged changes and new files aside in a local stash, clearing them from the working files. Ignored files stay in place.", "Aparta las versiones preparadas, los cambios sin preparar y los archivos nuevos en un stash local, limpiándolos de los archivos de trabajo. Los archivos ignorados permanecen en su sitio."));
+        summary.finalState.push(say("You stay on this branch, with your changes available through Stash pop.", "Sigues en esta rama, con tus cambios disponibles mediante Stash pop."));
+        edited = 0;
+        break;
+      case "stash_pop":
+        summary.local.push(say(`Restores the latest stash onto ${here}, including staged versions.`, `Recupera el último stash en ${here}, incluyendo las versiones preparadas.`));
+        summary.finalState.push(say("The restored changes remain uncommitted. The stash is removed only after success; on failure it is kept.", "Los cambios recuperados siguen sin guardar. El stash solo se elimina al terminar bien; si falla, se conserva."));
+        conflictProne.push(say("stash restoration", "recuperación del stash"));
+        break;
       case "status": summary.local.push(say("Reads the project's current state. Nothing changes.", "Lee el estado actual del proyecto. No cambia nada.")); break;
       case "fetch": {
         const remote = upstreamRemote ?? (remotes.length === 1 ? remotes[0] : undefined);
@@ -123,7 +138,7 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         break;
       }
       case "checkout":
-        summary.local.push(say(`Switches to ${args.name}: the files on disk change to match it. Uncommitted changes come along when they do not clash.`, `Cambia a ${args.name}: los archivos del disco pasan a ser los de esa rama. Los cambios sin guardar te acompañan si no chocan.`));
+        summary.local.push(args.ref ? say(`Creates a local copy of ${args.ref} named ${args.name}, sets it to track that remote copy and switches to it.`, `Crea la copia local de ${args.ref} con el nombre ${args.name}, la vincula con esa copia remota y cambia a ella.`) : say(`Switches to ${args.name}: the files on disk change to match it. Uncommitted changes come along when they do not clash.`, `Cambia a ${args.name}: los archivos del disco pasan a ser los de esa rama. Los cambios sin guardar te acompañan si no chocan.`));
         break;
       case "create_branch":
         summary.local.push(args.from

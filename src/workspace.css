@@ -137,6 +137,11 @@
 .ref-tag > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ref-tag.head { color: var(--text); font-weight: 650; border-color: color-mix(in srgb, var(--lane, var(--coral)) 70%, transparent); }
 .ref-tag.remote { border-style: dashed; }
+.branch-sync-badge { display: inline-flex; flex: none; align-items: center; color: var(--muted); }
+.branch-sync-badge.diverged, .ref-tag.diverged { color: var(--amber, #e4be81); }
+.ref-tag.diverged { border-color: var(--amber, #e4be81); }
+.ref-tag .ref-cloud { display: inline-flex; flex: none; overflow: visible; }
+.ref-tag .ref-cloud:hover { color: var(--mint); }
 .ref-tag.tag { color: #d6bbea; background: #2c2636; border-color: #4a3d69; }
 .ref-tag.more { flex: none; padding: 0 5px; color: var(--secondary); background: var(--raised); border-color: var(--border); font-size: 10px; }
 .ref-tag.more { font-family: inherit; cursor: pointer; }

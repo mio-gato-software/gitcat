@@ -74,7 +74,7 @@ const LLM_REQUIRED_EN =
   "To understand what you write, GitCat needs a connected AI provider: only the model interprets requests, never local rules. Connect one in Settings; meanwhile every Git action works from the buttons.";
 
 function llmRequired(locale?: Locale) { return localized(locale, LLM_REQUIRED, LLM_REQUIRED_EN); }
-const allowedOperations = new Set<Operation>([...executableOperations, "github_create_repo", "ignore_path", "set_identity", "add_remote", "none"]);
+const allowedOperations = new Set<Operation>([...executableOperations, "sync_remote", "stash_push", "stash_pop", "github_create_repo", "ignore_path", "set_identity", "add_remote", "none"]);
 /**
  * Operations that run without asking. The bar is deliberately high: they must leave the working tree,
  * the branch history and everything already published untouched, and running one again must be
@@ -478,7 +478,7 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   const branches: Branch[] = branchRaw.split("\n").filter(Boolean).map((line) => {
     const [name, upstream, track, shortHash, subject, author, email, date] = line.split("\0");
     // A branch lives on a remote too when it has a counterpart there, whether or not it is its upstream.
-    const tracked = upstream && [...remoteRefs.values()].some((remote) => remote.ref === upstream);
+    const tracked = upstream && remoteBranchRaw.split("\n").some(line => line.split("\0")[0] === upstream);
     const remoteRef = (tracked ? upstream : undefined) ?? remoteRefs.get(name)?.ref;
     return {
       name,
@@ -494,6 +494,24 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     };
   });
   const localNames = new Set(branches.map((branch) => branch.name));
+  await Promise.all(branches.map(async (branch) => {
+    if (!branch.remoteRef) return;
+    if (branch.upstream === branch.remoteRef) {
+      branch.remoteAhead = branch.ahead;
+      branch.remoteBehind = branch.behind;
+      return;
+    }
+    const remoteHash = remoteBranchRaw.split("\n").find(line => line.split("\0")[0] === branch.remoteRef)?.split("\0")[1];
+    if (branch.lastCommit?.shortHash === remoteHash) {
+      branch.remoteAhead = 0;
+      branch.remoteBehind = 0;
+      return;
+    }
+    const counts = await checkedGit(repoRoot, ["rev-list", "--left-right", "--count", `refs/heads/${branch.name}...refs/remotes/${branch.remoteRef}`]);
+    const [ahead, behind] = counts.split(/\s+/).map(Number);
+    branch.remoteAhead = ahead;
+    branch.remoteBehind = behind;
+  }));
   for (const [name, remote] of remoteRefs) {
     if (localNames.has(name)) continue;
     branches.push({ name, remoteRef: remote.ref, presence: "remote", mergedInto: [], ahead: 0, behind: 0, isCurrent: false, lastCommit: remote.lastCommit });
@@ -511,10 +529,11 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   const changes = parseStatus(statusRaw);
   const stageRaw = await checkedGit(repoRoot, ["ls-files", "--stage", "-z"], true);
   const stage = parseStage(stageRaw);
+  const stashRaw = await checkedGit(repoRoot, ["stash", "list", "--format=%H"]);
   // A file can change while keeping exactly the same status code. Bind reviews to its
   // contents, the staged version, the branch refs and checkout, not just "M file.txt".
   const fingerprint = createHash("sha256").update(JSON.stringify([
-    head, currentBranch, statusRaw, branchRaw, remoteBranchRaw, pending, worktreeList, stageRaw
+    head, currentBranch, statusRaw, branchRaw, remoteBranchRaw, pending, worktreeList, stageRaw, stashRaw
   ]));
   for (const change of changes) {
     // Each change also gets a version of its own: the commit and branch it sits on, its status, the
@@ -548,6 +567,8 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     name: basename(repoRoot),
     head,
     stateId: fingerprint.digest("hex"),
+    stashCount: stashRaw.split("\n").filter(Boolean).length,
+    remoteRefs: remoteBranchRaw.split("\n").filter(Boolean).map(line => line.split("\0")[0]).filter(ref => !ref.endsWith("/HEAD")),
     currentBranch,
     defaultBranch,
     defaultBranchSource: defaultBranchResolution?.source,
@@ -747,7 +768,10 @@ function quoteToken(token: string) {
 
 function buildCommand(operation: Operation, args: Record<string, string>, argv: string[] = []) {
   switch (operation) {
-    case "checkout": return `git switch ${args.name}`;
+    case "sync_remote": return `git merge ${args.mode === "ff" ? "--ff-only" : "--no-edit"} refs/remotes/${args.ref}`;
+    case "stash_push": return `git stash push --include-untracked -m ${quoteToken(args.message ?? "")}`;
+    case "stash_pop": return "git stash pop --index stash@{0}";
+    case "checkout": return args.ref ? `git switch --track -c ${args.name} refs/remotes/${args.ref}` : `git switch ${args.name}`;
     case "create_branch": return `git switch -c ${args.name}${args.from ? ` ${args.from}` : ""}`;
     case "delete_branch": return `git branch -d ${args.name}`;
     case "rename_branch": return `git branch -m ${args.name} ${args.to}`;
@@ -2543,6 +2567,9 @@ function isUnattended(step: PlanStep) {
 
 function operationDraft(operation: Operation, args: Record<string, string>, snapshot?: RepoSnapshot, argv: string[] = [], locale: Locale = "es"): PlanDraft {
   const details: Partial<Record<Operation, [string, string, ActionPlan["risk"]]>> = {
+    sync_remote: [localized(locale, `Unir ${args.name} con ${args.ref}`, `Join ${args.name} with ${args.ref}`), localized(locale, "Trae los commits remotos y conserva todos tus commits locales. Si ambas copias avanzaron, crea una fusión que puede requerir resolver conflictos.", "Brings in remote commits and keeps all your local commits. If both copies advanced, creates a merge that may need conflict resolution."), "high"],
+    stash_push: [localized(locale, "Apartar los cambios (stash)", "Set changes aside (stash)"), localized(locale, "Guarda las versiones preparadas, los cambios sin preparar y los archivos nuevos en un stash local; limpia esos cambios de los archivos para seguir trabajando. Los archivos ignorados permanecen en su sitio.", "Saves staged versions, unstaged changes and new files in a local stash, then clears those changes from the files so you can keep working. Ignored files stay in place."), "medium"],
+    stash_pop: [localized(locale, "Recuperar el último stash (pop)", "Restore the latest stash (pop)"), localized(locale, "Recupera el último stash en la rama actual, incluyendo las versiones preparadas. Solo elimina el stash si la recuperación termina bien; si hay conflictos, conserva el stash y permite resolverlos.", "Restores the latest stash onto the current branch, including staged versions. Removes the stash only after successful restoration; if there are conflicts, keeps the stash so they can be resolved."), "medium"],
     status: [localized(locale, "Actualizar la vista del repositorio", "Refresh the repository view"), localized(locale, "Lee el estado actual sin modificar archivos.", "Reads the current state without changing files."), "low"],
     checkout: [localized(locale, `Cambiar a ${args.name}`, `Switch to ${args.name}`), localized(locale, "Cambia la rama activa conservando los cambios locales compatibles.", "Switches the active branch while preserving compatible local changes."), "medium"],
     create_branch: [localized(locale, `Crear y cambiar a ${args.name}`, `Create and switch to ${args.name}`), args.from
@@ -2578,7 +2605,7 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
   const detail = details[operation];
   if (!detail || operation === "none") return refused(localized(locale, "La operación solicitada no está permitida.", "The requested operation is not allowed."));
   const steps: PlanStep[] = [{ operation, args, ...(argv.length ? { argv } : {}), command: buildCommand(operation, args, argv), summary: detail[0], risk: detail[2] }];
-  return sequenceDraft(steps, detail[1], renameEffects(steps, snapshot));
+  return sequenceDraft(steps, detail[1], renameEffects(steps, snapshot), locale);
 }
 
 /**
@@ -2649,6 +2676,8 @@ async function writeCommitMessages(steps: PlanStep[], snapshot: RepoSnapshot, lo
 export async function prepareOperation(cwd: string, operation: Operation, args: Record<string, string> = {}, locale?: Locale) {
   const language = normalizeLocale(locale);
   const snapshot = await getSnapshot(cwd);
+  if (operation === "sync_remote") return prepareRemoteSync(snapshot, args.ref, language);
+  if (operation === "stash_pop" && !snapshot.stashCount) throw new Error(localized(language, "No hay cambios apartados. Usa Stash para guardar cambios primero.", "There are no set-aside changes. Use Stash to save changes first."));
   if (operation === "github_create_repo") {
     const preparation = await prepareGithubRepository(snapshot, {
       localPath: args.localPath ?? args.source,
@@ -2673,6 +2702,8 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
   const normalized = operation === "push" && args.setUpstream ? { setUpstream: args.setUpstream, branch: snapshot.currentBranch, ...(args.noVerify === "true" ? { noVerify: "true" } : {}) }
     : operation === "set_identity" ? { user: (args.user ?? "").trim(), email: (args.email ?? "").trim(), scope: typeof args.scope === "string" ? args.scope : "local" }
     : operation === "add_remote" ? { name: (args.name ?? "origin").trim() || "origin", url: (args.url ?? "").trim() }
+    : operation === "stash_push" ? { message: `GitCat set aside: ${snapshot.currentBranch}` }
+    : operation === "stash_pop" ? { stash: await checkedGit(snapshot.path, ["rev-parse", "--verify", "refs/stash"]) }
     : args;
   const draft = operationDraft(operation, normalized, snapshot, [], language);
   if (draft.allowed) validateExecution(bindPlan(snapshot, draft), snapshot, language);
@@ -3046,6 +3077,50 @@ export async function prepareMergeToDefault(cwd: string, branchName: string, loc
   return plan;
 }
 
+/** Fetch the chosen copy, then prepare a reviewed update that never replaces local history. */
+async function prepareRemoteSync(initial: RepoSnapshot, ref: string, language: Locale): Promise<ActionPlan> {
+  const fail = (es: string, en: string): never => { throw new Error(localized(language, es, en)); };
+  if (!ref || !isBranchNameSafe(ref) || !initial.remoteRefs?.includes(ref)) fail("La copia remota ya no existe. Actualiza la vista.", "The remote copy no longer exists. Refresh the view.");
+  if (initial.pending || initial.conflicts.length) fail("Termina o aborta la operación pendiente antes de actualizar la rama.", "Finish or abort the pending operation before updating the branch.");
+  if (initial.isDirty) fail("Hay cambios sin guardar. Usa Stash en la barra o guarda los cambios antes de actualizar; después puedes recuperarlos con Stash pop.", "There are unsaved changes. Use Stash in the toolbar or save changes before updating; restore them afterwards with Stash pop.");
+  const remote = [...initial.remotes].sort((a, b) => b.length - a.length).find(name => ref.startsWith(`${name}/`));
+  if (!remote) fail("No se reconoce el remoto. Actualiza la vista.", "The remote is not recognized. Refresh the view.");
+  const name = ref.slice(remote!.length + 1);
+  const localFor = (snapshot: RepoSnapshot) => {
+    const tracked = snapshot.branches.filter(branch => branch.presence !== "remote" && branch.upstream === ref);
+    const same = snapshot.branches.find(branch => branch.presence !== "remote" && branch.name === name);
+    if (same) return same;
+    if (tracked.length > 1) fail("Varias ramas locales siguen esta copia. Elige la rama local y usa Pull.", "Several local branches track this copy. Choose the local branch and use Pull.");
+    return tracked[0];
+  };
+  const occupied = localFor(initial)?.checkedOutIn;
+  if (occupied) fail(`La rama está abierta en ${occupied}. Abre ese proyecto para actualizarla.`, `The branch is open in ${occupied}. Open that project to update it.`);
+  await checkedGit(initial.path, ["fetch", "--prune", remote!]);
+  const snapshot = await getSnapshot(initial.path);
+  if (!snapshot.remoteRefs?.includes(ref)) fail("La rama desapareció del remoto. Tu rama local se conserva; revisa la lista actualizada.", "The branch disappeared from the remote. Your local branch is kept; review the updated list.");
+  if (snapshot.isDirty || snapshot.pending || snapshot.conflicts.length || snapshot.head !== initial.head || snapshot.currentBranch !== initial.currentBranch) fail("El repositorio cambió durante la actualización. Revisa la acción de nuevo.", "The repository changed during the update. Review the action again.");
+  const local = localFor(snapshot);
+  if (local?.checkedOutIn) fail(`La rama está abierta en ${local.checkedOutIn}. Abre ese proyecto para actualizarla.`, `The branch is open in ${local.checkedOutIn}. Open that project to update it.`);
+  const steps: PlanStep[] = [];
+  let rationale: string;
+  if (!local) {
+    const step = stepFrom("checkout", { name, ref }, [], language)!;
+    step.summary = localized(language, `Crear la copia local de ${ref} y cambiar a ella`, `Create the local copy of ${ref} and switch to it`);
+    steps.push(step);
+    rationale = step.summary;
+  } else {
+    const [ahead, behind] = (await checkedGit(snapshot.path, ["rev-list", "--left-right", "--count", `refs/heads/${local.name}...refs/remotes/${ref}`])).split(/\s+/).map(Number);
+    if (behind && !(await optionalGit(snapshot.path, ["merge-base", `refs/heads/${local.name}`, `refs/remotes/${ref}`]))) fail("Las copias no comparten historia. Revisa ambas ramas antes de decidir cómo unirlas.", "The copies do not share history. Review both branches before choosing how to join them.");
+    if (!local.isCurrent) steps.push(stepFrom("checkout", { name: local.name }, [], language)!);
+    if (behind) steps.push(stepFrom("sync_remote", { name: local.name, ref, mode: ahead ? "merge" : "ff" }, [], language)!);
+    if (!steps.length) return bindPlan(snapshot, refused(localized(language, `${local.name} ya contiene todos los commits de ${ref}. Tus commits locales se conservan; no hay nada que traer.`, `${local.name} already contains all commits of ${ref}. Your local commits are kept; there is nothing to bring in.`)));
+    rationale = localized(language, `Actualiza ${local.name} desde ${ref}: ${behind} commits por traer y ${ahead} commits locales que se conservan.`, `Updates ${local.name} from ${ref}: ${behind} commits to bring in and ${ahead} local commits to keep.`);
+  }
+  const plan = bindPlan(snapshot, sequenceDraft(steps, rationale, [localized(language, "Se comprobó el remoto al preparar este plan. No se publica nada. Si hay conflictos, la actualización se detiene para que puedas resolverlos o abortarla.", "The remote was checked when preparing this plan. Nothing is published. If there are conflicts, the update stops so you can resolve them or abort it.")], language));
+  validateExecution(plan, snapshot, language);
+  return plan;
+}
+
 /**
  * A step against the repository as it stands right now. Every step of a sequence goes through this,
  * including the ones prepared before the earlier steps moved the repository, so nothing runs on a
@@ -3055,6 +3130,14 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
   const language = normalizeLocale(locale);
   const { operation, args } = step;
   if (operation === "none" || !allowedOperations.has(operation)) throw new Error(localized(language, "La acción no está permitida.", "The action is not allowed."));
+  if (["sync_remote", "stash_push", "stash_pop", "rebase"].includes(operation) && (snapshot.pending || snapshot.conflicts.length)) throw new Error(localized(language, "Resuelve los conflictos y termina o aborta la operación pendiente antes de continuar.", "Resolve conflicts and finish or abort the pending operation before continuing."));
+  if (["sync_remote", "stash_pop", "rebase"].includes(operation) && snapshot.isDirty) throw new Error(localized(language, "Hay cambios sin guardar. Revísalos, guárdalos o usa Stash en la barra antes de continuar; después puedes recuperarlos con Stash pop.", "There are unsaved changes. Review them, save them or use Stash in the toolbar before continuing; you can restore them with Stash pop afterwards."));
+  if (operation === "stash_push" && (!snapshot.head || !snapshot.isDirty)) throw new Error(localized(language, "Necesitas una primera versión guardada y cambios sin guardar para usar Stash.", "You need a first saved version and unsaved changes to use Stash."));
+  if (operation === "stash_pop" && !snapshot.stashCount) throw new Error(localized(language, "No hay ningún stash que recuperar. Actualiza la vista.", "There is no stash to restore. Refresh the view."));
+  if (operation === "sync_remote") {
+    if (!args.ref || !snapshot.remoteRefs?.includes(args.ref) || !isBranchNameSafe(args.ref) || !["ff", "merge"].includes(args.mode)) throw new Error(localized(language, "La referencia remota cambió. Actualiza y revisa la acción de nuevo.", "The remote reference changed. Refresh and review the action again."));
+    if (snapshot.currentBranch !== args.name) throw new Error(localized(language, "La rama activa cambió. Revisa la actualización de nuevo.", "The active branch changed. Review the update again."));
+  }
   const branchArg = args.name || args.onto;
   if (branchArg && !isBranchNameSafe(branchArg)) throw new Error(localized(language, "Nombre de rama no válido.", "Invalid branch name."));
   if (args.to && !isBranchNameSafe(args.to)) throw new Error(localized(language, "Nombre de rama no válido.", "Invalid branch name."));
@@ -3063,6 +3146,7 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
   if (operation === "commit" && (!args.message?.trim() || args.message.length > commitMessageLimit)) throw new Error(localized(language, "El mensaje de commit no es válido.", "The commit message is invalid."));
   if (operation === "commit" && !snapshot.changes.length) throw new Error(localized(language, "No hay cambios locales para confirmar.", "There are no local changes to commit."));
   if (operation === "checkout" && !snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(localized(language, `La rama ${args.name} no existe localmente.`, `Branch ${args.name} does not exist locally.`));
+  if (operation === "checkout" && args.ref && (!snapshot.remoteRefs?.includes(args.ref) || !isBranchNameSafe(args.ref) || snapshot.branches.some(branch => branch.name === args.name && branch.presence !== "remote"))) throw new Error(localized(language, "La copia local o remota cambió. Revisa la acción de nuevo.", "The local or remote copy changed. Review the action again."));
   // A start point is a commit hash picked in the graph: only hex, so it can never read as an option.
   if (operation === "create_branch" && args.from !== undefined && !/^[0-9a-f]{7,40}$/i.test(args.from)) throw new Error(localized(language, "El commit de partida no es válido.", "The starting commit is invalid."));
   if (operation === "create_branch" && snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(localized(language, `La rama ${args.name} ya existe.`, `Branch ${args.name} already exists.`));
@@ -3090,7 +3174,8 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
     if (remoteOnly) throw new Error(localized(language, `La rama ${target} solo existe en el remoto. Cámbiate a ella primero para tenerla en local.`, `Branch ${target} only exists on the remote. Switch to it first to create it locally.`));
   }
   if (operation === "merge" && args.name === snapshot.currentBranch) throw new Error(localized(language, `No puedes fusionar ${args.name} consigo misma.`, `You cannot merge ${args.name} into itself.`));
-  if (operation === "rebase" && !snapshot.branches.some((branch) => branch.name === args.onto) && !isCurrentUpstream(snapshot, args.onto)) throw new Error(localized(language, `La rama base ${args.onto} no existe localmente.`, `Base branch ${args.onto} does not exist locally.`));
+  if (operation === "rebase" && !snapshot.branches.some((branch) => branch.name === args.onto) && !isCurrentUpstream(snapshot, args.onto) && !snapshot.remoteRefs?.some(ref => `refs/remotes/${ref}` === args.onto)) throw new Error(localized(language, `La rama base ${args.onto} no existe. Actualiza la lista.`, `Base branch ${args.onto} does not exist. Refresh the list.`));
+  if (operation === "rebase" && (snapshot.currentBranch === "HEAD" || args.onto === snapshot.currentBranch)) throw new Error(localized(language, "Elige otra rama como base y trabaja desde una rama local.", "Choose another branch as the base and work from a local branch."));
   if (["abort_operation", "continue_operation", "skip_operation"].includes(operation)) {
     if (!snapshot.pending) throw new Error(localized(language, "No hay ninguna operación de Git a medias.", "There is no half-finished Git operation."));
     if (operation === "skip_operation" && !canSkip(snapshot.pending.kind)) {
@@ -3272,7 +3357,14 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
   const { args } = step;
   switch (step.operation) {
     case "status": return "";
-    case "checkout": return reportedGit(cwd, ["switch", args.name]);
+    case "checkout": return reportedGit(cwd, args.ref ? ["switch", "--track", "-c", args.name, `refs/remotes/${args.ref}`] : ["switch", args.name]);
+    case "sync_remote": return reportedGit(cwd, ["merge", args.mode === "ff" ? "--ff-only" : "--no-edit", `refs/remotes/${args.ref}`]);
+    case "stash_push": return reportedGit(cwd, ["stash", "push", "--include-untracked", "-m", args.message]);
+    case "stash_pop": {
+      const latest = await checkedGit(cwd, ["rev-parse", "--verify", "refs/stash"]);
+      if (latest !== args.stash) throw new StalePlanError(localized(locale, "El último stash cambió. Revisa la recuperación de nuevo.", "The latest stash changed. Review restoration again."));
+      return reportedGit(cwd, ["stash", "pop", "--index", "stash@{0}"]);
+    }
     case "create_branch": return reportedGit(cwd, ["switch", "-c", args.name, ...(args.from ? [args.from] : [])]);
     case "delete_branch": return reportedGit(cwd, ["branch", "-d", "--", args.name]);
     // "-m" and never "-M": Git must refuse when the new name is taken, rather than overwrite a branch.
@@ -3441,6 +3533,7 @@ async function executePlanBody(cwd: string, plan: ActionPlan, locale?: Locale, a
 export type FailedPlanRecord = { plan: ActionPlan; outcomes: StepOutcome[]; stale: boolean };
 
 const hooksFor: Partial<Record<Operation, string[]>> = {
+  sync_remote: ["pre-merge-commit", "prepare-commit-msg", "commit-msg"],
   commit: ["pre-commit", "prepare-commit-msg", "commit-msg"],
   merge: ["pre-merge-commit", "prepare-commit-msg", "commit-msg"],
   push: ["pre-push"],
