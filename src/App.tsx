@@ -1894,10 +1894,16 @@ function Welcome({ onPractice, practiceBusy, onOpen, onClone, onTrack, config, o
   const { t } = useI18n();
   // Without Git nothing below can work, so a missing or broken Git is said first, with how to get it.
   const gitMissing = readiness.report && !readiness.report.repoPath && readiness.report.git.status !== "ok";
-  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card first-run"><div className="welcome-mark"><CatMark size={42} /></div><div className="eyebrow">{t("branchWorkspace")}</div><h1>{t("yourGitClearer")}</h1><p>{t("welcomeCopy")}</p>{gitMissing && <ReadinessChecklist readiness={readiness} items={["git"]} t={t} />}<ProjectStartOptions onOpen={onOpen} onClone={onClone} onTrack={onTrack} />
+  return <div className="welcome"><div className="welcome-glow" /><div className="welcome-card first-run">
+    <div className="welcome-intro"><div className="welcome-mark"><CatMark size={42} /></div><div className="eyebrow">{t("branchWorkspace")}</div><h1>{t("yourGitClearer")}</h1><p>{t("welcomeCopy")}</p></div>
+    {gitMissing && <ReadinessChecklist readiness={readiness} items={["git"]} t={t} />}
+    <div className="welcome-content"><div className="welcome-projects">
+    <ProjectStartOptions onOpen={onOpen} onClone={onClone} onTrack={onTrack} />
     <div className="welcome-direct"><strong>{t("welcomeDirectTitle")}</strong><div className="welcome-features"><span><GitCommitHorizontal size={14} /> {t("welcomeDirectSave")}</span><span><GitBranch size={14} /> {t("welcomeDirectBranches")}</span><span><ArrowUpFromLine size={14} /> {t("welcomeDirectSync")}</span><span><GitMerge size={14} /> {t("welcomeDirectConflicts")}</span></div></div>
+    </div><div className="welcome-extras">
     <div className="practice-welcome"><strong>{t("practiceWelcomeTitle")}</strong><p>{t("practiceWelcomeCopy")}</p><button className="outline-button" disabled={practiceBusy} onClick={onPractice}><Lightbulb size={15} />{t("practiceWelcomeAction")}</button></div>
     <div className={`welcome-ai ${config.configured ? "connected" : ""}`}><Sparkles size={15} /><div><strong>{config.configured ? t("welcomeAiConnected", { model: config.model }) : t("welcomeAiTitle")}</strong><span>{t("welcomeAiCopy")}</span></div>{!config.configured && <button className="outline-button small" onClick={onConnect}>{t("connectAssistant")}</button>}</div>
+    </div></div>
   </div></div>;
 }
 
