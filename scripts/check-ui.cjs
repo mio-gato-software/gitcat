@@ -216,7 +216,10 @@ app.whenReady().then(async () => {
       if (await js(`Boolean(${expression})`)) return;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
-    if (process.env.GITCAT_UI_DEBUG) console.error((await js(`document.body.innerText`)).slice(0, 3000));
+    if (process.env.GITCAT_UI_DEBUG) {
+      console.error((await js(`document.body.innerText`)).slice(0, 3000));
+      console.error('Fixture Git status:', git('status', '--porcelain'));
+    }
     throw new Error(`UI did not become ready: ${expression}`);
   };
   const capture = async name => {
@@ -593,8 +596,11 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('aside.sidebar').textContent.includes('outside') || (window.dispatchEvent(new Event('focus')), false)`);
   // Credential-like files appear normally in the save list, with no secret warning or review gate.
   fs.writeFileSync(path.join(repo, '.env'), 'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n');
-  await js(`document.querySelector('.inspector-tabs button').click()`);
-  await waitFor(`document.querySelector('.inspector .change-list')?.textContent.includes('.env') || (window.dispatchEvent(new Event('focus')), false)`);
+  // Background reads preserve a selected commit. Wait for the new working row,
+  // then select it explicitly instead of relying on incidental selection timing.
+  await waitFor(`document.querySelector('.commit-row.wip') || (window.dispatchEvent(new Event('focus')), false)`);
+  await js(`document.querySelector('.commit-row.wip').click()`);
+  await waitFor(`document.querySelector('.inspector .change-list')?.textContent.includes('.env')`);
   assert.equal(await js(`Boolean(document.querySelector('.secret-warning, .change-badge.secret'))`), false);
   assert.doesNotMatch(await js(`document.querySelector('.changes-view').innerText`), /posible secreto|Revisé estos archivos/);
   await capture('save-without-secret-warning');
