@@ -402,7 +402,28 @@
 .identity-modal small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
 
 /* First run: open a project and use Git right away; the AI assistant is offered as optional help. */
-.welcome-card.first-run { width: min(500px, calc(100vw - 48px)); max-height: calc(100% - 32px); overflow-y: auto; }
+.welcome-card.first-run { width: min(1120px, calc(100% - 48px)); max-height: calc(100% - 32px); padding: 32px; overflow-y: auto; }
+.welcome-intro { max-width: 680px; margin: 0 auto 24px; }
+.welcome-intro .welcome-mark { margin-bottom: 16px; }
+.welcome-intro p { margin-bottom: 0; }
+.welcome-content { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+.welcome-projects, .welcome-extras { min-width: 0; }
+.welcome-extras { display: grid; gap: 16px; text-align: left; }
+.welcome-extras .practice-welcome { margin: 0; padding: 18px; }
+.welcome-extras .practice-welcome > strong { display: block; color: var(--text); font-size: 14px; }
+.welcome-extras .practice-welcome p { margin: 8px 0 16px; }
+.welcome-extras .welcome-ai { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: start; margin: 0; padding: 18px; }
+.welcome-extras .welcome-ai button { grid-column: 2; justify-self: start; white-space: normal; text-align: left; }
+.welcome-card.first-run > .readiness-checklist { margin-bottom: 20px; }
+@media (max-height: 760px) and (min-width: 901px) {
+  .welcome-card.first-run { padding: 24px; }
+  .welcome-intro { margin-bottom: 20px; }
+  .welcome-intro .welcome-mark { width: 48px; height: 48px; margin-bottom: 10px; }
+}
+@media (max-width: 900px) {
+  .welcome-card.first-run { width: calc(100% - 32px); padding: 24px; }
+  .welcome-content { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+}
 .welcome-direct { margin-top: 22px; }
 .welcome-direct > strong { display: block; color: var(--secondary); font-size: 11px; }
 .welcome-direct .welcome-features { margin-top: 10px; }

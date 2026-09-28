@@ -22,6 +22,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p electron/tsconfig.json",
     "test": "tsc -p electron/tsconfig.json && node --test test/*.test.mjs",
     "test:ui": "npm run build && electron scripts/check-ui.cjs",
+    "test:welcome": "npm run build && node scripts/check-welcome.cjs",
     "start": "electron .",
     "lint": "eslint . --max-warnings 0",
     "check": "npm run lint && npm run typecheck && npm test && npm run test:ui"
