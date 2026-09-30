@@ -527,13 +527,26 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   const integration = await countNotIntegrated(repoRoot, head, currentBranch, defaultBranch);
   const pending = await readPendingOperation(repoRoot);
   const changes = parseStatus(statusRaw);
+  // Keep sibling folder status out of operation bindings: edits there must update the graph without
+  // invalidating a review of work in this folder. Only inspect registered folders in this repository.
+  const worktreeBinding = JSON.stringify(worktreeList);
+  const commonDirectory = realpathSync.native(resolve(repoRoot, await checkedGit(repoRoot, ["rev-parse", "--git-common-dir"])));
+  await Promise.all(worktreeList.map(async (worktree) => {
+    if (worktree.bare || worktree.prunable !== undefined) return;
+    if (worktree.isCurrent) { worktree.changes = changes; return; }
+    try {
+      const common = realpathSync.native(resolve(worktree.path, await checkedGit(worktree.path, ["rev-parse", "--git-common-dir"])));
+      if (common !== commonDirectory) throw new Error("Worktree folder belongs to another repository.");
+      worktree.changes = parseStatus(await checkedGit(worktree.path, ["--no-optional-locks", "status", "--short", "--untracked-files=all", "-z"], true));
+    } catch { worktree.statusUnavailable = true; }
+  }));
   const stageRaw = await checkedGit(repoRoot, ["ls-files", "--stage", "-z"], true);
   const stage = parseStage(stageRaw);
   const stashRaw = await checkedGit(repoRoot, ["stash", "list", "--format=%H"]);
   // A file can change while keeping exactly the same status code. Bind reviews to its
   // contents, the staged version, the branch refs and checkout, not just "M file.txt".
   const fingerprint = createHash("sha256").update(JSON.stringify([
-    head, currentBranch, statusRaw, branchRaw, remoteBranchRaw, pending, worktreeList, stageRaw, stashRaw
+    head, currentBranch, statusRaw, branchRaw, remoteBranchRaw, pending, worktreeBinding, stageRaw, stashRaw
   ]));
   for (const change of changes) {
     // Each change also gets a version of its own: the commit and branch it sits on, its status, the

@@ -142,6 +142,14 @@
 .ref-tag.diverged { border-color: var(--amber, #e4be81); }
 .ref-tag .ref-cloud { display: inline-flex; flex: none; overflow: visible; }
 .ref-tag .ref-cloud:hover { color: var(--mint); }
+.ref-tag .ref-worktree { display: inline-flex; flex: none; overflow: visible; }
+.worktree-preview { padding: 16px; display: grid; gap: 12px; }
+.worktree-preview h3 { display: flex; align-items: center; gap: 8px; margin: 0; }
+.worktree-preview code { overflow-wrap: anywhere; font-size: 12px; }
+.worktree-preview p { color: var(--secondary); margin: 0; font-size: 13px; line-height: 1.5; }
+.worktree-preview ul { list-style: none; padding: 0; margin: 0; }
+.worktree-preview li { display: grid; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.worktree-preview li span { color: var(--secondary); font-size: 11px; }
 .ref-tag.tag { color: #d6bbea; background: #2c2636; border-color: #4a3d69; }
 .ref-tag.more { flex: none; padding: 0 5px; color: var(--secondary); background: var(--raised); border-color: var(--border); font-size: 10px; }
 .ref-tag.more { font-family: inherit; cursor: pointer; }

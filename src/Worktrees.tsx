@@ -29,6 +29,8 @@ export function Worktrees({ snapshot, locale, onClose, onOpen }: {
           <strong>{worktree.branch || (worktree.bare ? text('Bare repository', 'Repositorio sin carpeta de trabajo') : worktree.detached ? text('Detached — no active branch', 'Separado — sin rama activa') : text('No saved version yet', 'Sin versión guardada todavía'))}</strong>
           <code>{worktree.path}</code>
           <span>{worktree.isMain ? text('Main folder', 'Carpeta principal') : text('Linked worktree', 'Worktree vinculado')}{worktree.isCurrent && ` · ${text('Open here', 'Abierto aquí')}`}{worktree.head && ` · ${worktree.head.slice(0, 7)}`}</span>
+          {worktree.changes && <span>{worktree.changes.length ? text(`${worktree.changes.length} files with uncommitted changes`, `${worktree.changes.length} archivos con cambios sin guardar`) : text('No uncommitted changes', 'Sin cambios sin guardar')}</span>}
+          {worktree.statusUnavailable && <span>{text('Could not read this folder — check its location, then refresh', 'No se pudo leer esta carpeta — revisa su ubicación y actualiza')}</span>}
           {worktree.locked !== undefined && <span>{text('Locked against removal', 'Protegido contra eliminación')}{worktree.locked && `: ${worktree.locked}`}</span>}
           {worktree.prunable !== undefined && <span>{text('Unavailable — check the folder, then refresh', 'No disponible — revisa la carpeta y actualiza')}{worktree.prunable && `: ${worktree.prunable}`}</span>}
         </div>
