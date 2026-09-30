@@ -3058,7 +3058,7 @@ function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, on
       {tool(ArrowDownToLine, t("pull"), onPull, busy, t("pullTitle"))}
       {tool(ArrowUpFromLine, t("push"), onPush, busy, t("pushTitle"))}
       {tool(Archive, t("stash"), onStash, busy || !snapshot.isDirty || !snapshot.head || Boolean(snapshot.pending) || Boolean(snapshot.conflicts.length), t("stashTitle"))}
-      {tool(ArchiveRestore, t("stashPop", { count: snapshot.stashCount ?? 0 }), onStashPop, busy || !snapshot.stashCount || snapshot.isDirty || Boolean(snapshot.pending) || Boolean(snapshot.conflicts.length), snapshot.isDirty ? t("stashPopDirty") : t("stashPopTitle"))}
+      {tool(ArchiveRestore, t("stashPop", { count: snapshot.stashCount ?? 0 }), onStashPop, busy || !snapshot.stashCount || Boolean(snapshot.pending) || Boolean(snapshot.conflicts.length), t("stashPopTitle"))}
       <span className="tool-divider" aria-hidden="true" />
       {tool(GitBranchPlus, t("branchTool"), onBranch, busy, t("newBranch"))}
     </div>

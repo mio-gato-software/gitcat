@@ -2685,6 +2685,38 @@ async function writeCommitMessages(steps: PlanStep[], snapshot: RepoSnapshot, lo
   return steps.map((step) => pending(step) ? stepFrom("commit", { ...step.args, message }, [], locale) ?? step : step);
 }
 
+/** Pop can keep unrelated edits, but --index needs a clean index and new files must not collide. */
+async function validateStashPop(snapshot: RepoSnapshot, stash: string, language: Locale) {
+  const staged = snapshot.changes.filter(change => change.xy && ![" ", "?"].includes(change.xy[0]));
+  if (staged.length) throw new Error(localized(language,
+    `Hay cambios preparados en ${staged.map(c => c.path).join(", ")}. Usa Revisar y guardar antes de Pop para conservar lo preparado. El stash sigue disponible; no se cambió ningún archivo.`,
+    `There are staged changes in ${staged.map(c => c.path).join(", ")}. Use Review and save before Pop to preserve staged work. The stash is still available; no files were changed.`));
+  const paths = (raw: string) => raw.split("\0").filter(Boolean);
+  const tracked = paths(await checkedGit(snapshot.path, ["diff", "--name-only", "--no-renames", "-z", `${stash}^1`, stash, "--"], true));
+  tracked.push(...paths(await checkedGit(snapshot.path, ["diff", "--name-only", "--no-renames", "-z", `${stash}^1`, `${stash}^2`, "--"], true)));
+  const untrackedParent = await optionalGit(snapshot.path, ["rev-parse", "--verify", "--quiet", `${stash}^3`]);
+  const untracked = untrackedParent ? paths(await checkedGit(snapshot.path, ["ls-tree", "-r", "--name-only", "-z", untrackedParent], true)) : [];
+  const normalize = (path: string) => process.platform === "win32" ? path.toLowerCase() : path;
+  const overlaps = (a: string, b: string) => {
+    a = normalize(a); b = normalize(b);
+    return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+  };
+  const blockers = new Set(snapshot.changes.filter(change => changePaths(change).some(path =>
+    [...tracked, ...untracked].some(saved => overlaps(path, saved)))).map(change => change.path));
+  // Ignored files are absent from status, but a stash containing new files could still collide with them.
+  for (const path of untracked) {
+    try { lstatSync(join(snapshot.path, path)); blockers.add(path); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOTDIR") blockers.add(path);
+      else if (code !== "ENOENT") throw error;
+    }
+  }
+  if (blockers.size) throw new Error(localized(language,
+    `El stash necesita archivos que ya tienen trabajo local: ${[...blockers].join(", ")}. Revisa y guarda ese trabajo primero, o mueve los archivos nuevos a un lugar seguro, y vuelve a Pop. El stash sigue disponible; no se cambió ningún archivo.`,
+    `The stash needs files that already have local work: ${[...blockers].join(", ")}. Review and save that work first, or move new files somewhere safe, then return to Pop. The stash is still available; no files were changed.`));
+}
+
 /** Direct controls in the interface: the operation is already known, so no interpretation is needed. */
 export async function prepareOperation(cwd: string, operation: Operation, args: Record<string, string> = {}, locale?: Locale) {
   const language = normalizeLocale(locale);
@@ -2718,10 +2750,14 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
     : operation === "stash_push" ? { message: `GitCat set aside: ${snapshot.currentBranch}` }
     : operation === "stash_pop" ? { stash: await checkedGit(snapshot.path, ["rev-parse", "--verify", "refs/stash"]) }
     : args;
+  if (operation === "stash_pop") await validateStashPop(snapshot, normalized.stash, language);
   const draft = operationDraft(operation, normalized, snapshot, [], language);
   if (draft.allowed) validateExecution(bindPlan(snapshot, draft), snapshot, language);
   const effects = draft.allowed
-    ? [...await pendingEffects(snapshot, operation, language), ...(operation === "set_identity" ? await identityEffects(snapshot, normalized, language) : [])]
+    ? [...await pendingEffects(snapshot, operation, language), ...(operation === "set_identity" ? await identityEffects(snapshot, normalized, language) : []),
+      ...(operation === "stash_pop" && snapshot.isDirty ? [localized(language,
+        "Tus cambios actuales en otros archivos se conservan. El stash se recupera en la rama actual y solo se elimina si termina bien.",
+        "Your current changes in other files are kept. The stash is restored onto the current branch and removed only after success.")] : [])]
     : [];
   return bindPlan(snapshot, effects.length ? { ...draft, effects: [...(draft.effects ?? []), ...effects] } : draft);
 }
@@ -3144,7 +3180,7 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
   const { operation, args } = step;
   if (operation === "none" || !allowedOperations.has(operation)) throw new Error(localized(language, "La acción no está permitida.", "The action is not allowed."));
   if (["sync_remote", "stash_push", "stash_pop", "rebase"].includes(operation) && (snapshot.pending || snapshot.conflicts.length)) throw new Error(localized(language, "Resuelve los conflictos y termina o aborta la operación pendiente antes de continuar.", "Resolve conflicts and finish or abort the pending operation before continuing."));
-  if (["sync_remote", "stash_pop", "rebase"].includes(operation) && snapshot.isDirty) throw new Error(localized(language, "Hay cambios sin guardar. Revísalos, guárdalos o usa Stash en la barra antes de continuar; después puedes recuperarlos con Stash pop.", "There are unsaved changes. Review them, save them or use Stash in the toolbar before continuing; you can restore them with Stash pop afterwards."));
+  if (["sync_remote", "rebase"].includes(operation) && snapshot.isDirty) throw new Error(localized(language, "Hay cambios sin guardar. Revísalos, guárdalos o usa Stash en la barra antes de continuar; después puedes recuperarlos con Stash pop.", "There are unsaved changes. Review them, save them or use Stash in the toolbar before continuing; you can restore them with Stash pop afterwards."));
   if (operation === "stash_push" && (!snapshot.head || !snapshot.isDirty)) throw new Error(localized(language, "Necesitas una primera versión guardada y cambios sin guardar para usar Stash.", "You need a first saved version and unsaved changes to use Stash."));
   if (operation === "stash_pop" && !snapshot.stashCount) throw new Error(localized(language, "No hay ningún stash que recuperar. Actualiza la vista.", "There is no stash to restore. Refresh the view."));
   if (operation === "sync_remote") {
@@ -3376,6 +3412,7 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     case "stash_pop": {
       const latest = await checkedGit(cwd, ["rev-parse", "--verify", "refs/stash"]);
       if (latest !== args.stash) throw new StalePlanError(localized(locale, "El último stash cambió. Revisa la recuperación de nuevo.", "The latest stash changed. Review restoration again."));
+      await validateStashPop(await getSnapshot(cwd), latest, normalizeLocale(locale));
       return reportedGit(cwd, ["stash", "pop", "--index", "stash@{0}"]);
     }
     case "create_branch": return reportedGit(cwd, ["switch", "-c", args.name, ...(args.from ? [args.from] : [])]);

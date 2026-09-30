@@ -453,10 +453,17 @@ app.whenReady().then(async () => {
   await waitFor(`[...document.querySelectorAll('.tool-button')].some(node => node.innerText.trim() === 'Pop (1)' && !node.disabled)`);
   assert.equal(git('status', '--porcelain'), '');
   assert.equal(git('branch', '--show-current'), 'feature/new-menu');
+  fs.writeFileSync(path.join(repo, 'after-stash.txt'), 'keep current work');
+  await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+  await waitFor(`document.querySelector('.toolbar-delivery.is-dirty')`);
+  assert.equal(await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Pop (1)').disabled`), false, 'Current new files do not hide stash restoration');
   await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Pop (1)').click()`);
   await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
   await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
   await waitFor(`[...document.querySelectorAll('.tool-button')].some(node => node.innerText.trim() === 'Stash' && !node.disabled)`);
+  await waitFor(`[...document.querySelectorAll('.tool-button')].some(node => node.innerText.trim() === 'Pop (0)')`);
+  assert.equal(fs.readFileSync(path.join(repo, 'after-stash.txt'), 'utf8'), 'keep current work');
+  fs.unlinkSync(path.join(repo, 'after-stash.txt'));
   assert.equal(git('status', '--porcelain'), before, 'Pop restores the original edits and new file');
   // Graph columns resize from their header edges, remember the width, and reset on a double click.
   const refsCell = () => js(`Math.round(document.querySelector('.graph-columns > span').getBoundingClientRect().width)`);
