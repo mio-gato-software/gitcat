@@ -4,6 +4,15 @@ import { autoRefreshIntervalMs, backgroundFetchDue, refreshedProject, remoteRefr
 const snapshot = (stateId, extra = {}) => ({ path: '/repo', stateId, currentBranch: 'main', ...extra });
 const project = (value) => ({ id: 'tab', snapshot: value, loadedAt: '2026-09-25T10:00:00.000Z' });
 
+test('sibling folder edits refresh the graph without changing the current operation binding', () => {
+  const current = project(snapshot('same', { worktrees: [{ path: '/topic', changes: [] }] }));
+  const latest = snapshot('same', { worktrees: [{ path: '/topic', changes: [{ path: 'new', status: 'A' }] }] });
+  const next = refreshedProject(current, latest, 'now');
+  assert.equal(next.snapshot, latest);
+  assert.equal(next.snapshot.stateId, current.snapshot.stateId);
+  assert.equal(refreshedProject(next, structuredClone(latest), 'later').snapshot, latest);
+});
+
 test('an unchanged repository keeps its snapshot and only records the new read time', () => {
   const current = project(snapshot('same'));
   const next = refreshedProject(current, snapshot('same', { currentBranch: 'stale-copy' }), '2026-09-25T10:00:30.000Z');

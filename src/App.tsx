@@ -24,7 +24,8 @@ import type { BranchNode } from "../shared/branch-tree";
 import { branchSuggestions, namingCompletions, prefixAliases, variantHint } from "../shared/branch-consistency";
 import type { BranchSuggestion } from "../shared/branch-consistency";
 import { isProtectedBranch, lifecycleOf, staleDays } from "../shared/branch-lifecycle";
-import { buildCommitGraph, familyColour, maxLanes, withWorkInProgress, workInProgressHash } from "../shared/commit-graph";
+import { buildCommitGraph, familyColour, maxLanes } from "../shared/commit-graph";
+import { graphWorktrees, withWorktreeWork, worktreeWipHash } from "../shared/worktree-graph";
 import { pullRequestReference } from "../shared/repository-activity";
 import { workOverview } from "../shared/work-overview";
 import { completionSummary, planSummary, type CompletionSummary } from "../shared/plan-summary";
@@ -43,7 +44,7 @@ import type {
   ActionPlan, AiConnectionProblem, AiSharingPreview, AiSharingPurpose, AssistantUnavailable, Branch, ClonePreview, CloneResult, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
   ConflictChoice, ConflictChoiceRequest, ConflictChoiceResult, ConflictGuide, ConflictGuideFile, ConflictSideId, ConflictSideIdentity,
   FileChange, FileStats, FolderPreview, FolderProblem, HistoryScope, LlmConfig, LlmConnectResult, Locale, Operation, PendingOperationKind, ProjectLocateResult, ProjectSelectResult, ProjectUnavailableReason,
-  RecoveryAction, RecoveryReport, RepoSnapshot, SecretFinding, UnavailableProject, WithheldFile, AuthorReadiness, HelpPage, IdentityScope
+  RecoveryAction, RecoveryReport, RepoSnapshot, SecretFinding, UnavailableProject, WithheldFile, AuthorReadiness, HelpPage, IdentityScope, Worktree
 } from "../shared/types";
 import { localeTag, readLocale, translate, writeLocale, type MessageKey, type Translate } from "./i18n";
 import { folderNameProblem, parseCloneUrl, suggestedFolderName } from "../shared/clone-source";
@@ -56,7 +57,7 @@ type WorkspaceTab = { id: string; path: string; name: string; unavailable?: Unav
 type LocateNotice =
   | { kind: "invalid"; result: Extract<ProjectLocateResult, { status: "invalid" }> }
   | { kind: "confirm"; result: Extract<ProjectLocateResult, { status: "confirm" }> };
-type GraphFocus = { kind: "wip" } | { kind: "commit"; commit: Commit };
+type GraphFocus = { kind: "wip" } | { kind: "worktree"; path: string } | { kind: "commit"; commit: Commit };
 /**
  * Getting a project in: the three ways to start, and the answer to a folder that was picked. Each
  * waiting choice holds only the id the main process issued for that folder, never a path to act on.
@@ -69,7 +70,7 @@ type SetupState =
   | { kind: "clone" };
 type InspectorTab = "details" | "assistant";
 /** What was right-clicked: a commit, the branch label on it, both, or the uncommitted work. */
-type MenuTarget = { x: number; y: number; commit?: Commit; branch?: string; work?: boolean };
+type MenuTarget = { x: number; y: number; commit?: Commit; branch?: string; work?: boolean; worktree?: string };
 type MenuEntry =
   | { key: string; icon: LucideIcon; label: string; onSelect: () => void; disabled?: boolean; danger?: boolean; hint?: string }
   | { key: string; heading: string }
@@ -659,7 +660,7 @@ export default function App() {
     setDeliveryMerge(false);
     setGeneratingDescription(false);
     setDescriptionWithheld([]);
-  }, [activeId]);
+  }, [activeId, snapshot?.path]);
 
   useEffect(() => {
     conversationEnd.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -730,6 +731,27 @@ export default function App() {
     if (returning) setUnavailable((items) => items.filter((project) => project.path !== next.path));
     setProjects((items) => [...items, { id, snapshot: next, loadedAt: new Date().toISOString() }]);
     setActiveId(id);
+  };
+
+  /** Worktree navigation stays in the repository's tab and preserves each folder's own work. */
+  const showWorktree = (next: RepoSnapshot, source = snapshot?.path) => {
+    const existing = projects.find(project => project.snapshot.path === next.path);
+    if (existing) { updateSnapshot(next.path, next); setActiveId(existing.id); return; }
+    snapshotWrites.current += 1;
+    setProjects(items => items.map(project => project.snapshot.path === source
+      ? { ...project, snapshot: next, loadedAt: new Date().toISOString(), fetchedAt: undefined } : project));
+    setFocus(undefined);
+    setSelectedBranch(undefined);
+  };
+
+  const openWorktree = async (target: string) => {
+    if (!snapshot || planning) return;
+    const source = snapshot.path;
+    try { showWorktree(await window.gitcat.openWorktree(source, target, locale), source); }
+    catch (error) {
+      notify({ message: cleanError(error, t("worktreeOpenFailed")), tone: "error" });
+      await refreshProject(source, false);
+    }
   };
 
   /** A folder that is not a project yet, or sits inside one, is explained and waits for the person's choice. */
@@ -1441,7 +1463,12 @@ export default function App() {
     const turnId = addTurn(path, t("branchSwitchQuestion", { name }), false);
     try {
       const current=await window.gitcat.getSnapshot(path);
-      if (current.isDirty || current.branches.find(b=>b.name===name)?.checkedOutIn) {
+      const occupied = current.branches.find(b=>b.name===name)?.checkedOutIn;
+      if (occupied) {
+        updateTurn(path, turnId, turn => ({ ...turn, status: 'completed', outcome: t("openWorktreeAction") }));
+        await openWorktree(occupied); return;
+      }
+      if (current.isDirty) {
         updateTurn(path,turnId,turn=>({...turn,status:'cancelled',outcome:locale==='es'?'Elige qué hacer con el trabajo sin terminar.':'Choose what happens to unfinished work.'}));
         setSwitchWork({path:current.path,target:name}); return;
       }
@@ -1593,6 +1620,7 @@ export default function App() {
   const headCommit = snapshot?.head ? graphCommits.find((commit) => commit.hash === snapshot.head) ?? snapshot.commits.find((commit) => commit.hash === snapshot.head) : undefined;
   const activeFocus: GraphFocus | undefined = !snapshot ? undefined
     : focus?.kind === "commit" ? { kind: "commit", commit: richer(focus.commit) }
+    : focus?.kind === "worktree" && snapshot.worktrees?.some(worktree => worktree.path === focus.path) ? focus
     // A project with nothing saved yet has only its working folder to show, and the way to its first save.
     : snapshot.isDirty || !snapshot.head ? { kind: "wip" }
     : headCommit ? { kind: "commit", commit: headCommit } : undefined;
@@ -1623,6 +1651,10 @@ export default function App() {
     const assistantHint = config.configured ? undefined : t("assistantNeededHint");
     const entries: MenuEntry[] = [];
 
+    if (target.worktree) {
+      return [{ key: "open-worktree", icon: TreePine, label: t("openWorktreeAction"), onSelect: () => void openWorktree(target.worktree!) }];
+    }
+
     if (target.work) {
       const canIntegrate = Boolean(base && base !== current);
       entries.push({ key: "save", icon: GitCommitHorizontal, label: t("saveChanges"), onSelect: () => beginDelivery(false) });
@@ -1638,7 +1670,7 @@ export default function App() {
       const local = branch.presence !== "remote" && !remoteRef;
       entries.push({ key: "branch-heading", heading: name });
       if (remoteRef) entries.push({ key: "sync-remote", icon: CloudDownload, label: t("syncRemote", { ref: remoteRef }), onSelect: () => void prepare("sync_remote", { ref: remoteRef }), hint: t("doubleClickRemoteHint") });
-      if (!branch.isCurrent && !remoteRef) entries.push({ key: "switch", icon: ArrowLeftRight, label: t("switchBranch", { name }), onSelect: () => void switchBranch(branch.presence === "remote" ? `refs/remotes/${branch.remoteRef}` : name), hint: t("doubleClickHint") });
+      if (!branch.isCurrent && !remoteRef) entries.push({ key: "switch", icon: branch.checkedOutIn ? TreePine : ArrowLeftRight, label: branch.checkedOutIn ? t("openWorktreeAction") : t("switchBranch", { name }), onSelect: () => void switchBranch(branch.presence === "remote" ? `refs/remotes/${branch.remoteRef}` : name), hint: t("doubleClickHint") });
       if (branch.isCurrent && !remoteRef && branch.upstream) entries.push({ key: "pull", icon: ArrowDownToLine, label: t("pullLatest"), onSelect: () => void prepare("pull") });
       if (branch.isCurrent && !remoteRef) entries.push({ key: "push", icon: ArrowUpFromLine, label: t(branch.upstream ? "pushBranch" : "publishBranch"), onSelect: () => void prepare("push") });
       // An already-contained branch would merge nothing. Rebase is always reviewed before rewriting history.
@@ -1755,7 +1787,7 @@ export default function App() {
               selected={selection}
               onSelect={selectBranch}
               onCreate={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
-              onSwitch={(name) => void prepare("checkout", { name })}
+              onSwitch={(name) => snapshot.branches.find(branch => branch.name === name)?.checkedOutIn ? void switchBranch(name) : void prepare("checkout", { name })}
               onSwitchNow={(name) => void switchBranch(name)}
               onDelete={(name) => void prepare("delete_branch", { name })}
               onRename={(name, to) => void prepare("rename_branch", { name, to })}
@@ -1788,6 +1820,7 @@ export default function App() {
               onOpen={(commit) => setModalCommit({ commit })}
               onLoaded={setGraphCommits}
               onCheckout={(name) => void switchBranch(name)}
+              onWorktree={(path) => void openWorktree(path)}
               onMenu={(target) => setMenu(target)}
               sidebarHidden={sidebarHidden}
               onShowSidebar={() => toggleSidebar(false)}
@@ -1803,6 +1836,8 @@ export default function App() {
               {activeFocus?.kind === "wip"
                 ? <ChangesView readiness={readiness} snapshot={snapshot} descriptionWithheld={descriptionWithheld} merge={deliveryMerge} configured={config.configured} stale={deliveryStale} attention={saveAttention?.path === snapshot.path ? saveAttention : undefined} onReviewAgain={() => beginDelivery(deliveryMerge, true)} onMergeChange={setDeliveryMerge} onOpenFile={setSelectedFile} message={commitMessage} generating={generatingDescription} busy={planning} onMessageChange={setCommitMessage} onGenerate={() => void generateDescription()} onPrepare={() => prepareCommit()}
                     excluded={excluded} onToggle={toggleIncluded} onToggleAll={setAllIncluded} onIgnore={ignoreFile} onShowSelected={() => setSelectionDiffOpen(true)} />
+                : activeFocus?.kind === "worktree"
+                  ? <WorktreeInspector worktree={snapshot.worktrees!.find(worktree => worktree.path === activeFocus.path)!} onOpen={() => void openWorktree(activeFocus.path)} />
                 : activeFocus
                   ? <CommitInspector key={activeFocus.commit.hash} commit={activeFocus.commit} snapshot={snapshot} known={graphCommits} onFocus={(commit) => focusOn({ kind: "commit", commit }, true)} onOpen={(file) => setModalCommit({ commit: activeFocus.commit, file })} />
                   : <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommitSelected")}</strong><span>{t("noCommitSelectedHint")}</span></div>}
@@ -1820,7 +1855,7 @@ export default function App() {
       }} />}
       {worktreesPath && projects.find(project => project.snapshot.path === worktreesPath) && <Worktrees
         snapshot={projects.find(project => project.snapshot.path === worktreesPath)!.snapshot} locale={locale}
-        onClose={() => setWorktreesPath(undefined)} onOpen={showProject} />}
+        onClose={() => setWorktreesPath(undefined)} onOpen={(next) => showWorktree(next, worktreesPath)} />}
       {historyPath && <ActivityHistory path={historyPath} locale={locale} onClose={() => setHistoryPath(undefined)} onRecover={(id, mode) => {
         const path=historyPath; setHistoryPath(undefined);
         void showPlan(locale === 'es' ? 'Revisar recuperación' : 'Review recovery', () => window.gitcat.prepareHistoryRecovery(path,id,mode,locale),path,true);
@@ -2510,11 +2545,12 @@ function workSummary(files: FileChange[], t: Translate) {
  * The whole repository as one graph, newest first: which branch each line of work belongs to, what
  * every commit said and how much it changed, and — above it all — the work that is not saved yet.
  */
-function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpTo, onFocus, onOpen, onLoaded, onCheckout, onMenu, sidebarHidden, onShowSidebar }: {
+function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpTo, onFocus, onOpen, onLoaded, onCheckout, onWorktree, onMenu, sidebarHidden, onShowSidebar }: {
   snapshot: RepoSnapshot; selection: string; filter: string; onFilterChange: (value: string) => void;
   focus?: GraphFocus; jumpTo?: { hash: string; at: number }; onFocus: (focus: GraphFocus) => void;
   onOpen: (commit: Commit) => void; onLoaded: (commits: Commit[]) => void;
   onCheckout: (branch: string) => void; onMenu: (target: MenuTarget) => void;
+  onWorktree: (path: string) => void;
   sidebarHidden: boolean; onShowSidebar: () => void;
 }) {
   const { t, locale } = useI18n();
@@ -2562,11 +2598,11 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
   };
 
   const needle = filter.trim().toLocaleLowerCase();
-  // The working tree only belongs in a list that contains the commit it continues from.
-  const showWork = snapshot.isDirty && Boolean(snapshot.head) && !needle && (scope === "all" || branch === snapshot.currentBranch);
+  const worktrees = useMemo(() => graphWorktrees(snapshot, scope, branch), [snapshot, scope, branch]);
+  const workByHash = useMemo(() => new Map(worktrees.map(worktree => [worktreeWipHash(worktree), worktree])), [worktrees]);
   const listed = useMemo(
-    () => showWork ? withWorkInProgress(page.commits, snapshot.head, snapshot.currentBranch) : page.commits,
-    [showWork, page.commits, snapshot.head, snapshot.currentBranch]
+    () => needle ? page.commits : withWorktreeWork(page.commits, worktrees),
+    [needle, page.commits, worktrees]
   );
   const graph = useMemo(
     () => buildCommitGraph(listed, snapshot.remotes, snapshot.defaultBranch),
@@ -2656,12 +2692,13 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
       return label;
     });
   }, [visible, locale]);
-  const summary = useMemo(() => workSummary(snapshot.changes, t).map((item) => item.label).join(" · "), [snapshot.changes, t]);
-
-  const isFocused = (commit: Commit) => commit.hash === workInProgressHash
-    ? focus?.kind === "wip"
+  const isFocused = (commit: Commit) => workByHash.has(commit.hash)
+    ? workByHash.get(commit.hash)!.isCurrent ? focus?.kind === "wip" : focus?.kind === "worktree" && focus.path === workByHash.get(commit.hash)!.path
     : focus?.kind === "commit" && (commit.hash === focus.commit.hash || commit.hash.startsWith(focus.commit.shortHash || focus.commit.hash));
-  const focusCommit = (commit: Commit) => onFocus(commit.hash === workInProgressHash ? { kind: "wip" } : { kind: "commit", commit });
+  const focusCommit = (commit: Commit) => {
+    const worktree = workByHash.get(commit.hash);
+    onFocus(worktree ? worktree.isCurrent ? { kind: "wip" } : { kind: "worktree", path: worktree.path } : { kind: "commit", commit });
+  };
 
   // Picking a branch in the sidebar brings its tip into view once, and never again on a later reload.
   useEffect(() => {
@@ -2726,7 +2763,7 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
       {visible.length ? visible.map((commit, index) => <CommitRow
         key={commit.hash}
         commit={commit}
-        work={commit.hash === workInProgressHash ? { summary, count: snapshot.changes.length, branch: snapshot.currentBranch } : undefined}
+        work={workByHash.get(commit.hash)}
         head={commit.hash === snapshot.head}
         selected={isFocused(commit)}
         marker={markers[index]}
@@ -2734,15 +2771,22 @@ function HistoryView({ snapshot, selection, filter, onFilterChange, focus, jumpT
         lanes={lanes}
         remotes={snapshot.remotes}
         branches={snapshot.branches}
+        worktrees={snapshot.worktrees ?? []}
         colour={byFamily ? familyColour(rows.get(commit.hash)?.family ?? "") : branchColor(index)}
         byFamily={byFamily}
         register={(node) => { if (node) buttons.current.set(commit.hash, node); else buttons.current.delete(commit.hash); }}
         onSelect={() => focusCommit(commit)}
-        onOpen={() => commit.hash === workInProgressHash ? focusCommit(commit) : onOpen(commit)}
+        onOpen={() => {
+          const worktree = workByHash.get(commit.hash);
+          if (worktree && !worktree.isCurrent) onWorktree(worktree.path);
+          else if (worktree) focusCommit(commit);
+          else onOpen(commit);
+        }}
         onCheckout={onCheckout}
         onMenu={(branch, x, y) => {
           focusCommit(commit);
-          onMenu(commit.hash === workInProgressHash ? { x, y, work: true } : { x, y, commit, branch });
+          const worktree = workByHash.get(commit.hash);
+          onMenu(worktree ? worktree.isCurrent ? { x, y, work: true } : { x, y, worktree: worktree.path } : { x, y, commit, branch });
         }}
       />) : !loading && (!snapshot.head && !needle
         ? <div className="graph-empty first-save" role="status"><GitCommitHorizontal size={26} /><strong>{t("firstSaveTitle")}</strong><span>{t(snapshot.isDirty ? "firstSaveWithFiles" : "firstSaveEmpty")}</span>{!snapshot.isDirty && <code>{snapshot.path}</code>}</div>
@@ -2849,10 +2893,11 @@ function ChangeStats({ additions, deletions, files, binary = false }: { addition
   </span>;
 }
 
-function CommitRow({ commit, row, lanes, remotes, branches, colour, byFamily, selected, head, marker, work, register, onSelect, onOpen, onCheckout, onMenu }: {
+function CommitRow({ commit, row, lanes, remotes, branches, worktrees, colour, byFamily, selected, head, marker, work, register, onSelect, onOpen, onCheckout, onMenu }: {
   commit: Commit; row?: GraphRow; lanes: number; remotes: string[]; branches: Branch[]; colour: string; byFamily: boolean;
+  worktrees: Worktree[];
   selected: boolean; head: boolean; marker: string;
-  work?: { summary: string; count: number; branch: string };
+  work?: Worktree;
   register: (node: HTMLButtonElement | null) => void; onSelect: () => void; onOpen: () => void;
   onCheckout: (branch: string) => void; onMenu: (branch: string | undefined, x: number, y: number) => void;
 }) {
@@ -2879,6 +2924,8 @@ function CommitRow({ commit, row, lanes, remotes, branches, colour, byFamily, se
   const pr = pullRequestReference(commit.subject);
   const merge = commit.parents.length > 1;
   const chipBranch = (chip: RefChip) => branches.find(branch => branch.presence !== "remote" && (chip.kind === "remote" ? branch.remoteRef === chip.ref : branch.name === chip.label));
+  const chipWorktree = (chip: RefChip) => chip.kind === "head" || chip.kind === "local"
+    ? worktrees.find(worktree => worktree.branch === chip.label && !worktree.bare) : undefined;
   const chipTitle = (chip: RefChip) => `${chip.ref ?? chip.label} · ${t(chip.kind === "remote" ? "remoteCopyTitle" : chip.remoteRefs?.length ? "branchBoth" : "localCopyTitle")}${chipBranch(chip)?.remoteRef ? ` · ${branchSyncText(chipBranch(chip)!, t)}` : ""}`;
   const node = work ? "wip" : merge ? "merge" : "avatar";
   // A branch label is the branch: a double click moves there, a right click is about that branch.
@@ -2888,13 +2935,30 @@ function CommitRow({ commit, row, lanes, remotes, branches, colour, byFamily, se
     onContextMenu: (event: ReactMouseEvent) => { event.preventDefault(); event.stopPropagation(); onMenu(branchOf(chip), event.clientX, event.clientY); }
   };
   const size = node === "merge" ? 10 : 20;
-  const chipTag = (chip: RefChip) => <span className={`ref-tag ${chip.kind} ${chipBranch(chip)?.remoteAhead && chipBranch(chip)?.remoteBehind ? "diverged" : ""}`} key={`${chip.kind}:${chip.ref ?? chip.label}`} title={`${chip.kind === "tag" ? chip.label : chipTitle(chip)}${chip.kind === "tag" ? "" : `\n${t(chip.kind === "remote" || chip.remoteRefs?.length ? "doubleClickRemoteHint" : chip.kind === "head" ? "currentBranchHint" : "doubleClickSwitchHint")}`}`} {...chipEvents(chip)}>
-    {chip.kind === "head" && <span role="img" aria-label={t("currentBranchHint")} title={t("currentBranchHint")}><Check size={11} /></span>}{chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : <Laptop size={11} />}{chip.remoteRefs?.map(ref => <span className="ref-cloud" key={ref} title={`${ref} · ${t("doubleClickRemoteHint")}`} onDoubleClick={event => { event.stopPropagation(); onCheckout(`refs/remotes/${ref}`); }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onMenu(`refs/remotes/${ref}`, event.clientX, event.clientY); }}><Cloud size={11} /></span>)}<span>{chip.kind === "remote" ? chip.ref : chip.label}</span>{chipBranch(chip)?.remoteRef && <BranchSyncBadge branch={chipBranch(chip)!} hideSynced={chip.kind === "head"} />}
-  </span>;
+  const chipTag = (chip: RefChip) => {
+    const branch = chipBranch(chip);
+    const folder = chipWorktree(chip);
+    const hint = t(chip.kind === "remote" ? "doubleClickRemoteHint" : chip.kind === "head"
+      ? "currentBranchHint" : folder ? "worktreeOpenHint" : "doubleClickSwitchHint");
+    return <span className={`ref-tag ${chip.kind} ${branch?.remoteAhead && branch.remoteBehind ? "diverged" : ""}`}
+      key={`${chip.kind}:${chip.ref ?? chip.label}`} title={`${chip.kind === "tag" ? chip.label : chipTitle(chip)}${chip.kind === "tag" ? "" : `\n${hint}`}`} {...chipEvents(chip)}>
+      {chip.kind === "head" && <span role="img" aria-label={t("currentBranchHint")} title={t("currentBranchHint")}><Check size={11} /></span>}
+      {chip.kind === "tag" ? <Tag size={11} /> : chip.kind === "remote" ? <Cloud size={11} /> : folder
+        ? <span className="ref-worktree" data-worktree-path={folder.path} role="img" aria-label={t("worktreeBadge", { path: folder.path })} title={`${folder.path}\n${hint}`}>
+            {folder.isMain ? <Laptop size={11} /> : <TreePine size={11} />}
+          </span> : <Laptop size={11} />}
+      {chip.remoteRefs?.map(ref => <span className="ref-cloud" key={ref} title={`${ref} · ${t("doubleClickRemoteHint")}`}
+        onDoubleClick={event => { event.stopPropagation(); onCheckout(`refs/remotes/${ref}`); }}
+        onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onMenu(`refs/remotes/${ref}`, event.clientX, event.clientY); }}><Cloud size={11} /></span>)}
+      <span>{chip.kind === "remote" ? chip.ref : chip.label}</span>
+      {branch?.remoteRef && <BranchSyncBadge branch={branch} hideSynced={chip.kind === "head"} />}
+    </span>;
+  };
   return <div
     className={`commit-row ${selected ? "selected" : ""} ${head ? "head" : ""} ${work ? "wip" : ""}`}
     style={{ "--lane": colour } as CSSProperties}
     data-hash={commit.hash}
+    data-worktree-path={work?.path}
     onClick={onSelect}
     onDoubleClick={onOpen}
     onKeyDown={(event) => {
@@ -2925,10 +2989,10 @@ function CommitRow({ commit, row, lanes, remotes, branches, colour, byFamily, se
         {node === "avatar" ? <>{initials(commit.author)}<AuthorPhoto email={commit.email} /></> : node === "wip" ? <PencilLine size={10} /> : null}
       </span>
     </div>
-    <button className="commit-content" ref={register} aria-pressed={selected} aria-label={work ? t("inspectWork", { branch: work.branch }) : t("inspectCommit", { hash: commit.shortHash, subject: commit.subject })}>
+    <button className="commit-content" ref={register} aria-pressed={selected} aria-label={work ? t("inspectWork", { branch: work.branch ?? work.head.slice(0, 7) }) : t("inspectCommit", { hash: commit.shortHash, subject: commit.subject })}>
       {work ? <>
         <span className="wip-tag">// WIP</span>
-        <span className="commit-subject">{work.summary}</span>
+        <span className="commit-subject">{workSummary(work.changes ?? [], t).map(item => item.label).join(" · ")}{!work.isCurrent && ` · ${work.branch ?? work.head.slice(0, 7)}`}</span>
       </> : <>
         {pr && <span className="pr-badge" title={t("prReferenceNote")}>PR #{pr}</span>}
         {merge && <GitMerge size={12} className="merge-marker" />}
@@ -2937,11 +3001,22 @@ function CommitRow({ commit, row, lanes, remotes, branches, colour, byFamily, se
       </>}
     </button>
     <div className="commit-changes">
-      {work ? <span className="change-stats wip-count">{counted(t, work.count, "file", "files")}</span>
+      {work ? <span className="change-stats wip-count">{counted(t, work.changes?.length ?? 0, "file", "files")}</span>
         : commit.stats && <ChangeStats additions={commit.stats.additions} deletions={commit.stats.deletions} files={commit.stats.files} />}
     </div>
     <div className="commit-when" title={commit.date ? formatDateFull(commit.date, locale) : undefined}>{marker && <span>{marker}</span>}</div>
   </div>;
+}
+
+function WorktreeInspector({ worktree, onOpen }: { worktree: Worktree; onOpen: () => void }) {
+  const { t } = useI18n();
+  return <section className="worktree-preview">
+    <h3><TreePine size={16} /> {worktree.branch ?? worktree.head.slice(0, 7)}</h3>
+    <code>{worktree.path}</code>
+    <p>{t("worktreePreviewNote")}</p>
+    <button className="outline-button" onClick={onOpen}><FolderOpen size={14} /> {t("openWorktreeAction")}</button>
+    <ul>{worktree.changes?.map(change => <li key={change.path}><span>{changeStatus(change.xy ?? change.code, t)}</span><code>{change.path}</code></li>)}</ul>
+  </section>;
 }
 
 function changeStatus(code: string, t: Translate) {

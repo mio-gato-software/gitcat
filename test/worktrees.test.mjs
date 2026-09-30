@@ -38,6 +38,13 @@ test('real snapshots expose main, linked and detached worktrees; opening preserv
   assert.equal(state.worktrees.find(w=>w.path===linked).locked,'external drive');
   assert.equal(state.worktrees.find(w=>w.path===detached).detached,true);
   assert.equal(state.branches.find(b=>b.name==='topic').checkedOutIn,linked);
+  assert.equal(state.worktrees.find(w=>w.path===repo).changes[0].xy, 'MM');
+  assert.equal(state.worktrees.find(w=>w.path===linked).changes[0].path, 'file');
+  assert.deepEqual(state.worktrees.find(w=>w.path===detached).changes, []);
+  writeFileSync(join(detached,'new'), 'detached work');
+  const refreshed = await service.getSnapshot(repo);
+  assert.equal(refreshed.worktrees.find(w=>w.path===detached).changes[0].path, 'new');
+  assert.equal(refreshed.stateId, state.stateId, 'Sibling edits do not invalidate a plan for current files');
   const opened = await service.openWorktree(repo,linked);
   assert.equal(opened.path,linked); assert.equal(opened.currentBranch,'topic'); assert.equal(opened.isDirty,true);
   assert.equal(opened.worktrees.find(w=>w.isCurrent).isMain,false);
@@ -53,8 +60,26 @@ test('opening rejects unregistered, vanished and replaced worktree folders', asy
   git('worktree','lock',linked);
   await service.getSnapshot(repo);
   renameSync(linked,join(root,'moved'));
+  assert.equal((await service.getSnapshot(repo)).worktrees.find(w=>w.path===linked).statusUnavailable, true);
   await assert.rejects(service.openWorktree(repo,linked),/no longer available/);
   execFileSync('git',['init','-q',linked]);
+  assert.equal((await service.getSnapshot(repo)).worktrees.find(w=>w.path===linked).statusUnavailable, true);
   await assert.rejects(service.openWorktree(repo,linked),/no longer available/);
   assert.equal(git('branch','--show-current'),'main');
+});
+
+test('detached worktree history includes its own saved tip and preserves its uncommitted edits', async t => {
+  const {root,repo,git} = fixture(t);
+  const detached = join(root,'detached');
+  git('worktree','add','--detach',detached);
+  const there = (...args) => execFileSync('git',args,{cwd:detached,encoding:'utf8'}).trim();
+  writeFileSync(join(detached,'file'), 'detached saved');
+  there('commit','-qam','detached tip');
+  writeFileSync(join(detached,'file'), 'detached unsaved');
+  const head = there('rev-parse','HEAD');
+  const snapshot = await service.getSnapshot(repo);
+  assert.ok(snapshot.commits.some(commit => commit.hash === head));
+  assert.ok((await service.loadHistory(repo,{scope:'all'})).commits.some(commit => commit.hash === head));
+  assert.equal(snapshot.worktrees.find(folder => folder.path === detached).changes[0].code, 'M');
+  assert.equal(readFileSync(join(detached,'file'),'utf8'), 'detached unsaved');
 });

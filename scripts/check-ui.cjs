@@ -268,8 +268,8 @@ app.whenReady().then(async () => {
   await waitFor('innerWidth === 1480');
   await js(`localStorage.setItem('gitcat-locale', 'es')`);
   await win.loadFile(path.join(root, 'dist/index.html'));
-  // Five commits plus the uncommitted work, drawn as its own row above HEAD.
-  await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
+  // Five commits plus separate WIP rows for the current and linked working folders.
+  await waitFor(`document.querySelectorAll('.commit-row').length === 7`);
   // The unavailable project keeps its tab, says what happened and offers every way on.
   assert.equal(await js(`document.querySelectorAll('.window-tab.unavailable').length`), 1);
   await js(`document.querySelector('.window-tab.unavailable [role="tab"]').click()`);
@@ -283,8 +283,22 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.notification-preview.warning')`);
   assert.equal(await js(`Boolean(document.querySelector('.unavailable-project'))`), true, 'A failed retry keeps the project listed');
   await js(`document.querySelector('.window-tab:not(.unavailable) [role="tab"]').click()`);
-  await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
-  // Worktrees are visible independently of branch filtering, and open without checking out a branch.
+  await waitFor(`document.querySelectorAll('.commit-row').length === 7`);
+  // Linked edits are part of the graph, with their own preview and safe navigation.
+  assert.equal(await js(`document.querySelectorAll('.commit-row.wip').length`), 2);
+  const linkedRow = `[...document.querySelectorAll('.commit-row.wip')].find(row => row.dataset.worktreePath === ${JSON.stringify(linkedWorktree)})`;
+  await js(`${linkedRow}.click()`);
+  await waitFor(`document.querySelector('.worktree-preview')`);
+  assert.match(await js(`document.querySelector('.worktree-preview').innerText`), /worktree-only.txt/);
+  assert.equal(await js(`document.querySelectorAll('.worktree-preview .delivery-actions').length`), 0);
+  await capture('worktree-graph');
+  await js(`${linkedRow}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 600, clientY: 200 }))`);
+  await waitFor(`document.querySelector('.context-menu')`);
+  assert.match(await js(`document.querySelector('.context-menu').innerText`), /Abrir carpeta de trabajo/);
+  assert.doesNotMatch(await js(`document.querySelector('.context-menu').innerText`), /Guardar cambios/);
+  await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  // Worktrees remain available independently of branch filtering.
+
   await js(`document.querySelector('.worktrees-button').click()`);
   await waitFor(`document.querySelector('.worktrees-dialog')`);
   assert.equal(await js(`document.querySelectorAll('.worktree-list li').length`), 3);
@@ -297,8 +311,17 @@ app.whenReady().then(async () => {
   assert.equal(fs.readFileSync(path.join(repo, 'app.txt'), 'utf8'), 'updated menu\n');
   assert.equal(fs.readFileSync(path.join(linkedWorktree, 'worktree-only.txt'), 'utf8'), 'separate edits');
   assert.equal(await js(`Boolean(document.querySelector('.window-tab.active svg[aria-label="Worktree vinculado"]'))`), true);
-  await js(`document.querySelector('.window-tab.active .tab-close').click(); document.querySelector('.window-tab:not(.unavailable) [role="tab"]').click()`);
-  await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
+  assert.equal(await js(`document.querySelectorAll('.window-tab:not(.unavailable)').length`), 1, 'Opening a worktree reuses the repository tab');
+  await waitFor(`document.querySelector('.commit-row.head .ref-tag.more')`);
+  await js(`document.querySelector('.commit-row.head .ref-tag.more').click()`);
+  await waitFor(`document.querySelector('.ref-stack')`);
+  assert.equal(await js(`document.querySelectorAll('.ref-stack .ref-worktree').length`), 2);
+  await js(`[...document.querySelectorAll('.ref-stack .ref-tag')].find(chip => chip.innerText.includes('feature/new-menu')).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await waitFor(`document.querySelector('.window-tab.active')?.innerText.includes('GitCat')`);
+  assert.equal(await js(`Boolean(document.querySelector('.switch-work-dialog'))`), false);
+  assert.equal(await js(`document.querySelectorAll('.window-tab:not(.unavailable)').length`), 1);
+
+  await waitFor(`document.querySelectorAll('.commit-row').length === 7`);
   const operationEvent = { id:'ui-progress', repoPath:snapshot.path, startedAt:Date.now()-2000, phase:'executing', state:'running', mutation:true, stopping:false, step:1, total:3 };
   win.webContents.send('operation:progress', operationEvent);
   await waitFor(`document.querySelector('.operation-status')`);
@@ -310,7 +333,7 @@ app.whenReady().then(async () => {
   win.webContents.send('operation:progress', { ...operationEvent, state:'stopped', stopping:true });
   await waitFor(`document.querySelector('.operation-status')?.innerText.includes('no se deshizo nada')`);
   await js(`document.querySelector('.operation-status button').click()`);
-  await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
+  await waitFor(`document.querySelectorAll('.commit-row').length === 7`);
   const before = git('status', '--porcelain');
   await js(`document.querySelector('[aria-label="Compartir para revisión"]').click()`);
   await waitFor(`document.querySelector('.share-review')`);
@@ -366,7 +389,7 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.overview-toggle').click()`);
   assert.equal(await js(`localStorage.getItem('gitcat-work-overview-details')`), 'collapsed');
   assert.equal(await js(`document.querySelector('.commit-row').classList.contains('wip')`), true);
-  assert.match(await js(`document.querySelector('.commit-row.wip').innerText`), /WIP/);
+  assert.match(await js(`document.querySelector('.commit-row.wip[data-hash="working-tree"]').innerText`), /WIP/);
   // Every commit says how much it changed, without opening it.
   assert.match(await js(`document.querySelector('.commit-row.head .commit-changes').innerText`), /\+1/);
   // Nothing picked yet: the details pane shows the uncommitted work and its files.
@@ -374,7 +397,7 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.inspector .change-summary').innerText`), /1 modificado\n1 añadido/);
   assert.equal(await js(`document.querySelectorAll('.inspector .change-row').length`), 2);
   // Picking a commit shows its message, author and files with their line counts.
-  await js(`document.querySelectorAll('.commit-row')[2].click()`);
+  await js(`document.querySelectorAll('.commit-row')[3].click()`);
   await waitFor(`document.querySelector('.commit-inspector .change-row')`);
   assert.match(await js(`document.querySelector('.commit-inspector .detail-message').innerText`), /Integrar el buscador/);
   assert.match(await js(`document.querySelector('.commit-inspector .change-list').innerText`), /search\.txt/);
@@ -384,10 +407,10 @@ app.whenReady().then(async () => {
   assert.equal(await js(`localStorage.getItem('gitcat-file-list-mode')`), 'tree');
   await js(`document.querySelectorAll('.file-list .mode-toggle button')[0].click()`);
   // Arrow keys walk the graph and the details follow.
-  await js(`document.querySelectorAll('.commit-row')[2].querySelector('.commit-content').focus()`);
+  await js(`document.querySelectorAll('.commit-row')[3].querySelector('.commit-content').focus()`);
   await js(`document.querySelector('.graph-scroll').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }))`);
-  await waitFor(`document.querySelectorAll('.commit-row')[1].classList.contains('selected')`);
-  await js(`document.querySelector('.commit-row.wip').click()`);
+  await waitFor(`document.querySelectorAll('.commit-row')[2].classList.contains('selected')`);
+  await js(`document.querySelector('.commit-row.wip[data-hash="working-tree"]').click()`);
   await waitFor(`document.querySelector('.inspector .changes-view')`);
   // The new-project button shares the tabs' vertical centre.
   const centres = JSON.parse(await js(`JSON.stringify([...document.querySelectorAll('.window-tab, .tab-add')].map((node) => { const r = node.getBoundingClientRect(); return r.top + r.height / 2; }))`));
@@ -404,7 +427,7 @@ app.whenReady().then(async () => {
   await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
   await waitFor(`!document.querySelector('.context-menu')`);
   // The WIP row has its own short menu.
-  await js(`document.querySelector('.commit-row.wip').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 600, clientY: 200 }))`);
+  await js(`document.querySelector('.commit-row.wip[data-hash="working-tree"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 600, clientY: 200 }))`);
   await waitFor(`document.querySelector('.context-menu')`);
   assert.match(await js(`document.querySelector('.context-menu').innerText`), /Guardar cambios/);
   await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
@@ -477,7 +500,7 @@ app.whenReady().then(async () => {
   win.setSize(1080, 720);
   await js(`localStorage.setItem('gitcat-pane-widths', JSON.stringify({ sidebar: 460, inspector: 620 }))`);
   await win.loadFile(path.join(root, 'dist/index.html'));
-  await waitFor(`document.querySelectorAll('.commit-row').length === 6`);
+  await waitFor(`document.querySelectorAll('.commit-row').length === 7`);
   await assertFits(); await capture('compact');
   assert.equal(await js(`document.querySelector('.overview-toggle').getAttribute('aria-expanded')`), 'false', 'Compact preference survives reload');
   await js(`document.querySelector('.overview-toggle').click()`);
@@ -634,8 +657,8 @@ app.whenReady().then(async () => {
   fs.writeFileSync(path.join(repo, '.env'), 'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n');
   // Background reads preserve a selected commit. Wait for the new working row,
   // then select it explicitly instead of relying on incidental selection timing.
-  await waitFor(`document.querySelector('.commit-row.wip') || (window.dispatchEvent(new Event('focus')), false)`);
-  await js(`document.querySelector('.commit-row.wip').click()`);
+  await waitFor(`document.querySelector('.commit-row.wip[data-hash="working-tree"]') || (window.dispatchEvent(new Event('focus')), false)`);
+  await js(`document.querySelector('.commit-row.wip[data-hash="working-tree"]').click()`);
   await waitFor(`document.querySelector('.inspector .change-list')?.textContent.includes('.env')`);
   assert.equal(await js(`Boolean(document.querySelector('.secret-warning, .change-badge.secret'))`), false);
   assert.doesNotMatch(await js(`document.querySelector('.changes-view').innerText`), /posible secreto|Revisé estos archivos/);

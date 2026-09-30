@@ -161,6 +161,9 @@ export type Worktree = {
   bare: boolean;
   locked?: string;
   prunable?: string;
+  /** Read-only status for this folder; absent when the folder cannot be inspected. */
+  changes?: FileChange[];
+  statusUnavailable?: boolean;
 };
 
 export type RepoSnapshot = {

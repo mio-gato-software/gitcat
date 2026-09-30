@@ -21,6 +21,7 @@ export const remoteRefreshIntervalMs = 5 * 60_000;
 export function refreshedProject<T extends { snapshot: RepoSnapshot; loadedAt: string; fetchedAt?: string }>(project: T, next: RepoSnapshot, loadedAt: string, fetchedAt?: string): T {
   const times = fetchedAt ? { loadedAt, fetchedAt } : { loadedAt };
   return next.stateId === project.snapshot.stateId && next.path === project.snapshot.path
+    && JSON.stringify(next.worktrees) === JSON.stringify(project.snapshot.worktrees)
     ? { ...project, ...times }
     : { ...project, snapshot: next, ...times };
 }
