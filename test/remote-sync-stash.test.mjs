@@ -134,6 +134,82 @@ test('pop finds external stashes, rejects stale entries and keeps the stash on c
   assert.equal((await service.getSnapshot(path)).stashCount, 2); assert.ok(result.snapshot.conflicts.length);
 });
 
+test('pop keeps unrelated new files and unstaged edits while restoring staged stash versions', async t => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, 'other.txt'), 'base other\n'); git('add', '.'); git('commit', '-qm', 'other');
+  writeFileSync(join(path, 'file.txt'), 'staged\n'); git('add', 'file.txt'); const index = git('write-tree');
+  writeFileSync(join(path, 'file.txt'), 'unstaged\n'); writeFileSync(join(path, 'saved-new.txt'), 'saved new');
+  git('stash', 'push', '-qu');
+  writeFileSync(join(path, 'other.txt'), 'keep edits\n'); writeFileSync(join(path, 'current-new.txt'), 'keep new');
+  const before = git('status', '--porcelain');
+  const plan = await service.prepareOperation(path, 'stash_pop', {}, 'en');
+  assert.equal(plan.requiresConfirmation, true); assert.equal(git('status', '--porcelain'), before);
+  assert.match(plan.effects.join(' '), /current changes in other files are kept/);
+  const result = await service.executePlan(path, plan, 'en'); assert.equal(result.error, undefined, result.error);
+  assert.equal(readFileSync(join(path, 'other.txt'), 'utf8'), 'keep edits\n');
+  assert.equal(readFileSync(join(path, 'current-new.txt'), 'utf8'), 'keep new');
+  assert.equal(readFileSync(join(path, 'file.txt'), 'utf8'), 'unstaged\n');
+  assert.equal(readFileSync(join(path, 'saved-new.txt'), 'utf8'), 'saved new');
+  assert.equal(git('write-tree'), index); assert.equal(git('stash', 'list'), '');
+});
+
+test('pop names overlapping files and preserves current work and the stash before any mutation', async t => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, 'file.txt'), 'saved edits'); git('stash', 'push', '-q');
+  const hash = git('rev-parse', 'refs/stash');
+  writeFileSync(join(path, 'file.txt'), 'keep current edits');
+  const before = git('status', '--porcelain'), index = git('write-tree');
+  await assert.rejects(service.prepareOperation(path, 'stash_pop', {}, 'en'), /file.txt.*Review and save.*stash is still available/);
+  assert.equal(readFileSync(join(path, 'file.txt'), 'utf8'), 'keep current edits');
+  assert.equal(git('status', '--porcelain'), before); assert.equal(git('write-tree'), index);
+  assert.equal(git('rev-parse', 'refs/stash'), hash);
+});
+
+test('pop refuses existing ignored files that collide with new files in the stash', async t => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, 'file.txt'), 'saved edits'); writeFileSync(join(path, 'new.txt'), 'saved new');
+  git('stash', 'push', '-qu'); const hash = git('rev-parse', 'refs/stash');
+  writeFileSync(join(path, '.gitignore'), 'new.txt\n'); git('add', '.gitignore'); git('commit', '-qm', 'ignore');
+  writeFileSync(join(path, 'new.txt'), 'keep ignored');
+  assert.equal((await service.getSnapshot(path)).isDirty, false);
+  await assert.rejects(service.prepareOperation(path, 'stash_pop', {}, 'en'), /new.txt.*somewhere safe/);
+  assert.equal(readFileSync(join(path, 'file.txt'), 'utf8'), 'base\n');
+  assert.equal(readFileSync(join(path, 'new.txt'), 'utf8'), 'keep ignored');
+  assert.equal(git('rev-parse', 'refs/stash'), hash);
+});
+
+test('pop protects a dirty index even when its files do not overlap the stash', async t => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, 'file.txt'), 'saved edits'); git('stash', 'push', '-q');
+  writeFileSync(join(path, 'current.txt'), 'staged current'); git('add', 'current.txt');
+  const index = git('write-tree'), hash = git('rev-parse', 'refs/stash');
+  await assert.rejects(service.prepareOperation(path, 'stash_pop', {}, 'en'), /staged changes in current.txt.*Review and save/);
+  assert.equal(git('write-tree'), index); assert.equal(git('rev-parse', 'refs/stash'), hash);
+});
+
+test('pop protects index-only stash edits and preserves whitespace in stashed paths', async t => {
+  const { path, git } = fixture(t);
+  const filename = ' leading space.txt';
+  writeFileSync(join(path, filename), 'base\n'); git('add', '.'); git('commit', '-qm', 'space path');
+  writeFileSync(join(path, filename), 'staged\n'); git('add', filename);
+  writeFileSync(join(path, filename), 'base\n'); git('stash', 'push', '-q');
+  writeFileSync(join(path, filename), 'keep current\n');
+  await assert.rejects(service.prepareOperation(path, 'stash_pop', {}, 'en'), / leading space.txt.*Review and save/);
+  assert.equal(readFileSync(join(path, filename), 'utf8'), 'keep current\n');
+  assert.equal((await service.getSnapshot(path)).stashCount, 1);
+});
+
+test('pop rechecks new-file collisions created after review even when status remains clean', async t => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, 'new.txt'), 'saved new'); git('stash', 'push', '-qu');
+  writeFileSync(join(path, '.gitignore'), 'new.txt\n'); git('add', '.gitignore'); git('commit', '-qm', 'ignore');
+  const plan = await service.prepareOperation(path, 'stash_pop', {}, 'en');
+  writeFileSync(join(path, 'new.txt'), 'created after review');
+  const result = await service.executePlan(path, plan, 'en');
+  assert.match(result.error, /new.txt/); assert.equal(result.snapshot.stashCount, 1);
+  assert.equal(readFileSync(join(path, 'new.txt'), 'utf8'), 'created after review');
+});
+
 test('rebase on another branch is available from main and accepts an exact remote base', async t => {
   const { path, git, remoteCommit } = fixture(t); remoteCommit(); git('fetch', '-q');
   writeFileSync(join(path, 'local.txt'), 'mine'); git('add', '.'); git('commit', '-qm', 'mine');
