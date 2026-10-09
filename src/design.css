@@ -50,8 +50,6 @@ button:disabled { opacity: .45; }
 .branch-main > .current-pill { color: var(--coral); border: 0; background: #47302b; font-size: 9px; border-radius: 5px; }
 .branch-main > .current-pill + .current-pill, .branch-row:not(.current) .branch-main > .current-pill { color: var(--mint); background: #25352b; border: 0; }
 .branch-row:not(.current) .branch-main > svg { color: var(--secondary); }
-.sidebar-mascot { flex: none; display: grid; justify-items: center; gap: 4px; padding: 14px 10px 22px; color: #92968f; }
-.sidebar-mascot span { font-size: 11px; color: var(--muted); }
 
 .ghost-button, .outline-button, .primary-button { min-height: 35px; border-radius: 7px; font-size: 12px; font-weight: 550; padding: 0 12px; }
 .outline-button { color: var(--text); background: transparent; border-color: #4b4e4d; }
@@ -105,7 +103,6 @@ button:disabled { opacity: .45; }
 .welcome-card { background: #202222ed; border-color: var(--border); }
 .welcome-mark { background: var(--coral-soft); color: var(--coral); box-shadow: none; }
 .welcome-card h1 { color: var(--text); }
-@media (max-height: 760px) { .sidebar-mascot { display: none; } }
 @media (prefers-reduced-motion: reduce) { button { transition: none; } }
 
 

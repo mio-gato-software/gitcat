@@ -267,6 +267,46 @@ app.whenReady().then(async () => {
   win.setContentSize(1480, 940);
   await waitFor('innerWidth === 1480');
   await js(`localStorage.setItem('gitcat-locale', 'es')`);
+  // A long branch list must scroll inside the sidebar, with its controls staying visible.
+  const scrollBranches = Array.from({ length: 48 }, (_, index) => `scroll/item-${String(index).padStart(2, '0')}`);
+  for (const name of scrollBranches) git('branch', name);
+  restored = { projects: [await service.getSnapshot(repo)], unavailable: [], order: [repo], activePath: repo };
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await waitFor(`document.querySelector('.branch-section input')`);
+  await js(`(() => { const input = document.querySelector('.branch-section input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'scroll/item-'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await waitFor(`document.querySelectorAll('.branch-list .branch-row').length === 48`);
+  for (const height of [940, 720]) {
+    win.setContentSize(1480, height);
+    await waitFor(`innerHeight === ${height}`);
+    for (const mode of [1, 0]) {
+      await js(`document.querySelectorAll('.branch-tools .mode-toggle button')[${mode}].click()`);
+      await waitFor(`document.querySelectorAll('.branch-list .branch-row').length === 48`);
+      assert.equal(await js(`Boolean(document.querySelector('.sidebar-mascot'))`), false, 'The decorative cat takes no sidebar space');
+      const viewport = await js(`(() => {
+        const list = document.querySelector('.branch-list'), sidebar = document.querySelector('aside.sidebar');
+        list.scrollTop = 0;
+        const r = list.getBoundingClientRect();
+        return { overflows: list.scrollHeight > list.clientHeight, bottomGap: sidebar.getBoundingClientRect().bottom - r.bottom,
+          x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), controlsTop: document.querySelector('.branch-filters').getBoundingClientRect().top };
+      })()`);
+      assert.equal(viewport.overflows, true, 'The branch list has a bounded scroll viewport');
+      assert.ok(viewport.bottomGap <= 12, 'Branches use the space down to the bottom of the sidebar');
+      win.webContents.sendInputEvent({ type: 'mouseMove', x: viewport.x, y: viewport.y });
+      win.webContents.sendInputEvent({ type: 'mouseWheel', x: viewport.x, y: viewport.y, deltaY: -400, deltaX: 0 });
+      await waitFor(`document.querySelector('.branch-list').scrollTop > 0`);
+      assert.equal(await js(`document.querySelector('.branch-filters').getBoundingClientRect().top`), viewport.controlsTop, 'Scrolling keeps filter controls in place');
+      assert.equal(await js(`(() => {
+        const list = document.querySelector('.branch-list'); list.scrollTop = list.scrollHeight;
+        const last = list.querySelector('.branch-row:last-child').getBoundingClientRect(), r = list.getBoundingClientRect();
+        return last.top >= r.top && last.bottom <= r.bottom + 1;
+      })()`), true, 'The final branch is reachable in both list modes');
+      await capture(`branches-scroll-${height}-${mode === 1 ? 'flat' : 'tree'}`);
+    }
+  }
+  for (const name of scrollBranches) git('branch', '-D', name);
+  await js(`localStorage.removeItem(${JSON.stringify(`gitcat-branch-view:${repo}`)})`);
+  restored = null;
+  win.setContentSize(1480, 940);
   await win.loadFile(path.join(root, 'dist/index.html'));
   // Five commits plus separate WIP rows for the current and linked working folders.
   await waitFor(`document.querySelectorAll('.commit-row').length === 7`);

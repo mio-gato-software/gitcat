@@ -5,7 +5,7 @@ import { SwitchWork } from "./SwitchWork";
 import { ActivityHistory } from "./ActivityHistory";
 import { OperationStatus, Elapsed } from "./OperationStatus";
 import { useDialog } from "./useDialog";
-import { CatMark, SleepingCat } from "./CatMark";
+import { CatMark } from "./CatMark";
 import { NotificationCenter } from "./NotificationCenter";
 import { addNotification, type Notification } from "../shared/notifications";
 import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -1794,7 +1794,6 @@ export default function App() {
               onMenu={(branch, x, y) => setMenu({ x, y, branch: branch.name })}
               onCollapse={() => toggleSidebar(true)}
             />
-            <div className="sidebar-mascot"><SleepingCat /><span>{t("oneStepAtATime")}</span></div>
           </aside>}
 
           <section className={`graph-area ${sidebarHidden ? "full-width" : ""}`}>
