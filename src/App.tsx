@@ -1,4 +1,5 @@
 import { Worktrees } from "./Worktrees";
+import { reorderWorkspacePaths } from "../shared/workspace-order";
 import { PracticeGuide } from "./PracticeGuide";
 import { ShareReview } from "./ShareReview";
 import { SwitchWork } from "./SwitchWork";
@@ -423,6 +424,10 @@ export default function App() {
   const [unavailable, setUnavailable] = useState<UnavailableProject[]>([]);
   /** The saved order of the workspace, so a project that is back, or found elsewhere, keeps its place. */
   const [workspaceOrder, setWorkspaceOrder] = useState<string[]>([]);
+  const [draggedTab, setDraggedTab] = useState<string>();
+  // Native drag events can arrive before React renders the drag-start update.
+  const draggedTabPath = useRef<string | undefined>(undefined);
+  const [tabDrop, setTabDrop] = useState<{ path: string; side: "before" | "after" }>();
   /** The unavailable project being retried or located, so its buttons wait for the answer. */
   const [recoveringPath, setRecoveringPath] = useState<string>();
   const [locateNotice, setLocateNotice] = useState<{ path: string; notice: LocateNotice }>();
@@ -812,6 +817,22 @@ export default function App() {
     setProjects((items) => items.filter((project) => project.id !== id));
     setUnavailable((items) => items.filter((project) => project.path !== id));
     if (locateNotice?.path === id) setLocateNotice(undefined);
+  };
+
+  const clearTabDrag = () => { draggedTabPath.current = undefined; setDraggedTab(undefined); setTabDrop(undefined); };
+  const tabDropAt = (strip: HTMLElement, clientX: number): { path: string; side: "before" | "after" } | undefined => {
+    const elements = [...strip.querySelectorAll<HTMLElement>(".window-tab")];
+    const index = elements.findIndex((element) => {
+      const bounds = element.getBoundingClientRect();
+      return clientX < bounds.left + bounds.width / 2;
+    });
+    const tab = tabs[index < 0 ? tabs.length - 1 : index];
+    return tab ? { path: tab.path, side: index < 0 ? "after" : "before" } : undefined;
+  };
+  const moveTab = (source: string, target: string, side: "before" | "after") => {
+    const paths = tabs.map((tab) => tab.path);
+    const next = reorderWorkspacePaths(paths, source, target, side);
+    if (next !== paths) setWorkspaceOrder(next);
   };
 
   /** Asks again whether an unavailable project can be opened. A project that is back keeps its tab and its place. */
@@ -1719,10 +1740,51 @@ export default function App() {
     <div className={`app-shell platform-${window.gitcat.platform}`}>
       <header className="topbar">
         <div className="brand-lockup"><div className="brand-mark"><CatMark size={28} /></div><span>GitCat</span></div>
-        <div className="window-tabs" role="tablist" aria-label={t("openProjects")}>
-          {tabs.map((tab) => <div key={tab.id} className={`window-tab ${tab.id === activeId ? "active" : ""} ${tab.unavailable ? "unavailable" : ""}`}
+        <div className="window-tabs" role="tablist" aria-label={t("openProjects")}
+          onDragOver={(event) => {
+            const source = draggedTabPath.current;
+            if (!source || !tabs.some((tab) => tab.path === source)) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "move";
+            const strip = event.currentTarget;
+            const bounds = strip.getBoundingClientRect();
+            if (event.clientX < bounds.left + 32) strip.scrollLeft -= 20;
+            else if (event.clientX > bounds.right - 32) strip.scrollLeft += 20;
+            const drop = tabDropAt(strip, event.clientX);
+            setTabDrop(drop?.path === source ? undefined : drop);
+          }}
+          onDrop={(event) => {
+            const source = draggedTabPath.current;
+            if (!source) return;
+            event.preventDefault();
+            const drop = tabDropAt(event.currentTarget, event.clientX);
+            if (drop) moveTab(source, drop.path, drop.side);
+            clearTabDrag();
+          }}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setTabDrop(undefined);
+          }}>
+          {tabs.map((tab) => <div key={tab.id} className={`window-tab ${tab.id === activeId ? "active" : ""} ${tab.unavailable ? "unavailable" : ""} ${draggedTab === tab.path ? "dragging" : ""} ${tabDrop?.path === tab.path ? `drop-${tabDrop.side}` : ""}`}
             title={tab.unavailable ? t("unavailableTab", { name: tab.name, reason: t(unavailableReasonKeys[tab.unavailable.reason].short) }) : tab.path}>
-            <button role="tab" aria-selected={tab.id === activeId} onClick={() => setActiveId(tab.id)}>{tab.unavailable ? <AlertTriangle size={14} /> : projects.find(project => project.id === tab.id)?.snapshot.worktrees?.some(worktree => worktree.isCurrent && !worktree.isMain) ? <TreePine size={14} role="img" aria-label={t("linkedWorktree")} /> : <GitBranch size={14} />}<span>{tab.name}</span></button>
+            <button role="tab" aria-selected={tab.id === activeId} draggable={tabs.length > 1} aria-description={t("reorderTabHint")}
+              title={`${tab.unavailable ? t("unavailableTab", { name: tab.name, reason: t(unavailableReasonKeys[tab.unavailable.reason].short) }) : tab.path}\n${t("reorderTabHint")}`}
+              onDragStart={(event) => {
+                draggedTabPath.current = tab.path;
+                setDraggedTab(tab.path);
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("application/x-gitcat-tab", tab.path);
+                event.dataTransfer.setDragImage(event.currentTarget.parentElement!, 20, 20);
+                setTabDrop(undefined);
+              }}
+              onDragEnd={clearTabDrag}
+              onKeyDown={(event) => {
+                if (!event.altKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+                event.preventDefault();
+                const index = tabs.findIndex((item) => item.id === tab.id);
+                const target = tabs[index + (event.key === "ArrowLeft" ? -1 : 1)];
+                if (target) moveTab(tab.path, target.path, event.key === "ArrowLeft" ? "before" : "after");
+              }}
+              onClick={() => setActiveId(tab.id)}>{tab.unavailable ? <AlertTriangle size={14} /> : projects.find(project => project.id === tab.id)?.snapshot.worktrees?.some(worktree => worktree.isCurrent && !worktree.isMain) ? <TreePine size={14} role="img" aria-label={t("linkedWorktree")} /> : <GitBranch size={14} />}<span>{tab.name}</span></button>
             <button className="tab-close" onClick={() => closeProject(tab.id)} aria-label={t(tab.unavailable ? "removeFromRecentNamed" : "closeProject", { name: tab.name })}><X size={13} /></button>
           </div>)}
           <button className="icon-button tab-add" onClick={() => setSetup({ kind: "choose" })} aria-label={t("addProjectTitle")} title={t("addProjectTitle")}><Plus size={16} /></button>

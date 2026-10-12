@@ -84,10 +84,11 @@ app.whenReady().then(async () => {
   let retries = 0;
   // The last scenario swaps in a repository stopped in a merge, with no assistant configured.
   let restored = null;
+  let savedWorkspace;
   let configured = true;
   ipcMain.handle('workspace:restore', () => restored ?? ({ projects: [snapshot], unavailable: [moved()], order: [snapshot.path, movedPath], activePath: snapshot.path }));
   ipcMain.handle('workspace:retry', () => { retries += 1; return { unavailable: moved() }; });
-  ipcMain.handle('workspace:save', () => {});
+  ipcMain.handle('workspace:save', (_, paths, activePath) => { savedWorkspace = { paths, activePath }; });
   // The fresh-profile scenario drives the guided connection against scripted answers; nothing reaches a provider.
   let secureStorage = true;
   let connected = false;
@@ -267,6 +268,90 @@ app.whenReady().then(async () => {
   win.setContentSize(1480, 940);
   await waitFor('innerWidth === 1480');
   await js(`localStorage.setItem('gitcat-locale', 'es')`);
+  await waitFor(`document.querySelectorAll('.window-tab').length === 2`);
+  // Dragging reorders available and unavailable tabs without changing the selected project.
+  const tabNames = () => js(`[...document.querySelectorAll('.window-tab [role="tab"] span')].map(node => node.textContent)`);
+  const startTabDrag = (selector) => js(`(() => {
+    window.tabTransfer = new DataTransfer();
+    document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: window.tabTransfer }));
+  })()`);
+  const overTab = (selector, side, type = 'dragover') => js(`(() => {
+    const tab = document.querySelector(${JSON.stringify(selector)}), r = tab.getBoundingClientRect();
+    tab.dispatchEvent(new DragEvent(${JSON.stringify(type)}, { bubbles: true, cancelable: true, dataTransfer: window.tabTransfer,
+      clientX: ${side === 'before' ? 'r.left + 2' : 'r.right - 2'}, clientY: r.top + r.height / 2 }));
+  })()`);
+  await startTabDrag('.window-tab.unavailable [role="tab"]');
+  await overTab('.window-tab:not(.unavailable)', 'before');
+  await waitFor(`document.querySelector('.window-tab.drop-before')`);
+  await js(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+  await capture('tab-reorder');
+  await overTab('.window-tab:not(.unavailable)', 'before', 'drop');
+  await waitFor(`document.querySelector('.window-tab:first-child.unavailable')`);
+  assert.deepEqual(await tabNames(), ['Moved project', 'GitCat']);
+  assert.deepEqual(savedWorkspace, { paths: [movedPath, repo], activePath: repo });
+  assert.equal(await js(`document.querySelector('.window-tab.active [role="tab"] span').textContent`), 'GitCat');
+  assert.equal(await js(`document.querySelectorAll('.drop-before, .drop-after, .dragging').length`), 0);
+  restored = { projects: [snapshot], unavailable: [moved()], order: savedWorkspace.paths, activePath: savedWorkspace.activePath };
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await waitFor(`document.querySelector('.window-tab:first-child.unavailable')`);
+  assert.deepEqual(await tabNames(), ['Moved project', 'GitCat'], 'Saved tab order survives workspace restoration');
+  // An abandoned drag and a drop from outside GitCat cannot change the workspace.
+  await startTabDrag('.window-tab.unavailable [role="tab"]');
+  await overTab('.window-tab:not(.unavailable)', 'after');
+  await js(`document.querySelector('.window-tab.unavailable [role="tab"]').dispatchEvent(new DragEvent('dragend', { bubbles: true }))`);
+  await overTab('.window-tab:not(.unavailable)', 'after', 'drop');
+  assert.deepEqual(await tabNames(), ['Moved project', 'GitCat']);
+  // Move right, then exercise the keyboard alternative and normal close controls.
+  await startTabDrag('.window-tab.unavailable [role="tab"]');
+  await overTab('.window-tab:not(.unavailable)', 'after', 'drop');
+  await waitFor(`document.querySelector('.window-tab:last-of-type.unavailable')`);
+  await js(`document.querySelector('.window-tab.unavailable [role="tab"]').dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, altKey: true, key: 'ArrowLeft' }))`);
+  await waitFor(`document.querySelector('.window-tab:first-child.unavailable')`);
+  await js(`document.querySelector('.window-tab.unavailable [role="tab"]').dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, altKey: true, key: 'ArrowRight' }))`);
+  await waitFor(`document.querySelector('.window-tab:last-of-type.unavailable')`);
+  await js(`document.querySelector('.window-tab.unavailable .tab-close').click()`);
+  await waitFor(`document.querySelectorAll('.window-tab').length === 1`);
+  assert.equal(await js(`document.querySelector('.window-tab.active [role="tab"] span').textContent`), 'GitCat');
+  // Overflowing tabs remain reachable and a drop beyond the last tab moves to the end.
+  const missingTabs = Array.from({ length: 12 }, (_, index) => ({ ...moved(), path: path.join(scratch, `missing-${index}`), name: `Saved project ${index}` }));
+  restored = { projects: [snapshot], unavailable: missingTabs, order: [repo, ...missingTabs.map(tab => tab.path)], activePath: repo };
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await waitFor(`document.querySelectorAll('.window-tab').length === 13`);
+  assert.equal(await js(`document.querySelector('.window-tabs').scrollWidth > document.querySelector('.window-tabs').clientWidth`), true);
+  await startTabDrag('.window-tab:not(.unavailable) [role="tab"]');
+  await js(`(() => {
+    const strip = document.querySelector('.window-tabs'), r = strip.getBoundingClientRect();
+    for (let i = 0; i < 8; i++) strip.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true,
+      dataTransfer: window.tabTransfer, clientX: r.right - 2, clientY: r.top + r.height / 2 }));
+  })()`);
+  assert.equal(await js(`document.querySelector('.window-tabs').scrollLeft > 0`), true, 'Dragging at the edge scrolls hidden tabs into reach');
+  await overTab('.tab-add', 'after', 'drop');
+  await waitFor(`document.querySelector('.window-tab:last-of-type.active')`);
+  assert.deepEqual(await tabNames(), [...missingTabs.map(tab => tab.name), 'GitCat']);
+  await js(`document.querySelector('.window-tabs').scrollLeft = 0`);
+  await startTabDrag('.window-tab:not(.unavailable) [role="tab"]');
+  await js(`(() => {
+    const strip = document.querySelector('.window-tabs'), first = strip.querySelector('.window-tab').getBoundingClientRect();
+    strip.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: window.tabTransfer,
+      clientX: first.right + 2, clientY: first.top + first.height / 2 }));
+  })()`);
+  await waitFor(`document.querySelectorAll('.window-tab')[1].classList.contains('active')`);
+  assert.deepEqual(await tabNames(), [missingTabs[0].name, 'GitCat', ...missingTabs.slice(1).map(tab => tab.name)], 'A drop in the gap between tabs inserts at that gap');
+  restored = null;
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await waitFor(`document.querySelectorAll('.commit-row').length === 7`);
+  // A fast native gesture can deliver the drop before React paints drag-start state.
+  await js(`(() => {
+    const source = document.querySelector('.window-tab.unavailable [role="tab"]');
+    const target = document.querySelector('.window-tab:not(.unavailable)'), r = target.getBoundingClientRect();
+    const transfer = new DataTransfer();
+    source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: transfer }));
+    target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer, clientX: r.left + 2, clientY: r.top + 10 }));
+    source.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: transfer }));
+  })()`);
+  await waitFor(`document.querySelector('.window-tab:first-child.unavailable')`);
+  await js(`document.querySelector('.window-tab.unavailable [role="tab"]').dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, altKey: true, key: 'ArrowRight' }))`);
+  await waitFor(`document.querySelector('.window-tab:last-of-type.unavailable')`);
   // A long branch list must scroll inside the sidebar, with its controls staying visible.
   const scrollBranches = Array.from({ length: 48 }, (_, index) => `scroll/item-${String(index).padStart(2, '0')}`);
   for (const name of scrollBranches) git('branch', name);
