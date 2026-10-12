@@ -84,7 +84,9 @@
 
 /* Sidebar: the branch list, denser now that the repository lives in the bar above. */
 .sidebar-section { padding: 14px 10px 10px; }
-.branch-list { margin-top: 10px; }
+.branch-section { display: flex; flex-direction: column; }
+.branch-section > :not(.branch-list) { flex: none; }
+.branch-list { flex: 1; min-height: 0; margin-top: 10px; overflow-y: auto; }
 .branch-row { height: 30px; margin-bottom: 1px; font-size: 12.5px; }
 .branch-group { height: 26px; }
 /* The name is what the row is for, so badges give way before it does. */
