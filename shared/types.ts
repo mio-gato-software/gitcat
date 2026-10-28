@@ -750,8 +750,6 @@ export type RecoveryReport = {
 
 export type ExecutionResult = {
   snapshot: RepoSnapshot;
-  /** A post-execution inspection failed; snapshot is the pre-execution fallback, not current state. */
-  snapshotStale?: boolean;
   output: string;
   error?: string;
   /** What each step of the plan actually did, so a sequence that stops halfway is never reported as a success. */
