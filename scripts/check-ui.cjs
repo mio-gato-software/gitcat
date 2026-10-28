@@ -360,6 +360,10 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.branch-section input')`);
   await js(`(() => { const input = document.querySelector('.branch-section input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'scroll/item-'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await waitFor(`document.querySelectorAll('.branch-list .branch-row').length === 48`);
+  // Native input requires a focused window; hidden-window wheel delivery is unreliable on hosted Macs.
+  win.show();
+  win.focus();
+  await waitFor('document.hasFocus()');
   for (const height of [940, 720]) {
     win.setContentSize(1480, height);
     await waitFor(`innerHeight === ${height}`);
@@ -376,6 +380,8 @@ app.whenReady().then(async () => {
       })()`);
       assert.equal(viewport.overflows, true, 'The branch list has a bounded scroll viewport');
       assert.ok(viewport.bottomGap <= 12, 'Branches use the space down to the bottom of the sidebar');
+      // Let Chromium paint the mode/size change and reset before hit-testing native wheel input.
+      await js(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
       win.webContents.sendInputEvent({ type: 'mouseMove', x: viewport.x, y: viewport.y });
       win.webContents.sendInputEvent({ type: 'mouseWheel', x: viewport.x, y: viewport.y, deltaY: -400, deltaX: 0 });
       await waitFor(`document.querySelector('.branch-list').scrollTop > 0`);

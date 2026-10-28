@@ -1412,8 +1412,8 @@ export default function App() {
     const before = project?.snapshot;
     try {
       const result = await window.gitcat.executePlan(plan.repoPath, plan.id, locale);
-      const completion = completionSummary({ plan, outcomes: result.outcomes, before, after: result.snapshot, error: result.error, fetchedAt: project?.fetchedAt }, locale);
-      updateSnapshot(plan.repoPath, result.snapshot);
+      const completion = completionSummary({ plan, outcomes: result.outcomes, before, after: result.snapshotStale ? undefined : result.snapshot, error: result.error, fetchedAt: project?.fetchedAt }, locale);
+      if (!result.snapshotStale) updateSnapshot(plan.repoPath, result.snapshot);
       setReadinessEpoch((epoch) => epoch + 1);
       if (result.error) {
         // A sequence that stopped halfway did change the repository: show what ran, not only the failure.
@@ -1429,16 +1429,15 @@ export default function App() {
         // A failed push or fetch does not create a pending Git operation, but it still needs the
         // assistant's translation and next-step options. Recovery is for any failed plan, not only
         // merge/rebase states that leave metadata in .git.
-        if (failed) {
-          await recoverFrom(plan.repoPath, {
-            command: failed.command,
-            summary: failed.summary,
-            error: result.error,
-            skipped: (result.outcomes ?? []).filter((outcome) => outcome.status === "skipped").map((outcome) => outcome.summary),
-            planId: plan.id,
-            stage: "execute"
-          });
-        }
+        // Persistence can fail with no failed Git step; recovery still shows completed work.
+        await recoverFrom(plan.repoPath, {
+          command: failed?.command ?? plan.command,
+          summary: failed?.summary ?? plan.summary,
+          error: result.error,
+          skipped: (result.outcomes ?? []).filter((outcome) => outcome.status === "skipped").map((outcome) => outcome.summary),
+          planId: plan.id,
+          stage: "execute"
+        });
       } else {
         // The model still reads what Git printed; the person reads what changed and what is left.
         const outcome = result.output || completion.headline;

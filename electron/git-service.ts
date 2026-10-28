@@ -45,7 +45,7 @@ import {
 } from "./outbound-content.js";
 import type {
   ActionPlan, AiSharingFile, AiSharingPreview, AiSharingPurpose, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource,
-  DeliveryRequest, FileChange, GitProtocol, SecretFinding, SecretKind, SelectedChange, WithheldFile,
+  DeliveryRequest, ExecutionResult, FileChange, GitProtocol, SecretFinding, SecretKind, SelectedChange, WithheldFile,
   ConflictApplyResult, ConflictFileOutcome, ConflictProposal, ConflictChoice, ConflictChoiceOutcome, ConflictChoiceRequest, ConflictChoiceResult,
   ConflictFileVersion, ConflictGuide, ConflictGuideFile, ConflictSideIdentity, ConflictSideId, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput, LlmConnectResult, AiConnectionProblem,
   Locale, Operation, PendingOperation, PlanStep, RepoSnapshot, StepOutcome, AssistantUnavailable, RecoveryReport,
@@ -2561,20 +2561,9 @@ export async function planAction(cwd: string, request: string, context: Conversa
   }
 }
 
-/**
- * What a free-form command costs, on the app's word: these subcommands only read — they leave the
- * working tree, the history and everything published untouched — so they are "low" and may run
- * unattended. Anything else is "high" and always waits for confirmation. "reflog" stays out:
- * "reflog expire" rewrites, so the subcommand alone does not prove read-only.
- */
-const readOnlyGitSubcommands = new Set([
-  "blame", "describe", "diff", "grep", "log", "ls-files", "ls-remote", "rev-list", "rev-parse", "shortlog", "show", "status"
-]);
-
-/** A step that leaves the repository exactly as it found it can run without asking. */
+/** Only structured operations qualify. Free-form options and Git configuration can write files
+ * or invoke programs even for commands normally used to read (for example log --output). */
 function isUnattended(step: PlanStep) {
-  const argv = step.argv ?? [];
-  if (step.operation === "git_command") return argv.length > 0 && readOnlyGitSubcommands.has(argv[0]);
   return unattendedOperations.has(step.operation);
 }
 
@@ -2612,7 +2601,7 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     git_command: [
       localized(locale, `Ejecutar ${buildCommand("git_command", {}, argv)}`, `Run ${buildCommand("git_command", {}, argv)}`),
       localized(locale, "Comando Git propuesto por el asistente: se ejecuta tal cual, sin shell, y solo tras tu confirmación.", "Git command proposed by the assistant: it runs as-is, without a shell, only after your confirmation."),
-      argv.length && readOnlyGitSubcommands.has(argv[0]) ? "low" : "high"
+      "high"
     ]
   };
   const detail = details[operation];
@@ -3530,7 +3519,7 @@ function showsWithheld(plan: ActionPlan, outcomes: StepOutcome[]) {
  * produced, and the first failure stops the sequence: a half-finished merge must never be reported as
  * done, and the steps that never ran are named so the user knows exactly where things stand.
  */
-async function executePlanBody(cwd: string, plan: ActionPlan, locale?: Locale, activityId?: string): Promise<{ snapshot: RepoSnapshot; output: string; error?: string; outcomes: StepOutcome[]; withheldFromAssistant?: boolean }> {
+async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutcome[], locale?: Locale, activityId?: string): Promise<ExecutionResult & { outcomes: StepOutcome[] }> {
   const language = normalizeLocale(locale);
   let snapshot = await getSnapshot(cwd);
   const selectionNow = plan.selection ? await selectionBinding(snapshot, currentVersions(snapshot, plan.selection.changes), plan.selection.target) : undefined;
@@ -3541,8 +3530,6 @@ async function executePlanBody(cwd: string, plan: ActionPlan, locale?: Locale, a
     const blockers = "problem" in resolved ? [] : await integrationBlockers(snapshot, resolved.excluded, plan.selection.target);
     if (blockers.length) throw new Error(blockersText(blockers, snapshot.currentBranch, plan.selection.target, language));
   }
-  const outcomes: StepOutcome[] = plan.steps.map((step) => ({ command: step.command, summary: step.summary, status: "skipped", output: "" }));
-
   for (const [index, step] of plan.steps.entries()) {
     if (operationContext()?.signal.aborted) {
       operationPhase("inspecting");
@@ -3556,7 +3543,6 @@ async function executePlanBody(cwd: string, plan: ActionPlan, locale?: Locale, a
         validateStep(step, snapshot, language);
       }
       outcomes[index] = { ...outcomes[index], status: "completed", output: await runStep(cwd, step, plan, snapshot, language) };
-      activityHistory().step(activityId, index, outcomes[index], snapshot, await inspectOperation(() => getSnapshot(cwd)));
     } catch (error) {
       const detail = error instanceof Error ? error.message : localized(language, "Git no pudo completar la acción.", "Git could not complete the action.");
       outcomes[index] = { ...outcomes[index], status: "failed", output: detail };
@@ -3571,6 +3557,8 @@ async function executePlanBody(cwd: string, plan: ActionPlan, locale?: Locale, a
         ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {})
       };
     }
+    // Git has settled. Observation or persistence errors must never change its outcome.
+    activityHistory().step(activityId, index, outcomes[index], snapshot, await inspectOperation(() => getSnapshot(cwd)));
   }
   operationPhase("inspecting");
   return { snapshot: await inspectOperation(() => getSnapshot(cwd)), output: executionReport(outcomes, language), outcomes, ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {}) };
@@ -3812,16 +3800,35 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
   if (plan.switchWork) await validateSwitchWork(cwd, plan.switchWork);
   const before = await getSnapshot(cwd);
   const history = activityHistory(), id = history.begin(plan, before);
+  // Keep the ledger outside the body: even a failed snapshot or journal write cannot erase it.
+  const outcomes: StepOutcome[] = plan.steps.map(step => ({ command: step.command, summary: step.summary, status: "skipped", output: "" }));
+  const language = normalizeLocale(locale);
+  const bookkeepingError = (error: unknown) => localized(language,
+    "No se pudo comprobar el estado o guardar el historial de actividad. Los pasos completados siguen hechos y no se repetirán. Actualiza la vista y revisa el historial antes de continuar.",
+    "Could not verify the state or save activity history. Completed steps remain done and will not be repeated. Refresh the view and review history before continuing.") + `\n${error instanceof Error ? error.message : String(error)}`;
+  let result: ExecutionResult & { outcomes: StepOutcome[] };
   try {
-    const result = await executePlanBody(cwd, plan, locale, id);
-    history.finish(id, result.snapshot, result.outcomes, result.error);
-    return result;
+    result = await executePlanBody(cwd, plan, outcomes, locale, id);
   } catch (error) {
+    if (outcomes.every(outcome => outcome.status === "skipped")) {
+      // Validation failed before execution. A journal failure must not replace the original error.
+      try { history.finish(id, before, outcomes, error instanceof Error ? error.message : String(error)); } catch { /* The pending journal remains visibly uncertain. */ }
+      throw error;
+    }
     const after = await inspectOperation(() => getSnapshot(cwd)).catch(() => undefined);
-    // A missing result never proves rollback. Pending journal steps remain unknown.
-    history.finish(id, after, [], error instanceof Error ? error.message : String(error));
-    throw error;
+    result = {
+      snapshot: after ?? before,
+      ...(!after ? { snapshotStale: true } : {}),
+      output: executionReport(outcomes, language), error: bookkeepingError(error), outcomes,
+      ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {})
+    };
   }
+  try {
+    history.finish(id, result.snapshotStale ? undefined : result.snapshot, outcomes, result.error);
+  } catch (error) {
+    result.error = [result.error, bookkeepingError(error)].filter(Boolean).join("\n");
+  }
+  return result;
 }
 
 async function validateHistoryRecovery(cwd: string, recovery: HistoryRecovery) {

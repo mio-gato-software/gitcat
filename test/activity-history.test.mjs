@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -69,4 +69,83 @@ test('partial sequence records completed and failed steps with recovery refs',as
  const result=await service.executePlan(path,plan,'en');
  assert.ok(result.error);const entry=(await service.getActivityHistory(path)).entries[0];
  assert.deepEqual(entry.steps.map(s=>s.status),['completed','failed','skipped']);assert.ok(entry.steps[0].afterHead);
+});
+
+for (const failingMethods of [['step'], ['finish'], ['step', 'finish']]) {
+ test(`journal failure after commit preserves completion: ${failingMethods.join('+')}`, async t => {
+  const {path,git}=fixture(t);
+  writeFileSync(join(path,'file'),'saved despite journal error');
+  const plan=await service.prepareOperation(path,'commit',{message:'confirmed save'},'en');
+  for (const method of failingMethods) t.mock.method(ActivityHistory.prototype,method,()=>{throw new Error('simulated disk error');});
+  const result=await service.executePlan(path,plan,'en');
+  assert.match(result.error,/Completed steps remain done/);
+  assert.deepEqual(result.outcomes.map(s=>s.status),['completed']);
+  assert.equal(git('rev-list','--count','HEAD'),'2');
+  assert.equal(git('show','HEAD:file'),'saved despite journal error');
+  assert.equal(result.snapshot.head,git('rev-parse','HEAD'));
+  const record={plan,outcomes:result.outcomes,stale:false};
+  await assert.rejects(service.prepareRetry(path,record,'en'),/No step/);
+  const report=await service.describeFailure(path,{command:plan.command,summary:plan.summary,error:result.error,skipped:[],stage:'execute'},record);
+  assert.deepEqual(report.completed,[plan.steps[0].summary]);
+  assert.equal(report.actions.some(action=>action.kind==='retry'),false);
+  if (!failingMethods.includes('finish')) assert.equal((await service.getActivityHistory(path)).entries[0].steps[0].status,'completed');
+ });
+}
+
+test('journal failure between steps stops the sequence and retry excludes the completed commit',async t=>{
+ const {path,git}=fixture(t);
+ writeFileSync(join(path,'file'),'saved once');
+ const plan=await service.prepareOperation(path,'commit',{message:'save once'},'en');
+ const next=await service.prepareOperation(path,'create_branch',{name:'after-save'},'en');
+ plan.steps.push(...next.steps);
+ const mock=t.mock.method(ActivityHistory.prototype,'step',()=>{throw new Error('simulated disk error');});
+ const result=await service.executePlan(path,plan,'en');
+ assert.deepEqual(result.outcomes.map(s=>s.status),['completed','skipped']);
+ assert.equal(git('branch','--show-current'),'main');
+ const saved=git('rev-parse','HEAD');
+ mock.mock.restore();
+ const retry=await service.prepareRetry(path,{plan,outcomes:result.outcomes,stale:false},'en');
+ assert.deepEqual(retry.steps.map(s=>s.operation),['create_branch']);
+ assert.equal((await service.executePlan(path,retry,'en')).error,undefined);
+ assert.equal(git('branch','--show-current'),'after-save');
+ assert.equal(git('rev-parse','HEAD'),saved);
+ assert.equal(git('rev-list','--count','HEAD'),'2');
+});
+
+test('journal failure before execution leaves Git and local edits untouched',async t=>{
+ const {path,git}=fixture(t),head=git('rev-parse','HEAD');
+ writeFileSync(join(path,'file'),'still unsaved');
+ const plan=await service.prepareOperation(path,'commit',{message:'must not run'},'en');
+ t.mock.method(ActivityHistory.prototype,'begin',()=>{throw new Error('simulated disk error');});
+ await assert.rejects(service.executePlan(path,plan,'en'),/simulated disk error/);
+ assert.equal(git('rev-parse','HEAD'),head);
+ assert.equal(readFileSync(join(path,'file'),'utf8'),'still unsaved');
+});
+
+test('a Git failure remains failed when its journal write also fails',async t=>{
+ const {path}=fixture(t);
+ const plan=await service.prepareOperation(path,'push',{},'en');
+ t.mock.method(ActivityHistory.prototype,'step',()=>{throw new Error('simulated disk error');});
+ const result=await service.executePlan(path,plan,'en');
+ assert.ok(result.error);
+ assert.deepEqual(result.outcomes.map(s=>s.status),['failed']);
+ assert.match(result.outcomes[0].output,/destination|upstream|remote/i);
+});
+
+test('failed post-execution inspection marks its fallback stale without losing the commit',async t=>{
+ const {path,git}=fixture(t),head=git('rev-parse','HEAD');
+ writeFileSync(join(path,'file'),'saved before inspection failed');
+ const plan=await service.prepareOperation(path,'commit',{message:'save'},'en');
+ t.mock.method(ActivityHistory.prototype,'step',()=>{
+  renameSync(join(path,'.git'),join(path,'.git-hidden'));
+  throw new Error('repository became unavailable');
+ });
+ const result=await service.executePlan(path,plan,'en');
+ renameSync(join(path,'.git-hidden'),join(path,'.git'));
+ assert.equal(result.snapshotStale,true);
+ assert.equal(result.snapshot.head,head);
+ assert.deepEqual(result.outcomes.map(s=>s.status),['completed']);
+ assert.equal(git('rev-list','--count','HEAD'),'2');
+ assert.equal(git('show','HEAD:file'),'saved before inspection failed');
+ assert.equal((await service.getActivityHistory(path)).entries[0].after,undefined);
 });

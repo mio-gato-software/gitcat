@@ -309,7 +309,7 @@ test("output of a command aimed at a withheld file stays out of the conversation
   await service.acknowledgeAiSharing(repo);
   queue.push(plan({ intent: "git_operation", steps: [step("git_command", {}, ["show", "HEAD:.env"])], summary: "Show", reply: "" }));
   const reading = await service.planAction(repo, "show me .env", [], "en");
-  assert.equal(reading.requiresConfirmation, false);
+  assert.equal(reading.requiresConfirmation, true);
   const execution = await service.executePlan(repo, reading, "en");
   assert.equal(execution.withheldFromAssistant, true);
   queue.push(plan({ intent: "git_operation", steps: [step("git_command", {}, ["log", "-1", "--format=%s"])], summary: "Log", reply: "" }));
