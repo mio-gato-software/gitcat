@@ -10,7 +10,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 test("el proyecto usa Electron como entrada de escritorio", async () => {
   const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   assert.equal(packageJson.main, "dist-electron/electron/main.js");
-  assert.match(packageJson.devDependencies.electron, /43\.3/);
+  assert.match(packageJson.devDependencies.electron, /45\.0/);
   assert.match(packageJson.scripts["dist:mac"], /CSC_IDENTITY_AUTO_DISCOVERY=false/);
   assert.equal(packageJson.build.productName, "GitCat");
 });
@@ -75,8 +75,7 @@ test("git_command da libertad al modelo sin shell y sin saltarse protecciones", 
   assert.match(service, /case "git_command": return reportedGit\(cwd, step\.argv \?\? \[\]\)/);
   assert.doesNotMatch(service, /exec\(.*command/);
   assert.match(planner, /there is no shell/);
-  // Investigar es su primer instinto: los de solo lectura corren sin confirmación; el resto, jamás.
-  assert.match(service, /readOnlyGitSubcommands/);
+  // Investigar sigue siendo su primer instinto; la política de confirmación se prueba con Git real.
   assert.match(planner, /first instinct/);
   // Anunciar que lo hará no vale: la investigación es un git_operation, en este turno.
   assert.match(planner, /is "git_operation" with read-only "git_command" steps, never "answer" or\n"needs_information"/);
@@ -370,8 +369,7 @@ test("una acción que no puede perder trabajo se ejecuta sin pedir confirmación
   // El criterio vive en un solo sitio y es restrictivo a propósito.
   assert.match(service, /const unattendedOperations = new Set<Operation>\(\["status", "fetch"\]\)/);
   assert.match(service, /requiresConfirmation: steps\.some\(\(step\) => !isUnattended\(step\)\)/);
-  // Un comando libre solo corre desatendido si su subcomando es de solo lectura.
-  assert.match(service, /if \(step\.operation === "git_command"\) return argv\.length > 0 && readOnlyGitSubcommands\.has\(argv\[0\]\)/);
+  // Las regresiones de planner-flow comprueban la confirmación de comandos libres.
   // El flag ahora manda: se ejecuta solo, y la tarjeta no ofrece un botón que no decide nada.
   assert.match(app, /if \(unattended\) await runPlan\(turnId, plan\)/);
   assert.match(app, /plan\.allowed && !plan\.requiresConfirmation/);

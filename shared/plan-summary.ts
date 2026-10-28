@@ -310,13 +310,16 @@ export function completionSummary(input: CompletionInput, locale?: Locale): Comp
   const done = outcomes.filter((outcome) => outcome.status === "completed").length;
   const moved = before && after ? fingerprint(before) !== fingerprint(after) : true;
   const status: CompletionStatus = failed ? (done ? "partial" : "failed")
-    : input.error || !done ? "not_run"
+    : input.error ? (done ? "partial" : "not_run")
+    : !done ? "not_run"
     : !moved && plan.steps.every((step) => observable.has(step.operation)) ? "no_change"
     : "completed";
 
   const headline = status === "completed" ? (outcomes.length === 1 ? say(`Done: ${outcomes[0].summary}.`, `Hecho: ${outcomes[0].summary}.`) : say(`All ${outcomes.length} steps completed.`, `Se completaron los ${outcomes.length} pasos.`))
     : status === "no_change" ? say("Git ran and nothing needed to change.", "Git se ejecutó y no hacía falta cambiar nada.")
-    : status === "partial" ? say(`Stopped partway: ${done} of ${outcomes.length} steps completed. “${failed!.summary}” failed.`, `Se detuvo a medias: se completaron ${done} de ${outcomes.length} pasos. Falló «${failed!.summary}».`)
+    : status === "partial" ? failed
+      ? say(`Stopped partway: ${done} of ${outcomes.length} steps completed. “${failed.summary}” failed.`, `Se detuvo a medias: se completaron ${done} de ${outcomes.length} pasos. Falló «${failed.summary}».`)
+      : say(`${done} of ${outcomes.length} Git steps completed. Review the warning before continuing; completed steps will not be repeated.`, `Se completaron ${done} de ${outcomes.length} pasos de Git. Revisa el aviso antes de continuar; los pasos completados no se repetirán.`)
     : status === "failed" ? (outcomes.length > 1
       ? say(`“${failed!.summary}” did not complete, so the other steps did not run.`, `«${failed!.summary}» no se completó, así que los demás pasos no se ejecutaron.`)
       : say(`“${failed!.summary}” did not complete.`, `«${failed!.summary}» no se completó.`))

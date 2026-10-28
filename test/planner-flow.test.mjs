@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { rmSync, chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { rmSync, chmodSync, mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -278,7 +278,7 @@ test("git_command sin argv vuelve al modelo como incidencia estructurada", async
   assert.equal(result.allowed, false);
 });
 
-test("un git_command de solo lectura corre sin confirmación; uno que escribe, no", async () => {
+test("todo git_command espera confirmación, aunque se proponga como lectura", async () => {
   reply(plan({
     intent: "git_operation",
     steps: [step("git_command", {}, ["log", "-1", "--format=%ad"])],
@@ -286,8 +286,8 @@ test("un git_command de solo lectura corre sin confirmación; uno que escribe, n
   }));
   const reading = await service.planAction(repo, "¿cuándo fue el último commit?");
   assert.equal(reading.allowed, true, reading.rationale);
-  assert.equal(reading.requiresConfirmation, false, "un comando de solo lectura no pide tarjeta");
-  assert.equal(reading.risk, "low");
+  assert.equal(reading.requiresConfirmation, true, "los argumentos libres se revisan antes de ejecutar");
+  assert.equal(reading.risk, "high");
 
   const execution = await service.executePlan(repo, reading);
   assert.equal(execution.error, undefined, execution.error);
@@ -304,7 +304,7 @@ test("un git_command de solo lectura corre sin confirmación; uno que escribe, n
   assert.equal(writing.steps[0].risk, "high");
 });
 
-test("una investigación con varios comandos de solo lectura corre entera sin confirmación", async () => {
+test("una investigación con varios comandos libres espera confirmación", async () => {
   reply(plan({
     intent: "git_operation",
     steps: [
@@ -315,7 +315,7 @@ test("una investigación con varios comandos de solo lectura corre entera sin co
   }));
   const result = await service.planAction(repo, "investiga quién creó README.md, cuándo y quién lo eliminó");
   assert.equal(result.allowed, true, result.rationale);
-  assert.equal(result.requiresConfirmation, false, "investigar no pide tarjeta");
+  assert.equal(result.requiresConfirmation, true, "la investigación con comandos libres también se revisa");
   assert.equal(result.steps.length, 2);
 
   const execution = await service.executePlan(repo, result);
@@ -650,3 +650,28 @@ test("un fallo de red conserva su causa y no cambia la configuración guardada",
     globalThis.fetch = providerFetch;
   }
 });
+
+for (const variant of ['output-equals', 'output-separate', 'external-diff', 'pager', 'global-option']) {
+  test(`un comando libre con efectos posibles espera confirmación: ${variant}`, async t => {
+    const sentinel = join(repo, 'README.md');
+    const original = readFileSync(sentinel);
+    t.after(() => writeFileSync(sentinel, original));
+    const dirty = Buffer.from('trabajo local sin guardar\n');
+    writeFileSync(sentinel, dirty);
+    const argv = {
+      'output-equals': ['log', '-1', `--output=${sentinel}`],
+      'output-separate': ['log', '-1', '--output', sentinel],
+      'external-diff': ['diff', '--ext-diff'],
+      'pager': ['grep', '--open-files-in-pager=echo', 'trabajo'],
+      'global-option': ['-c', 'alias.inspect=!echo unsafe', 'inspect']
+    }[variant];
+    reply(plan({ steps: [step('git_command', {}, argv)], summary: 'Inspect', rationale: 'Read only', risk: 'low' }));
+    const proposed = await service.planAction(repo, 'Inspect the project');
+    assert.equal(proposed.allowed, true, proposed.rationale);
+    assert.equal(proposed.requiresConfirmation, true);
+    assert.equal(proposed.risk, 'high');
+    // Exercise the renderer's unattended gate with the real executor and a dirty tracked file.
+    if (proposed.allowed && !proposed.requiresConfirmation) await service.executePlan(repo, proposed);
+    assert.deepEqual(readFileSync(sentinel), dirty);
+  });
+}

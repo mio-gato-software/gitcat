@@ -170,3 +170,17 @@ test("a partial failure tells completed, failed and unrun steps apart and is nev
   assert.match(first.headline, /did not complete, so the other steps did not run/);
   assert.match(completionSummary({ plan: delivery, outcomes: done(delivery.steps, ["failed", "skipped", "skipped"]), before, after: before, error: "x" }, "es").headline, /no se completó, así que los demás pasos no se ejecutaron/);
 });
+
+for (const statuses of [['completed'], ['completed','skipped']]) {
+ test(`bookkeeping failure still shows completed Git work (${statuses.length} steps)`,()=>{
+  const steps=[step('commit',{message:'save'},'Save work'),step('checkout',{name:'main'},'Switch to main')].slice(0,statuses.length);
+  for(const locale of ['en','es']) {
+   const result=completionSummary({plan:plan(steps),outcomes:done(steps,statuses),before:snapshot(),error:'Activity history unavailable'},locale);
+   assert.equal(result.status,'partial');
+   assert.deepEqual(result.steps.map(s=>s.status),statuses);
+   assert.doesNotMatch(result.headline,/Nothing ran|No se ejecutó nada|failed|Falló/);
+   assert.match(result.headline,locale==='en'?/1 of .* Git steps completed/:/Se completaron 1 de .* pasos de Git/);
+   assert.equal(result.next,undefined);
+  }
+ });
+}

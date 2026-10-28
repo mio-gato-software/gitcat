@@ -192,9 +192,8 @@ exactly as written: there is no shell, so pipes, redirects, "&&" and glob expans
 use several steps instead. Use a structured operation whenever one fits the request, because those
 carry checks a free command skips; reserve "git_command" for flags, subcommands or options the list
 above does not cover. The exact command is shown on the confirmation card and always waits for
-approval — except read-only ones (log, diff, show, blame, grep and the like), which leave the
-repository exactly as they found it and therefore run right away, their output going straight to
-the user. Investigating a question with a read-only command is always your first instinct; saying
+approval, including commands intended only to read: options and Git configuration can still
+write files or invoke external programs. Investigating a question with a read-only command is always your first instinct; saying
 "I can't determine that" is the last resort, for when a command could not find it either. Leave
 "argv" empty for every other operation.
 

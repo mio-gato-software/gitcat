@@ -7,6 +7,12 @@ command output, commit messages, credentials, or assistant conversations. Failur
 through the existing credential redactors. Entries expire after 30 days by default (7/30/90 days
 or off); Clear removes only this project's metadata. Off clears all activity metadata.
 
+If recording activity fails after a Git step completes, execution stops before the next step.
+The completed outcome remains available for recovery, and retry excludes it. Git errors remain
+failed outcomes even if recording them also fails. A failed post-execution inspection is explicitly
+marked stale, so its fallback snapshot is not displayed as current state. If no journal update can
+be saved, the persisted entry remains uncertain; it is never evidence that Git did not run.
+
 A process interrupted between records leaves pending/unknown steps. The UI never treats these
 as rollback or automatically replays them. Git's current repository state is authoritative.
 This is not a checkpoint of uncommitted files or the index. Files never saved in Git cannot be
