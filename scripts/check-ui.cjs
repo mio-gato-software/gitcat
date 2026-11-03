@@ -269,6 +269,7 @@ app.whenReady().then(async () => {
   await waitFor('innerWidth === 1480');
   await js(`localStorage.setItem('gitcat-locale', 'es')`);
   await waitFor(`document.querySelectorAll('.window-tab').length === 2`);
+  assert.equal(await js(`document.querySelectorAll('.tab-scroll').length`), 0, 'No overflow controls when every project fits');
   // Dragging reorders available and unavailable tabs without changing the selected project.
   const tabNames = () => js(`[...document.querySelectorAll('.window-tab [role="tab"] span')].map(node => node.textContent)`);
   const startTabDrag = (selector) => js(`(() => {
@@ -318,6 +319,60 @@ app.whenReady().then(async () => {
   await win.loadFile(path.join(root, 'dist/index.html'));
   await waitFor(`document.querySelectorAll('.window-tab').length === 13`);
   assert.equal(await js(`document.querySelector('.window-tabs').scrollWidth > document.querySelector('.window-tabs').clientWidth`), true);
+  await waitFor(`document.querySelectorAll('.tab-scroll').length === 2`);
+  assert.deepEqual(await js(`[...document.querySelectorAll('.tab-scroll')].map(button => button.disabled)`), [true, false]);
+  const activeTabVisible = `(() => {
+    const tab = document.querySelector('.window-tab.active').getBoundingClientRect();
+    const strip = document.querySelector('.window-tabs').getBoundingClientRect();
+    return tab.left >= strip.left - 1 && tab.right <= strip.right + 1;
+  })()`;
+  const addButtonVisible = `(() => {
+    const add = document.querySelector('.tab-add').getBoundingClientRect();
+    const strip = document.querySelector('.window-tabs').getBoundingClientRect();
+    const actions = document.querySelector('.top-actions').getBoundingClientRect();
+    return add.left >= strip.right && add.right <= actions.left;
+  })()`;
+  await capture('tabs-overflow-start');
+  await js(`document.querySelectorAll('.tab-scroll')[1].click()`);
+  await waitFor(`document.querySelector('.window-tabs').scrollLeft > document.querySelector('.window-tabs').clientWidth * .6`);
+  assert.equal(savedWorkspace.activePath, repo, 'Browsing hidden tabs does not switch the selected project');
+  await waitFor(`!document.querySelector('.tab-scroll').disabled`);
+  await js(`document.querySelector('.tab-scroll').click()`);
+  await waitFor(`document.querySelector('.tab-scroll').disabled`);
+  assert.equal(await js(`(() => {
+    const strip = document.querySelector('.window-tabs');
+    const event = new WheelEvent('wheel', { deltaY: 240, bubbles: true, cancelable: true });
+    strip.dispatchEvent(event);
+    return event.defaultPrevented && strip.scrollLeft > 0;
+  })()`), true, 'A conventional mouse wheel moves the project strip horizontally');
+  assert.equal(await js(`(() => {
+    const event = new WheelEvent('wheel', { deltaY: 100, ctrlKey: true, bubbles: true, cancelable: true });
+    document.querySelector('.window-tabs').dispatchEvent(event);
+    return event.defaultPrevented;
+  })()`), false, 'Trackpad zoom remains native');
+  await js(`document.querySelector('.window-tabs').scrollTo({ left: 100000, behavior: 'instant' })`);
+  await waitFor(`document.querySelectorAll('.tab-scroll')[1].disabled`);
+  assert.equal(await js(addButtonVisible), true, 'Add project stays fixed outside the scrolling viewport');
+  await capture('tabs-overflow-end');
+  await js(`document.querySelector('.window-tab.active [role="tab"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }))`);
+  await waitFor(`document.querySelector('.window-tab:last-child.active')`);
+  await waitFor(activeTabVisible);
+  assert.equal(await js(`document.activeElement === document.querySelector('.window-tab.active [role="tab"]')`), true);
+  win.setContentSize(1024, 760);
+  await waitFor('innerWidth === 1024');
+  await waitFor(activeTabVisible);
+  assert.equal(await js(addButtonVisible), true);
+  await capture('tabs-overflow-compact');
+  // Removing the arrows must use the full available width, including the space they occupied.
+  const fittingWidth = await js(`Math.ceil(innerWidth + document.querySelector('.window-tab-items').scrollWidth - document.querySelector('.tab-navigation').clientWidth + 1)`);
+  win.setContentSize(fittingWidth, 940);
+  await waitFor(`document.querySelectorAll('.tab-scroll').length === 0`);
+  win.setContentSize(1480, 940);
+  await waitFor('innerWidth === 1480');
+  await waitFor(activeTabVisible);
+  await js(`document.querySelector('.window-tab.active [role="tab"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }))`);
+  await waitFor(`document.querySelector('.window-tab:first-child.active')`);
+  await waitFor(activeTabVisible);
   await startTabDrag('.window-tab:not(.unavailable) [role="tab"]');
   await js(`(() => {
     const strip = document.querySelector('.window-tabs'), r = strip.getBoundingClientRect();

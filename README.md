@@ -10,6 +10,7 @@ I built GitCat for my own use and am sharing the result publicly in case it is u
 - Lets you inspect a diff and choose which **whole files** to include before saving a commit. Unselected files stay in your working folder.
 - Opens existing Git repositories, clones projects from HTTPS or SSH addresses, starts tracking a folder, and provides a disposable local practice project.
 - Lets you drag project tabs into your preferred order and remembers it when you reopen the app. Alt + Left/Right moves a focused tab too.
+- Keeps hidden project tabs reachable with scroll arrows, the mouse wheel, and Left/Right or Home/End keys. The add-project button stays visible.
 - Helps you create, switch, rename, and integrate branches; inspect commit history and linked worktrees; and fetch, pull, or push remote changes.
 - Guides you through conflicts, interrupted operations, and recovery with visible plans and confirmation before changes are applied.
 - Can prepare a GitHub review when the required GitHub tools and access are available.

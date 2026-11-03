@@ -1,5 +1,6 @@
 import { Worktrees } from "./Worktrees";
 import { reorderWorkspacePaths } from "../shared/workspace-order";
+import { useTabOverflow } from "./useTabOverflow";
 import { PracticeGuide } from "./PracticeGuide";
 import { ShareReview } from "./ShareReview";
 import { SwitchWork } from "./SwitchWork";
@@ -12,7 +13,7 @@ import { addNotification, type Notification } from "../shared/notifications";
 import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
-  AlertTriangle, Archive, ArchiveRestore, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronDown, ChevronRight, CircleDot,
+  AlertTriangle, Archive, ArchiveRestore, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDot,
   Clock3, Cloud, CloudDownload, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
   FolderOpen, FolderPlus, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
   ListTree, LoaderCircle, Maximize2, MessageCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen, Palette, Pencil, PencilLine, Plus,
@@ -516,6 +517,7 @@ export default function App() {
     const rank = (path: string) => { const index = workspaceOrder.indexOf(path); return index < 0 ? Number.MAX_SAFE_INTEGER : index; };
     return all.map((tab, index) => ({ tab, index })).sort((a, b) => rank(a.tab.path) - rank(b.tab.path) || a.index - b.index).map(({ tab }) => tab);
   }, [projects, unavailable, workspaceOrder]);
+  const tabOverflow = useTabOverflow(activeId, JSON.stringify(tabs.map(tab => [tab.id, tab.name])));
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
   const excludedRef = useRef(excludedByRepo);
@@ -820,9 +822,9 @@ export default function App() {
   };
 
   const clearTabDrag = () => { draggedTabPath.current = undefined; setDraggedTab(undefined); setTabDrop(undefined); };
-  const tabDropAt = (strip: HTMLElement, clientX: number): { path: string; side: "before" | "after" } | undefined => {
+  const tabDropAt = (strip: HTMLElement, clientX: number, atEnd = false): { path: string; side: "before" | "after" } | undefined => {
     const elements = [...strip.querySelectorAll<HTMLElement>(".window-tab")];
-    const index = elements.findIndex((element) => {
+    const index = atEnd ? -1 : elements.findIndex((element) => {
       const bounds = element.getBoundingClientRect();
       return clientX < bounds.left + bounds.width / 2;
     });
@@ -1739,33 +1741,37 @@ export default function App() {
     <div className={`app-shell platform-${window.gitcat.platform}`}>
       <header className="topbar">
         <div className="brand-lockup"><div className="brand-mark"><CatMark size={28} /></div><span>GitCat</span></div>
-        <div className="window-tabs" role="tablist" aria-label={t("openProjects")}
+        <div className="project-tabs"
           onDragOver={(event) => {
             const source = draggedTabPath.current;
             if (!source || !tabs.some((tab) => tab.path === source)) return;
             event.preventDefault();
             event.dataTransfer.dropEffect = "move";
-            const strip = event.currentTarget;
+            const strip = tabOverflow.viewport.current!;
             const bounds = strip.getBoundingClientRect();
             if (event.clientX < bounds.left + 32) strip.scrollLeft -= 20;
             else if (event.clientX > bounds.right - 32) strip.scrollLeft += 20;
-            const drop = tabDropAt(strip, event.clientX);
+            const drop = tabDropAt(strip, event.clientX, Boolean((event.target as HTMLElement).closest(".tab-add")));
             setTabDrop(drop?.path === source ? undefined : drop);
           }}
           onDrop={(event) => {
             const source = draggedTabPath.current;
             if (!source) return;
             event.preventDefault();
-            const drop = tabDropAt(event.currentTarget, event.clientX);
+            const drop = tabDropAt(event.currentTarget, event.clientX, Boolean((event.target as HTMLElement).closest(".tab-add")));
             if (drop) moveTab(source, drop.path, drop.side);
             clearTabDrag();
           }}
           onDragLeave={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setTabDrop(undefined);
           }}>
+          <div className="tab-navigation" ref={tabOverflow.navigation}>
+          {tabOverflow.overflow && <button className="icon-button tab-scroll" disabled={!tabOverflow.left} onClick={() => tabOverflow.scroll(-1)} aria-label={t("scrollProjectsLeft")} title={t("scrollProjectsLeft")}><ChevronLeft size={17} /></button>}
+          <div className={`window-tabs ${tabOverflow.left ? "can-scroll-left" : ""} ${tabOverflow.right ? "can-scroll-right" : ""}`} ref={tabOverflow.viewport}>
+          <div className="window-tab-items" ref={tabOverflow.content} role="tablist" aria-label={t("openProjects")}>
           {tabs.map((tab) => <div key={tab.id} className={`window-tab ${tab.id === activeId ? "active" : ""} ${tab.unavailable ? "unavailable" : ""} ${draggedTab === tab.path ? "dragging" : ""} ${tabDrop?.path === tab.path ? `drop-${tabDrop.side}` : ""}`}
             title={tab.unavailable ? t("unavailableTab", { name: tab.name, reason: t(unavailableReasonKeys[tab.unavailable.reason].short) }) : tab.path}>
-            <button role="tab" aria-selected={tab.id === activeId} draggable={tabs.length > 1} aria-description={t("reorderTabHint")}
+            <button role="tab" aria-selected={tab.id === activeId} tabIndex={tab.id === activeId ? 0 : -1} draggable={tabs.length > 1} aria-description={t("reorderTabHint")}
               title={`${tab.unavailable ? t("unavailableTab", { name: tab.name, reason: t(unavailableReasonKeys[tab.unavailable.reason].short) }) : tab.path}\n${t("reorderTabHint")}`}
               onDragStart={(event) => {
                 draggedTabPath.current = tab.path;
@@ -1777,15 +1783,29 @@ export default function App() {
               }}
               onDragEnd={clearTabDrag}
               onKeyDown={(event) => {
-                if (!event.altKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
-                event.preventDefault();
                 const index = tabs.findIndex((item) => item.id === tab.id);
+                if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+                if (!event.altKey) {
+                  const targets: Record<string, number> = { Home: 0, End: tabs.length - 1, ArrowLeft: (index - 1 + tabs.length) % tabs.length, ArrowRight: (index + 1) % tabs.length };
+                  const targetIndex = targets[event.key];
+                  if (targetIndex === undefined) return;
+                  event.preventDefault();
+                  setActiveId(tabs[targetIndex].id);
+                  tabOverflow.content.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[targetIndex]?.focus();
+                  return;
+                }
+                if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                event.preventDefault();
                 const target = tabs[index + (event.key === "ArrowLeft" ? -1 : 1)];
                 if (target) moveTab(tab.path, target.path, event.key === "ArrowLeft" ? "before" : "after");
               }}
               onClick={() => setActiveId(tab.id)}>{tab.unavailable ? <AlertTriangle size={14} /> : projects.find(project => project.id === tab.id)?.snapshot.worktrees?.some(worktree => worktree.isCurrent && !worktree.isMain) ? <TreePine size={14} role="img" aria-label={t("linkedWorktree")} /> : <GitBranch size={14} />}<span>{tab.name}</span></button>
             <button className="tab-close" onClick={() => closeProject(tab.id)} aria-label={t(tab.unavailable ? "removeFromRecentNamed" : "closeProject", { name: tab.name })}><X size={13} /></button>
           </div>)}
+          </div>
+          </div>
+          {tabOverflow.overflow && <button className="icon-button tab-scroll" disabled={!tabOverflow.right} onClick={() => tabOverflow.scroll(1)} aria-label={t("scrollProjectsRight")} title={t("scrollProjectsRight")}><ChevronRight size={17} /></button>}
+          </div>
           <button className="icon-button tab-add" onClick={() => setSetup({ kind: "choose" })} aria-label={t("addProjectTitle")} title={t("addProjectTitle")}><Plus size={16} /></button>
         </div>
         <div className="top-actions">{snapshot && <button className="worktrees-button" onClick={() => setWorktreesPath(snapshot.path)} aria-label={t("worktreesOpen")} title={t("worktreesOpen")}><TreePine size={17} /><span>{snapshot.worktrees?.length ?? 1}</span></button>}<button className="icon-button" disabled={practiceBusy} onClick={()=>void startPractice()} aria-label={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'} title={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'}><Lightbulb size={17} /></button>{snapshot && <button className="icon-button" onClick={()=>setShareReview({path:snapshot.path,head:selection})} aria-label={locale==='es'?'Compartir para revisión':'Share for review'} title={locale==='es'?'Compartir para revisión':'Share for review'}><Send size={17} /></button>}{snapshot && <button className="icon-button" onClick={()=>setSwitchWork({path:snapshot.path,target:snapshot.currentBranch})} aria-label={locale==='es'?'Trabajo apartado':'Set-aside work'}><ArrowLeftRight size={17} /></button>}{snapshot && <button className="icon-button" onClick={() => setHistoryPath(snapshot.path)} data-action="activity" aria-label={locale === "es" ? "Actividad y recuperación" : "Activity and recovery"}><Clock3 size={17} /></button>}<button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
