@@ -325,6 +325,17 @@
 }
 
 /* The new-project button sits on the same baseline as the tabs beside it. */
+.project-tabs { display: flex; flex: 1; align-self: stretch; gap: 4px; min-width: 0; -webkit-app-region: no-drag; }
+.tab-navigation { display: flex; flex: 1; gap: 2px; min-width: 0; }
+.window-tab-items { display: flex; flex: none; align-items: center; gap: inherit; width: max-content; height: 100%; }
+.window-tabs.can-scroll-left { mask-image: linear-gradient(to right, transparent, #000 18px); }
+.window-tabs.can-scroll-right { mask-image: linear-gradient(to left, transparent, #000 18px); }
+.window-tabs.can-scroll-left.can-scroll-right { mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent); }
+.tab-scroll, .project-tabs > .tab-add { flex: none; align-self: flex-end; margin-bottom: 5px; }
+.tab-scroll { border: 1px solid var(--border); color: var(--secondary); }
+.tab-scroll:disabled { border-color: transparent; opacity: .3; background: transparent; }
+.window-tab button:focus-visible { outline-offset: -2px; }
+.top-actions, .brand-lockup { flex: none; }
 .tab-add { align-self: flex-end; margin-bottom: 5px; }
 
 /* With the branch panel hidden, the graph takes its column and the inspector keeps its own. */
