@@ -325,7 +325,9 @@
 }
 
 /* The new-project button sits on the same baseline as the tabs beside it. */
-.project-tabs { display: flex; flex: 1; align-self: stretch; gap: 4px; min-width: 0; -webkit-app-region: no-drag; }
+/* Keep empty space and the strip above the tabs available for moving the window.
+   Only the actual tabs and buttons opt out in styles.css. */
+.project-tabs { display: flex; flex: 1; align-self: stretch; gap: 4px; min-width: 0; -webkit-app-region: drag; }
 .tab-navigation { display: flex; flex: 1; gap: 2px; min-width: 0; }
 .window-tab-items { display: flex; flex: none; align-items: center; gap: inherit; width: max-content; height: 100%; }
 .window-tabs.can-scroll-left { mask-image: linear-gradient(to right, transparent, #000 18px); }

@@ -5,12 +5,12 @@ button, input, textarea { font: inherit; }
 button { border: 0; color: inherit; cursor: pointer; }
 button:disabled { cursor: default; opacity: .55; }
 .app-shell { height: 100vh; display: flex; flex-direction: column; background: radial-gradient(circle at 58% -10%, var(--raised) 0, transparent 38%), var(--canvas); }
-.topbar { height: 56px; display: flex; align-items: center; gap: 26px; padding: 0 21px; border-bottom: 1px solid var(--hover); background: rgba(12, 18, 27, .96); -webkit-app-region: drag; }
+.topbar { height: 56px; display: flex; align-items: center; gap: 26px; padding: 0 21px; border-bottom: 1px solid var(--hover); background: rgba(12, 18, 27, .96); -webkit-app-region: drag; user-select: none; }
 .topbar button, .topbar input, .topbar .avatar, .window-tab { -webkit-app-region: no-drag; }
 .brand-lockup { display: flex; align-items: center; gap: 9px; font-weight: 800; letter-spacing: -.03em; color: var(--text); white-space: nowrap; }
 .brand-mark { width: 27px; height: 27px; display: grid; place-items: center; color: var(--canvas); background: #66ddce; border-radius: 8px; box-shadow: 0 0 22px #56d6c055; }
 .brand-beta { font-size: 9px; letter-spacing: .1em; color: var(--muted); padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; font-weight: 700; }
-.window-tabs { display: flex; align-self: stretch; align-items: center; gap: 5px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; -webkit-app-region: no-drag; }
+.window-tabs { display: flex; align-self: stretch; align-items: center; gap: 5px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; -webkit-app-region: drag; }
 .window-tabs::-webkit-scrollbar { display: none; }
 .window-tab { position: relative; flex: none; max-width: 240px; user-select: none; }
 .window-tab [draggable="true"] { cursor: grab; }
