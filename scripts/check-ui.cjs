@@ -245,6 +245,33 @@ app.whenReady().then(async () => {
     return nodes.filter(node => { const r = node.getBoundingClientRect(); return r.left < 0 || r.right > innerWidth || r.width < 20 || r.bottom > innerHeight; }).map(node => node.textContent || node.getAttribute('aria-label'));
   })()`), [], 'Primary controls fit the window');
 
+  const assertTitlebarDragging = async () => assert.deepEqual(await js(`(() => {
+    const header = document.querySelector('.topbar');
+    const strip = document.querySelector('.window-tabs').getBoundingClientRect();
+    const tabs = [...document.querySelectorAll('.window-tab')];
+    const controls = [...header.querySelectorAll('button, .window-tab')];
+    const blocked = controls.filter(node => getComputedStyle(node).webkitAppRegion !== 'no-drag');
+    const canDragAt = (x, y) => {
+      let drag = false;
+      for (let node = document.elementFromPoint(x, y); node; node = node.parentElement) {
+        const region = getComputedStyle(node).webkitAppRegion;
+        if (region === 'no-drag') return false;
+        if (region === 'drag') drag = true;
+      }
+      return drag;
+    };
+    // Even a full strip leaves a continuous grip above the reorderable tabs.
+    const tabTop = Math.min(...tabs.map(node => node.getBoundingClientRect().top));
+    const gripY = strip.top + 6;
+    const grip = tabTop - strip.top >= 12 &&
+      Array.from({ length: 20 }, (_, i) => strip.left + 2 + (strip.width - 4) * i / 19)
+        .every(x => canDragAt(x, gripY));
+    // With only a few projects, the large unused part of the title bar also moves the window.
+    const last = tabs.at(-1).getBoundingClientRect();
+    const empty = last.right >= strip.right - 8 || canDragAt((last.right + strip.right) / 2, strip.top + strip.height / 2);
+    return { grip, empty, controls: blocked.map(node => node.className) };
+  })()`), { grip: true, empty: true, controls: [] }, 'Title bar gaps move the window; project tabs and buttons remain interactive');
+
   const assertDialog = async () => {
     assert.deepEqual(await js(`(() => {
       const dialog = [...document.querySelectorAll('[aria-modal="true"]')].at(-1);
@@ -269,6 +296,7 @@ app.whenReady().then(async () => {
   await waitFor('innerWidth === 1480');
   await js(`localStorage.setItem('gitcat-locale', 'es')`);
   await waitFor(`document.querySelectorAll('.window-tab').length === 2`);
+  await assertTitlebarDragging();
   assert.equal(await js(`document.querySelectorAll('.tab-scroll').length`), 0, 'No overflow controls when every project fits');
   // Dragging reorders available and unavailable tabs without changing the selected project.
   const tabNames = () => js(`[...document.querySelectorAll('.window-tab [role="tab"] span')].map(node => node.textContent)`);
@@ -363,6 +391,7 @@ app.whenReady().then(async () => {
   await waitFor(activeTabVisible);
   assert.equal(await js(addButtonVisible), true);
   await capture('tabs-overflow-compact');
+  await assertTitlebarDragging();
   // Removing the arrows must use the full available width, including the space they occupied.
   const fittingWidth = await js(`Math.ceil(innerWidth + document.querySelector('.window-tab-items').scrollWidth - document.querySelector('.tab-navigation').clientWidth + 1)`);
   win.setContentSize(fittingWidth, 940);
