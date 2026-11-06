@@ -10,7 +10,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 test("el proyecto usa Electron como entrada de escritorio", async () => {
   const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   assert.equal(packageJson.main, "dist-electron/electron/main.js");
-  assert.match(packageJson.devDependencies.electron, /45\.0/);
+  assert.match(packageJson.devDependencies.electron, /^\^45\./);
   assert.match(packageJson.scripts["dist:mac"], /CSC_IDENTITY_AUTO_DISCOVERY=false/);
   assert.equal(packageJson.build.productName, "GitCat");
 });
