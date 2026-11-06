@@ -64,6 +64,8 @@ npm run test:welcome
 
 `npm run check` runs the lint, type, unit, and UI checks together. Unit fixtures use disposable Git configuration so personal identity, hooks, signing and line-ending preferences do not change their results. The UI checks build the app and use disposable app profiles; the main UI check also uses disposable repositories. `npm run test:welcome` checks both languages at desktop, compact and zoomed sizes.
 
+TypeScript stays on 6.0.3 while `typescript-eslint` requires TypeScript below 6.1. The platform-copy tests also use the TypeScript 6 `transpileModule` API; review that API before moving to TypeScript 7. Other direct dependencies use their latest stable releases, and the lockfile records compatible transitive updates.
+
 ### Continuous integration
 
 [Desktop PR checks](https://github.com/mio-gato-software/gitcat/actions/workflows/desktop-pr.yml) runs on pull requests. [Desktop CI](https://github.com/mio-gato-software/gitcat/actions/workflows/desktop-ci.yml) runs on pushes to `main` and can also be started manually. Separate native Windows x64, macOS Apple Silicon, and macOS Intel jobs run lint, type checks, the full test suite, desktop UI and welcome-layout checks, and package the application.
