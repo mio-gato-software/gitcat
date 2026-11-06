@@ -48,10 +48,19 @@ test("los directorios conocidos dependen de la plataforma", () => {
   assert.ok(mac.includes("/opt/homebrew/bin"));
   assert.ok(mac.includes("/Users/persona/.local/bin"));
   assert.ok(wellKnownToolDirectories("linux", "/home/persona").includes("/home/linuxbrew/.linuxbrew/bin"));
-  assert.deepEqual(wellKnownToolDirectories("win32", "C:\\Users\\persona"), []);
+  const windows = wellKnownToolDirectories("win32", "D:\\Users\\persona", {
+    ProgramFiles: "D:\\Programs", LOCALAPPDATA: "D:\\Local", SystemRoot: "D:\\Windows"
+  });
+  assert.ok(windows.includes("D:\\Programs\\Git\\cmd"));
+  assert.ok(windows.includes("D:\\Programs\\GitHub CLI"));
+  assert.ok(windows.includes("D:\\Local\\Programs\\Git\\cmd"));
+  assert.ok(windows.includes("D:\\Local\\Microsoft\\WinGet\\Links"));
+  assert.ok(windows.includes("D:\\Windows\\System32\\OpenSSH"));
+  assert.equal(findExecutable("git", windows, present("D:\\Programs\\Git\\cmd\\git.EXE"), "win32"), "D:\\Programs\\Git\\cmd\\git.EXE");
 });
 
 test("pathEntries limpia entradas vacías y espacios", () => {
   assert.deepEqual(pathEntries(undefined), []);
+  assert.deepEqual(pathEntries('"C:\\Program Files\\Git\\cmd"; ; C:\\tools ', "win32"), ["C:\\Program Files\\Git\\cmd", "C:\\tools"]);
   assert.deepEqual(pathEntries(`/usr/bin${process.platform === "win32" ? ";" : ":"} /opt/bin `), ["/usr/bin", "/opt/bin"]);
 });

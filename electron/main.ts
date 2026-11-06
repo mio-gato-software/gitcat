@@ -3,6 +3,7 @@ import { legacyAppName, migrateProfileFiles, profilePath } from "./app-identity.
 import { exclusive } from "./repository-queue.js";
 import { opensSafely } from "./conflict-guide.js";
 import { installApplicationMenu } from "./application-menu.js";
+import { keepSingleInstance } from "./single-instance.js";
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -347,7 +348,7 @@ async function createWindow() {
   else await window.loadFile(join(app.getAppPath(), "dist/index.html"));
 }
 
-app.whenReady().then(async () => {
+if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? mainWindow : null)) app.whenReady().then(async () => {
   app.setName("GitCat");
   installApplicationMenu(app, Menu, process);
   migrateProfileFiles(app.getPath("userData"));

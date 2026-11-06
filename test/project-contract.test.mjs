@@ -64,7 +64,7 @@ test("la capa de Git evita ejecutar comandos libres", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   assert.match(service, /const allowedOperations = new Set/);
   assert.match(service, /runCommand\("git", args/);
-  assert.match(service, /spawn\(executable, args/);
+  assert.match(service, /spawn\(executable, command === "git" \? gitArguments\(args\) : args,/);
   assert.doesNotMatch(service, /exec\(.*command/);
 });
 

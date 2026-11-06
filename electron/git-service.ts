@@ -166,6 +166,12 @@ function commandEnv(searchPath: string, extraEnv: NodeJS.ProcessEnv = {}): NodeJ
   return { ...process.env, PATH: searchPath, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no", GIT_EDITOR: "true", ...extraEnv };
 }
 
+// Git for Windows otherwise rejects ordinary project paths beyond MAX_PATH.
+// Apply this only to our processes; leave the owner's Git configuration alone.
+function gitArguments(args: string[]) {
+  return process.platform === "win32" ? ["-c", "core.longpaths=true", ...args] : args;
+}
+
 /**
  * A Git process with the same tool lookup and environment as every other command, for the callers
  * that have to read its output as it arrives or stop it part way: a clone, or a count of many files.
@@ -174,16 +180,17 @@ export async function spawnGit(cwd: string, args: string[], { extraEnv = {}, gro
   const executable = await resolveTool("git");
   const searchPath = (await toolDirectories()).join(delimiter);
   // A group of its own lets a stop reach the helpers Git starts too (git-remote-https, ssh), not only Git.
-  return spawn(executable, args, { cwd, env: commandEnv(searchPath, extraEnv), stdio: ["ignore", "pipe", "pipe"], detached: group && process.platform !== "win32" });
+  return spawn(executable, gitArguments(args), { cwd, env: commandEnv(searchPath, extraEnv), windowsHide: true, stdio: ["ignore", "pipe", "pipe"], detached: group && process.platform !== "win32" });
 }
 
 async function runCommand(command: string, args: string[], cwd: string, timeoutMs = 60_000, extraEnv: NodeJS.ProcessEnv = {}): Promise<CommandResult> {
   const executable = await resolveTool(command);
   const searchPath = (await toolDirectories()).join(delimiter);
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(executable, args, {
+    const child = spawn(executable, command === "git" ? gitArguments(args) : args, {
       cwd,
       env: commandEnv(searchPath, extraEnv),
+      windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32"
     });
@@ -205,8 +212,10 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
       if (active.signal.aborted) cancel();
     }
     const cleanup = () => { clearTimeout(timer); if (canAbort) active.signal.removeEventListener("abort", cancel); };
-    child.stdout.on("data", (chunk: Buffer) => { if (stdout.length < 2_000_000) stdout += chunk.toString(); });
-    child.stderr.on("data", (chunk: Buffer) => { if (stderr.length < 2_000_000) stderr += chunk.toString(); });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { if (stdout.length < 2_000_000) stdout += chunk; });
+    child.stderr.on("data", (chunk: string) => { if (stderr.length < 2_000_000) stderr += chunk; });
     child.on("error", (error) => { if (!settled) { settled = true; cleanup(); reject(error); } });
     child.on("close", (code) => {
       if (!settled) { settled = true; cleanup(); if (stopped) reject(stopped); else resolvePromise({ stdout, stderr, code: code ?? 1 }); }
@@ -726,7 +735,7 @@ export async function getCommitFileDiff(cwd: string, hash: string, file: string)
   if (!commit) throw new Error("Ese commit no existe en este repositorio.");
   const absolute = resolve(repoRoot, file);
   if (absolute !== repoRoot && !absolute.startsWith(`${repoRoot}${sep}`)) throw new Error("La ruta no pertenece a este repositorio.");
-  const relative = absolute.slice(repoRoot.length + 1);
+  const relative = absolute.slice(repoRoot.length + 1).split(sep).join("/");
   const lineage = (await checkedGit(repoRoot, ["rev-list", "--parents", "-n", "1", commit])).split(" ").filter(Boolean);
   const base = lineage[1];
   const statusRaw = base
@@ -748,7 +757,7 @@ export async function getWorkingFileDiff(cwd: string, file: string): Promise<Com
   const absolute = resolve(repoRoot, file);
   // A path from the interface is still a path: it has to land inside the repository that asked.
   if (absolute !== repoRoot && !absolute.startsWith(`${repoRoot}${sep}`)) throw new Error("La ruta no pertenece a este repositorio.");
-  const relative = absolute.slice(repoRoot.length + 1);
+  const relative = absolute.slice(repoRoot.length + 1).split(sep).join("/");
   const head = await optionalGit(repoRoot, ["rev-parse", "HEAD"]);
   const tracked = head
     ? await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", "HEAD", "--", relative])
@@ -2312,8 +2321,8 @@ async function blobHead(repoRoot: string, oid: string, limit: number): Promise<{
   const executable = await resolveTool("git");
   const searchPath = (await toolDirectories()).join(delimiter);
   return new Promise((done) => {
-    const child = spawn(executable, ["cat-file", "blob", oid], {
-      cwd: repoRoot, env: { ...process.env, PATH: searchPath, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0" }, stdio: ["ignore", "pipe", "ignore"]
+    const child = spawn(executable, gitArguments(["cat-file", "blob", oid]), {
+      cwd: repoRoot, env: { ...process.env, PATH: searchPath, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0" }, windowsHide: true, stdio: ["ignore", "pipe", "ignore"]
     });
     const chunks: Buffer[] = [];
     let length = 0;

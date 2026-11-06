@@ -2182,9 +2182,9 @@ function CloneModal({ onClose, onRemoteLogin, onCloned }: { onClose: () => void;
   const [attempt, setAttempt] = useState(0);
   const check = useMemo(() => parseCloneUrl(url), [url]);
   const host = check.ok ? check.source.host : "";
-  const nameProblem = folderNameProblem(name);
+  const nameProblem = folderNameProblem(name, window.gitcat.platform);
 
-  useEffect(() => { if (!nameEdited) setName(check.ok ? suggestedFolderName(url) : ""); }, [url, check.ok, nameEdited]);
+  useEffect(() => { if (!nameEdited) setName(check.ok ? suggestedFolderName(url, window.gitcat.platform) : ""); }, [url, check.ok, nameEdited]);
   useEffect(() => {
     setPreview(undefined);
     if (!check.ok || !parent || nameProblem) return;
