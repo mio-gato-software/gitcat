@@ -258,6 +258,22 @@ app.whenReady().then(async () => {
     }
     throw new Error(`UI did not become ready: ${expression}`);
   };
+  // Native frame sizes and zoom updates are asynchronous on Windows. Verify the
+  // content viewport before asserting a layout, just like the welcome checks.
+  const resizeContent = async (width, height, zoom = 1) => {
+    if (win.isMaximized()) win.unmaximize();
+    if (win.isMinimized()) win.restore();
+    win.webContents.setZoomFactor(zoom);
+    win.setContentSize(width, height);
+    const expected = Math.round(width / zoom);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (await js(`innerWidth === ${expected}`)) return;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      // A queued Windows restore or zoom event can supersede the first resize.
+      if (attempt % 10 === 9) win.setContentSize(width, height);
+    }
+    throw new Error(`Viewport resize failed: ${JSON.stringify({ expected, content: win.getContentSize(), bounds: win.getBounds(), maximized: win.isMaximized(), zoom: win.webContents.getZoomFactor(), renderer: await js('({width:innerWidth,height:innerHeight,ratio:devicePixelRatio})') })}`);
+  };
   const capture = async name => {
     if (!screenshots) return;
     fs.mkdirSync(screenshots, { recursive: true });
@@ -1058,22 +1074,18 @@ app.whenReady().then(async () => {
   await js(`[...document.querySelectorAll('.welcome-ai button')][0].click()`);
   await waitFor(`document.querySelector('.settings-modal.guided')`);
   await assertDialog();
-  win.setSize(1280, 800);
-  win.webContents.setZoomFactor(1.5);
+  await resizeContent(1280, 800, 1.5);
   await js(`document.querySelector('.settings-modal .modal-actions button').focus()`);
   assert.equal(await js(`(() => { const r = document.activeElement.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight && r.right <= innerWidth; })()`), true, 'Dialog primary actions reachable at 150% zoom on a laptop');
   await capture('settings-large-text');
-  win.webContents.setZoomFactor(1);
-  win.setSize(800, 700);
-  await waitFor(`innerWidth <= 820`);
+  await resizeContent(800, 700);
   assert.equal(await js(`(() => {
     const modal = document.querySelector('.settings-modal');
     const ai = modal.querySelector('.ai-section').getBoundingClientRect();
     const readiness = modal.querySelector('.readiness-section').getBoundingClientRect();
     return readiness.top > ai.top && modal.querySelector('.modal-actions').getBoundingClientRect().bottom <= innerHeight;
   })()`), true, 'Settings stacks sections and keeps Close visible in a compact window');
-  win.setSize(1480, 940);
-  await waitFor(`innerWidth >= 1400`);
+  await resizeContent(1480, 940);
   const settingsLayout = await js(`(() => {
     const modal = document.querySelector('.settings-modal');
     const ai = modal.querySelector('.ai-section').getBoundingClientRect();
@@ -1250,8 +1262,22 @@ app.whenReady().then(async () => {
   }
   assert.match(await js(`document.querySelector('.clone-form .setup-problem').innerText`), /contraseña o un token/);
   assert.equal(await js(`document.querySelector('.clone-form .primary-button').disabled`), true, 'Nothing can start from an address that failed the check');
+  if (process.platform === 'win32') {
+    await setText('.clone-form input', 'https://example.test/team/CON.git');
+    await waitFor(`document.querySelectorAll('.clone-form input')[1].value === 'repository-CON'`);
+  }
   await setText('.clone-form input', `https://127.0.0.1:${silent.address().port}/octo/demo.git`);
   await waitFor(`document.querySelectorAll('.clone-form input')[1].value === 'demo'`);
+  if (process.platform === 'win32') {
+    for (const name of ['NUL.txt', 'CON', 'notes.', 'a*b']) {
+      await setText('.clone-form label:nth-of-type(2) input', name);
+      await waitFor(`document.querySelector('.clone-form .setup-problem[role="alert"]')`);
+      assert.equal(await js(`document.querySelector('.clone-form .primary-button').disabled`), true, `Windows refuses ${name} before a clone starts`);
+      assert.equal(await js(`document.querySelector('.setup-preview')`), null);
+    }
+    await setText('.clone-form label:nth-of-type(2) input', 'demo');
+    await waitFor(`!document.querySelector('.clone-form .setup-problem[role="alert"]')`);
+  }
   await js(`document.querySelector('.setup-parent button').click()`);
   await waitFor(`document.querySelector('.setup-preview')`);
   const clonePreview = await js(`document.querySelector('.setup-preview').innerText`);

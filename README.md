@@ -94,6 +94,8 @@ The workflow does not install anything on your computer. Personal Windows instal
 
 On Windows, run `npm run dist:win` to create both an installer (`release/GitCat-<version>-win-<arch>-setup.exe`) and a portable app (`release/GitCat-<version>-win-<arch>-portable.exe`). The portable app runs without installation. Windows builds are unsigned and require Git to be installed separately.
 
+Windows Git processes run without console windows and enable long-path support for each command, without changing your Git configuration. GitCat also searches standard Git and hosting CLI installation folders when the desktop has an older PATH. Clone previews reject Windows device names and invalid folder characters before copying. Reopening GitCat focuses its existing window so two instances cannot write the same profile.
+
 ## Contributions and support
 
 I'm not accepting external contributions or pull requests for now. I may change that later. This is a personal project, so there is no support commitment or guaranteed response time.

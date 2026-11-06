@@ -2,7 +2,8 @@ import { accessSync, constants, statSync } from "node:fs";
 import { posix, win32 } from "node:path";
 
 export function pathEntries(value: string | undefined, platform: NodeJS.Platform = process.platform): string[] {
-  return (value ?? "").split(platform === "win32" ? win32.delimiter : posix.delimiter).map((entry) => entry.trim()).filter(Boolean);
+  return (value ?? "").split(platform === "win32" ? win32.delimiter : posix.delimiter)
+    .map((entry) => platform === "win32" ? entry.trim().replace(/^"(.*)"$/, "$1") : entry.trim()).filter(Boolean);
 }
 
 /**
@@ -10,8 +11,18 @@ export function pathEntries(value: string | undefined, platform: NodeJS.Platform
  * PATH, not the shell's, so package-manager locations are missing. Git usually survives because
  * /usr/bin/git exists; tools like gh do not.
  */
-export function wellKnownToolDirectories(platform: NodeJS.Platform, home: string): string[] {
-  if (platform === "win32") return [];
+export function wellKnownToolDirectories(platform: NodeJS.Platform, home: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  if (platform === "win32") {
+    // Explorer can keep the PATH from before Git or a hosting CLI was installed.
+    const local = env.LOCALAPPDATA || win32.join(home, "AppData", "Local");
+    const programs = [...new Set([env.ProgramW6432, env.ProgramFiles, env["ProgramFiles(x86)"], "C:\\Program Files"].filter((path): path is string => Boolean(path)))];
+    return [
+      ...programs.flatMap((path) => [win32.join(path, "Git", "cmd"), win32.join(path, "GitHub CLI"), win32.join(path, "glab")]),
+      win32.join(local, "Programs", "Git", "cmd"), win32.join(local, "Programs", "GitHub CLI"),
+      win32.join(local, "Microsoft", "WinGet", "Links"),
+      win32.join(env.SystemRoot || "C:\\Windows", "System32", "OpenSSH")
+    ];
+  }
   const { join } = posix;
   const shared = ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin", join(home, ".local", "bin"), join(home, "bin")];
   return platform === "darwin"
