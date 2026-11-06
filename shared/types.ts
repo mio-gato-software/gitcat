@@ -423,6 +423,9 @@ export type Operation =
 export type GitProtocol = "ssh" | "https";
 
 export type RepositoryPlan = {
+  provider?: HostingProvider;
+  connectionId?: string;
+  serviceUrl?: string;
   action: "create_repository" | "create_repository_and_push";
   host: string;
   owner: string;
@@ -479,6 +482,7 @@ export type ActionPlan = {
   answer?: string;
   effects?: string[];
   repositoryPlan?: RepositoryPlan;
+  hostingConnection?: NativeHostingContext;
   targetPath?: string;
   targetHead?: string;
   targetStateId?: string;
@@ -545,7 +549,7 @@ export type LlmConnectResult =
 export type ProviderPage = "api_keys" | "billing";
 
 /** Setup pages GitCat may open in the browser from the readiness checks. The main process holds the only addresses. */
-export type HelpPage = "github_ssh_keys" | "git_download" | "gh_install";
+export type HelpPage = "github_ssh_keys" | "git_download" | "gh_install" | "glab_install" | "bitbucket_tokens" | "bitbucket_dc_tokens" | "azure_tokens";
 
 /** Where a Git setting comes from, as `git config --show-scope` names it. */
 export type ConfigScope = "local" | "worktree" | "global" | "system" | "command";
@@ -581,17 +585,24 @@ export type AuthorReadiness = {
 export type RemoteAccess = "ok" | "denied" | "not_found" | "credentials" | "offline" | "host_key" | "unknown" | "not_checked";
 export type RemoteProtocol = "https" | "ssh" | "local" | "other";
 /** What keeps an HTTPS sign-in on this computer, by kind only. Its contents are never read. */
-export type CredentialHelper = "gh" | "osxkeychain" | "manager" | "store" | "cache" | "other" | "none";
+export type HostingProvider = "github" | "gitlab" | "bitbucket" | "bitbucket_dc" | "azure";
+export type NativeHostingProvider = Exclude<HostingProvider, "github" | "gitlab">;
+export type HostingConnectionInput = { provider: NativeHostingProvider; baseUrl: string; username: string; token: string };
+export type HostingConnection = { id: string; provider: NativeHostingProvider; baseUrl: string; username: string; accountId: string; label: string };
+export type NativeRepository = { provider: NativeHostingProvider; baseUrl: string; gitUrl: string; webUrl: string; apiUrl: string; repository: string; owner: string; name: string; project?: string };
+export type NativeHostingContext = { connectionId: string; location: NativeRepository; accountId: string; label: string; repositoryId?: string; projectId?: string };
+export type CredentialHelper = "gh" | "glab" | "osxkeychain" | "manager" | "store" | "cache" | "other" | "none";
 
 export type AccountReadiness = {
-  /** GitHub CLI is not installed, is installed with nobody signed in, or has accounts. */
+  cli?: "gh" | "glab";
+  /** Status of the selected hosting CLI. The field name is retained for existing profiles/callers. */
   gh: "missing" | "signed_out" | "signed_in";
   accounts: { login: string; active: boolean }[];
   /** Who the SSH key on this computer signs in as, from the host's own greeting. */
   sshLogin?: string;
   /** The account this remote is proven to use, when GitCat could tell, and how it knows. */
   verified?: string;
-  verifiedBy?: "ssh" | "gh";
+  verifiedBy?: "ssh" | "gh" | "glab" | "connection";
   /** The SSH key and GitHub CLI's active account belong to different accounts. */
   differs: boolean;
 };
@@ -607,6 +618,8 @@ export type RemoteReadiness =
     host?: string;
     /** The real host behind an SSH alias from ~/.ssh/config. */
     resolvedHost?: string;
+    provider?: HostingProvider;
+    hosting?: NativeHostingContext;
     /** owner/repository, as the address writes it. */
     path?: string;
     /** Why this remote: the one asked for, the branch's upstream, origin, the only one, or the first of several. */
@@ -617,7 +630,7 @@ export type RemoteReadiness =
     /** What Git answered, with anything shaped like a credential masked. */
     detail?: string;
     helper?: CredentialHelper;
-    /** Accounts on GitHub, when the remote is there. */
+    /** Accounts on the selected GitHub or GitLab host, when explicitly checked. */
     account?: AccountReadiness;
   };
 
@@ -631,6 +644,8 @@ export type ReadinessReport = {
 };
 
 export type ReadinessRequest = {
+  connectionId?: string;
+  provider?: HostingProvider;
   /** A remote to check instead of the one GitCat would pick. */
   remote?: string;
   /** Contact the remote to check access. Without it, only this computer is read. */
@@ -982,6 +997,9 @@ export type GitlineApi = {
   /** Reads what Git needs to save and publish, without a repository or for the open one. Never changes configuration. */
   checkReadiness: (path: string | undefined, request?: ReadinessRequest) => Promise<ReadinessReport>;
   openHelpPage: (page: HelpPage) => Promise<void>;
+  getHostingConnections: () => Promise<{ secureStorage: boolean; connections: HostingConnection[] }>;
+  connectHosting: (input: HostingConnectionInput) => Promise<{ secureStorage: boolean; connections: HostingConnection[] }>;
+  removeHostingConnection: (id: string) => Promise<{ secureStorage: boolean; connections: HostingConnection[] }>;
 };
 
 /** Facts emitted by the main process. Percentages are never inferred from elapsed time. */
@@ -1004,8 +1022,8 @@ export type HistoryRecovery = { mode: 'revert' | 'undo' | 'restore'; commit: str
 export type SwitchWorkRequest = { mode: 'carry' | 'set_aside' | 'restore'; target?: string; label?: string; includeUntracked?: boolean; stash?: string };
 export type SwitchWorkPreview = { snapshot: RepoSnapshot; target: string; occupied?: string; blockers: string[]; entries: { hash: string; label: string }[] };
 
-export type ShareReviewRequest = { remote:string;head:string;base:string;title:string;body:string };
+export type ShareReviewRequest = { remote:string;head:string;base:string;title:string;body:string;provider?:HostingProvider;connectionId?:string };
 export type ReviewPullRequest = {url:string;state:'OPEN'|'CLOSED'|'MERGED';head:string;base:string};
-export type ShareReviewPreview = {id:string;repoPath:string;request:ShareReviewRequest;headHash:string;baseHash:string;publishedHash?:string;repository:string;remoteUrl:string;account:string;commits:{hash:string;subject:string}[];existing?:ReviewPullRequest;reviewable:boolean;checkedAt:string};
+export type ShareReviewPreview = {id:string;repoPath:string;request:ShareReviewRequest;provider:HostingProvider;host:string;hosting?:NativeHostingContext;headHash:string;baseHash:string;publishedHash?:string;repository:string;remoteUrl:string;account:string;commits:{hash:string;subject:string}[];existing?:ReviewPullRequest;reviewable:boolean;checkedAt:string};
 
 export type PracticeInfo={id:string;path:string;lesson:number};

@@ -1,10 +1,13 @@
-import type { Operation } from "../shared/types.js";
+import type { HostingProvider, Operation } from "../shared/types.js";
+import { hostingProviders } from '../shared/hosting.js';
 
 export type PlannerIntent = "git_operation" | "create_repository" | "answer" | "needs_information" | "out_of_scope";
 
 export type PlannedArgs = { name: string; onto: string; to: string; path: string; side: string; message: string; noVerify: string };
 
 export type PlannedRepository = {
+  provider?: HostingProvider | "";
+  connectionId?: string;
   localPath: string;
   repository: string;
   owner: string;
@@ -86,8 +89,10 @@ export const planResponseFormat = {
       repository: {
         type: "object",
         additionalProperties: false,
-        required: repositoryKeys,
+        required: [...repositoryKeys, "provider", "connectionId"],
         properties: {
+          provider: { type: "string", enum: [...hostingProviders, ""] },
+          connectionId: { type: "string" },
           localPath: { type: "string" },
           repository: { type: "string" },
           owner: { type: "string" },
@@ -205,7 +210,9 @@ message should be, and never invent one from the file names in the state.
 "repository" is only meaningful for "create_repository". Use "" or false for anything unknown:
 - localPath: absolute path of the local repository to publish. When the user means "this repository", use the open repository path from the state below.
 - repository: remote repository name, 1 to 100 characters from A-Z a-z 0-9 . _ -, never ending in ".git".
-- owner: GitHub user or organization login that will own it.
+- provider: "github", "gitlab", "bitbucket" (Cloud), "bitbucket_dc" (Data Center), or "azure" (Azure DevOps). For an unknown company domain, ask which service it runs; never infer it from its name.
+- connectionId: for Bitbucket and Azure, an ID from savedHostingAccounts below, or "" to use the only matching account. Never invent IDs. If multiple accounts match, use the user's intended account or ask a focused question. GitHub and GitLab use "" and their CLI sign-ins.
+- owner: GitHub user/organization, full GitLab namespace, Bitbucket Cloud workspace, Bitbucket Data Center project key, or the full Azure organization/collection and project path (for example "my-org/My Project"). Azure repository creation always needs an existing private project; never create or make a project public on the user's behalf.
 - host: DNS host name only, such as "github.com". No scheme, no port, no path.
 - protocol: "ssh" or "https", whichever the user asked for.
 - sshHost: leave "" unless the user names a specific SSH host or ~/.ssh/config alias. The application
@@ -218,7 +225,9 @@ Never guess an owner, host, repository name or path. A value like "/foo/bar" is 
 never an owner or a repository name. If part of the data is missing, use "needs_information" and ask
 for the rest instead of filling it in yourself.
 
-Repositories are always created private. The application resolves by itself which authenticated gh
+Repositories are always created private. Bitbucket and Azure use the selected saved hosting account for initial HTTPS publication, keeping any SSH remote configuration the user requested. Never ask for tokens in chat: direct the person to Hosting accounts in Settings when no matching connection exists.
+GitLab uses the active glab account; it never switches accounts.
+The application resolves by itself which authenticated gh
 account and which SSH key correspond to "owner", including accounts that are not the active one and
 keys that are not the default, so do not ask the user about credentials unless a validation issue
 below says the machine genuinely lacks them.
@@ -439,8 +448,11 @@ function validate(value: unknown): ModelPlan | undefined {
     if (!Array.isArray(entry.argv) || !entry.argv.every((item) => typeof item === "string")) return undefined;
     if (!hasExactKeys(entry.args, argsKeys) || !Object.values(entry.args as object).every((item) => typeof item === "string")) return undefined;
   }
-  if (!hasExactKeys(record.repository, repositoryKeys)) return undefined;
+  const optionalRepositoryKeys=['provider','connectionId'].filter(key=>record.repository&&typeof record.repository==='object'&&Object.hasOwn(record.repository,key));
+  if (!hasExactKeys(record.repository, [...repositoryKeys,...optionalRepositoryKeys])) return undefined;
   const repository = record.repository as Record<string, unknown>;
+  if (repository.provider !== undefined && ![...hostingProviders, ""].includes(repository.provider as string)) return undefined;
+  if(repository.connectionId!==undefined&&typeof repository.connectionId!=='string')return undefined;
   for (const key of ["localPath", "repository", "owner", "host", "remote", "sshHost"]) if (typeof repository[key] !== "string") return undefined;
   if (!["ssh", "https", ""].includes(repository.protocol as string)) return undefined;
   if (typeof repository.push !== "boolean" || typeof repository.replaceRemote !== "boolean") return undefined;

@@ -6,11 +6,12 @@ export type GhAccount = { login: string; active: boolean };
  * whichever key happens to be the default one.
  */
 export function parseSshGreeting(output: string): string | undefined {
-  return output.match(/\bHi\s+([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)[!,]/)?.[1];
+  return output.match(/\bHi\s+([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)[!,]/)?.[1]
+    ?? output.match(/Welcome to GitLab, @([A-Za-z0-9_][A-Za-z0-9_.-]*)!/i)?.[1];
 }
 
 export function isSshAuthenticated(output: string, exitCode: number | undefined) {
-  return exitCode === 0 || /successfully authenticated|shell access is disabled|authenticated to/i.test(output);
+  return exitCode === 0 || /successfully authenticated|shell access is disabled|authenticated to|Welcome to GitLab, @/i.test(output);
 }
 
 /** Concrete `Host` aliases from an ssh config; patterns and negations cannot be dialled directly. */

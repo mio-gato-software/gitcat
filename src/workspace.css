@@ -656,6 +656,13 @@
 .share-review { font-size: 13px; line-height: 1.5; color: var(--secondary); }
 .share-review fieldset { display: grid; gap: 8px; }
 .share-review label { display: grid; gap: 4px; }
+.hosting-accounts { font-size: 12px; line-height: 1.5; }
+.hosting-accounts summary { cursor: pointer; font-weight: 700; color: var(--text); }
+.hosting-accounts fieldset { display: grid; gap: 9px; border: 0; padding: 0; min-width: 0; }
+.hosting-accounts label, .hosting-account { display: grid; gap: 5px; }
+.hosting-account { border-bottom: 1px solid var(--border); padding: 10px 0; overflow-wrap: anywhere; }
+.hosting-accounts input, .hosting-accounts select { width: 100%; min-width: 0; padding: 8px; color: var(--text); background: var(--canvas); border: 1px solid var(--border); }
+.hosting-accounts small { color: var(--muted); font-weight: 400; }
 .share-review input, .share-review select, .share-review textarea { padding: 7px; max-width: 100%; color: var(--text); background: var(--canvas); border: 1px solid var(--border); }
 .practice-guide { flex: none; max-height: 220px; overflow: auto; padding: 10px 16px; color: var(--secondary); background: var(--surface); border-bottom: 1px solid var(--border); font-size: 12px; line-height: 1.45; }
 .practice-heading, .practice-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

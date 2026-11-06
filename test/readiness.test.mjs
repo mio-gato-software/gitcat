@@ -165,7 +165,7 @@ test("con varias cuentas de GitHub se muestran todas, cuál está activa y cuál
   const accounts = [{ login: "eliaquin-exit83", active: true }, { login: "eliaquin", active: false }];
   // SSH: the key's own greeting is the proof, even when gh's active account is someone else.
   const ssh = accountReadiness({ ghInstalled: true, accounts, protocol: "ssh", sshLogin: "eliaquin", access: "ok" });
-  assert.deepEqual(ssh, { gh: "signed_in", accounts, sshLogin: "eliaquin", verified: "eliaquin", verifiedBy: "ssh", differs: true });
+  assert.deepEqual(ssh, { cli: 'gh', gh: "signed_in", accounts, sshLogin: "eliaquin", verified: "eliaquin", verifiedBy: "ssh", differs: true });
   // HTTPS through gh: the active account is the one that answered.
   const https = accountReadiness({ ghInstalled: true, accounts, protocol: "https", helper: credentialHelperKind(["", "!/opt/homebrew/bin/gh auth git-credential"]), access: "ok" });
   assert.equal(https.verified, "eliaquin-exit83");

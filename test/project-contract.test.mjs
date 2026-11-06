@@ -72,7 +72,7 @@ test("git_command da libertad al modelo sin shell y sin saltarse protecciones", 
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
   // El comando libre se ejecuta como lista de argumentos: nunca se interpreta por un shell.
-  assert.match(service, /case "git_command": return reportedGit\(cwd, step\.argv \?\? \[\]\)/);
+  assert.match(service, /case "git_command": \{[\s\S]{0,400}return reportedGit\(cwd, step\.argv \?\? \[\]\)/);
   assert.doesNotMatch(service, /exec\(.*command/);
   assert.match(planner, /there is no shell/);
   // Investigar sigue siendo su primer instinto; la política de confirmación se prueba con Git real.
@@ -382,7 +382,7 @@ test("las herramientas se localizan sin depender del PATH que hereda la app", as
   assert.match(service, /\["-ilc", 'printf "%s" "\$PATH"'\]/);
   assert.match(service, /const executable = await resolveTool\(command\)/);
   assert.match(service, /env: \{ \.\.\.process\.env, PATH: searchPath,/);
-  assert.match(service, /no runnable gh was found in any of the/);
+  assert.match(service, /no runnable \$\{cli\} was found in any of the/);
 });
 
 test("ninguna decisión sobre el mensaje del usuario se toma con palabras clave", async () => {
@@ -656,7 +656,7 @@ test("la ejecución gh no usa shell y revierte cambios locales ante fallo", asyn
   assert.match(service, /runCommand\("gh", args/);
   assert.match(service, /GH_PROMPT_DISABLED: "1"/);
   assert.match(service, /\["remote", "remove", plan\.args\.remote\]/);
-  assert.match(service, /\["remote", "add", plan\.args\.remote, previousRemoteUrl\]/);
+  assert.match(service, /\["remote", "set-url", plan\.args\.remote, previousRemoteUrl\]/);
   assert.match(service, /existingRemoteHash/);
   assert.doesNotMatch(service, /existingRemoteUrl/);
   assert.doesNotMatch(service, /spawn\([^\n]+shell:\s*true/);
@@ -709,7 +709,7 @@ test("solo se recuerdan decisiones confirmadas, nunca estado del entorno", async
   assert.match(memory, /never measured state/);
   assert.match(memory, /export function identityKey/);
   // Se escribe solo tras una ejecución confirmada y correcta, nunca al proponer un plan.
-  assert.match(service, /const pushOutput = plan\.args\.push === "true"[\s\S]{0,400}saveMemory\(rememberRepository\(/);
+  assert.match(service, /const now = new Date\(\)\.toISOString\(\);\s*saveMemory\(rememberRepository\(/);
   assert.doesNotMatch(service, /saveMemory\([\s\S]{0,80}\)\s*;?\s*return \{\s*draft:/);
   // Lo recordado reordena la búsqueda; la verificación sigue ocurriendo.
   assert.match(service, /Memory only reorders the search/);

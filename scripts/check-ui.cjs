@@ -63,9 +63,32 @@ app.whenReady().then(async () => {
   const service = await import(pathToFileURL(path.join(root, 'dist-electron/electron/git-service.js')));
   ipcMain.handle('worktree:open', (_, source, target, locale) => service.openWorktree(source, target, locale));
   const snapshot = await service.getSnapshot(repo);
+  const { nativeFixture } = await import(pathToFileURL(path.join(root, 'test/helpers/native-hosting-fixture.mjs')));
+  const nativeUi = Object.fromEntries(['bitbucket','bitbucket_dc','azure'].map(provider=>[provider,nativeFixture(provider)]));
+  const hostingAccounts = Object.values(nativeUi).map(value=>({id:`ui-${value.provider}`,provider:value.provider,baseUrl:value.baseUrl,username:value.username,accountId:value.accountId,label:value.label}));
+  const hostingConnectRequests=[];
+  ipcMain.handle('hosting:list',()=>({secureStorage:true,connections:hostingAccounts}));
+  ipcMain.handle('hosting:connect',(_,input)=>{hostingConnectRequests.push({provider:input.provider,baseUrl:input.baseUrl,username:input.username,hasToken:Boolean(input.token)});return {secureStorage:true,connections:hostingAccounts};});
+  ipcMain.handle('hosting:remove',()=>({secureStorage:true,connections:hostingAccounts}));
+  let hostingScenario = false;
+  const hostingSnapshot = value => hostingScenario ? { ...value, remotes: ['origin'], remoteUrls: { origin: nativeUi[hostingScenario]?.remote??'https://code.company.test/org/team/repo.git' } } : value;
+  const reviewRequests = [], reviewLinks = [];
+  let reviewPublished = false;
+  ipcMain.handle('review:preview', (_, p, request) => {
+    reviewRequests.push(request);
+    const native=nativeUi[request.provider];
+    if(native)return {id:'hosting-ui',repoPath:p,provider:request.provider,host:new URL(native.baseUrl).host,request,repository:native.location.repository,remoteUrl:native.remote,account:native.accountId,hosting:{connectionId:`ui-${request.provider}`,location:native.location,accountId:native.accountId,label:native.label},headHash:snapshot.head,baseHash:'b'.repeat(40),commits:[{hash:snapshot.head,subject:'Saved work for review'}],reviewable:true,checkedAt:new Date().toISOString()};
+    return { id: 'hosting-ui', repoPath: p, provider: request.provider, host: 'code.company.test', request, repository: 'org/team/repo', remoteUrl: 'https://code.company.test/org/team/repo.git', account: 'anna.work', headHash: snapshot.head, baseHash: 'b'.repeat(40), commits: [{ hash: snapshot.head, subject: 'Saved work for review' }], reviewable: true, checkedAt: new Date().toISOString() };
+  });
+  ipcMain.handle('review:publish', async (_, p, id) => {
+    assert.equal(id, 'hosting-ui');reviewPublished = true;
+    const native=nativeUi[hostingScenario];
+    return { snapshot: hostingSnapshot(await service.getSnapshot(p)), pullRequest: { url: native?`${native.location.webUrl}/${native.provider==='azure'?'pullrequest':'pull-requests'}/1`:'https://code.company.test/org/team/repo/-/merge_requests/1', state: 'OPEN' } };
+  });
+  ipcMain.handle('review:open', (_, url) => { reviewLinks.push(url); });
   ipcMain.handle('operation:list', () => []);
   ipcMain.handle('operation:cancel', () => false);
-  ipcMain.handle('repo:fetch', (_, p) => service.fetchRemotes(p));
+  ipcMain.handle('repo:fetch', async (_, p) => hostingSnapshot(await service.fetchRemotes(p)));
   ipcMain.handle('switch-work:read', (_, p, target) => service.getSwitchWork(p,target));
   ipcMain.handle('switch-work:prepare', async (_, p, request, locale) => { const plan=await service.prepareSwitchWork(p,request,locale); plans.set(plan.id,plan); return plan; });
   ipcMain.handle('activity:list', (_, p) => service.getActivityHistory(p));
@@ -122,7 +145,7 @@ app.whenReady().then(async () => {
     const request = Symbol();
     const started = Date.now();
     snapshotReads.set(request, started);
-    try { return await service.getSnapshot(p || repo); }
+    try { return hostingSnapshot(await service.getSnapshot(p || repo)); }
     finally {
       snapshotReads.delete(request);
       const elapsed = Date.now() - started;
@@ -557,6 +580,58 @@ app.whenReady().then(async () => {
   assert.equal(await js(`document.querySelector('.share-review .outline-button').disabled`),true);
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
   await waitFor(`!document.querySelector('.share-review')`);
+
+  // The renderer uses scripted hosting replies; publication is exercised against real Git separately.
+  hostingScenario = true;
+  await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+  await waitFor(`document.querySelector('.remote-status')?.innerText.includes('code.company.test')`);
+  await js(`document.querySelector('[aria-label="Compartir para revisión"]').click()`);
+  await waitFor(`document.querySelector('.share-review')`);
+  await js(`(() => {const select=document.querySelectorAll('.share-review select')[1];select.value='gitlab';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  await js(`document.querySelector('.share-review .outline-button').click()`);
+  await waitFor(`document.querySelector('.share-review .activity-record')`);
+  assert.equal(reviewRequests.at(-1).provider, 'gitlab');
+  assert.equal(reviewPublished, false, 'Checking leaves publication behind confirmation');
+  assert.match(await js(`document.querySelector('.share-review .activity-record').innerText`), /GitLab[\s\S]*org\/team\/repo[\s\S]*anna.work[\s\S]*Saved work for review/);
+  await assertDialog();
+  await capture('gitlab-review');
+  await js(`document.querySelector('.share-review .primary-button').click()`);
+  await waitFor(`document.querySelector('.share-review [role="status"]')?.innerText.includes('merge_requests/1')`);
+  assert.equal(reviewPublished, true);
+  await js(`document.querySelector('.share-review [role="status"] button').click()`);
+  assert.deepEqual(reviewLinks, ['https://code.company.test/org/team/repo/-/merge_requests/1']);
+  await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
+  await waitFor(`!document.querySelector('.share-review')`);
+  hostingScenario = false;
+  await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+  await waitFor(`document.querySelector('.remote-status')?.innerText.includes('Sin remoto')`);
+  assert.equal(git('status','--porcelain'),before,'Sharing for review never saves unsaved files');
+
+  for(const provider of ['bitbucket','bitbucket_dc','azure']){
+    hostingScenario=provider;reviewPublished=false;
+    await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+    await waitFor(`document.querySelector('.remote-status')?.innerText.includes(${JSON.stringify(provider==='bitbucket'?'bitbucket.org':provider==='azure'?'ssh.dev.azure.com':'code.company.test')})`);
+    await js(`document.querySelector('[aria-label="Compartir para revisión"]').click()`);
+    await waitFor(`document.querySelector('.share-review')`);
+    await js(`(() => {const select=document.querySelectorAll('.share-review select')[1];select.value=${JSON.stringify(provider)};select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await waitFor(`document.querySelectorAll('.share-review select')[2]?.querySelector('option[value="ui-${provider}"]')`);
+    await js(`(() => {const select=document.querySelectorAll('.share-review select')[2];select.value='ui-${provider}';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await js(`document.querySelector('.share-review .outline-button').click()`);
+    await waitFor(`document.querySelector('.share-review .activity-record')`);
+    assert.equal(reviewRequests.at(-1).connectionId,`ui-${provider}`);assert.equal(reviewPublished,false);
+    assert.match(await js(`document.querySelector('.share-review .activity-record').innerText`),/Anna Work/);
+    assert.match(await js(`document.querySelector('.share-review').innerText`),/HTTPS/);
+    await assertDialog();await capture(`${provider}-review`);
+    await js(`document.querySelector('.share-review .primary-button').click()`);
+    await waitFor(`document.querySelector('.share-review [role="status"] button')`);
+    assert.equal(reviewPublished,true);
+    await js(`document.querySelector('.share-review [role="status"] button').click()`);
+    assert.equal(reviewLinks.at(-1),`${nativeUi[provider].location.webUrl}/${provider==='azure'?'pullrequest':'pull-requests'}/1`);
+    await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);await waitFor(`!document.querySelector('.share-review')`);
+  }
+  hostingScenario=false;
+  await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+  await waitFor(`document.querySelector('.remote-status')?.innerText.includes('Sin remoto')`);
 
   await js(`document.querySelector('.branch-switch').click()`);
   await waitFor(`document.querySelector('.switch-work fieldset')`);
@@ -1018,6 +1093,19 @@ app.whenReady().then(async () => {
   for (const entry of [/Listo para guardar y publicar/, /Git \d\S* está listo/, /Git todavía no sabe quién guarda/, /No es un inicio de sesión/]) assert.match(guide, entry);
   await js(`document.querySelector('.settings-modal .readiness-section').scrollIntoView()`);
   await capture('settings-readiness');
+  await js(`document.querySelector('.settings-modal .hosting-accounts summary').click()`);
+  await waitFor(`document.querySelector('.settings-modal .hosting-accounts[open]')`);
+  const hostingSetText=(selector,value)=>js(`(() => {const input=document.querySelector(${JSON.stringify(selector)});Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(value)});input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+  await hostingSetText('.hosting-accounts label:nth-of-type(3) input','anna@example.test');
+  await hostingSetText('.hosting-accounts input[type="password"]','synthetic-ui-personal-token');
+  await js(`document.querySelector('.hosting-accounts fieldset .outline-button').click()`);
+  await waitFor(`document.querySelector('.hosting-accounts [role="status"]')?.innerText.includes('Cuenta verificada')`);
+  assert.deepEqual(hostingConnectRequests.at(-1),{provider:'bitbucket',baseUrl:'https://bitbucket.org',username:'anna@example.test',hasToken:true});
+  assert.equal(await js(`document.querySelector('.hosting-accounts input[type="password"]').value`),'','The hosting token leaves the field once saved');
+  assert.doesNotMatch(await js(`document.querySelector('.hosting-accounts').innerText`),/synthetic-ui-personal-token/);
+  assert.match(await js(`document.querySelector('.hosting-accounts').innerText`),/cifran en este equipo[\s\S]*nunca se envían al asistente de IA/);
+  await assertDialog();await capture('hosting-account-connection');
+  await js(`document.querySelector('.settings-modal .hosting-accounts summary').click()`);
   await js(`document.querySelector('.settings-modal .modal-heading').scrollIntoView()`);
   for (const entry of [/Asistente de IA \(opcional\)/, /Sin conectar/, /OpenAI cobra a tu cuenta/, /GitCat no cobra nada/, /Crea una clave/, /solo para el asistente de IA/, /recomendado/, /Avanzado: ID de modelo personalizado/,
     /Tres accesos distintos/, /Clave del asistente de IA/, /Identidad de autor en Git/, /Acceso al remoto/]) assert.match(guide, entry);

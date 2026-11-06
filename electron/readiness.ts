@@ -156,14 +156,18 @@ export function credentialHelperKind(values: string[]): CredentialHelper {
     else active.push(value.trim());
   }
   if (!active.length) return "none";
+  const cliHelper = (value: string, cli: "gh" | "glab") =>
+    new RegExp(`^!(?:"[^"\\r\\n]*[/\\\\]${cli}(?:\\.exe)?"|'[^'\\r\\n]*[/\\\\]${cli}(?:\\.exe)?'|(?:[^\\s"'!;|&]*[/\\\\])?${cli}(?:\\.exe)?)\\s+auth\\s+git-credential$`).test(value);
   const kinds = active.map((value): CredentialHelper =>
-    /\bgh(?:\.exe)?\s+auth\s+git-credential/.test(value) ? "gh"
+    cliHelper(value, "gh") ? "gh"
+      : cliHelper(value, "glab") ? "glab"
       : /osxkeychain/.test(value) ? "osxkeychain"
       : /manager/.test(value) ? "manager"
       : /^(?:store)(?:\s|$)|credential-store/.test(value) ? "store"
       : /^(?:cache)(?:\s|$)|credential-cache/.test(value) ? "cache"
       : "other");
-  return kinds.includes("gh") ? "gh" : kinds[0];
+  // Several helpers can answer with different accounts. Their presence alone proves no identity.
+  return kinds.length === 1 ? kinds[0] : "other";
 }
 
 /**
@@ -172,6 +176,7 @@ export function credentialHelperKind(values: string[]): CredentialHelper {
  * Several accounts are listed side by side and none is ever switched to.
  */
 export function accountReadiness(input: {
+  cli?: "gh" | "glab";
   ghInstalled: boolean;
   accounts: { login: string; active: boolean }[];
   protocol: RemoteProtocol;
@@ -179,11 +184,13 @@ export function accountReadiness(input: {
   helper?: CredentialHelper;
   access: RemoteAccess;
 }): AccountReadiness {
+  const cli = input.cli ?? "gh";
   const active = input.accounts.find((account) => account.active)?.login;
   const verified = input.protocol === "ssh" && input.sshLogin ? { verified: input.sshLogin, verifiedBy: "ssh" as const }
-    : input.protocol === "https" && input.helper === "gh" && input.access === "ok" && active ? { verified: active, verifiedBy: "gh" as const }
+    : input.protocol === "https" && input.helper === cli && input.access === "ok" && active ? { verified: active, verifiedBy: cli }
     : {};
   return {
+    cli,
     gh: !input.ghInstalled ? "missing" : input.accounts.length ? "signed_in" : "signed_out",
     accounts: input.accounts.map((account) => ({ login: account.login, active: account.active })),
     ...(input.sshLogin ? { sshLogin: input.sshLogin } : {}),

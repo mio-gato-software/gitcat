@@ -13,7 +13,7 @@ I built GitCat for my own use and am sharing the result publicly in case it is u
 - Keeps hidden project tabs reachable with scroll arrows, the mouse wheel, and Left/Right or Home/End keys. The add-project button stays visible.
 - Helps you create, switch, rename, and integrate branches; inspect commit history and linked worktrees; and fetch, pull, or push remote changes.
 - Guides you through conflicts, interrupted operations, and recovery with visible plans and confirmation before changes are applied.
-- Can prepare a GitHub review when the required GitHub tools and access are available.
+- Can publish a branch for review on GitHub, GitLab, Bitbucket Cloud, Bitbucket Data Center, and Azure DevOps (including compatible company-hosted servers), with account and live review checks before confirmation.
 - Offers its interface in English and Spanish.
 
 The direct Git controls work without an AI account or an internet connection when the action itself is local. Remote operations still need access to the remote.
@@ -39,7 +39,19 @@ npm run dev
 
 On first launch, choose **Create a practice project** to try editing, saving, branching, and resolving a sample conflict without an account, a remote, or AI. You can also open a folder that already uses Git. GitCat does not require you to move an existing project into a special workspace.
 
-Remote actions use your existing Git access. Sharing a branch for GitHub review also requires the [GitHub CLI](https://cli.github.com/) and a signed-in account.
+Remote actions use your existing Git access. For GitHub and GitLab, sharing a branch for review requires the [GitHub CLI (`gh`)](https://cli.github.com/) or [GitLab CLI (`glab`)](https://docs.gitlab.com/cli/) and a signed-in account on the selected host. GitCat checks that Git publishing and the hosting CLI use the same account, shows the saved commits and current review status, and rechecks before publishing. Existing open reviews are reused; local edits are left untouched.
+
+For a company domain, choose GitHub Enterprise or GitLab Self-Managed in **Share for review** or the remote access check in Settings. GitCat remembers the service after successful confirmed publication. GitLab nested groups are supported. For HTTPS, configure the matching CLI as the credential helper: GitHub uses `gh auth setup-git`; GitLab supports `glab auth login --hostname YOUR_HOST --setup-git-credential-helper`. For SSH, use a key for the same account as the CLI.
+
+For **Bitbucket and Azure DevOps**, open **Settings → Hosting accounts**, choose the service, and connect a personal access token. Tokens are encrypted using the operating system's secure storage; they are not sent to the AI assistant, returned to the interface after saving, stored in Git configuration, or included in plans and activity records. Multiple accounts can be saved; choose the intended one in **Share for review**. A successful confirmed publication remembers that choice for this repository and host. Failed connection attempts preserve the previous saved account.
+
+- **Bitbucket Cloud:** use `https://bitbucket.org`, your Atlassian account email, and a personal API token with account-read, repository read/write, and pull-request read/write scopes. API tokens use the email for REST access and the fixed Git username `x-bitbucket-api-token-auth` for Git access. App passwords and shared project/repository tokens are not supported by this personal-account flow.
+- **Bitbucket Data Center:** enter the HTTPS service address, including any context path such as `/bitbucket`, your Bitbucket username, and a personal HTTP access token. Repository creation needs a private destination project and permission to create repositories there.
+- **Azure DevOps:** enter `https://dev.azure.com/ORGANIZATION`, or the HTTPS collection address for a server supporting the 7.1 REST API, and a personal access token with Code read/write access. Private repository creation also checks the existing project and needs Project and Team read access. The destination is written as `ORGANIZATION/PROJECT` (or `COLLECTION_PATH/PROJECT` on a server). GitCat never changes project visibility. Legacy `ORG.visualstudio.com` repository addresses are recognized.
+
+These saved connections use HTTPS for reviewed publication, even when the configured remote uses SSH. The confirmation identifies the account and exact HTTPS destination. GitCat does not change the remote address or existing Git sign-in configuration during review publication. Ordinary Git actions and cloning continue to use your existing Git access. Git 2.31 or newer is required for this process-scoped authentication.
+
+The assistant can prepare private repository creation on every supported service. It verifies the destination and account before showing a confirmation, then connects the chosen remote and publishes saved commits if requested. Azure repositories inherit project visibility, so only existing private projects are accepted; Azure DevOps Server creation uses HTTPS. Bitbucket repository slugs are normalized to lowercase in the preview. Other hosts remain accessible through ordinary Git actions and HTTPS/SSH cloning.
 
 The app is built for Windows, macOS, and Linux with Electron, React, TypeScript, and Vite. The renderer uses a preload bridge to request operations from the Electron main process, which checks repository state and runs Git. Windows x64 builds have passed the full unit suite, desktop UI and welcome-layout checks, and installed-app startup and local Git checks. macOS is also used for personal development; Linux has not been verified for public distribution.
 

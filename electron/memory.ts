@@ -1,4 +1,5 @@
-import type { GitProtocol } from "../shared/types.js";
+import type { GitProtocol, HostingProvider } from "../shared/types.js";
+import { hostingProviders } from '../shared/hosting.js';
 
 /**
  * What GitCat is allowed to remember: choices the user confirmed, never measured state.
@@ -7,7 +8,7 @@ import type { GitProtocol } from "../shared/types.js";
  * wrong identity. A recalled value only skips the *search*; the *check* always runs.
  */
 export type IdentityMemory = { account?: string; sshHost?: string; confirmedAt: string };
-export type RepositoryMemory = { host?: string; owner?: string; protocol?: GitProtocol; remote?: string; confirmedAt: string };
+export type RepositoryMemory = { provider?: HostingProvider; connectionId?: string; host?: string; owner?: string; protocol?: GitProtocol; remote?: string; confirmedAt: string };
 /**
  * What the person decided about sharing one repository with the assistant. It lives on this computer, never
  * inside the repository: `acknowledgedAt` is when they agreed that its content may go to the provider,
@@ -66,6 +67,8 @@ export function sanitizeMemory(value: unknown): Memory {
     const item = entry as Record<string, unknown>;
     const protocol = item.protocol === "ssh" || item.protocol === "https" ? item.protocol : undefined;
     const remembered: RepositoryMemory = {
+      ...(hostingProviders.includes(item.provider as HostingProvider) ? { provider: item.provider as HostingProvider } : {}),
+      ...(typeof item.connectionId==='string'&&/^[A-Za-z0-9-]{1,80}$/.test(item.connectionId)?{connectionId:item.connectionId}:{}),
       ...(optionalString(item.host) ? { host: optionalString(item.host) } : {}),
       ...(optionalString(item.owner) ? { owner: optionalString(item.owner) } : {}),
       ...(protocol ? { protocol } : {}),

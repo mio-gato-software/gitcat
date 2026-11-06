@@ -14,7 +14,7 @@ function loadSource(name, globals = {}, extra = "") {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX
   } });
   const exports = {};
-  runInNewContext(outputText, { require, exports, ...globals });
+  runInNewContext(outputText, { require: name => name === '../shared/hosting' ? require('../dist-electron/shared/hosting.js') : require(name), exports, ...globals });
   return exports;
 }
 const { en, es, translate } = loadSource("i18n.ts", {}, "\nexport { en, es };\n");
@@ -61,7 +61,7 @@ test("HTTPS sign-in never prescribes macOS Keychain and keeps GitHub CLI guidanc
       }));
       assert.doesNotMatch(html, /credential\.helper osxkeychain|xcode-select/);
       if (host === "github.com") assert.match(html, /gh auth login/);
-      else assert.doesNotMatch(html, /gh auth login/);
+      else { assert.match(html, /glab auth login/); assert.doesNotMatch(html, /\bgh auth login/); }
     }
   }
 });
