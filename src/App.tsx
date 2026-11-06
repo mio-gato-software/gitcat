@@ -3,6 +3,7 @@ import { reorderWorkspacePaths } from "../shared/workspace-order";
 import { useTabOverflow } from "./useTabOverflow";
 import { PracticeGuide } from "./PracticeGuide";
 import { ShareReview } from "./ShareReview";
+import { HostingAccounts } from "./HostingAccounts";
 import { SwitchWork } from "./SwitchWork";
 import { ActivityHistory } from "./ActivityHistory";
 import { OperationStatus, Elapsed } from "./OperationStatus";
@@ -3851,6 +3852,7 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange
       </ReadinessActionsContext.Provider>
     </section>
 
+    <HostingAccounts locale={locale} onChanged={()=>void setupReadiness.recheck(true)} />
     <section className="settings-section accounts-explainer" aria-labelledby="accounts-title">
       <h3 id="accounts-title">{t("accountsTitle")}</h3>
       <p className="settings-intro">{t("accountsIntro")}</p>

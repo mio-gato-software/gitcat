@@ -9,6 +9,7 @@ import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  getHostingConnections, connectHosting, removeHostingConnection,
   createPractice, getPracticeInfo, setPracticeLesson, editPractice, removePractice, previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
   getLlmConfig, getSnapshot, openWorktree, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
   prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
@@ -16,6 +17,7 @@ import {
 } from "./git-service.js";
 import { localized } from "./i18n.js";
 import { remoteNamePattern } from "./repository-plan.js";
+import { hostingProviders } from "../shared/hosting.js";
 import { cloneRepository, inspectFolder, previewClone, startTracking, type FolderInspection } from "./project-setup.js";
 import {
   classifyFailure, compareFingerprints, emptyWorkspace, errorText, fingerprintFrom, inspectProject, keepFingerprints, nearestExistingFolder,
@@ -38,6 +40,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 const openedRepositories = new Set<string>();
 const issuedReviews = new Map<string, import("../shared/types.js").ShareReviewPreview>();
+const verifiedReviewUrls = new Set<string>();
+function rememberReviewUrl(url: string | undefined) {
+  if (!url) return;
+  if (verifiedReviewUrls.size >= 200) verifiedReviewUrls.delete(verifiedReviewUrls.values().next().value ?? "");
+  verifiedReviewUrls.add(url);
+}
 const issuedPlans = new Map<string, ActionPlan>();
 /** Plans that stopped, with what each step did: recovery reads completed steps from here, never from the renderer. */
 const failedPlans = new Map<string, FailedPlanRecord>();
@@ -237,7 +245,11 @@ const providerPages: Record<ProviderPage, string> = {
 const helpPages: Record<HelpPage, string> = {
   github_ssh_keys: "https://github.com/settings/keys",
   git_download: "https://git-scm.com/downloads",
-  gh_install: "https://cli.github.com/"
+  gh_install: "https://cli.github.com/",
+  glab_install: "https://docs.gitlab.com/cli/",
+  bitbucket_tokens: "https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/",
+  bitbucket_dc_tokens: "https://confluence.atlassian.com/bitbucketserver/managing-http-access-tokens-1005339986.html",
+  azure_tokens: "https://learn.microsoft.com/en-us/azure/devops/organizations/accounts/use-personal-access-tokens-to-authenticate"
 };
 const sharingPurposes = new Set<AiSharingPurpose>(["planning", "description", "conflicts", "recovery"]);
 
@@ -496,17 +508,18 @@ app.whenReady().then(async () => {
     if(!request || typeof request!=='object')throw new Error('Invalid review request');
     const preview=await tracked(event,path,'planning',()=>previewShareReview(path,request));
     if(issuedReviews.size>=50)issuedReviews.delete(issuedReviews.keys().next().value??'');
-    issuedReviews.set(preview.id,preview);return preview;
+    issuedReviews.set(preview.id,preview);rememberReviewUrl(preview.existing?.url);return preview;
   });
   ipcMain.handle("review:publish",async(event,cwd:string,id:unknown)=>{
     assertTrustedSender(event);const path=assertOpenedRepository(cwd),preview=typeof id==='string'?issuedReviews.get(id):undefined;
     if(!preview || preview.repoPath!==path)throw new Error('Review expired. Check again before publishing.');
     issuedReviews.delete(preview.id);
-    return tracked(event,path,'executing',()=>publishShareReview(preview),true);
+    const result=await tracked(event,path,'executing',()=>publishShareReview(preview),true);
+    rememberReviewUrl(result.pullRequest.url);return result;
   });
   ipcMain.handle("review:open",async(event,url:unknown)=>{
     assertTrustedSender(event);
-    if(typeof url!=='string'||!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+$/.test(url))throw new Error('Invalid review URL');
+    if(typeof url!=='string'||!verifiedReviewUrls.has(url))throw new Error('Check the live review status before opening this link.');
     await shell.openExternal(url);
   });
   ipcMain.handle("switch-work:read", (event, cwd: string, target: unknown) => {
@@ -751,11 +764,16 @@ app.whenReady().then(async () => {
     assertTrustedSender(event);
     const asked = request && typeof request === "object" ? request as ReadinessRequest : {};
     if (asked.remote !== undefined && (typeof asked.remote !== "string" || !remoteNamePattern.test(asked.remote))) throw new Error("El remoto solicitado no es válido.");
-    const checked: ReadinessRequest = { ...(asked.remote ? { remote: asked.remote } : {}), access: asked.access === true };
+    if (asked.provider !== undefined && !hostingProviders.includes(asked.provider)) throw new Error("Choose a supported hosting service.");
+    if (asked.connectionId !== undefined && (typeof asked.connectionId !== 'string' || !/^[A-Za-z0-9-]{1,80}$/.test(asked.connectionId))) throw new Error('Choose a saved hosting account.');
+    const checked: ReadinessRequest = { ...(asked.remote ? { remote: asked.remote } : {}), ...(asked.provider ? { provider: asked.provider } : {}), ...(asked.connectionId ? { connectionId: asked.connectionId } : {}), access: asked.access === true };
     if (cwd === undefined || cwd === null) return checkReadiness(undefined, checked);
     if (typeof cwd !== "string") throw new Error("El repositorio no es válido.");
     return checkReadiness(assertOpenedRepository(cwd), checked);
   });
+  ipcMain.handle('hosting:list',event=>{assertTrustedSender(event);return getHostingConnections();});
+  ipcMain.handle('hosting:connect',(event,input:import('../shared/types.js').HostingConnectionInput)=>{assertTrustedSender(event);return connectHosting(input);});
+  ipcMain.handle('hosting:remove',(event,id:unknown)=>{assertTrustedSender(event);if(typeof id!=='string'||!/^[A-Za-z0-9-]{1,80}$/.test(id))throw new Error('Choose a saved account.');return removeHostingConnection(id);});
   ipcMain.handle("help:open-page", async (event, page: unknown) => {
     assertTrustedSender(event);
     const url = typeof page === "string" && Object.hasOwn(helpPages, page) ? helpPages[page as HelpPage] : undefined;
