@@ -81,6 +81,49 @@ test('a conflicting remote update retains both tips and exposes an abortable mer
   assert.equal(readFileSync(join(path, 'file.txt'), 'utf8'), 'local edit\n');
 });
 
+test('sync from a detached remote favors overlapping remote edits only after review', async t => {
+  const { path, git, remoteCommit, run, remote } = fixture(t);
+  writeFileSync(join(path, 'file.txt'), 'local edit\n');
+  writeFileSync(join(path, 'local.txt'), 'keep me\n');
+  git('add', '.'); git('commit', '-qm', 'local');
+  const local = git('rev-parse', 'HEAD');
+  const incoming = remoteCommit('file.txt', 'remote edit\n');
+  git('fetch', '-q'); git('switch', '--detach', 'origin/main');
+  await assert.rejects(service.prepareOperation(path, 'pull', {}, 'en'), /Double-click the branch/);
+  const recovery = await service.describeFailure(path, { command: 'git pull --ff-only', summary: 'Pull', skipped: [], error: 'You are not currently on a branch.' });
+  assert.equal(recovery.kind, 'detached_pull');
+  assert.deepEqual(recovery.actions, [{ kind: 'choose_sync' }]);
+  const plan = await service.prepareOperation(path, 'sync_remote', { ref: 'origin/main', name: 'main', side: 'theirs' }, 'es');
+  assert.equal(plan.requiresConfirmation, true);
+  assert.match(plan.command, /-Xtheirs/);
+  assert.match(planSummary(plan, await service.getSnapshot(path), 'es').local.join(' '), /prioridad a origin\/main/);
+  assert.equal(git('branch', '--show-current'), '');
+  assert.equal(git('rev-parse', 'main'), local);
+  const result = await service.executePlan(path, plan, 'es');
+  assert.equal(result.error, undefined);
+  assert.equal(result.snapshot.currentBranch, 'main');
+  assert.equal(result.snapshot.conflicts.length, 0);
+  assert.equal(readFileSync(join(path, 'file.txt'), 'utf8'), 'remote edit\n');
+  assert.equal(readFileSync(join(path, 'local.txt'), 'utf8'), 'keep me\n');
+  git('merge-base', '--is-ancestor', local, 'HEAD');
+  git('merge-base', '--is-ancestor', incoming, 'HEAD');
+  assert.equal(run(remote, 'rev-parse', 'main'), incoming);
+});
+
+test('explicit destination disambiguates branches tracking the same remote and protects a detached save', async t => {
+  const { path, git, remoteCommit } = fixture(t);
+  git('branch', '--track', 'release', 'origin/main');
+  remoteCommit();
+  await assert.rejects(service.prepareOperation(path, 'sync_remote', { ref: 'origin/main' }, 'en'), /Choose the local branch/);
+  const main = git('rev-parse', 'main');
+  const plan = await service.prepareOperation(path, 'sync_remote', { ref: 'origin/main', name: 'release' }, 'en');
+  assert.equal((await service.executePlan(path, plan, 'en')).snapshot.currentBranch, 'release');
+  assert.equal(git('rev-parse', 'main'), main);
+  git('switch', '--detach'); git('commit', '--allow-empty', '-qm', 'only here');
+  await assert.rejects(service.prepareOperation(path, 'sync_remote', { ref: 'origin/main', name: 'main' }, 'en'), /Start a branch here/);
+  assert.equal(git('branch', '--show-current'), '');
+});
+
 test('the exact selected remote wins, and remote-only checkout sets tracking explicitly', async t => {
   const { path, root, run, git, writeGit, remote, remoteCommit } = fixture(t);
   const mirror = join(root, 'mirror.git'); run(root, 'clone', '-q', '--bare', remote, mirror);

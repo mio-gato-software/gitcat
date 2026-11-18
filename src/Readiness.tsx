@@ -2,8 +2,9 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import type { ReactNode } from "react";
 import { AlertTriangle, Check, Cloud, CircleDashed, ExternalLink, LoaderCircle, RefreshCcw, TerminalSquare, UserRound } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { AuthorReadiness, ConfigScope, HelpPage, IdentityValues, ReadinessReport } from "../shared/types";
+import type { AuthorReadiness, ConfigScope, HelpPage, HostingProvider, IdentityValues, ReadinessReport } from "../shared/types";
 import type { MessageKey, Translate } from "./i18n";
+import { hostingLabels, hostingProviders, isNativeProvider } from '../shared/hosting';
 
 /**
  * The readiness checklist: Git, who saves are attributed to, and where a publish goes with the access
@@ -23,6 +24,8 @@ export const ReadinessActionsContext = createContext<ReadinessActions>({ onOpenP
 export type ReadinessItem = "git" | "author" | "remote";
 
 export type ReadinessState = {
+  provider?: HostingProvider;
+  setProvider?: (provider: HostingProvider | undefined) => void;
   report?: ReadinessReport;
   loading: boolean;
   error?: string;
@@ -35,19 +38,21 @@ export function useReadiness(path: string | undefined, { access = false, remote,
   const [state, setState] = useState<{ path?: string; report?: ReadinessReport }>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
+  const [provider, setProvider] = useState<HostingProvider>();
   const sequence = useRef(0);
   const recheck = useCallback(async (withAccess: boolean = access) => {
     const id = ++sequence.current;
     setLoading(true); setError(undefined);
     try {
-      const report = await window.gitcat.checkReadiness(path, { ...(remote ? { remote } : {}), access: withAccess });
+      const report = await window.gitcat.checkReadiness(path, { ...(remote ? { remote } : {}), access: withAccess, ...(provider ? { provider } : {}) });
       if (id === sequence.current) setState({ path, report });
     } catch (reason) {
       if (id === sequence.current) setError(reason instanceof Error ? reason.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "") : String(reason));
     } finally {
       if (id === sequence.current) setLoading(false);
     }
-  }, [path, remote, access]);
+  }, [path, remote, access, provider]);
+  useEffect(() => { setProvider(undefined); }, [path, remote]);
   useEffect(() => { if (enabled) void recheck(); }, [recheck, key, enabled]);
   // Git installed or an identity set from Terminal shows up when the window comes back. Only the local
   // read repeats on its own; contacting the remote again stays the person's click.
@@ -58,7 +63,7 @@ export function useReadiness(path: string | undefined, { access = false, remote,
     return () => window.removeEventListener("focus", onFocus);
   }, [recheck, enabled, access]);
   // A report read for another project is never shown for this one.
-  return { report: state.path === path ? state.report : undefined, loading, error, recheck };
+  return { report: state.path === path ? state.report : undefined, loading, error, recheck, provider, setProvider };
 }
 
 export function identityText(values: IdentityValues) {
@@ -149,34 +154,41 @@ export function ReadinessChecklist({ readiness, items, t, compact = false, title
       </Row>);
     } else {
       const host = remote.resolvedHost ?? remote.host ?? remote.url;
-      const github = host === "github.com";
+      const github = remote.provider === "github" || host === "github.com";
+      const native = remote.provider ? isNativeProvider(remote.provider) : false;
       const state: RowState = remote.access === "ok" ? "ok" : remote.access === "not_checked" ? "pending" : "attention";
       const account = remote.account;
+      const cli = account?.cli ?? (remote.provider === "gitlab" || host === "gitlab.com" ? "glab" : "gh");
+      const cliName = cli === "glab" ? "GitLab CLI" : "GitHub CLI";
+      const login = `${cli} auth login --hostname ${host}${cli === "glab" ? " --setup-git-credential-helper" : ""}`;
+      const cliParams = { cli: cliName, command: login };
       const accountList = account?.accounts.map((entry) => `${entry.login}${entry.active ? ` ${t("readinessActiveMarker")}` : ""}`).join(", ");
       rows.push(<Row key="remote" item="remote" state={state} icon={Cloud} title={t("readinessRemoteWhere", { url: remote.url })}>
         <span className="readiness-detail">{[remote.name, t(`readinessProtocol_${remote.protocol}` as MessageKey), remote.host && remote.resolvedHost ? `${remote.host} → ${remote.resolvedHost}` : remote.host].filter(Boolean).join(" · ")} · {t(`readinessRemoteSource_${remote.source}` as MessageKey, { count: remote.remotes.length })}</span>
         {remoteChoice && remote.remotes.length > 1 && <label className="readiness-remote-choice">{t("readinessRemoteChoice")}<select value={remoteChoice.value ?? remote.name} onChange={(event) => remoteChoice.onChange(event.target.value)} disabled={loading}>{remote.remotes.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>}
+        {host !== "github.com" && host !== "gitlab.com" && readiness.setProvider && <label className="readiness-remote-choice">{t("readinessHostingService")}<select value={readiness.provider ?? ""} onChange={event => readiness.setProvider?.(event.target.value as HostingProvider || undefined)} disabled={loading}><option value="">{t("readinessGenericGit")}</option>{hostingProviders.map(p=><option key={p} value={p}>{hostingLabels[p]}</option>)}</select></label>}
         <div className="readiness-access" data-access={remote.access}>
           <strong>{loading && remote.access === "not_checked" ? <><LoaderCircle className="spin" size={11} /> {t("readinessAccessChecking")}</> : t(`readinessAccess_${remote.access}` as MessageKey, { host })}</strong>
           {!(loading && remote.access === "not_checked") && <span>{t(accessHelpKey(remote.access, remote.protocol), { host })}</span>}
-          {remote.access === "credentials" && remote.protocol === "https" && <>{github && <Terminal command="gh auth login" />}{remote.helper && <span className="readiness-detail">{t("readinessHelper", { helper: t(`readinessHelper_${remote.helper}` as MessageKey) })}</span>}</>}
+          {remote.access === "credentials" && remote.protocol === "https" && !native && <>{(remote.provider || github || host === "gitlab.com") && <Terminal command={login} />}{remote.helper && <span className="readiness-detail">{t("readinessHelper", { helper: t(`readinessHelper_${remote.helper}` as MessageKey) })}</span>}</>}
           {remote.access === "denied" && remote.protocol === "ssh" && <Terminal command="ssh-keygen -t ed25519" />}
-          {remote.access === "denied" && remote.protocol === "https" && github && <Terminal command="gh auth switch" />}
+          {remote.access === "denied" && remote.protocol === "https" && remote.provider && !native && <Terminal command={login} />}
           {remote.access === "host_key" && <Terminal command={`ssh -T git@${remote.host ?? host}`} />}
           {remote.access === "ok" && remote.protocol === "https" && remote.helper && <span className="readiness-detail">{t("readinessHelper", { helper: t(`readinessHelper_${remote.helper}` as MessageKey) })}</span>}
         </div>
-        {account && <div className="readiness-account">
-          {account.verified && <span className="readiness-verified"><Check size={11} /> {t(account.verifiedBy === "ssh" ? "readinessAccountVerifiedSsh" : "readinessAccountVerifiedGh", { login: account.verified, path: remote.path ?? remote.url })}</span>}
-          {account.gh === "signed_in" && <span>{t("readinessAccountsGh", { accounts: accountList ?? "" })}</span>}
-          {account.differs && <span className="readiness-warning">{t("readinessAccountsDiffer", { ssh: account.sshLogin ?? "", active: account.accounts.find((entry) => entry.active)?.login ?? "" })}</span>}
-          {!account.differs && account.accounts.length > 1 && <span>{t("readinessAccountsSeveral")}</span>}
-          {account.gh === "missing" && <span>{t("readinessGh_missing")}</span>}
-          {account.gh === "signed_out" && <><span>{t("readinessGh_signed_out")}</span><Terminal command="gh auth login" /></>}
+        {native && <div className="readiness-account"><span>{t(remote.account?.verified ? 'readinessHostingVerified' : 'readinessHostingConnect', { account: remote.hosting?.label ?? '' })}</span></div>}
+        {account && !native && <div className="readiness-account">
+          {account.verified && <span className="readiness-verified"><Check size={11} /> {t(account.verifiedBy === "ssh" ? "readinessAccountVerifiedSsh" : "readinessAccountVerifiedGh", { login: account.verified, path: remote.path ?? remote.url, cli: cliName })}</span>}
+          {account.gh === "signed_in" && <span>{t("readinessAccountsGh", { accounts: accountList ?? "", cli: cliName })}</span>}
+          {account.differs && <span className="readiness-warning">{t("readinessAccountsDiffer", { ssh: account.sshLogin ?? "", active: account.accounts.find((entry) => entry.active)?.login ?? "", ...cliParams })}</span>}
+          {!account.differs && account.accounts.length > 1 && <span>{t("readinessAccountsSeveral", cliParams)}</span>}
+          {account.gh === "missing" && <span>{t("readinessGh_missing", cliParams)}</span>}
+          {account.gh === "signed_out" && <><span>{t("readinessGh_signed_out", cliParams)}</span><Terminal command={login} /></>}
         </div>}
         <div className="readiness-actions">
           {recheckButton(remote.access === "not_checked" ? "readinessCheckAccess" : "readinessRecheckAccess", true)}
           {remote.access === "denied" && remote.protocol === "ssh" && github && page("github_ssh_keys", "readinessOpenSshKeys")}
-          {account?.gh === "missing" && page("gh_install", "readinessGetGh")}
+          {account?.gh === "missing" && <button type="button" className="ghost-button small" onClick={() => actions.onOpenPage(cli === "glab" ? "glab_install" : "gh_install")}><ExternalLink size={12} /> {t("readinessGetGh", { cli: cliName })}</button>}
         </div>
         {remote.detail && remote.access !== "ok" && <details className="recovery-detail"><summary>{t("technicalDetails")}</summary><pre>{remote.detail}</pre></details>}
       </Row>);

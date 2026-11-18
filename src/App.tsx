@@ -1,7 +1,9 @@
 import { Worktrees } from "./Worktrees";
 import { reorderWorkspacePaths } from "../shared/workspace-order";
+import { useTabOverflow } from "./useTabOverflow";
 import { PracticeGuide } from "./PracticeGuide";
 import { ShareReview } from "./ShareReview";
+import { HostingAccounts } from "./HostingAccounts";
 import { SwitchWork } from "./SwitchWork";
 import { ActivityHistory } from "./ActivityHistory";
 import { OperationStatus, Elapsed } from "./OperationStatus";
@@ -12,7 +14,7 @@ import { addNotification, type Notification } from "../shared/notifications";
 import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
-  AlertTriangle, Archive, ArchiveRestore, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronDown, ChevronRight, CircleDot,
+  AlertTriangle, Archive, ArchiveRestore, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDot,
   Clock3, Cloud, CloudDownload, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
   FolderOpen, FolderPlus, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
   ListTree, LoaderCircle, Maximize2, MessageCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen, Palette, Pencil, PencilLine, Plus,
@@ -28,6 +30,7 @@ import { isProtectedBranch, lifecycleOf, staleDays } from "../shared/branch-life
 import { buildCommitGraph, familyColour, maxLanes } from "../shared/commit-graph";
 import { graphWorktrees, withWorktreeWork, worktreeWipHash } from "../shared/worktree-graph";
 import { pullRequestReference } from "../shared/repository-activity";
+import { syncDestinations } from "../shared/remote-sync";
 import { workOverview } from "../shared/work-overview";
 import { completionSummary, planSummary, type CompletionSummary } from "../shared/plan-summary";
 import { refChips } from "../shared/ref-chips";
@@ -460,6 +463,7 @@ export default function App() {
   const [guide, setGuide] = useState<ConflictGuide>();
   const [guideResult, setGuideResult] = useState<ConflictChoiceResult>();
   const [guideBusy, setGuideBusy] = useState(false);
+  const [syncDialog, setSyncDialog] = useState<{ path: string; ref?: string; name?: string }>();
   const [inputDialog, setInputDialog] = useState<InputDialog>();
   const [setup, setSetup] = useState<SetupState>();
   const [identityDialog, setIdentityDialog] = useState<IdentityDialog>();
@@ -516,6 +520,7 @@ export default function App() {
     const rank = (path: string) => { const index = workspaceOrder.indexOf(path); return index < 0 ? Number.MAX_SAFE_INTEGER : index; };
     return all.map((tab, index) => ({ tab, index })).sort((a, b) => rank(a.tab.path) - rank(b.tab.path) || a.index - b.index).map(({ tab }) => tab);
   }, [projects, unavailable, workspaceOrder]);
+  const tabOverflow = useTabOverflow(activeId, JSON.stringify(tabs.map(tab => [tab.id, tab.name])));
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
   const excludedRef = useRef(excludedByRepo);
@@ -540,7 +545,7 @@ export default function App() {
   const conversation = snapshot ? conversations[snapshot.path] ?? [] : [];
   const planning = conversation.some((turn) => turn.status === "loading" || turn.status === "executing");
   // Something prepared against the current state that the user has not decided on yet.
-  const awaitingDecision = conversation.some((turn) => turn.status === "ready") || Boolean(deliveryReview || inputDialog || proposal || generatingDescription
+  const awaitingDecision = conversation.some((turn) => turn.status === "ready") || Boolean(deliveryReview || syncDialog || inputDialog || proposal || generatingDescription
     || (snapshot?.isDirty && deliveryBaseline?.path === snapshot.path && !deliveryStale));
   // A hidden branch panel gives its column to the graph; its saved width waits for it to come back.
   const paneStyle = panes || sidebarHidden
@@ -820,9 +825,9 @@ export default function App() {
   };
 
   const clearTabDrag = () => { draggedTabPath.current = undefined; setDraggedTab(undefined); setTabDrop(undefined); };
-  const tabDropAt = (strip: HTMLElement, clientX: number): { path: string; side: "before" | "after" } | undefined => {
+  const tabDropAt = (strip: HTMLElement, clientX: number, atEnd = false): { path: string; side: "before" | "after" } | undefined => {
     const elements = [...strip.querySelectorAll<HTMLElement>(".window-tab")];
-    const index = elements.findIndex((element) => {
+    const index = atEnd ? -1 : elements.findIndex((element) => {
       const bounds = element.getBoundingClientRect();
       return clientX < bounds.left + bounds.width / 2;
     });
@@ -1152,6 +1157,7 @@ export default function App() {
     // Declining keeps what was typed, so nothing the person wrote is lost.
     if (!(await ensureSharing(path, "planning"))) { setRequest(question); return; }
     const plan = await showPlan(question, () => window.gitcat.planAction(path, question, context, locale), path);
+    if (plan && plan.stateId !== snapshot.stateId) await refreshProject(path, false);
     // When the assistant could not answer, what was typed comes back, unless something new was typed meanwhile.
     if (!plan || plan.assistantUnavailable) setRequest((current) => current || question);
   };
@@ -1198,6 +1204,10 @@ export default function App() {
         if (operation === "sync_remote") await refreshProject(path, false);
       }
     }, path);
+  };
+
+  const openSync = (ref?: string, name?: string) => {
+    if (snapshot) setSyncDialog({ path: snapshot.path, ref, name });
   };
 
   const prepareMergeToDefault = async (name: string) => {
@@ -1251,6 +1261,7 @@ export default function App() {
     try {
       const plan = await window.gitcat.planRecovery(path, failure, context, locale);
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
+      if (plan.steps.some(step => step.operation === "sync_remote")) await refreshProject(path, false);
       if (plan.assistantUnavailable) {
         const reason = plan.assistantUnavailable;
         updateTurn(path, turnId, (turn) => turn.recovery ? { ...turn, assistant: reason } : { ...turn, assistant: reason, error: plan.rationale, status: "error" });
@@ -1280,6 +1291,7 @@ export default function App() {
     if (path !== snapshot.path) return;
     const facts = turn.recovery.facts;
     switch (action.kind) {
+      case "choose_sync": openSync(); return;
       case "refresh": await refreshProject(path); return;
       case "retry":
         if (turn.recoveryPlanId) {
@@ -1472,12 +1484,12 @@ export default function App() {
   const switchBranch = async (name: string) => {
     if (!snapshot || planning) return;
     if (name.startsWith("refs/remotes/")) {
-      await prepare("sync_remote", { ref: name.slice("refs/remotes/".length) });
+      openSync(name.slice("refs/remotes/".length));
       return;
     }
     const remoteOnly = snapshot.branches.find(branch => branch.name === name && branch.presence === "remote");
     if (remoteOnly?.remoteRef) {
-      await prepare("sync_remote", { ref: remoteOnly.remoteRef });
+      openSync(remoteOnly.remoteRef);
       return;
     }
     const path = snapshot.path;
@@ -1513,6 +1525,16 @@ export default function App() {
         skipped: [],
         stage: "prepare"
       });
+    }
+  };
+
+  const activateBranch = (name: string) => {
+    if (!snapshot || planning) return;
+    const branch = snapshot.branches.find(item => item.name === name);
+    if (branch?.remoteRef && !branch.checkedOutIn) {
+      openSync(branch.remoteRef, branch.presence === "remote" ? undefined : name);
+    } else {
+      void switchBranch(name);
     }
   };
 
@@ -1690,7 +1712,8 @@ export default function App() {
       const name = branch.name;
       const local = branch.presence !== "remote" && !remoteRef;
       entries.push({ key: "branch-heading", heading: name });
-      if (remoteRef) entries.push({ key: "sync-remote", icon: CloudDownload, label: t("syncRemote", { ref: remoteRef }), onSelect: () => void prepare("sync_remote", { ref: remoteRef }), hint: t("doubleClickRemoteHint") });
+      const syncRef = remoteRef ?? branch.remoteRef;
+      if (syncRef) entries.push({ key: "sync-remote", icon: CloudDownload, label: t("syncRemote", { ref: syncRef }), onSelect: () => openSync(syncRef, local ? name : undefined) });
       if (!branch.isCurrent && !remoteRef) entries.push({ key: "switch", icon: branch.checkedOutIn ? TreePine : ArrowLeftRight, label: branch.checkedOutIn ? t("openWorktreeAction") : t("switchBranch", { name }), onSelect: () => void switchBranch(branch.presence === "remote" ? `refs/remotes/${branch.remoteRef}` : name), hint: t("doubleClickHint") });
       if (branch.isCurrent && !remoteRef && branch.upstream) entries.push({ key: "pull", icon: ArrowDownToLine, label: t("pullLatest"), onSelect: () => void prepare("pull") });
       if (branch.isCurrent && !remoteRef) entries.push({ key: "push", icon: ArrowUpFromLine, label: t(branch.upstream ? "pushBranch" : "publishBranch"), onSelect: () => void prepare("push") });
@@ -1740,33 +1763,37 @@ export default function App() {
     <div className={`app-shell platform-${window.gitcat.platform}`}>
       <header className="topbar">
         <div className="brand-lockup"><div className="brand-mark"><CatMark size={28} /></div><span>GitCat</span></div>
-        <div className="window-tabs" role="tablist" aria-label={t("openProjects")}
+        <div className="project-tabs"
           onDragOver={(event) => {
             const source = draggedTabPath.current;
             if (!source || !tabs.some((tab) => tab.path === source)) return;
             event.preventDefault();
             event.dataTransfer.dropEffect = "move";
-            const strip = event.currentTarget;
+            const strip = tabOverflow.viewport.current!;
             const bounds = strip.getBoundingClientRect();
             if (event.clientX < bounds.left + 32) strip.scrollLeft -= 20;
             else if (event.clientX > bounds.right - 32) strip.scrollLeft += 20;
-            const drop = tabDropAt(strip, event.clientX);
+            const drop = tabDropAt(strip, event.clientX, Boolean((event.target as HTMLElement).closest(".tab-add")));
             setTabDrop(drop?.path === source ? undefined : drop);
           }}
           onDrop={(event) => {
             const source = draggedTabPath.current;
             if (!source) return;
             event.preventDefault();
-            const drop = tabDropAt(event.currentTarget, event.clientX);
+            const drop = tabDropAt(event.currentTarget, event.clientX, Boolean((event.target as HTMLElement).closest(".tab-add")));
             if (drop) moveTab(source, drop.path, drop.side);
             clearTabDrag();
           }}
           onDragLeave={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setTabDrop(undefined);
           }}>
+          <div className="tab-navigation" ref={tabOverflow.navigation}>
+          {tabOverflow.overflow && <button className="icon-button tab-scroll" disabled={!tabOverflow.left} onClick={() => tabOverflow.scroll(-1)} aria-label={t("scrollProjectsLeft")} title={t("scrollProjectsLeft")}><ChevronLeft size={17} /></button>}
+          <div className={`window-tabs ${tabOverflow.left ? "can-scroll-left" : ""} ${tabOverflow.right ? "can-scroll-right" : ""}`} ref={tabOverflow.viewport}>
+          <div className="window-tab-items" ref={tabOverflow.content} role="tablist" aria-label={t("openProjects")}>
           {tabs.map((tab) => <div key={tab.id} className={`window-tab ${tab.id === activeId ? "active" : ""} ${tab.unavailable ? "unavailable" : ""} ${draggedTab === tab.path ? "dragging" : ""} ${tabDrop?.path === tab.path ? `drop-${tabDrop.side}` : ""}`}
             title={tab.unavailable ? t("unavailableTab", { name: tab.name, reason: t(unavailableReasonKeys[tab.unavailable.reason].short) }) : tab.path}>
-            <button role="tab" aria-selected={tab.id === activeId} draggable={tabs.length > 1} aria-description={t("reorderTabHint")}
+            <button role="tab" aria-selected={tab.id === activeId} tabIndex={tab.id === activeId ? 0 : -1} draggable={tabs.length > 1} aria-description={t("reorderTabHint")}
               title={`${tab.unavailable ? t("unavailableTab", { name: tab.name, reason: t(unavailableReasonKeys[tab.unavailable.reason].short) }) : tab.path}\n${t("reorderTabHint")}`}
               onDragStart={(event) => {
                 draggedTabPath.current = tab.path;
@@ -1778,15 +1805,29 @@ export default function App() {
               }}
               onDragEnd={clearTabDrag}
               onKeyDown={(event) => {
-                if (!event.altKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
-                event.preventDefault();
                 const index = tabs.findIndex((item) => item.id === tab.id);
+                if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+                if (!event.altKey) {
+                  const targets: Record<string, number> = { Home: 0, End: tabs.length - 1, ArrowLeft: (index - 1 + tabs.length) % tabs.length, ArrowRight: (index + 1) % tabs.length };
+                  const targetIndex = targets[event.key];
+                  if (targetIndex === undefined) return;
+                  event.preventDefault();
+                  setActiveId(tabs[targetIndex].id);
+                  tabOverflow.content.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[targetIndex]?.focus();
+                  return;
+                }
+                if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                event.preventDefault();
                 const target = tabs[index + (event.key === "ArrowLeft" ? -1 : 1)];
                 if (target) moveTab(tab.path, target.path, event.key === "ArrowLeft" ? "before" : "after");
               }}
               onClick={() => setActiveId(tab.id)}>{tab.unavailable ? <AlertTriangle size={14} /> : projects.find(project => project.id === tab.id)?.snapshot.worktrees?.some(worktree => worktree.isCurrent && !worktree.isMain) ? <TreePine size={14} role="img" aria-label={t("linkedWorktree")} /> : <GitBranch size={14} />}<span>{tab.name}</span></button>
             <button className="tab-close" onClick={() => closeProject(tab.id)} aria-label={t(tab.unavailable ? "removeFromRecentNamed" : "closeProject", { name: tab.name })}><X size={13} /></button>
           </div>)}
+          </div>
+          </div>
+          {tabOverflow.overflow && <button className="icon-button tab-scroll" disabled={!tabOverflow.right} onClick={() => tabOverflow.scroll(1)} aria-label={t("scrollProjectsRight")} title={t("scrollProjectsRight")}><ChevronRight size={17} /></button>}
+          </div>
           <button className="icon-button tab-add" onClick={() => setSetup({ kind: "choose" })} aria-label={t("addProjectTitle")} title={t("addProjectTitle")}><Plus size={16} /></button>
         </div>
         <div className="top-actions">{snapshot && <button className="worktrees-button" onClick={() => setWorktreesPath(snapshot.path)} aria-label={t("worktreesOpen")} title={t("worktreesOpen")}><TreePine size={17} /><span>{snapshot.worktrees?.length ?? 1}</span></button>}<button className="icon-button" disabled={practiceBusy} onClick={()=>void startPractice()} aria-label={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'} title={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'}><Lightbulb size={17} /></button>{snapshot && <button className="icon-button" onClick={()=>setShareReview({path:snapshot.path,head:selection})} aria-label={locale==='es'?'Compartir para revisión':'Share for review'} title={locale==='es'?'Compartir para revisión':'Share for review'}><Send size={17} /></button>}{snapshot && <button className="icon-button" onClick={()=>setSwitchWork({path:snapshot.path,target:snapshot.currentBranch})} aria-label={locale==='es'?'Trabajo apartado':'Set-aside work'}><ArrowLeftRight size={17} /></button>}{snapshot && <button className="icon-button" onClick={() => setHistoryPath(snapshot.path)} data-action="activity" aria-label={locale === "es" ? "Actividad y recuperación" : "Activity and recovery"}><Clock3 size={17} /></button>}<button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
@@ -1816,7 +1857,7 @@ export default function App() {
             refreshDisabled={Boolean(refreshingPath)}
             onRefresh={() => void refreshEverything()}
             onFetch={() => void refreshEverything("fetch")}
-            onPull={() => void prepare("pull")}
+            onPull={() => snapshot.currentBranch === "HEAD" ? openSync() : void prepare("pull")}
             onPush={() => void prepare("push")}
             onStash={() => void prepare("stash_push")}
             onStashPop={() => void prepare("stash_pop")}
@@ -1850,7 +1891,7 @@ export default function App() {
               onSelect={selectBranch}
               onCreate={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
               onSwitch={(name) => snapshot.branches.find(branch => branch.name === name)?.checkedOutIn ? void switchBranch(name) : void prepare("checkout", { name })}
-              onSwitchNow={(name) => void switchBranch(name)}
+              onSwitchNow={activateBranch}
               onDelete={(name) => void prepare("delete_branch", { name })}
               onRename={(name, to) => void prepare("rename_branch", { name, to })}
               onMenu={(branch, x, y) => setMenu({ x, y, branch: branch.name })}
@@ -1880,7 +1921,7 @@ export default function App() {
               onFocus={focusOn}
               onOpen={(commit) => setModalCommit({ commit })}
               onLoaded={setGraphCommits}
-              onCheckout={(name) => void switchBranch(name)}
+              onCheckout={activateBranch}
               onWorktree={(path) => void openWorktree(path)}
               onMenu={(target) => setMenu(target)}
               sidebarHidden={sidebarHidden}
@@ -1932,6 +1973,14 @@ export default function App() {
         onSetAuthor={snapshot ? () => { setSettingsOpen(false); void openIdentityDialog(); } : undefined}
         repoPath={snapshot?.path} readinessKey={readinessEpoch}
         onConnectRemote={snapshot ? () => { setSettingsOpen(false); readinessActions.onConnectRemote?.(); } : undefined} />}
+      {syncDialog && snapshot?.path === syncDialog.path && <SyncModal snapshot={snapshot} initial={syncDialog}
+        onClose={() => setSyncDialog(undefined)}
+        onPrepare={(args) => { setSyncDialog(undefined); void prepare("sync_remote", args); }}
+        onStash={() => { setSyncDialog(undefined); void prepare("stash_push"); }}
+        onGuide={() => { setSyncDialog(undefined); void openGuide(); }}
+        onFetch={() => { setSyncDialog(undefined); void refreshEverything("fetch"); }}
+        onConnect={() => { setSyncDialog(undefined); setInputDialog({ operation: "add_remote", title: t("connectRemoteTitle"), label: t("remoteAddress"), value: "" }); }}
+      />}
       {identityDialog && <IdentityModal dialog={identityDialog} onChange={setIdentityDialog} onClose={() => setIdentityDialog(undefined)} onSubmit={() => { const identity = identityDialog; setIdentityDialog(undefined); void prepare("set_identity", { user: identity.user.trim(), email: identity.email.trim(), scope: identity.scope }); }} />}
       {inputDialog && <InputModal dialog={inputDialog} branches={snapshot?.branches ?? []} onChange={(value) => setInputDialog({ ...inputDialog, value })} onClose={() => setInputDialog(undefined)} onSubmit={submitInputDialog} />}
       {menu && snapshot && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu)} label={menu.work ? t("uncommittedHeading") : menu.commit ? t("commitActions", { hash: menu.commit.shortHash }) : t("actionsFor", { name: menu.branch ?? "" })} onClose={() => setMenu(undefined)} />}
@@ -2162,9 +2211,9 @@ function CloneModal({ onClose, onRemoteLogin, onCloned }: { onClose: () => void;
   const [attempt, setAttempt] = useState(0);
   const check = useMemo(() => parseCloneUrl(url), [url]);
   const host = check.ok ? check.source.host : "";
-  const nameProblem = folderNameProblem(name);
+  const nameProblem = folderNameProblem(name, window.gitcat.platform);
 
-  useEffect(() => { if (!nameEdited) setName(check.ok ? suggestedFolderName(url) : ""); }, [url, check.ok, nameEdited]);
+  useEffect(() => { if (!nameEdited) setName(check.ok ? suggestedFolderName(url, window.gitcat.platform) : ""); }, [url, check.ok, nameEdited]);
   useEffect(() => {
     setPreview(undefined);
     if (!check.ok || !parent || nameProblem) return;
@@ -2555,7 +2604,7 @@ function BranchRow({ branch, label, variant, merged, selected, defaultBranch, co
       event.preventDefault(); const box = event.currentTarget.getBoundingClientRect();
       event.currentTarget.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: box.left + 20, clientY: box.bottom }));
     }
-  }} className={`branch-row ${branch.isCurrent ? "current" : ""} ${selected ? "selected" : ""} ${merged ? "merged" : ""} ${branch.stackedOn ? "stacked" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onSwitchNow} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch, t)}\n${t("branchClickHint")}`}><span className="branch-color" style={{ background: colour }} />{branch.stackedOn ? <GitFork size={14} className="branch-stack-icon" /> : <GitBranch size={14} />}<span className="branch-label">{label}</span>{variant && <span className="branch-variant" title={t("variantPrefix", { name: branch.name })}>{t("variant")}</span>}{merged && <span className="branch-merged" role="img" aria-label={t("mergedBadge", { branch: defaultBranch ?? "" })} title={t("mergedTitle", { branch: defaultBranch ?? "" })}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={t("worktreeBadge", { path: branch.checkedOutIn })} title={t("worktreeBadge", { path: branch.checkedOutIn })}><TreePine size={12} /></span>}{protectedByPrefix && <span className="branch-protected" role="img" aria-label={t("protectedBadge")} title={t("protectedTitle")}><ShieldCheck size={12} /></span>}{stale > 0 && <span className="branch-stale" role="img" aria-label={t("staleBadge", { days: stale })} title={t("staleTitle", { days: stale })}><Clock3 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">{t("current")}</span>}{isDefault && <span className="current-pill">{t("primary")}</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && <button className="branch-switch" onClick={onSwitch} disabled={busy} aria-label={t("switchBranch", { name: branch.name })} title={t("switchBranchTitle", { name: branch.name })}><ArrowLeftRight size={12} /></button>}{!branch.isCurrent && !isDefault && !protectedByPrefix && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={t("deleteBranch", { name: branch.name })} title={branch.mergedInto.length ? t("deleteMergedBranch", { name: branch.name, branches: branch.mergedInto.join(t("and")) }) : t("deleteUnmergedBranch", { name: branch.name })}><Trash2 size={12} /></button>}</div>;
+  }} className={`branch-row ${branch.isCurrent ? "current" : ""} ${selected ? "selected" : ""} ${merged ? "merged" : ""} ${branch.stackedOn ? "stacked" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onSwitchNow} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch, t)}\n${t(branch.remoteRef && !branch.checkedOutIn ? "doubleClickRemoteHint" : "branchClickHint")}`}><span className="branch-color" style={{ background: colour }} />{branch.stackedOn ? <GitFork size={14} className="branch-stack-icon" /> : <GitBranch size={14} />}<span className="branch-label">{label}</span>{variant && <span className="branch-variant" title={t("variantPrefix", { name: branch.name })}>{t("variant")}</span>}{merged && <span className="branch-merged" role="img" aria-label={t("mergedBadge", { branch: defaultBranch ?? "" })} title={t("mergedTitle", { branch: defaultBranch ?? "" })}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={t("worktreeBadge", { path: branch.checkedOutIn })} title={t("worktreeBadge", { path: branch.checkedOutIn })}><TreePine size={12} /></span>}{protectedByPrefix && <span className="branch-protected" role="img" aria-label={t("protectedBadge")} title={t("protectedTitle")}><ShieldCheck size={12} /></span>}{stale > 0 && <span className="branch-stale" role="img" aria-label={t("staleBadge", { days: stale })} title={t("staleTitle", { days: stale })}><Clock3 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">{t("current")}</span>}{isDefault && <span className="current-pill">{t("primary")}</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && <button className="branch-switch" onClick={onSwitch} disabled={busy} aria-label={t("switchBranch", { name: branch.name })} title={t("switchBranchTitle", { name: branch.name })}><ArrowLeftRight size={12} /></button>}{!branch.isCurrent && !isDefault && !protectedByPrefix && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={t("deleteBranch", { name: branch.name })} title={branch.mergedInto.length ? t("deleteMergedBranch", { name: branch.name, branches: branch.mergedInto.join(t("and")) }) : t("deleteUnmergedBranch", { name: branch.name })}><Trash2 size={12} /></button>}</div>;
 }
 
 /**
@@ -2992,14 +3041,14 @@ function CommitRow({ commit, row, lanes, remotes, branches, worktrees, colour, b
   // A branch label is the branch: a double click moves there, a right click is about that branch.
   const branchOf = (chip?: RefChip) => chip && chip.kind !== "tag" ? chip.ref ? `refs/remotes/${chip.ref}` : chip.label : undefined;
   const chipEvents = (chip: RefChip) => chip.kind === "tag" ? {} : {
-    onDoubleClick: (event: ReactMouseEvent) => { event.stopPropagation(); if (chip.kind !== "head") onCheckout(branchOf(chip)!); },
+    onDoubleClick: (event: ReactMouseEvent) => { event.stopPropagation(); if (chip.kind !== "head" || chipBranch(chip)?.remoteRef) onCheckout(branchOf(chip)!); },
     onContextMenu: (event: ReactMouseEvent) => { event.preventDefault(); event.stopPropagation(); onMenu(branchOf(chip), event.clientX, event.clientY); }
   };
   const size = node === "merge" ? 10 : 20;
   const chipTag = (chip: RefChip) => {
     const branch = chipBranch(chip);
     const folder = chipWorktree(chip);
-    const hint = t(chip.kind === "remote" ? "doubleClickRemoteHint" : chip.kind === "head"
+    const hint = t(chip.kind === "remote" || (branch?.remoteRef && !branch.checkedOutIn) ? "doubleClickRemoteHint" : chip.kind === "head"
       ? "currentBranchHint" : folder ? "worktreeOpenHint" : "doubleClickSwitchHint");
     return <span className={`ref-tag ${chip.kind} ${branch?.remoteAhead && branch.remoteBehind ? "diverged" : ""}`}
       key={`${chip.kind}:${chip.ref ?? chip.label}`} title={`${chip.kind === "tag" ? chip.label : chipTitle(chip)}${chip.kind === "tag" ? "" : `\n${hint}`}`} {...chipEvents(chip)}>
@@ -3222,7 +3271,7 @@ function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
     case "save_changes": case "first_save": actions.push(button(t("next_save_changes_button"), handlers.onSave)); break;
     case "combine_diverged":
       if (next.upstream) {
-        actions.push(button(t("next_combine_merge_button"), () => handlers.onPrepare("merge", { name: next.upstream! })));
+        actions.push(button(t("next_combine_merge_button"), () => handlers.onPrepare("sync_remote", { name: snapshot.currentBranch, ref: next.upstream! })));
         actions.push(button(t("next_combine_rebase_button"), () => handlers.onPrepare("rebase", { onto: next.upstream! }), false));
       }
       break;
@@ -3832,6 +3881,7 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange
       </ReadinessActionsContext.Provider>
     </section>
 
+    <HostingAccounts locale={locale} onChanged={()=>void setupReadiness.recheck(true)} />
     <section className="settings-section accounts-explainer" aria-labelledby="accounts-title">
       <h3 id="accounts-title">{t("accountsTitle")}</h3>
       <p className="settings-intro">{t("accountsIntro")}</p>
@@ -3872,6 +3922,49 @@ function IdentityModal({ dialog, onChange, onClose, onSubmit }: { dialog: Identi
  * starts with a prefix this repo spells differently, it says so and stops there: creation is never
  * blocked, because the convention is the user's to set, not the app's to enforce.
  */
+function SyncModal({ snapshot, initial, onClose, onPrepare, onStash, onGuide, onFetch, onConnect }: {
+  snapshot: RepoSnapshot; initial: { ref?: string; name?: string };
+  onClose: () => void; onPrepare: (args: Record<string, string>) => void;
+  onStash: () => void; onGuide: () => void; onFetch: () => void; onConnect: () => void;
+}) {
+  const { t } = useI18n();
+  const dialogRef = useDialog(onClose);
+  const refs = snapshot.remoteRefs ?? [];
+  const current = snapshot.branches.find(branch => branch.isCurrent);
+  const atHead = snapshot.commits.find(commit => commit.hash === snapshot.head)?.refs ?? [];
+  const matches = refs.filter(ref => atHead.includes(ref));
+  const [ref, setRef] = useState(initial.ref ?? current?.remoteRef ?? (matches.length === 1 ? matches[0] : refs.length === 1 ? refs[0] : ""));
+  const [chosen, setChosen] = useState(initial.name ?? current?.name ?? "");
+  const [preferRemote, setPreferRemote] = useState(false);
+  const destinations = syncDestinations(snapshot, ref);
+  const name = destinations.includes(chosen) ? chosen : destinations.length === 1 ? destinations[0] : "";
+  const pending = snapshot.pending || snapshot.conflicts.length > 0;
+  const blocked = pending || snapshot.isDirty || !refs.length;
+  return <div className="modal-backdrop"><form className="input-modal sync-modal" role="dialog" aria-modal="true" aria-labelledby="sync-title" ref={dialogRef}
+    onSubmit={event => { event.preventDefault(); if (!blocked && name) onPrepare({ ref, name, side: preferRemote ? "theirs" : "" }); }}>
+    <div className="modal-heading"><h2 id="sync-title">{t("syncTitleAction")}</h2>
+      <button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div>
+    {blocked ? <p>{t(pending ? "syncPending" : snapshot.isDirty ? "syncDirty" : "syncNoRefs")}</p> : <>
+      <label>{t("syncSource")}<select value={ref} onChange={event => { setRef(event.target.value); setChosen(""); }}>
+        <option disabled value="">{t("syncChoose")}</option>{refs.map(item => <option key={item}>{item}</option>)}
+      </select></label>
+      {ref && <label>{t("syncDestination")}<select value={name} onChange={event => setChosen(event.target.value)}>
+        <option disabled value="">{t("syncChoose")}</option>{destinations.map(item => <option key={item}>{item}</option>)}
+      </select></label>}
+      <label>{t("syncOverlap")}<select value={preferRemote ? "remote" : "ask"} onChange={event => setPreferRemote(event.target.value === "remote")}>
+        <option value="ask">{t("syncAsk")}</option><option value="remote">{t("syncPrefer")}</option>
+      </select></label>
+      <p>{t("syncPreserves")}</p>
+    </>}
+    <div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button>
+      {pending ? <button type="button" className="primary-button" onClick={onGuide}>{t("resolveConflictsButton")}</button>
+        : snapshot.isDirty ? <button type="button" className="primary-button" onClick={onStash}>{t("stashTitle")}</button>
+        : !refs.length ? <button type="button" className="primary-button" onClick={snapshot.remotes.length ? onFetch : onConnect}>{t(snapshot.remotes.length ? "fetch" : "connectRemoteTitle")}</button>
+        : <button className="primary-button" disabled={!name}>{t("prepare")}</button>}
+    </div>
+  </form></div>;
+}
+
 function InputModal({ dialog, branches, onChange, onClose, onSubmit }: { dialog: InputDialog; branches: Branch[]; onChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
   const { t } = useI18n();
   const dialogRef = useDialog(onClose);

@@ -10,7 +10,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 test("el proyecto usa Electron como entrada de escritorio", async () => {
   const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   assert.equal(packageJson.main, "dist-electron/electron/main.js");
-  assert.match(packageJson.devDependencies.electron, /43\.3/);
+  assert.match(packageJson.devDependencies.electron, /^\^45\./);
   assert.match(packageJson.scripts["dist:mac"], /CSC_IDENTITY_AUTO_DISCOVERY=false/);
   assert.equal(packageJson.build.productName, "GitCat");
 });
@@ -64,7 +64,7 @@ test("la capa de Git evita ejecutar comandos libres", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   assert.match(service, /const allowedOperations = new Set/);
   assert.match(service, /runCommand\("git", args/);
-  assert.match(service, /spawn\(executable, args/);
+  assert.match(service, /spawn\(executable, command === "git" \? gitArguments\(args\) : args,/);
   assert.doesNotMatch(service, /exec\(.*command/);
 });
 
@@ -72,7 +72,7 @@ test("git_command da libertad al modelo sin shell y sin saltarse protecciones", 
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
   // El comando libre se ejecuta como lista de argumentos: nunca se interpreta por un shell.
-  assert.match(service, /case "git_command": return reportedGit\(cwd, step\.argv \?\? \[\]\)/);
+  assert.match(service, /case "git_command": \{[\s\S]{0,400}return reportedGit\(cwd, step\.argv \?\? \[\]\)/);
   assert.doesNotMatch(service, /exec\(.*command/);
   assert.match(planner, /there is no shell/);
   // Investigar es su primer instinto: los de solo lectura corren sin confirmación; el resto, jamás.
@@ -384,7 +384,7 @@ test("las herramientas se localizan sin depender del PATH que hereda la app", as
   assert.match(service, /\["-ilc", 'printf "%s" "\$PATH"'\]/);
   assert.match(service, /const executable = await resolveTool\(command\)/);
   assert.match(service, /env: \{ \.\.\.process\.env, PATH: searchPath,/);
-  assert.match(service, /no runnable gh was found in any of the/);
+  assert.match(service, /no runnable \$\{cli\} was found in any of the/);
 });
 
 test("ninguna decisión sobre el mensaje del usuario se toma con palabras clave", async () => {
@@ -499,7 +499,7 @@ test("el modelo clasifica la intención, responde preguntas y escribe en el idio
   assert.match(planner, /same language as the user's latest message/);
   assert.match(planner, /"git_operation", "create_repository", "answer", "needs_information", "out_of_scope"/);
   assert.match(service, /function plannerState/);
-  assert.match(service, /if \(plan\.intent === "answer"\) return answerDraft\(plan\)/);
+  assert.match(service, /if \(plan\.intent === "answer"\) return bindPlan\(snapshot, answerDraft\(plan\)\)/);
   assert.match(app, /plan\.answer/);
 });
 
@@ -511,7 +511,7 @@ test("los defectos vuelven al modelo como datos estructurados, no como texto en 
   assert.match(planner, /Validation issues \(JSON\)/);
   assert.match(repositoryPlan, /export type RepositoryIssue = \{ field: RepositoryFieldName; problem: string \}/);
   assert.match(service, /type RepositoryPreparation = \{ draft: PlanDraft \} \| \{ blockers: PlanIssue\[\] \}/);
-  assert.match(service, /return issues\.length \? retry\(issues\) : gitOperationDraft\(plan, snapshot, locale, notes\)/);
+  assert.match(service, /if \(issues\.length\) return retry\(issues\)/);
   assert.match(service, /if \("blockers" in preparation\) return retry\(preparation\.blockers\)/);
 });
 
@@ -658,7 +658,7 @@ test("la ejecución gh no usa shell y revierte cambios locales ante fallo", asyn
   assert.match(service, /runCommand\("gh", args/);
   assert.match(service, /GH_PROMPT_DISABLED: "1"/);
   assert.match(service, /\["remote", "remove", plan\.args\.remote\]/);
-  assert.match(service, /\["remote", "add", plan\.args\.remote, previousRemoteUrl\]/);
+  assert.match(service, /\["remote", "set-url", plan\.args\.remote, previousRemoteUrl\]/);
   assert.match(service, /existingRemoteHash/);
   assert.doesNotMatch(service, /existingRemoteUrl/);
   assert.doesNotMatch(service, /spawn\([^\n]+shell:\s*true/);
@@ -686,7 +686,7 @@ test("las preguntas del asistente no se presentan como errores", async () => {
   const styles = await readFile(join(root, "src/styles.css"), "utf8");
   assert.match(types, /kind: "plan" \| "question" \| "refusal"/);
   assert.match(service, /function asking/);
-  assert.match(service, /if \(plan\.intent === "needs_information"\) return asking/);
+  assert.match(service, /if \(plan\.intent === "needs_information"\) return bindPlan\(snapshot, asking/);
   assert.match(planner, /never ask "shall I proceed\?"/);
   assert.match(app, /const asking = plan\.kind === "question"/);
   assert.match(app, /tone: plan\.kind === "refusal" \? "warning" : "neutral"/);
@@ -711,7 +711,7 @@ test("solo se recuerdan decisiones confirmadas, nunca estado del entorno", async
   assert.match(memory, /never measured state/);
   assert.match(memory, /export function identityKey/);
   // Se escribe solo tras una ejecución confirmada y correcta, nunca al proponer un plan.
-  assert.match(service, /const pushOutput = plan\.args\.push === "true"[\s\S]{0,400}saveMemory\(rememberRepository\(/);
+  assert.match(service, /const now = new Date\(\)\.toISOString\(\);\s*saveMemory\(rememberRepository\(/);
   assert.doesNotMatch(service, /saveMemory\([\s\S]{0,80}\)\s*;?\s*return \{\s*draft:/);
   // Lo recordado reordena la búsqueda; la verificación sigue ocurriendo.
   assert.match(service, /Memory only reorders the search/);

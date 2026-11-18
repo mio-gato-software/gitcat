@@ -1,6 +1,13 @@
+import { syncDestinations } from "../shared/remote-sync.js";
 import { PracticeProjects } from "./practice-project.js";
 import { previewReview, publishReview, type ReviewTools } from "./share-review.js";
 import type { ShareReviewRequest, ShareReviewPreview } from "../shared/types.js";
+import { hostingProvider, validHostingHost, validHostingRepository, isNativeProvider, hostingLabels } from "../shared/hosting.js";
+import { HostingConnections, nativeGitConfig } from "./hosting-connections.js";
+import { nativeRepositoryFacts, createNativeReview, nativeCreationFacts, createNativeRepository } from "./native-reviews.js";
+import type { HostingConnectionInput, NativeHostingContext } from "../shared/types.js";
+import { createReviewArgs } from "./review-provider.js";
+import { assertGitlabProjectAvailable, createGitlabProjectArgs, gitlabCreationFacts } from "./gitlab-repository.js";
 import { ActivityHistory } from "./activity-history.js";
 import type { HistoryRecovery, SwitchWorkRequest, SwitchWorkPreview } from "../shared/types.js";
 import { operationContext, operationCheckpoint, operationPhase, inspectOperation, OperationCancelled } from "./operation-progress.js";
@@ -49,7 +56,7 @@ import type {
   ConflictApplyResult, ConflictFileOutcome, ConflictProposal, ConflictChoice, ConflictChoiceOutcome, ConflictChoiceRequest, ConflictChoiceResult,
   ConflictFileVersion, ConflictGuide, ConflictGuideFile, ConflictSideIdentity, ConflictSideId, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput, LlmConnectResult, AiConnectionProblem,
   Locale, Operation, PendingOperation, PlanStep, RepoSnapshot, StepOutcome, AssistantUnavailable, RecoveryReport,
-  AuthorReadiness, CredentialHelper, IdentityValues, ReadinessReport, ReadinessRequest, RemoteAccess, RemoteProtocol, RemoteReadiness
+  AuthorReadiness, CredentialHelper, HostingProvider, IdentityValues, ReadinessReport, ReadinessRequest, RemoteAccess, RemoteProtocol, RemoteReadiness
 } from "../shared/types.js";
 import { classifyProviderFailure, maskKeys, recommendedModel } from "../shared/ai-connection.js";
 import { classifyFailure, operationFromCommand, recoveryActions, recoveryFacts, type FailureEvidence } from "./failure-recovery.js";
@@ -74,7 +81,7 @@ const LLM_REQUIRED_EN =
   "To understand what you write, GitCat needs a connected AI provider: only the model interprets requests, never local rules. Connect one in Settings; meanwhile every Git action works from the buttons.";
 
 function llmRequired(locale?: Locale) { return localized(locale, LLM_REQUIRED, LLM_REQUIRED_EN); }
-const allowedOperations = new Set<Operation>([...executableOperations, "sync_remote", "stash_push", "stash_pop", "github_create_repo", "ignore_path", "set_identity", "add_remote", "none"]);
+const allowedOperations = new Set<Operation>([...executableOperations, "stash_push", "stash_pop", "github_create_repo", "ignore_path", "set_identity", "add_remote", "none"]);
 /**
  * Operations that run without asking. The bar is deliberately high: they must leave the working tree,
  * the branch history and everything already published untouched, and running one again must be
@@ -160,6 +167,12 @@ function commandEnv(searchPath: string, extraEnv: NodeJS.ProcessEnv = {}): NodeJ
   return { ...process.env, PATH: searchPath, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no", GIT_EDITOR: "true", ...extraEnv };
 }
 
+// Git for Windows otherwise rejects ordinary project paths beyond MAX_PATH.
+// Apply this only to our processes; leave the owner's Git configuration alone.
+function gitArguments(args: string[]) {
+  return process.platform === "win32" ? ["-c", "core.longpaths=true", ...args] : args;
+}
+
 /**
  * A Git process with the same tool lookup and environment as every other command, for the callers
  * that have to read its output as it arrives or stop it part way: a clone, or a count of many files.
@@ -168,16 +181,17 @@ export async function spawnGit(cwd: string, args: string[], { extraEnv = {}, gro
   const executable = await resolveTool("git");
   const searchPath = (await toolDirectories()).join(delimiter);
   // A group of its own lets a stop reach the helpers Git starts too (git-remote-https, ssh), not only Git.
-  return spawn(executable, args, { cwd, env: commandEnv(searchPath, extraEnv), stdio: ["ignore", "pipe", "pipe"], detached: group && process.platform !== "win32" });
+  return spawn(executable, gitArguments(args), { cwd, env: commandEnv(searchPath, extraEnv), windowsHide: true, stdio: ["ignore", "pipe", "pipe"], detached: group && process.platform !== "win32" });
 }
 
 async function runCommand(command: string, args: string[], cwd: string, timeoutMs = 60_000, extraEnv: NodeJS.ProcessEnv = {}): Promise<CommandResult> {
   const executable = await resolveTool(command);
   const searchPath = (await toolDirectories()).join(delimiter);
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(executable, args, {
+    const child = spawn(executable, command === "git" ? gitArguments(args) : args, {
       cwd,
       env: commandEnv(searchPath, extraEnv),
+      windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32"
     });
@@ -199,8 +213,10 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
       if (active.signal.aborted) cancel();
     }
     const cleanup = () => { clearTimeout(timer); if (canAbort) active.signal.removeEventListener("abort", cancel); };
-    child.stdout.on("data", (chunk: Buffer) => { if (stdout.length < 2_000_000) stdout += chunk.toString(); });
-    child.stderr.on("data", (chunk: Buffer) => { if (stderr.length < 2_000_000) stderr += chunk.toString(); });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { if (stdout.length < 2_000_000) stdout += chunk; });
+    child.stderr.on("data", (chunk: string) => { if (stderr.length < 2_000_000) stderr += chunk; });
     child.on("error", (error) => { if (!settled) { settled = true; cleanup(); reject(error); } });
     child.on("close", (code) => {
       if (!settled) { settled = true; cleanup(); if (stopped) reject(stopped); else resolvePromise({ stdout, stderr, code: code ?? 1 }); }
@@ -720,7 +736,7 @@ export async function getCommitFileDiff(cwd: string, hash: string, file: string)
   if (!commit) throw new Error("Ese commit no existe en este repositorio.");
   const absolute = resolve(repoRoot, file);
   if (absolute !== repoRoot && !absolute.startsWith(`${repoRoot}${sep}`)) throw new Error("La ruta no pertenece a este repositorio.");
-  const relative = absolute.slice(repoRoot.length + 1);
+  const relative = absolute.slice(repoRoot.length + 1).split(sep).join("/");
   const lineage = (await checkedGit(repoRoot, ["rev-list", "--parents", "-n", "1", commit])).split(" ").filter(Boolean);
   const base = lineage[1];
   const statusRaw = base
@@ -742,7 +758,7 @@ export async function getWorkingFileDiff(cwd: string, file: string): Promise<Com
   const absolute = resolve(repoRoot, file);
   // A path from the interface is still a path: it has to land inside the repository that asked.
   if (absolute !== repoRoot && !absolute.startsWith(`${repoRoot}${sep}`)) throw new Error("La ruta no pertenece a este repositorio.");
-  const relative = absolute.slice(repoRoot.length + 1);
+  const relative = absolute.slice(repoRoot.length + 1).split(sep).join("/");
   const head = await optionalGit(repoRoot, ["rev-parse", "HEAD"]);
   const tracked = head
     ? await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", "HEAD", "--", relative])
@@ -781,7 +797,7 @@ function quoteToken(token: string) {
 
 function buildCommand(operation: Operation, args: Record<string, string>, argv: string[] = []) {
   switch (operation) {
-    case "sync_remote": return `git merge ${args.mode === "ff" ? "--ff-only" : "--no-edit"} refs/remotes/${args.ref}`;
+    case "sync_remote": return `git ${remoteMergeArgs(args).join(" ")}`;
     case "stash_push": return `git stash push --include-untracked -m ${quoteToken(args.message ?? "")}`;
     case "stash_pop": return "git stash pop --index stash@{0}";
     case "checkout": return args.ref ? `git switch --track -c ${args.name} refs/remotes/${args.ref}` : `git switch ${args.name}`;
@@ -809,11 +825,15 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
     case "git_command": return ["git", ...argv].map(quoteToken).join(" ");
     case "github_create_repo": {
       const steps = [];
-      if (args.account && args.account !== args.activeAccount) steps.push(`gh auth switch --hostname ${args.host} --user ${args.account}`);
-      steps.push(`GH_HOST=${args.host} gh repo create ${args.owner}/${args.name} --private`);
+      if (args.provider&&isNativeProvider(args.provider as HostingProvider)) steps.push(`Create private repository on ${hostingLabels[args.provider as HostingProvider]}: ${args.owner}/${args.name}`);
+      else if (args.provider === "gitlab") steps.push(["glab", ...createGitlabProjectArgs(args.name, args.namespaceId), "--hostname", args.host].map(quoteToken).join(" "));
+      else {
+        if (args.account && args.account !== args.activeAccount) steps.push(`gh auth switch --hostname ${args.host} --user ${args.account}`);
+        steps.push(`GH_HOST=${args.host} gh repo create ${args.owner}/${args.name} --private`);
+      }
       steps.push(`git -C ${JSON.stringify(args.source)} remote add ${args.remote} ${args.remoteUrl}`);
       if (args.push === "true") steps.push(`git -C ${JSON.stringify(args.source)} push -u ${args.remote} HEAD`);
-      if (args.account && args.account !== args.activeAccount) steps.push(`gh auth switch --hostname ${args.host} --user ${args.activeAccount}`);
+      if (args.provider === "github" && args.account && args.account !== args.activeAccount) steps.push(`gh auth switch --hostname ${args.host} --user ${args.activeAccount}`);
       return steps.join(" && ");
     }
     case "status": return "git status";
@@ -968,19 +988,67 @@ async function checkedGh(args: string[], cwd: string, host?: string) {
   return result.stdout.trim();
 }
 
+async function checkedGlab(args: string[], cwd: string, host: string) {
+  if (!validHostingHost(host)) throw new Error("Invalid GitLab host.");
+  const result = await runCommand("glab", [...args, "--hostname", host], cwd, 60_000, {
+    GITLAB_HOST: host, GLAB_PROMPT_DISABLED: "1", NO_PROMPT: "1", GLAB_CHECK_UPDATE: "false"
+  });
+  if (result.code !== 0) throw new Error(redactSecrets(result.stderr.trim() || result.stdout.trim() || "GitLab could not complete the request."));
+  return result.stdout.trim();
+}
+
 /** The settings files user.name and user.email come from, read the way Git reads them. Without a repository, only this computer's. */
 async function readAuthor(cwd: string | undefined): Promise<AuthorReadiness> {
   const result = await runGit(cwd ?? homedir(), ["config", "--show-scope", "--get-regexp", "^user\\.(name|email)$"], 10_000).catch(() => undefined);
   return authorReadiness(parseIdentityConfig(result?.stdout ?? ""), { repository: Boolean(cwd) });
 }
 
-/** Every value of a multi-valued setting, in order. An empty value is kept: for a helper list it means "forget the ones before". */
-async function configValues(cwd: string, key: string) {
-  const result = await runGit(cwd, ["config", "--get-all", key], 10_000).catch(() => undefined);
-  return result?.code === 0 && result.stdout ? result.stdout.replace(/\n$/, "").split("\n") : [];
+const accessTimeoutMs = 15_000;
+
+let savedHosting: HostingConnections | undefined;
+function hostingConnections() { return savedHosting ??= new HostingConnections(join(app.getPath('userData'),'gitcat-hosting.json'),safeStorage); }
+export const getHostingConnections=()=>hostingConnections().list();
+export const connectHosting=(input:HostingConnectionInput)=>hostingConnections().connect(input);
+export const removeHostingConnection=(id:string)=>hostingConnections().remove(id);
+async function nativeGit(cwd:string,args:string[],context:NativeHostingContext) {
+  const account=await hostingConnections().verify(context.connectionId);
+  if(account.accountId!==context.accountId)throw new Error('The hosting account changed. Review the action again before publishing.');
+  const config=nativeGitConfig(context.location,hostingConnections().authorization(context.connectionId,true));
+  const argv=[...args];
+  if(argv[0]==='ls-remote')argv[argv[1]==='--heads'?2:1]=context.location.gitUrl;
+  else if(argv[0]==='fetch'||argv[0]==='push')argv[1]=context.location.gitUrl;
+  else throw new Error('Only the reviewed remote read, fetch or push can use this hosting connection.');
+  const result=await runCommand('git',[...config.args,...argv],cwd,60_000,config.env);
+  if(result.code!==0)throw new Error(`The hosting Git operation failed (${classifyAccess({code:result.code,output:result.stderr})}). Check repository access and branch protections, then review again. If Git does not support --config-env, update Git to version 2.31 or later.`);
+  return argv[0]==='push'?'Published the reviewed saved commits.':result.stdout.trim();
 }
 
-const accessTimeoutMs = 15_000;
+/** Git's config query returns only the last URL-matched helper; credentials try every matching helper.
+ * Keep their original order and resets, using Git itself to match each URL-specific subsection.
+ */
+async function configuredCredentialHelper(cwd: string, url: string): Promise<CredentialHelper> {
+  const result = await runGit(cwd, ["config", "--null", "--get-regexp", "^credential(\\..*)?\\.helper$"]);
+  if (result.code === 1) return "none";
+  if (result.code !== 0) return "other";
+  const matches = new Map<string, boolean>();
+  const helpers: string[] = [];
+  const section = `gitcatcredential${randomUUID().replace(/-/g, "")}`;
+  for (const entry of result.stdout.split("\0").filter(Boolean)) {
+    const separator = entry.indexOf("\n");
+    if (separator < 0) return "other";
+    const key = entry.slice(0, separator), value = entry.slice(separator + 1);
+    if (key === "credential.helper") { helpers.push(value); continue; }
+    const scope = key.slice("credential.".length, -".helper".length);
+    if (!scope.includes("://")) return "other";
+    if (!matches.has(scope)) {
+      const match = await runGit(cwd, ["-c", `${section}.${scope}.match=yes`, "config", "--get-urlmatch", `${section}.match`, url]);
+      if (![0, 1].includes(match.code)) return "other";
+      matches.set(scope, match.code === 0);
+    }
+    if (matches.get(scope)) helpers.push(value);
+  }
+  return credentialHelperKind(helpers);
+}
 
 /**
  * Reads the remote's branch list with the sign-in this computer already has, and nothing else: no prompt
@@ -1005,11 +1073,21 @@ async function remoteAccess(repoRoot: string, remote: string): Promise<{ access:
 }
 
 /** GitHub accounts behind a remote: every gh account, and who the SSH key signs in as. Nothing is switched. */
-async function remoteAccount(repoRoot: string, sshHost: string | undefined, protocol: RemoteProtocol, helper: CredentialHelper | undefined, access: RemoteAccess) {
-  const ghInstalled = Boolean(findExecutable("gh", await toolDirectories(), isExecutableFile));
-  const accounts = ghInstalled ? await ghAccounts("github.com", repoRoot) : [];
-  const sshLogin = protocol === "ssh" && sshHost && access === "ok" ? (await sshIdentity(sshHost, repoRoot)).login : undefined;
-  return accountReadiness({ ghInstalled, accounts, protocol, sshLogin, helper, access });
+async function remoteAccount(repoRoot: string, sshHost: string | undefined, protocol: RemoteProtocol, helper: CredentialHelper | undefined, access: RemoteAccess, host: string, provider: HostingProvider) {
+  const cli = provider === "github" ? "gh" : "glab";
+  const ghInstalled = Boolean(findExecutable(cli, await toolDirectories(), isExecutableFile));
+  let accounts: { login: string; active: boolean }[] = [];
+  if (ghInstalled && provider === "github") accounts = await ghAccounts(host, repoRoot);
+  if (ghInstalled && provider === "gitlab") {
+    try {
+      const user = JSON.parse(await checkedGlab(["api", "user"], repoRoot, host));
+      if (typeof user.username === "string" && /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(user.username)) accounts = [{ login: user.username, active: true }];
+    } catch { /* Sign-in guidance remains available; no token is ever read. */ }
+  }
+  // A separate SSH command can select another key; probing plain ssh would not prove Git's identity.
+  const customSsh = process.env.GIT_SSH_COMMAND || process.env.GIT_SSH || await optionalGit(repoRoot, ["config", "--get", "core.sshCommand"]);
+  const sshLogin = protocol === "ssh" && sshHost && access === "ok" && !customSsh ? (await sshIdentity(sshHost, repoRoot)).login : undefined;
+  return accountReadiness({ cli, ghInstalled, accounts, protocol, sshLogin, helper, access });
 }
 
 async function readRemote(snapshot: RepoSnapshot, request: ReadinessRequest): Promise<RemoteReadiness> {
@@ -1019,7 +1097,8 @@ async function readRemote(snapshot: RepoSnapshot, request: ReadinessRequest): Pr
   const address = parseRemoteAddress(pushUrl);
   if (practiceProjects().registered(snapshot.path)) return {status:'found',name:choice.name,url:displayUrl(pushUrl),protocol:address.protocol,host:address.host,path:address.path,source:choice.source,remotes:[...snapshot.remotes],access:'denied',detail:'Practice projects stay local; no account or network check was made.'};
   // A host that could read as an option is never handed to ssh.
-  const sshHost = address.protocol === "ssh" && address.host && !address.host.startsWith("-") && !address.port ? address.host : undefined;
+  const sshUser = pushUrl.match(/^(?:ssh|git\+ssh|ssh\+git):\/\/([^@/]+)@/i)?.[1] ?? pushUrl.match(/^([^@/:]+)@[^:]+:/)?.[1] ?? "git";
+  const sshHost = address.protocol === "ssh" && sshUser === "git" && address.host && !address.host.startsWith("-") && !address.port ? address.host : undefined;
   let resolvedHost: string | undefined;
   if (sshHost) {
     const resolved = await runCommand("ssh", ["-G", sshHost], snapshot.path, 10_000).catch(() => undefined);
@@ -1027,20 +1106,34 @@ async function readRemote(snapshot: RepoSnapshot, request: ReadinessRequest): Pr
     if (name && name !== sshHost) resolvedHost = name;
   }
   const host = resolvedHost ?? address.host;
+  const apiHost = `${host ?? ""}${address.protocol === "https" && address.port ? `:${address.port}` : ""}`;
+  const remembered = recallRepository(memory, snapshot.path);
+  const provider = hostingProvider(host, request.provider ?? (remembered?.host === apiHost && remembered.remote === choice.name ? remembered.provider : undefined));
   const helper = address.protocol === "https" && address.host
-    ? credentialHelperKind([...await configValues(snapshot.path, "credential.helper"), ...await configValues(snapshot.path, `credential.https://${address.host}.helper`)])
+    ? await configuredCredentialHelper(snapshot.path, pushUrl)
     : undefined;
-  const checked = request.access ? await remoteAccess(snapshot.path, choice.name) : { access: "not_checked" as const };
+  const checked = request.access && !(provider&&isNativeProvider(provider)) ? await remoteAccess(snapshot.path, choice.name) : { access: "not_checked" as const };
+  if(provider&&isNativeProvider(provider)) {
+    let hosting:NativeHostingContext|undefined;
+    let nativeAccess:RemoteAccess='not_checked',detail:string|undefined;
+    try {
+      const selected=hostingConnections().select(provider,pushUrl,resolvedHost,request.connectionId??(remembered?.provider===provider&&remembered.host===apiHost&&remembered.remote===choice.name?remembered.connectionId:undefined));
+      hosting={connectionId:selected.connection.id,location:selected.location,accountId:selected.connection.accountId,label:`${selected.connection.label}${selected.connection.username?` (${selected.connection.username})`:''}`};
+      if(request.access){await nativeGit(snapshot.path,['ls-remote','--heads',choice.name],hosting);nativeAccess='ok';}
+    }catch(error){if(request.access){nativeAccess='credentials';detail=error instanceof Error?error.message:'Connect the service account in Settings and check again.';}}
+    return {status:'found',name:choice.name,url:displayUrl(pushUrl),protocol:address.protocol,host:address.host,resolvedHost,path:address.path,source:choice.source,remotes:[...snapshot.remotes],provider,access:nativeAccess,...(hosting?{hosting}:{}),...(detail?{detail}:{}),
+      ...(request.access?{account:{gh:hosting&&nativeAccess==='ok'?'signed_in':'signed_out',accounts:hosting?[{login:hosting.accountId,active:true}]:[],...(hosting&&nativeAccess==='ok'?{verified:hosting.accountId,verifiedBy:'connection' as const}:{}),differs:false}}:{})};
+  }
   // gh verifies each token online, so accounts are only read when the person asked for a check.
-  const account = request.access && host === "github.com" && (address.protocol === "https" || address.protocol === "ssh")
-    ? await remoteAccount(snapshot.path, sshHost, address.protocol, helper, checked.access)
+  const account = request.access && provider && validHostingHost(apiHost) && (address.protocol === "https" || address.protocol === "ssh")
+    ? await remoteAccount(snapshot.path, sshHost, address.protocol, helper, checked.access, apiHost, provider)
     : undefined;
   return {
     status: "found", name: choice.name, url: displayUrl(pushUrl), protocol: address.protocol,
     ...(address.host ? { host: address.host } : {}), ...(resolvedHost ? { resolvedHost } : {}), ...(address.path ? { path: address.path } : {}),
     source: choice.source, ...(choice.upstream ? { upstream: choice.upstream } : {}), remotes: [...snapshot.remotes],
     access: checked.access, ...("detail" in checked && checked.detail ? { detail: checked.detail } : {}),
-    ...(helper ? { helper } : {}), ...(account ? { account } : {})
+    ...(provider ? { provider } : {}), ...(helper ? { helper } : {}), ...(account ? { account } : {})
   };
 }
 
@@ -1081,7 +1174,7 @@ async function identityEffects(snapshot: RepoSnapshot, args: Record<string, stri
   ];
 }
 
-async function prepareGithubRepository(snapshot: RepoSnapshot, input: RepositoryFields, source: ActionPlan["source"]): Promise<RepositoryPreparation> {
+async function prepareHostedRepository(snapshot: RepoSnapshot, input: RepositoryFields, source: ActionPlan["source"]): Promise<RepositoryPreparation> {
   const validation = validateRepositoryFields(input);
   if (validation.issues.length) return { blockers: validation.issues.map((issue) => ({ field: `repository.${issue.field}`, problem: issue.problem })) };
   let repositoryPlan = buildRepositoryPlan(validation.fields);
@@ -1112,13 +1205,34 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
   const replaceRemote = validation.fields.replaceRemote === true;
   if (push && !sourceSnapshot.head) return blocked("the local repository has no commits, so there is nothing to push; the user can create a first commit or ask to create the repository without pushing");
 
-  const ghVersion = await runCommand("gh", ["--version"], sourcePath, 10_000, { GH_PROMPT_DISABLED: "1" }).catch(() => undefined);
-  if (!ghVersion || ghVersion.code !== 0) {
+  const provider = hostingProvider(host, repositoryPlan.provider)!;
+  const native=isNativeProvider(provider);
+  const cli = native?'GitCat':provider === "github" ? "gh" : "glab";
+  const ghVersion = native?undefined:await runCommand(cli, ["--version"], sourcePath, 10_000, { GH_PROMPT_DISABLED: "1" }).catch(() => undefined);
+  if (!native&&(!ghVersion || ghVersion.code !== 0)) {
     const searched = await toolDirectories();
-    return blocked(`GitHub CLI (gh) is required but no runnable gh was found in any of the ${searched.length} directories GitCat searched (including ${searched.slice(0, 6).join(", ")}). If gh is installed elsewhere, it is a PATH problem rather than a missing install`);
+    return blocked(`${cli} is required but no runnable ${cli} was found in any of the ${searched.length} directories GitCat searched. Install ${cli}, then sign in with ${cli} auth login --hostname ${host}`);
   }
-  const accounts = await ghAccounts(host, sourcePath);
-  if (!accounts.length) return blocked(`no account is logged into ${host} with gh; the user must run: gh auth login --hostname ${host}`);
+  let namespaceId = "";
+  let hosting:NativeHostingContext|undefined;
+  let accounts: { login: string; active: boolean }[];
+  if(native){
+    try{
+      const selected=hostingConnections().creation(provider,host,owner,name,validation.fields.connectionId),verified=await hostingConnections().verify(selected.connection.id);
+      if(provider==='azure'&&host!=='dev.azure.com'&&protocol==='ssh')return blocked('For Azure DevOps Server repository creation, choose HTTPS. Existing SSH projects can still use HTTPS for reviewed publication.','repository.protocol');
+      hosting={connectionId:verified.id,location:selected.location,accountId:verified.accountId,label:`${verified.label}${verified.username?` (${verified.username})`:''}`};
+      namespaceId=(await nativeCreationFacts((url,method,body)=>hostingConnections().request(verified.id,url,method,body),selected.location)).namespaceId;
+      repositoryPlan=buildRepositoryPlan({...validation.fields,localPath:sourcePath,provider,connectionId:verified.id,serviceUrl:selected.location.baseUrl});
+      assertRepositoryPlan(repositoryPlan);accounts=[{login:verified.accountId,active:true}];
+    }catch(error){return blocked(error instanceof Error?error.message:String(error),'repository.connectionId');}
+  }else if (provider === "gitlab") {
+    try {
+      const facts = await gitlabCreationFacts(args => checkedGlab(args, sourcePath, host), owner);
+      namespaceId = facts.namespaceId;
+      accounts = [{ login: facts.account, active: true }];
+    } catch (error) { return blocked(`${error instanceof Error ? error.message : String(error)} Sign in with glab auth login --hostname ${host} and check again.`); }
+  } else accounts = await ghAccounts(host, sourcePath);
+  if (!accounts.length) return blocked(`no account is logged into ${host} with ${cli}; the user must run: ${cli} auth login --hostname ${host}`);
   const activeAccount = accounts.find((entry) => entry.active)?.login ?? accounts[0].login;
   const ownerAccount = findAccount(accounts, owner);
   const rememberedAccount = recallIdentity(memory, host, owner)?.account;
@@ -1126,7 +1240,7 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
   const available = accounts.map((entry) => `${entry.login}${entry.active ? " (active)" : ""}`).join(", ");
 
   // Owner is not one of the logged-in accounts, so it has to be an organization the account can publish to.
-  if (!ownerAccount) {
+  if (provider === "github" && !ownerAccount) {
     const permission = await runCommand("gh", [
       "api", "graphql",
       "-f", "query=query($login:String!){organization(login:$login){viewerCanCreateRepositories}}",
@@ -1139,41 +1253,50 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
   }
 
   let sshHost = "";
-  if (protocol === "ssh") {
-    const resolution = await resolveSshHost(host, owner, sourcePath, validation.fields.sshHost);
+  if (protocol === "ssh"&&!native) {
+    const resolution = await resolveSshHost(host, provider === "gitlab" ? account : owner, sourcePath, validation.fields.sshHost);
     if ("problem" in resolution) return blocked(resolution.problem, "repository.sshHost");
     sshHost = resolution.sshHost;
     repositoryPlan = buildRepositoryPlan({ ...validation.fields, localPath: sourcePath, sshHost });
     assertRepositoryPlan(repositoryPlan);
   }
+  if(native)sshHost=repositoryPlan.sshHost;
   const { remoteUrl } = repositoryPlan;
 
-  const existing = await runCommand("gh", ["api", `repos/${owner}/${name}`, "--silent"], sourcePath, 20_000, { GH_PROMPT_DISABLED: "1", GH_HOST: host });
-  if (existing.code === 0) return blocked(`the repository ${host}/${owner}/${name} already exists; a different name is needed`, "repository.repository");
-  const existingError = `${existing.stderr}\n${existing.stdout}`;
-  if (!/HTTP 404|not found/i.test(existingError)) {
-    return blocked(`it could not be verified whether ${host}/${owner}/${name} already exists, so nothing was attempted; gh reported: ${(existing.stderr.trim() || existing.stdout.trim() || "network or API error").slice(0, 300)}`);
+  if(native){ /* Existence, private destination and account were checked above without changing anything. */ }
+  else if (provider === "gitlab") {
+    try { await assertGitlabProjectAvailable(args => checkedGlab(args, sourcePath, host), `${owner}/${name}`); }
+    catch (error) { return blocked(error instanceof Error ? error.message : String(error)); }
+  } else {
+    const existing = await runCommand("gh", ["api", `repos/${owner}/${name}`, "--silent"], sourcePath, 20_000, { GH_PROMPT_DISABLED: "1", GH_HOST: host });
+    if (existing.code === 0) return blocked(`the repository ${host}/${owner}/${name} already exists; a different name is needed`, "repository.repository");
+    const existingError = `${existing.stderr}\n${existing.stdout}`;
+    if (!/HTTP 404|not found/i.test(existingError)) {
+      return blocked(`it could not be verified whether ${host}/${owner}/${name} already exists, so nothing was attempted; gh reported: ${(existing.stderr.trim() || existing.stdout.trim() || "network or API error").slice(0, 300)}`);
+    }
   }
 
   const remoteResult = await runGit(sourcePath, ["remote", "get-url", remote]);
   const remoteExists = remoteResult.code === 0;
+  if (remoteExists && await optionalGit(sourcePath, ["config", "--get-all", `remote.${remote}.pushurl`])) return blocked(`remote "${remote}" has a separate push destination. Choose a new remote name so existing publishing settings are preserved`, "repository.remote");
   if (remoteExists && !replaceRemote) {
     return blocked(`the local remote "${remote}" already points to ${remoteResult.stdout.trim()}; replacing it requires the user to say so explicitly`, "repository.replaceRemote");
   }
 
   const args = {
     name, owner, host, protocol, sshHost, remoteUrl, visibility: "private", source: sourcePath, remote,
-    account, activeAccount,
+    account, activeAccount, provider, namespaceId, ...(hosting?{connectionId:hosting.connectionId,serviceUrl:hosting.location.baseUrl}:{}),
     push: String(push), replaceRemote: String(replaceRemote && remoteExists),
     existingRemoteHash: remoteExists ? createHash("sha256").update(remoteResult.stdout.trim()).digest("hex") : ""
   };
   const effects = [
     `create: ${host}/${owner}/${name} (private)`,
     `local: ${sourcePath}`,
-    `gh account: ${account}${account === activeAccount ? " (active)" : ` (temporarily active instead of ${activeAccount}, restored afterwards)`}`,
+    `${cli} account: ${hosting?.label??account}${account === activeAccount ? " (active)" : ` (temporarily active instead of ${activeAccount}, restored afterwards)`}`,
     ...(protocol === "ssh" ? [`ssh identity: ${sshHost} → ${owner}`] : []),
     `remote ${remote}: ${remoteExists ? `${remoteResult.stdout.trim()} → ${remoteUrl}` : remoteUrl}`,
-    `push: ${push ? `${remote} HEAD` : "no"}`
+    `push: ${push ? `${remote} HEAD` : "no"}`,
+    ...(hosting?[`Initial publication uses the verified saved account over HTTPS: ${hosting.location.gitUrl}. Unsaved files stay local.`]:[])
   ];
   return {
     draft: {
@@ -1183,9 +1306,10 @@ async function prepareGithubRepository(snapshot: RepoSnapshot, input: Repository
       args,
       command: buildCommand("github_create_repo", args),
       summary: `${owner}/${name}`,
-      rationale: `gh ${host} · ${protocol} · ${sourcePath}`,
+      rationale: `${cli} ${host} · ${protocol} · ${sourcePath}`,
       effects,
       repositoryPlan,
+      ...(hosting?{hostingConnection:hosting}:{}),
       targetPath: sourceSnapshot.path,
       targetHead: sourceSnapshot.head,
       targetStateId: sourceSnapshot.stateId,
@@ -1765,6 +1889,7 @@ async function plannerState(snapshot: RepoSnapshot, notes: SharingNotes = newNot
     // Likely credentials replaced by a marker in the conversation or the request before they were sent.
     redactedFromConversation: notes.redacted,
     remotes: snapshot.remotes,
+    remoteRefs: snapshot.remoteRefs,
     branches: snapshot.branches.map((branch) => ({
       name: branch.name,
       isCurrent: branch.isCurrent,
@@ -1791,6 +1916,7 @@ async function plannerState(snapshot: RepoSnapshot, notes: SharingNotes = newNot
       shortHash: commit.shortHash, subject: subject(commit.subject), author: commit.author, date: commit.date, refs: commit.refs
     })),
     staleAfterDays,
+    savedHostingAccounts: getHostingConnections().connections,
     remembered: {
       thisRepository: recallRepository(memory, snapshot.path) ?? null,
       identities: Object.entries(memory.identities).map(([hostAndOwner, entry]) => ({
@@ -1889,8 +2015,11 @@ function protectedBranchIssues(plan: ModelPlan, snapshot: RepoSnapshot): PlanIss
 }
 
 function repositoryFieldsFromPlan(plan: ModelPlan): RepositoryFields {
-  const { localPath, repository, owner, host, protocol, remote, push, replaceRemote } = plan.repository;
+  const { localPath, repository, owner, host, protocol, remote, push, replaceRemote, provider, sshHost, connectionId } = plan.repository;
   return {
+    provider: provider || undefined,
+    connectionId: connectionId || undefined,
+    sshHost: sshHost || undefined,
     localPath: localPath || undefined,
     repository: repository || undefined,
     owner: owner || undefined,
@@ -1908,35 +2037,54 @@ const LAST_RESORT_REFUSAL_EN =
   "I could not turn the request into a verifiable plan and the provider did not explain why. Rephrase the request or check the model configuration.";
 
 /**
- * Turns one model plan into a draft. When local validation or an environment check rejects it, the
+ * Binds the model plan to the snapshot used for its final preparation. When local validation or an environment check rejects it, the
  * defects go back to the model as structured issues so it can correct itself or explain the problem
  * to the user in their own language. Retried once; there is no keyword fallback.
  */
-async function draftFromPlan(
+async function prepareModelPlan(
   plan: ModelPlan, snapshot: RepoSnapshot, request: string, context: ConversationMessage[], locale: Locale = "es", notes: SharingNotes = newNotes(), retried = false
-): Promise<PlanDraft> {
+): Promise<ActionPlan> {
   const fallbackRefusal = localized(locale, LAST_RESORT_REFUSAL, LAST_RESORT_REFUSAL_EN);
-  if (plan.intent === "answer") return answerDraft(plan);
-  if (plan.intent === "needs_information") return asking(plan.reply || plan.rationale || fallbackRefusal, plan.summary);
-  if (plan.intent === "out_of_scope") return refused(plan.reply || plan.rationale || fallbackRefusal, "llm", plan.summary || localized(locale, "Solicitud rechazada", "Request rejected"));
+  if (plan.intent === "answer") return bindPlan(snapshot, answerDraft(plan));
+  if (plan.intent === "needs_information") return bindPlan(snapshot, asking(plan.reply || plan.rationale || fallbackRefusal, plan.summary));
+  if (plan.intent === "out_of_scope") return bindPlan(snapshot, refused(plan.reply || plan.rationale || fallbackRefusal, "llm", plan.summary || localized(locale, "Solicitud rechazada", "Request rejected")));
 
   const retry = async (issues: PlanIssue[]) => {
-    if (retried) return asking(plan.reply || plan.rationale || fallbackRefusal, plan.summary);
-    return draftFromPlan(await requestPlan(request, snapshot, context, issues, notes), snapshot, request, context, locale, notes, true);
+    if (retried) return bindPlan(snapshot, asking(plan.reply || plan.rationale || fallbackRefusal, plan.summary));
+    return prepareModelPlan(await requestPlan(request, snapshot, context, issues, notes), snapshot, request, context, locale, notes, true);
   };
 
   if (plan.intent === "git_operation") {
     const issues = [...planIssues(plan), ...protectedBranchIssues(plan, snapshot)];
-    return issues.length ? retry(issues) : gitOperationDraft(plan, snapshot, locale, notes);
+    for (const [index, step] of plan.steps.entries()) {
+      const [verb, target] = step.argv;
+      if (step.operation === "git_command" && verb === "checkout" && step.argv.length === 2 &&
+          snapshot.remoteRefs?.some(ref => target === ref || target === `refs/remotes/${ref}`)) {
+        issues.push({ field: `steps[${index}].argv`, problem: "Checking out a remote ref detaches HEAD. Use sync_remote to activate its local counterpart. Use checkout --detach only for an explicit request to inspect the commit." });
+      }
+      if (!index && snapshot.currentBranch === "HEAD" && (step.operation === "pull" || (step.operation === "git_command" && verb === "pull"))) {
+        issues.push({ field: "steps[0]", problem: "There is no active local branch. Use sync_remote for the intended remote copy or ask which branch to update." });
+      }
+    }
+    if (issues.length) return retry(issues);
+    const sync = plan.steps.find(step => step.operation === "sync_remote");
+    if (sync) {
+      try {
+        return { ...await prepareRemoteSync(snapshot, operationArgs(sync), locale), source: "llm" };
+      } catch (error) {
+        return bindPlan(snapshot, asking(error instanceof Error ? error.message : String(error), plan.summary));
+      }
+    }
+    return bindPlan(snapshot, await gitOperationDraft(plan, snapshot, locale, notes));
   }
 
-  const preparation = await prepareGithubRepository(snapshot, repositoryFieldsFromPlan(plan), "llm");
+  const preparation = await prepareHostedRepository(snapshot, repositoryFieldsFromPlan(plan), "llm");
   if ("blockers" in preparation) return retry(preparation.blockers);
-  return {
+  return bindPlan(snapshot, {
     ...preparation.draft,
     summary: plan.summary || preparation.draft.summary,
     rationale: plan.rationale || preparation.draft.rationale
-  };
+  });
 }
 
 function bindPlan(snapshot: RepoSnapshot, draft: PlanDraft): ActionPlan {
@@ -1944,7 +2092,7 @@ function bindPlan(snapshot: RepoSnapshot, draft: PlanDraft): ActionPlan {
 }
 
 /** A plan that says which files the model could not read while preparing it. */
-function withNotes(draft: PlanDraft, notes: SharingNotes): PlanDraft {
+function withNotes(draft: ActionPlan, notes: SharingNotes): ActionPlan {
   return notes.withheld.length ? { ...draft, withheld: notes.withheld } : draft;
 }
 
@@ -2194,8 +2342,8 @@ async function blobHead(repoRoot: string, oid: string, limit: number): Promise<{
   const executable = await resolveTool("git");
   const searchPath = (await toolDirectories()).join(delimiter);
   return new Promise((done) => {
-    const child = spawn(executable, ["cat-file", "blob", oid], {
-      cwd: repoRoot, env: { ...process.env, PATH: searchPath, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0" }, stdio: ["ignore", "pipe", "ignore"]
+    const child = spawn(executable, gitArguments(["cat-file", "blob", oid]), {
+      cwd: repoRoot, env: { ...process.env, PATH: searchPath, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0" }, windowsHide: true, stdio: ["ignore", "pipe", "ignore"]
     });
     const chunks: Buffer[] = [];
     let length = 0;
@@ -2530,7 +2678,7 @@ export async function planRecovery(cwd: string, failure: ExecutionFailure, conte
   const notes = newNotes();
   try {
     const plan = await requestPlan(RECOVERY_REQUEST, snapshot, context, issues, notes, providerLimits.recoveryMs);
-    return bindPlan(snapshot, withNotes(await draftFromPlan(plan, snapshot, RECOVERY_REQUEST, context, language, notes), notes));
+    return withNotes(await prepareModelPlan(plan, snapshot, RECOVERY_REQUEST, context, language, notes), notes);
   } catch (error) {
     return bindPlan(snapshot, {
       ...refused(localized(language, `No pude consultar el proveedor LLM: ${error instanceof Error ? error.message : "error desconocido"}`, `I could not query the LLM provider: ${error instanceof Error ? error.message : "unknown error"}`), "llm"),
@@ -2552,7 +2700,7 @@ export async function planAction(cwd: string, request: string, context: Conversa
   const notes = newNotes();
   try {
     const plan = await requestPlan(request, snapshot, context, [], notes);
-    return bindPlan(snapshot, withNotes(await draftFromPlan(plan, snapshot, request, context, language, notes), notes));
+    return withNotes(await prepareModelPlan(plan, snapshot, request, context, language, notes), notes);
   } catch (error) {
     return bindPlan(snapshot, {
       ...refused(localized(language, `No pude consultar el proveedor LLM: ${error instanceof Error ? error.message : "error desconocido"}`, `I could not query the LLM provider: ${error instanceof Error ? error.message : "unknown error"}`), "llm"),
@@ -2580,7 +2728,7 @@ function isUnattended(step: PlanStep) {
 
 function operationDraft(operation: Operation, args: Record<string, string>, snapshot?: RepoSnapshot, argv: string[] = [], locale: Locale = "es"): PlanDraft {
   const details: Partial<Record<Operation, [string, string, ActionPlan["risk"]]>> = {
-    sync_remote: [localized(locale, `Unir ${args.name} con ${args.ref}`, `Join ${args.name} with ${args.ref}`), localized(locale, "Trae los commits remotos y conserva todos tus commits locales. Si ambas copias avanzaron, crea una fusión que puede requerir resolver conflictos.", "Brings in remote commits and keeps all your local commits. If both copies advanced, creates a merge that may need conflict resolution."), "high"],
+    sync_remote: [args.mode === "prefer_remote" ? localized(locale, `Unir ${args.name} con ${args.ref} dando prioridad al remoto`, `Merge ${args.ref} into ${args.name}, preferring remote edits`) : localized(locale, `Unir ${args.name} con ${args.ref}`, `Join ${args.name} with ${args.ref}`), localized(locale, "Trae los commits remotos y conserva todos tus commits locales. Si ambas copias avanzaron, crea una fusión que puede requerir resolver conflictos.", "Brings in remote commits and keeps all your local commits. If both copies advanced, creates a merge that may need conflict resolution."), "high"],
     stash_push: [localized(locale, "Apartar los cambios (stash)", "Set changes aside (stash)"), localized(locale, "Guarda las versiones preparadas, los cambios sin preparar y los archivos nuevos en un stash local; limpia esos cambios de los archivos para seguir trabajando. Los archivos ignorados permanecen en su sitio.", "Saves staged versions, unstaged changes and new files in a local stash, then clears those changes from the files so you can keep working. Ignored files stay in place."), "medium"],
     stash_pop: [localized(locale, "Recuperar el último stash (pop)", "Restore the latest stash (pop)"), localized(locale, "Recupera el último stash en la rama actual, incluyendo las versiones preparadas. Solo elimina el stash si la recuperación termina bien; si hay conflictos, conserva el stash y permite resolverlos.", "Restores the latest stash onto the current branch, including staged versions. Removes the stash only after successful restoration; if there are conflicts, keeps the stash so they can be resolved."), "medium"],
     status: [localized(locale, "Actualizar la vista del repositorio", "Refresh the repository view"), localized(locale, "Lee el estado actual sin modificar archivos.", "Reads the current state without changing files."), "low"],
@@ -2721,14 +2869,17 @@ async function validateStashPop(snapshot: RepoSnapshot, stash: string, language:
 export async function prepareOperation(cwd: string, operation: Operation, args: Record<string, string> = {}, locale?: Locale) {
   const language = normalizeLocale(locale);
   const snapshot = await getSnapshot(cwd);
-  if (operation === "sync_remote") return prepareRemoteSync(snapshot, args.ref, language);
+  if (operation === "sync_remote") return prepareRemoteSync(snapshot, args, language);
   if (operation === "stash_pop" && !snapshot.stashCount) throw new Error(localized(language, "No hay cambios apartados. Usa Stash para guardar cambios primero.", "There are no set-aside changes. Use Stash to save changes first."));
   if (operation === "github_create_repo") {
-    const preparation = await prepareGithubRepository(snapshot, {
+    const preparation = await prepareHostedRepository(snapshot, {
       localPath: args.localPath ?? args.source,
       repository: args.repository ?? args.name,
       owner: args.owner,
       host: args.host,
+      provider: args.provider as HostingProvider | undefined,
+      connectionId: args.connectionId,
+      sshHost: args.sshHost,
       protocol: args.protocol === "ssh" || args.protocol === "https" ? args.protocol : undefined,
       push: args.push !== "false",
       remote: args.remote,
@@ -3126,28 +3277,36 @@ export async function prepareMergeToDefault(cwd: string, branchName: string, loc
   return plan;
 }
 
+function remoteMergeArgs(args: Record<string, string>) {
+  const flags = args.mode === "ff" ? ["--ff-only"] : ["--no-edit"];
+  if (args.mode === "prefer_remote") flags.push("-s", "ort", "-Xtheirs");
+  return ["merge", ...flags, `refs/remotes/${args.ref}`];
+}
+
 /** Fetch the chosen copy, then prepare a reviewed update that never replaces local history. */
-async function prepareRemoteSync(initial: RepoSnapshot, ref: string, language: Locale): Promise<ActionPlan> {
+async function prepareRemoteSync(initial: RepoSnapshot, args: Record<string, string>, language: Locale): Promise<ActionPlan> {
+  const { ref, side } = args;
   const fail = (es: string, en: string): never => { throw new Error(localized(language, es, en)); };
   if (!ref || !isBranchNameSafe(ref) || !initial.remoteRefs?.includes(ref)) fail("La copia remota ya no existe. Actualiza la vista.", "The remote copy no longer exists. Refresh the view.");
   if (initial.pending || initial.conflicts.length) fail("Termina o aborta la operación pendiente antes de actualizar la rama.", "Finish or abort the pending operation before updating the branch.");
   if (initial.isDirty) fail("Hay cambios sin guardar. Usa Stash en la barra o guarda los cambios antes de actualizar; después puedes recuperarlos con Stash pop.", "There are unsaved changes. Use Stash in the toolbar or save changes before updating; restore them afterwards with Stash pop.");
   const remote = [...initial.remotes].sort((a, b) => b.length - a.length).find(name => ref.startsWith(`${name}/`));
   if (!remote) fail("No se reconoce el remoto. Actualiza la vista.", "The remote is not recognized. Refresh the view.");
-  const name = ref.slice(remote!.length + 1);
-  const localFor = (snapshot: RepoSnapshot) => {
-    const tracked = snapshot.branches.filter(branch => branch.presence !== "remote" && branch.upstream === ref);
-    const same = snapshot.branches.find(branch => branch.presence !== "remote" && branch.name === name);
-    if (same) return same;
-    if (tracked.length > 1) fail("Varias ramas locales siguen esta copia. Elige la rama local y usa Pull.", "Several local branches track this copy. Choose the local branch and use Pull.");
-    return tracked[0];
-  };
+  if (side && side !== "theirs") fail("Elige cómo resolver los cambios que coincidan.", "Choose how to handle overlapping edits.");
+  const destinations = syncDestinations(initial, ref);
+  const name = args.name || (destinations.length === 1 ? destinations[0] : "");
+  if (!destinations.includes(name)) fail(`Elige la rama local que quieres actualizar desde ${ref}: ${destinations.join(", ")}.`, `Choose the local branch to update from ${ref}: ${destinations.join(", ")}.`);
+  const localFor = (snapshot: RepoSnapshot) => snapshot.branches.find(branch => branch.presence !== "remote" && branch.name === name);
   const occupied = localFor(initial)?.checkedOutIn;
   if (occupied) fail(`La rama está abierta en ${occupied}. Abre ese proyecto para actualizarla.`, `The branch is open in ${occupied}. Open that project to update it.`);
   await checkedGit(initial.path, ["fetch", "--prune", remote!]);
   const snapshot = await getSnapshot(initial.path);
   if (!snapshot.remoteRefs?.includes(ref)) fail("La rama desapareció del remoto. Tu rama local se conserva; revisa la lista actualizada.", "The branch disappeared from the remote. Your local branch is kept; review the updated list.");
   if (snapshot.isDirty || snapshot.pending || snapshot.conflicts.length || snapshot.head !== initial.head || snapshot.currentBranch !== initial.currentBranch) fail("El repositorio cambió durante la actualización. Revisa la acción de nuevo.", "The repository changed during the update. Review the action again.");
+  if (!syncDestinations(snapshot, ref).includes(name)) fail("La rama de destino cambió. Elige de nuevo la copia local.", "The destination changed. Choose the local copy again.");
+  if (snapshot.currentBranch === "HEAD" && snapshot.head && !(await checkedGit(snapshot.path, ["for-each-ref", "--count=1", "--contains", snapshot.head, "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags"]))) {
+    fail("Este commit solo está aquí. Usa «Crear una rama aquí» para conservarlo y después vuelve a sincronizar.", "This commit is only here. Use “Start a branch here” to keep it, then sync again.");
+  }
   const local = localFor(snapshot);
   if (local?.checkedOutIn) fail(`La rama está abierta en ${local.checkedOutIn}. Abre ese proyecto para actualizarla.`, `The branch is open in ${local.checkedOutIn}. Open that project to update it.`);
   const steps: PlanStep[] = [];
@@ -3158,10 +3317,14 @@ async function prepareRemoteSync(initial: RepoSnapshot, ref: string, language: L
     steps.push(step);
     rationale = step.summary;
   } else {
-    const [ahead, behind] = (await checkedGit(snapshot.path, ["rev-list", "--left-right", "--count", `refs/heads/${local.name}...refs/remotes/${ref}`])).split(/\s+/).map(Number);
+    const [localTip, remoteTip] = (await checkedGit(snapshot.path, ["rev-parse", `refs/heads/${local.name}`, `refs/remotes/${ref}`])).split(/\s+/);
+    const [ahead, behind] = (await checkedGit(snapshot.path, ["rev-list", "--left-right", "--count", `${localTip}...${remoteTip}`])).split(/\s+/).map(Number);
     if (behind && !(await optionalGit(snapshot.path, ["merge-base", `refs/heads/${local.name}`, `refs/remotes/${ref}`]))) fail("Las copias no comparten historia. Revisa ambas ramas antes de decidir cómo unirlas.", "The copies do not share history. Review both branches before choosing how to join them.");
     if (!local.isCurrent) steps.push(stepFrom("checkout", { name: local.name }, [], language)!);
-    if (behind) steps.push(stepFrom("sync_remote", { name: local.name, ref, mode: ahead ? "merge" : "ff" }, [], language)!);
+    if (behind) {
+      const mode = ahead ? (side === "theirs" ? "prefer_remote" : "merge") : "ff";
+      steps.push(stepFrom("sync_remote", { name, ref, mode, localTip, remoteTip }, [], language)!);
+    }
     if (!steps.length) return bindPlan(snapshot, refused(localized(language, `${local.name} ya contiene todos los commits de ${ref}. Tus commits locales se conservan; no hay nada que traer.`, `${local.name} already contains all commits of ${ref}. Your local commits are kept; there is nothing to bring in.`)));
     rationale = localized(language, `Actualiza ${local.name} desde ${ref}: ${behind} commits por traer y ${ahead} commits locales que se conservan.`, `Updates ${local.name} from ${ref}: ${behind} commits to bring in and ${ahead} local commits to keep.`);
   }
@@ -3183,8 +3346,9 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
   if (["sync_remote", "rebase"].includes(operation) && snapshot.isDirty) throw new Error(localized(language, "Hay cambios sin guardar. Revísalos, guárdalos o usa Stash en la barra antes de continuar; después puedes recuperarlos con Stash pop.", "There are unsaved changes. Review them, save them or use Stash in the toolbar before continuing; you can restore them with Stash pop afterwards."));
   if (operation === "stash_push" && (!snapshot.head || !snapshot.isDirty)) throw new Error(localized(language, "Necesitas una primera versión guardada y cambios sin guardar para usar Stash.", "You need a first saved version and unsaved changes to use Stash."));
   if (operation === "stash_pop" && !snapshot.stashCount) throw new Error(localized(language, "No hay ningún stash que recuperar. Actualiza la vista.", "There is no stash to restore. Refresh the view."));
+  if (operation === "pull" && snapshot.currentBranch === "HEAD") throw new Error(localized(language, "Estás viendo un commit suelto. Haz doble clic en la rama que quieres actualizar desde el remoto.", "You are viewing a detached commit. Double-click the branch you want to update from the remote."));
   if (operation === "sync_remote") {
-    if (!args.ref || !snapshot.remoteRefs?.includes(args.ref) || !isBranchNameSafe(args.ref) || !["ff", "merge"].includes(args.mode)) throw new Error(localized(language, "La referencia remota cambió. Actualiza y revisa la acción de nuevo.", "The remote reference changed. Refresh and review the action again."));
+    if (!args.ref || !snapshot.remoteRefs?.includes(args.ref) || !isBranchNameSafe(args.ref) || !["ff", "merge", "prefer_remote"].includes(args.mode)) throw new Error(localized(language, "La referencia remota cambió. Actualiza y revisa la acción de nuevo.", "The remote reference changed. Refresh and review the action again."));
     if (snapshot.currentBranch !== args.name) throw new Error(localized(language, "La rama activa cambió. Revisa la actualización de nuevo.", "The active branch changed. Review the update again."));
   }
   const branchArg = args.name || args.onto;
@@ -3319,61 +3483,105 @@ function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot, locale?: Lo
   validateStep(plan.steps[0], snapshot, language);
 }
 
-function validateGithubPlan(plan: ActionPlan, locale?: Locale) {
+function validateHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
   const language = normalizeLocale(locale);
   const { name, owner, host, protocol, sshHost, remoteUrl, visibility, source, remote, push, replaceRemote, account, activeAccount } = plan.args;
-  if (!repositoryNamePattern.test(name ?? "") || !repositoryOwnerPattern.test(owner ?? "") || !repositoryHostPattern.test(host ?? "") || !["ssh", "https"].includes(protocol) ||
+  const provider = hostingProvider(host, plan.args.provider as HostingProvider | undefined);
+  const native=Boolean(provider&&isNativeProvider(provider));
+  const validOwner = provider === "gitlab" || native ? typeof owner === "string" && validHostingRepository(`${owner}/repository`, provider!) : repositoryOwnerPattern.test(owner ?? "");
+  if (!provider || !(provider==='azure'?/^[A-Za-z0-9_][A-Za-z0-9_. -]{0,99}$/.test(name??''):repositoryNamePattern.test(name ?? "")) || !validOwner || !(native?validHostingHost(host??''):repositoryHostPattern.test(host ?? "")) || !["ssh", "https"].includes(protocol) ||
       visibility !== "private" || !remoteNamePattern.test(remote ?? "") || !["true", "false"].includes(push) || !["true", "false"].includes(replaceRemote)) {
-    throw new Error(localized(language, "El plan de creación de GitHub contiene argumentos no válidos.", "The GitHub creation plan contains invalid arguments."));
+    throw new Error(localized(language, "El plan de creación del repositorio contiene argumentos no válidos.", "The repository creation plan contains invalid arguments."));
   }
-  if (!repositoryOwnerPattern.test(account ?? "") || !repositoryOwnerPattern.test(activeAccount ?? "")) throw new Error(localized(language, "La cuenta de GitHub del plan no es válida.", "The GitHub account in the plan is invalid."));
+  const accountPattern = native ? /^[A-Za-z0-9{}-]{1,100}$/ : provider === "gitlab" ? /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/ : repositoryOwnerPattern;
+  if (!accountPattern.test(account ?? "") || !accountPattern.test(activeAccount ?? "") || (provider === "gitlab" && (!/^[1-9]\d*$/.test(plan.args.namespaceId ?? "") || account !== activeAccount))) throw new Error("The hosting account in the plan is invalid.");
   if (protocol === "ssh" ? !sshHostPattern.test(sshHost ?? "") : sshHost !== "") throw new Error(localized(language, "El host SSH del plan no es válido.", "The SSH host in the plan is invalid."));
   if (!source || resolve(source) !== plan.targetPath) throw new Error(localized(language, "La ruta de origen del plan no es válida.", "The plan's source path is invalid."));
   if (!plan.repositoryPlan) throw new Error(localized(language, "Falta el plan JSON verificable del repositorio.", "The repository's verifiable JSON plan is missing."));
   assertRepositoryPlan(plan.repositoryPlan);
-  if (plan.repositoryPlan.remoteUrl !== remoteUrl || plan.repositoryPlan.localPath !== source) throw new Error(localized(language, "El plan JSON no coincide con los argumentos de ejecución.", "The JSON plan does not match the execution arguments."));
+  if(native&&(!plan.hostingConnection||plan.hostingConnection.connectionId!==plan.args.connectionId||plan.repositoryPlan.connectionId!==plan.args.connectionId||plan.repositoryPlan.serviceUrl!==plan.args.serviceUrl||plan.hostingConnection.accountId!==account||account!==activeAccount))throw new Error('The hosting account binding is invalid. Prepare the action again.');
+  if (plan.repositoryPlan.action !== (push === "true" ? "create_repository_and_push" : "create_repository")) throw new Error("The publishing choice changed. Prepare the repository action again.");
+  if (plan.repositoryPlan.remoteUrl !== remoteUrl || plan.repositoryPlan.localPath !== source || plan.repositoryPlan.host !== host || plan.repositoryPlan.owner !== owner || plan.repositoryPlan.repository !== name || plan.repositoryPlan.protocol !== protocol || hostingProvider(host, plan.repositoryPlan.provider) !== provider) throw new Error(localized(language, "El plan JSON no coincide con los argumentos de ejecución.", "The JSON plan does not match the execution arguments."));
 }
 
-async function executeGithubRepositoryPlan(plan: ActionPlan, locale?: Locale) {
+async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
   const language = normalizeLocale(locale);
-  validateGithubPlan(plan, language);
+  validateHostedRepositoryPlan(plan, language);
   const source = realpathSync.native(plan.args.source);
   const snapshot = await getSnapshot(source);
   if (snapshot.path !== plan.targetPath || snapshot.head !== plan.targetHead || snapshot.stateId !== plan.targetStateId) {
     throw new Error(localized(language, "El repositorio de origen cambió desde la validación. Prepara la acción de nuevo.", "The source repository changed after validation. Prepare the action again."));
   }
   if (plan.args.push === "true" && !snapshot.head) throw new Error(localized(language, "No hay commits locales que publicar.", "There are no local commits to publish."));
-  const ghVersion = await runCommand("gh", ["--version"], source, 10_000, { GH_PROMPT_DISABLED: "1" }).catch(() => undefined);
-  if (!ghVersion || ghVersion.code !== 0) throw new Error(localized(language, "GitHub CLI (gh) ya no está instalado o disponible en PATH.", "GitHub CLI (gh) is no longer installed or available on PATH."));
-  const accounts = await ghAccounts(plan.args.host, source);
-  if (!findAccount(accounts, plan.args.account)) throw new Error(localized(language, `La cuenta ${plan.args.account} ya no está autenticada en ${plan.args.host}.`, `Account ${plan.args.account} is no longer authenticated on ${plan.args.host}.`));
-  if (plan.args.protocol === "ssh") {
+  const provider = hostingProvider(plan.args.host, plan.args.provider as HostingProvider | undefined)!;
+  const native=isNativeProvider(provider),hosting=plan.hostingConnection;
+  const cli = native?'GitCat':provider === "gitlab" ? "glab" : "gh";
+  const ghVersion = native?undefined:await runCommand(cli, ["--version"], source, 10_000, { GH_PROMPT_DISABLED: "1" }).catch(() => undefined);
+  if (!native&&(!ghVersion || ghVersion.code !== 0)) throw new Error(`${cli} is no longer available. Install it and prepare the action again.`);
+  if(native){
+    const selected=hostingConnections().creation(provider,plan.args.host,plan.args.owner,plan.args.name,plan.args.connectionId),account=await hostingConnections().verify(selected.connection.id);
+    if(account.accountId!==plan.args.account||JSON.stringify(selected.location)!==JSON.stringify(hosting!.location))throw new Error('The hosting account or destination changed. Prepare the action again; nothing was created.');
+    const facts=await nativeCreationFacts((url,method,body)=>hostingConnections().request(account.id,url,method,body),selected.location);
+    if(facts.namespaceId!==plan.args.namespaceId)throw new Error('The hosting workspace or project changed. Prepare the action again; nothing was created.');
+  }else if (provider === "gitlab") {
+    const facts = await gitlabCreationFacts(args => checkedGlab(args, source, plan.args.host), plan.args.owner);
+    if (facts.account !== plan.args.account || facts.namespaceId !== plan.args.namespaceId) throw new Error("The GitLab account or namespace changed. Prepare the action again; nothing was created.");
+  } else {
+    const accounts = await ghAccounts(plan.args.host, source);
+    if (!findAccount(accounts, plan.args.account)) throw new Error(localized(language, `La cuenta ${plan.args.account} ya no está autenticada en ${plan.args.host}.`, `Account ${plan.args.account} is no longer authenticated on ${plan.args.host}.`));
+    if (accounts.find(account => account.active)?.login !== plan.args.activeAccount) throw new Error("The active GitHub account changed. Prepare the action again.");
+  }
+  if (plan.args.protocol === "ssh"&&!native) {
     const identity = await sshIdentity(plan.args.sshHost, source);
     if (!identity.authenticated) throw new Error(localized(language, `SSH ya no autentica contra ${plan.args.sshHost}: ${identity.output.slice(0, 200)}`, `SSH no longer authenticates against ${plan.args.sshHost}: ${identity.output.slice(0, 200)}`));
-    if (identity.login && identity.login.toLowerCase() !== plan.args.owner.toLowerCase()) {
+    if (identity.login && identity.login.toLowerCase() !== (provider === "gitlab" ? plan.args.account : plan.args.owner).toLowerCase()) {
       throw new Error(localized(language, `${plan.args.sshHost} ahora autentica como ${identity.login}, no como ${plan.args.owner}.`, `${plan.args.sshHost} now authenticates as ${identity.login}, not ${plan.args.owner}.`));
     }
   }
-  const existing = await runCommand("gh", ["api", `repos/${plan.args.owner}/${plan.args.name}`, "--silent"], source, 20_000, { GH_PROMPT_DISABLED: "1", GH_HOST: plan.args.host });
-  if (existing.code === 0) throw new Error(localized(language, `El repositorio ${plan.args.owner}/${plan.args.name} ya existe.`, `Repository ${plan.args.owner}/${plan.args.name} already exists.`));
-  if (!/HTTP 404|not found/i.test(`${existing.stderr}\n${existing.stdout}`)) throw new Error(localized(language, "No se pudo confirmar que el repositorio remoto siga disponible.", "Could not confirm that the remote repository is still available."));
+  if(native){ /* The live private destination and absence of the repository were rechecked above. */ }
+  else if (provider === "gitlab") await assertGitlabProjectAvailable(args => checkedGlab(args, source, plan.args.host), `${plan.args.owner}/${plan.args.name}`);
+  else {
+    const existing = await runCommand("gh", ["api", `repos/${plan.args.owner}/${plan.args.name}`, "--silent"], source, 20_000, { GH_PROMPT_DISABLED: "1", GH_HOST: plan.args.host });
+    if (existing.code === 0) throw new Error(localized(language, `El repositorio ${plan.args.owner}/${plan.args.name} ya existe.`, `Repository ${plan.args.owner}/${plan.args.name} already exists.`));
+    if (!/HTTP 404|not found/i.test(`${existing.stderr}\n${existing.stdout}`)) throw new Error(localized(language, "No se pudo confirmar que el repositorio remoto siga disponible.", "Could not confirm that the remote repository is still available."));
+  }
 
   const currentRemote = await runGit(source, ["remote", "get-url", plan.args.remote]);
+  if (currentRemote.code !== 0 && plan.args.existingRemoteHash) throw new Error("The remote was removed after validation. Prepare the action again.");
   if (currentRemote.code === 0 && plan.args.replaceRemote !== "true") throw new Error(localized(language, `El remoto “${plan.args.remote}” existe y no se autorizó reemplazarlo.`, `Remote “${plan.args.remote}” exists and replacing it was not authorized.`));
   if (currentRemote.code === 0 && createHash("sha256").update(currentRemote.stdout.trim()).digest("hex") !== plan.args.existingRemoteHash) throw new Error(localized(language, `El remoto “${plan.args.remote}” cambió desde la validación.`, `Remote “${plan.args.remote}” changed after validation.`));
   const previousRemoteUrl = currentRemote.code === 0 ? currentRemote.stdout.trim() : "";
-  if (currentRemote.code === 0) await checkedGit(source, ["remote", "remove", plan.args.remote]);
+  if (currentRemote.code === 0 && await optionalGit(source, ["config", "--get-all", `remote.${plan.args.remote}.pushurl`])) throw new Error("The remote now has a separate push destination. Choose a new remote name and prepare again.");
 
   // gh has no per-command account flag, so the active one is switched and restored around the work.
-  const switching = plan.args.account !== plan.args.activeAccount;
+  const switching = provider === "github" && plan.args.account !== plan.args.activeAccount;
   if (switching) await checkedGh(["auth", "switch", "--hostname", plan.args.host, "--user", plan.args.account], source);
 
   let repositoryCreated = false;
+  let remoteChanged = false;
   try {
-    const createOutput = await checkedGh(["repo", "create", `${plan.args.owner}/${plan.args.name}`, "--private"], source, plan.args.host);
+    const createOutput = native
+      ? JSON.stringify(await createNativeRepository((url,method,body)=>hostingConnections().request(hosting!.connectionId,url,method,body),hosting!.location,plan.args.namespaceId))
+      : provider === "gitlab"
+      ? await checkedGlab(createGitlabProjectArgs(plan.args.name, plan.args.namespaceId), source, plan.args.host)
+      : await checkedGh(["repo", "create", `${plan.args.owner}/${plan.args.name}`, "--private"], source, plan.args.host);
     repositoryCreated = true;
-    await checkedGit(source, ["remote", "add", plan.args.remote, plan.args.remoteUrl]);
-    const pushOutput = plan.args.push === "true" ? await checkedGit(source, ["push", "-u", plan.args.remote, "HEAD"]) : "";
+    if (provider === "gitlab") {
+      const created = JSON.parse(createOutput);
+      if (created.path_with_namespace !== `${plan.args.owner}/${plan.args.name}` || created.visibility !== "private") throw new Error("GitLab returned unexpected project details. Check the project before connecting or publishing it.");
+    }
+    await checkedGit(source, ["remote", previousRemoteUrl ? "set-url" : "add", plan.args.remote, plan.args.remoteUrl]);
+    remoteChanged = true;
+    let pushOutput='';
+    if(plan.args.push==='true'){
+      if(hosting){
+        const facts=await nativeRepositoryFacts((url,method,body)=>hostingConnections().request(hosting.connectionId,url,method,body),hosting.location);
+        const bound={...hosting,repositoryId:facts.id};
+        pushOutput=await nativeGit(source,['push',plan.args.remote,`${snapshot.head}:refs/heads/${snapshot.currentBranch}`],bound);
+        await nativeGit(source,['fetch',plan.args.remote,`+refs/heads/${snapshot.currentBranch}:refs/remotes/${plan.args.remote}/${snapshot.currentBranch}`],bound);
+        await checkedGit(source,['branch',`--set-upstream-to=${plan.args.remote}/${snapshot.currentBranch}`,snapshot.currentBranch]);
+      }else pushOutput=await checkedGit(source,["push", "-u", plan.args.remote, "HEAD"]);
+    }
     // The user confirmed it and it worked: this is the moment the choice becomes worth remembering.
     const now = new Date().toISOString();
     saveMemory(rememberRepository(
@@ -3382,14 +3590,12 @@ async function executeGithubRepositoryPlan(plan: ActionPlan, locale?: Locale) {
         ...(plan.args.protocol === "ssh" ? { sshHost: plan.args.sshHost } : {})
       }, now),
       source,
-      { host: plan.args.host, owner: plan.args.owner, protocol: plan.args.protocol as GitProtocol, remote: plan.args.remote },
+      { provider, ...(hosting?{connectionId:hosting.connectionId}:{}), host: plan.args.host, owner: plan.args.owner, protocol: plan.args.protocol as GitProtocol, remote: plan.args.remote },
       now
     ));
-    return [createOutput, pushOutput].filter(Boolean).join("\n");
+    return [native?`Created private repository ${plan.args.host}/${plan.args.owner}/${plan.args.name}.`:createOutput, pushOutput].filter(Boolean).join("\n");
   } catch (error) {
-    const createdRemote = await runGit(source, ["remote", "get-url", plan.args.remote]);
-    if (createdRemote.code === 0) await checkedGit(source, ["remote", "remove", plan.args.remote]).catch(() => undefined);
-    if (currentRemote.code === 0) await checkedGit(source, ["remote", "add", plan.args.remote, previousRemoteUrl]).catch(() => undefined);
+    if (remoteChanged) await checkedGit(source, previousRemoteUrl ? ["remote", "set-url", plan.args.remote, previousRemoteUrl] : ["remote", "remove", plan.args.remote]).catch(() => undefined);
     const message = error instanceof Error ? error.message : localized(language, "gh no pudo crear el repositorio.", "gh could not create the repository.");
     if (repositoryCreated) throw new Error(localized(language, `El repositorio remoto se creó, pero no se pudo configurar o publicar el remoto local: ${message}`, `The remote repository was created, but the local remote could not be configured or published: ${message}`), { cause: error });
     if (/forbidden|permission|not accessible|403/i.test(message)) throw new Error(localized(language, "No hay permisos suficientes para crear el repositorio privado solicitado.", "You do not have enough permission to create the requested private repository."), { cause: error });
@@ -3407,7 +3613,13 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
   switch (step.operation) {
     case "status": return "";
     case "checkout": return reportedGit(cwd, args.ref ? ["switch", "--track", "-c", args.name, `refs/remotes/${args.ref}`] : ["switch", args.name]);
-    case "sync_remote": return reportedGit(cwd, ["merge", args.mode === "ff" ? "--ff-only" : "--no-edit", `refs/remotes/${args.ref}`]);
+    case "sync_remote": {
+      const remoteTip = await checkedGit(cwd, ["rev-parse", "--verify", `refs/remotes/${args.ref}`]);
+      if (snapshot.head !== args.localTip || remoteTip !== args.remoteTip) {
+        throw new StalePlanError(localized(locale, "Una de las ramas cambió. Vuelve a sincronizar para revisar sus nuevos commits.", "A branch moved. Sync again to review its new commits."));
+      }
+      return reportedGit(cwd, remoteMergeArgs(args));
+    }
     case "stash_push": return reportedGit(cwd, ["stash", "push", "--include-untracked", "-m", args.message]);
     case "stash_pop": {
       const latest = await checkedGit(cwd, ["rev-parse", "--verify", "refs/stash"]);
@@ -3444,8 +3656,11 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
       await checkedGit(cwd, ["add", "-A"]);
       return reportedGit(cwd, ["commit", "-m", args.message]);
     case "ignore_path": return ignorePath(snapshot.path, args, locale);
-    case "git_command": return reportedGit(cwd, step.argv ?? []);
-    case "github_create_repo": return executeGithubRepositoryPlan(plan, locale);
+    case "git_command": {
+      if(plan.hostingConnection){if(step.argv?.[0]!=='push')throw new Error('The saved hosting connection can only publish the reviewed branch.');return nativeGit(cwd,step.argv,plan.hostingConnection);}
+      return reportedGit(cwd, step.argv ?? []);
+    }
+    case "github_create_repo": return executeHostedRepositoryPlan(plan, locale);
     default: throw new Error(localized(locale, "La acción no está permitida.", "The action is not allowed."));
   }
 }
@@ -3689,6 +3904,8 @@ export async function prepareRetry(cwd: string, record: FailedPlanRecord, locale
   }
   const start = record.outcomes.findIndex((outcome) => outcome.status !== "completed");
   const remaining = record.plan.steps.slice(start);
+  const sync = remaining.find(step => step.operation === "sync_remote");
+  if (sync) return prepareRemoteSync(snapshot, { ref: sync.args.ref, name: sync.args.name, side: sync.args.mode === "prefer_remote" ? "theirs" : "" }, language);
   const completed = record.outcomes.slice(0, start).map((outcome) => outcome.summary);
   const draft = sequenceDraft(remaining, localized(language,
     "Se prepara de nuevo con el repositorio tal como está ahora. Solo incluye lo que no llegó a completarse.",
@@ -3949,25 +4166,40 @@ export async function prepareSwitchWork(cwd: string, request: SwitchWorkRequest,
 
 const reviewTools: ReviewTools = {
   snapshot:getSnapshot,
-  remote:async (cwd,name)=>readRemote(await getSnapshot(cwd),{remote:name,access:true}),
-  git:(cwd,args)=>checkedGit(cwd,args), gh:(cwd,args)=>checkedGh(args,cwd,'github.com'),
+  remote:async (cwd,name,provider,connectionId)=>readRemote(await getSnapshot(cwd),{remote:name,access:true,provider,connectionId}),
+  git:(cwd,args,hosting)=>hosting?nativeGit(cwd,args,hosting):checkedGit(cwd,args), gh:(cwd,args,host)=>checkedGh(args,cwd,host), glab:(cwd,args,host)=>checkedGlab(args,cwd,host),
+  api:(context,url,method,body)=>hostingConnections().request(context.connectionId,url,method,body),
   publish:async preview=>{
     const snapshot=await getSnapshot(preview.repoPath);
     const argv=['push',preview.request.remote,`${preview.headHash}:refs/heads/${preview.request.head}`];
     const plan=bindPlan(snapshot,sequenceDraft([stepFrom('git_command',{},argv,'en')!],'Publish the reviewed branch',undefined,'en'));
+    if(preview.hosting)plan.hostingConnection=preview.hosting;
     const result=await executePlan(preview.repoPath,plan,'en'); if(result.error)throw new Error(result.error);
   },
   create:async preview=>{
     const snapshot=await getSnapshot(preview.repoPath),history=activityHistory();
     const id=history.begin({steps:[{operation:'pull_request'}]},snapshot);
     try {
-      await checkedGh(['pr','create','--repo',preview.repository,'--head',preview.request.head,'--base',preview.request.base,'--title',preview.request.title,'--body',preview.request.body],preview.repoPath,'github.com');
+      if(preview.hosting){
+        const api=(url:string,method?:string,body?:unknown)=>hostingConnections().request(preview.hosting!.connectionId,url,method,body);
+        const facts=await nativeRepositoryFacts(api,preview.hosting.location);
+        if(facts.id!==preview.hosting.repositoryId)throw new Error('The remote repository identity changed. Check live status before creating a review.');
+        await createNativeReview(api,preview.hosting,facts,preview.request);
+      }else{
+        const args=createReviewArgs(preview);
+        if(preview.provider==='github')await checkedGh(args,preview.repoPath,preview.host);
+        else await checkedGlab(args,preview.repoPath,preview.host);
+      }
       history.finish(id,snapshot,[{command:'',summary:'pull_request',status:'completed',output:''}]);
     } catch(error){history.finish(id,snapshot,[{command:'',summary:'pull_request',status:'failed',output:''}],String(error));throw error;}
   }
 };
 export const previewShareReview=(cwd:string,request:ShareReviewRequest)=>previewReview(reviewTools,cwd,request);
-export const publishShareReview=(preview:ShareReviewPreview)=>publishReview(reviewTools,preview);
+export const publishShareReview=async(preview:ShareReviewPreview)=>{
+  const result=await publishReview(reviewTools,preview);
+  saveMemory(rememberRepository(memory,preview.repoPath,{provider:preview.provider,host:preview.host,remote:preview.request.remote,...(preview.hosting?{connectionId:preview.hosting.connectionId}:{})},new Date().toISOString()));
+  return result;
+};
 
 
 function practiceProjects(){return new PracticeProjects(join(app.getPath('userData'),'gitcat-practice'),async(cwd,args)=>{

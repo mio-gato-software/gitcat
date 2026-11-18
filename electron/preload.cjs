@@ -71,5 +71,8 @@ contextBridge.exposeInMainWorld("gitcat", {
   verifyLlmConfig: () => ipcRenderer.invoke("llm:verify"),
   openProviderPage: (page) => ipcRenderer.invoke("llm:open-provider-page", page),
   checkReadiness: (path, request) => ipcRenderer.invoke("readiness:check", path, request),
-  openHelpPage: (page) => ipcRenderer.invoke("help:open-page", page)
+  openHelpPage: (page) => ipcRenderer.invoke("help:open-page", page),
+  getHostingConnections: () => ipcRenderer.invoke("hosting:list"),
+  connectHosting: (input) => ipcRenderer.invoke("hosting:connect", input),
+  removeHostingConnection: (id) => ipcRenderer.invoke("hosting:remove", id)
 });

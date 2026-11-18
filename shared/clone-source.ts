@@ -63,23 +63,27 @@ export function parseCloneUrl(input: unknown): CloneUrlCheck {
 }
 
 /** The folder name a clone gets by default: the repository's own name, as Git would pick it. */
-export function suggestedFolderName(url: string) {
+export function suggestedFolderName(url: string, platform?: string) {
   const check = parseCloneUrl(url);
   if (!check.ok) return "repository";
   let last = check.source.path.replace(/[/\\]+$/, "").split(/[/\\:]/).pop() ?? "";
   try { last = decodeURIComponent(last); } catch { /* keep it as written */ }
   const name = last.replace(/\.git$/i, "").replace(/[^\p{L}\p{N}._ -]+/gu, "-").replace(/^[.\s-]+|[\s.]+$/g, "").slice(0, 100);
-  return name || "repository";
+  return name ? folderNameProblem(name, platform) ? `repository-${name}` : name : "repository";
 }
 
 export type FolderNameProblem = "empty" | "reserved" | "separator" | "too_long" | "control";
 
 /** A folder name to create inside the chosen parent: one plain name, never a path. */
-export function folderNameProblem(input: unknown): FolderNameProblem | undefined {
+export function folderNameProblem(input: unknown, platform?: string): FolderNameProblem | undefined {
   if (typeof input !== "string" || !input.trim()) return "empty";
   const name = input.trim();
   if (name === "." || name === "..") return "reserved";
   if (/[/\\:]/.test(name)) return "separator";
+  if (platform === "win32") {
+    if (/[<>"|?*]/.test(name)) return "separator";
+    if (name.endsWith(".") || /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³]|conin\$|conout\$)(?:[ .]|$)/i.test(name)) return "reserved";
+  }
   // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1f\x7f]/.test(name)) return "control";
   if (new TextEncoder().encode(name).length > 255) return "too_long";

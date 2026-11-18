@@ -45,6 +45,13 @@ test("el repositorio recuerda cómo se publicó y se fusiona con lo anterior", (
   assert.equal(recallRepository(second, "/repo").remote, "upstream");
 });
 
+test("a confirmed hosting service survives reopening without accepting an unknown provider", () => {
+  const memory = rememberRepository(emptyMemory(), "/company", { provider: "gitlab", host: "code.company.test", remote: "origin" }, now);
+  assert.equal(recallRepository(sanitizeMemory(memory), "/company").provider, "gitlab");
+  memory.repositories["/company"].provider = "unknown";
+  assert.equal(recallRepository(sanitizeMemory(memory), "/company").provider, undefined);
+});
+
 test("un archivo de memoria corrupto o manipulado no entra en el proceso", () => {
   assert.deepEqual(sanitizeMemory(null), emptyMemory());
   assert.deepEqual(sanitizeMemory("texto"), emptyMemory());

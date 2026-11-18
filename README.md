@@ -10,9 +10,10 @@ I built GitCat for my own use and am sharing the result publicly in case it is u
 - Lets you inspect a diff and choose which **whole files** to include before saving a commit. Unselected files stay in your working folder.
 - Opens existing Git repositories, clones projects from HTTPS or SSH addresses, starts tracking a folder, and provides a disposable local practice project.
 - Lets you drag project tabs into your preferred order and remembers it when you reopen the app. Alt + Left/Right moves a focused tab too.
+- Keeps hidden project tabs reachable with scroll arrows, the mouse wheel, and Left/Right or Home/End keys. The add-project button stays visible.
 - Helps you create, switch, rename, and integrate branches; inspect commit history and linked worktrees; and fetch, pull, or push remote changes.
 - Guides you through conflicts, interrupted operations, and recovery with visible plans and confirmation before changes are applied.
-- Can prepare a GitHub review when the required GitHub tools and access are available.
+- Can publish a branch for review on GitHub, GitLab, Bitbucket Cloud, Bitbucket Data Center, and Azure DevOps (including compatible company-hosted servers), with account and live review checks before confirmation.
 - Offers its interface in English and Spanish.
 
 The direct Git controls work without an AI account or an internet connection when the action itself is local. Remote operations still need access to the remote.
@@ -38,7 +39,19 @@ npm run dev
 
 On first launch, choose **Create a practice project** to try editing, saving, branching, and resolving a sample conflict without an account, a remote, or AI. You can also open a folder that already uses Git. GitCat does not require you to move an existing project into a special workspace.
 
-Remote actions use your existing Git access. Sharing a branch for GitHub review also requires the [GitHub CLI](https://cli.github.com/) and a signed-in account.
+Remote actions use your existing Git access. For GitHub and GitLab, sharing a branch for review requires the [GitHub CLI (`gh`)](https://cli.github.com/) or [GitLab CLI (`glab`)](https://docs.gitlab.com/cli/) and a signed-in account on the selected host. GitCat checks that Git publishing and the hosting CLI use the same account, shows the saved commits and current review status, and rechecks before publishing. Existing open reviews are reused; local edits are left untouched.
+
+For a company domain, choose GitHub Enterprise or GitLab Self-Managed in **Share for review** or the remote access check in Settings. GitCat remembers the service after successful confirmed publication. GitLab nested groups are supported. For HTTPS, configure the matching CLI as the credential helper: GitHub uses `gh auth setup-git`; GitLab supports `glab auth login --hostname YOUR_HOST --setup-git-credential-helper`. For SSH, use a key for the same account as the CLI.
+
+For **Bitbucket and Azure DevOps**, open **Settings → Hosting accounts**, choose the service, and connect a personal access token. Tokens are encrypted using the operating system's secure storage; they are not sent to the AI assistant, returned to the interface after saving, stored in Git configuration, or included in plans and activity records. Multiple accounts can be saved; choose the intended one in **Share for review**. A successful confirmed publication remembers that choice for this repository and host. Failed connection attempts preserve the previous saved account.
+
+- **Bitbucket Cloud:** use `https://bitbucket.org`, your Atlassian account email, and a personal API token with account-read, repository read/write, and pull-request read/write scopes. API tokens use the email for REST access and the fixed Git username `x-bitbucket-api-token-auth` for Git access. App passwords and shared project/repository tokens are not supported by this personal-account flow.
+- **Bitbucket Data Center:** enter the HTTPS service address, including any context path such as `/bitbucket`, your Bitbucket username, and a personal HTTP access token. Repository creation needs a private destination project and permission to create repositories there.
+- **Azure DevOps:** enter `https://dev.azure.com/ORGANIZATION`, or the HTTPS collection address for a server supporting the 7.1 REST API, and a personal access token with Code read/write access. Private repository creation also checks the existing project and needs Project and Team read access. The destination is written as `ORGANIZATION/PROJECT` (or `COLLECTION_PATH/PROJECT` on a server). GitCat never changes project visibility. Legacy `ORG.visualstudio.com` repository addresses are recognized.
+
+These saved connections use HTTPS for reviewed publication, even when the configured remote uses SSH. The confirmation identifies the account and exact HTTPS destination. GitCat does not change the remote address or existing Git sign-in configuration during review publication. Ordinary Git actions and cloning continue to use your existing Git access. Git 2.31 or newer is required for this process-scoped authentication.
+
+The assistant can prepare private repository creation on every supported service. It verifies the destination and account before showing a confirmation, then connects the chosen remote and publishes saved commits if requested. Azure repositories inherit project visibility, so only existing private projects are accepted; Azure DevOps Server creation uses HTTPS. Bitbucket repository slugs are normalized to lowercase in the preview. Other hosts remain accessible through ordinary Git actions and HTTPS/SSH cloning.
 
 The app is built for Windows, macOS, and Linux with Electron, React, TypeScript, and Vite. The renderer uses a preload bridge to request operations from the Electron main process, which checks repository state and runs Git. Windows x64 builds have passed the full unit suite, desktop UI and welcome-layout checks, and installed-app startup and local Git checks. macOS is also used for personal development; Linux has not been verified for public distribution.
 
@@ -63,6 +76,8 @@ npm run test:welcome
 
 `npm run check` runs the lint, type, unit, and UI checks together. Unit fixtures use disposable Git configuration so personal identity, hooks, signing and line-ending preferences do not change their results. The UI checks build the app and use disposable app profiles; the main UI check also uses disposable repositories. `npm run test:welcome` checks both languages at desktop, compact and zoomed sizes.
 
+TypeScript stays on 6.0.3 while `typescript-eslint` requires TypeScript below 6.1. The platform-copy tests also use the TypeScript 6 `transpileModule` API; review that API before moving to TypeScript 7. Other direct dependencies use their latest stable releases, and the lockfile records compatible transitive updates.
+
 ### Continuous integration
 
 [Desktop PR checks](https://github.com/mio-gato-software/gitcat/actions/workflows/desktop-pr.yml) runs on pull requests. [Desktop CI](https://github.com/mio-gato-software/gitcat/actions/workflows/desktop-ci.yml) runs on pushes to `main` and can also be started manually. Separate native Windows x64, macOS Apple Silicon, and macOS Intel jobs run lint, type checks, the full test suite, desktop UI and welcome-layout checks, and package the application.
@@ -78,6 +93,8 @@ The workflow does not install anything on your computer. Personal Windows instal
 `npm run package:dir` creates an unpacked local build. Packaging scripts for macOS, Windows, and Linux are in `package.json`. The macOS packaging scripts currently produce unsigned builds; I do not have a signing certificate or notarized public release.
 
 On Windows, run `npm run dist:win` to create both an installer (`release/GitCat-<version>-win-<arch>-setup.exe`) and a portable app (`release/GitCat-<version>-win-<arch>-portable.exe`). The portable app runs without installation. Windows builds are unsigned and require Git to be installed separately.
+
+Windows Git processes run without console windows and enable long-path support for each command, without changing your Git configuration. GitCat also searches standard Git and hosting CLI installation folders when the desktop has an older PATH. Clone previews reject Windows device names and invalid folder characters before copying. Reopening GitCat focuses its existing window so two instances cannot write the same profile.
 
 ## Contributions and support
 

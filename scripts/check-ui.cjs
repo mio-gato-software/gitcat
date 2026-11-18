@@ -63,9 +63,32 @@ app.whenReady().then(async () => {
   const service = await import(pathToFileURL(path.join(root, 'dist-electron/electron/git-service.js')));
   ipcMain.handle('worktree:open', (_, source, target, locale) => service.openWorktree(source, target, locale));
   const snapshot = await service.getSnapshot(repo);
+  const { nativeFixture } = await import(pathToFileURL(path.join(root, 'test/helpers/native-hosting-fixture.mjs')));
+  const nativeUi = Object.fromEntries(['bitbucket','bitbucket_dc','azure'].map(provider=>[provider,nativeFixture(provider)]));
+  const hostingAccounts = Object.values(nativeUi).map(value=>({id:`ui-${value.provider}`,provider:value.provider,baseUrl:value.baseUrl,username:value.username,accountId:value.accountId,label:value.label}));
+  const hostingConnectRequests=[];
+  ipcMain.handle('hosting:list',()=>({secureStorage:true,connections:hostingAccounts}));
+  ipcMain.handle('hosting:connect',(_,input)=>{hostingConnectRequests.push({provider:input.provider,baseUrl:input.baseUrl,username:input.username,hasToken:Boolean(input.token)});return {secureStorage:true,connections:hostingAccounts};});
+  ipcMain.handle('hosting:remove',()=>({secureStorage:true,connections:hostingAccounts}));
+  let hostingScenario = false;
+  const hostingSnapshot = value => hostingScenario ? { ...value, remotes: ['origin'], remoteUrls: { origin: nativeUi[hostingScenario]?.remote??'https://code.company.test/org/team/repo.git' } } : value;
+  const reviewRequests = [], reviewLinks = [];
+  let reviewPublished = false;
+  ipcMain.handle('review:preview', (_, p, request) => {
+    reviewRequests.push(request);
+    const native=nativeUi[request.provider];
+    if(native)return {id:'hosting-ui',repoPath:p,provider:request.provider,host:new URL(native.baseUrl).host,request,repository:native.location.repository,remoteUrl:native.remote,account:native.accountId,hosting:{connectionId:`ui-${request.provider}`,location:native.location,accountId:native.accountId,label:native.label},headHash:snapshot.head,baseHash:'b'.repeat(40),commits:[{hash:snapshot.head,subject:'Saved work for review'}],reviewable:true,checkedAt:new Date().toISOString()};
+    return { id: 'hosting-ui', repoPath: p, provider: request.provider, host: 'code.company.test', request, repository: 'org/team/repo', remoteUrl: 'https://code.company.test/org/team/repo.git', account: 'anna.work', headHash: snapshot.head, baseHash: 'b'.repeat(40), commits: [{ hash: snapshot.head, subject: 'Saved work for review' }], reviewable: true, checkedAt: new Date().toISOString() };
+  });
+  ipcMain.handle('review:publish', async (_, p, id) => {
+    assert.equal(id, 'hosting-ui');reviewPublished = true;
+    const native=nativeUi[hostingScenario];
+    return { snapshot: hostingSnapshot(await service.getSnapshot(p)), pullRequest: { url: native?`${native.location.webUrl}/${native.provider==='azure'?'pullrequest':'pull-requests'}/1`:'https://code.company.test/org/team/repo/-/merge_requests/1', state: 'OPEN' } };
+  });
+  ipcMain.handle('review:open', (_, url) => { reviewLinks.push(url); });
   ipcMain.handle('operation:list', () => []);
   ipcMain.handle('operation:cancel', () => false);
-  ipcMain.handle('repo:fetch', (_, p) => service.fetchRemotes(p));
+  ipcMain.handle('repo:fetch', async (_, p) => hostingSnapshot(await service.fetchRemotes(p)));
   ipcMain.handle('switch-work:read', (_, p, target) => service.getSwitchWork(p,target));
   ipcMain.handle('switch-work:prepare', async (_, p, request, locale) => { const plan=await service.prepareSwitchWork(p,request,locale); plans.set(plan.id,plan); return plan; });
   ipcMain.handle('activity:list', (_, p) => service.getActivityHistory(p));
@@ -122,7 +145,7 @@ app.whenReady().then(async () => {
     const request = Symbol();
     const started = Date.now();
     snapshotReads.set(request, started);
-    try { return await service.getSnapshot(p || repo); }
+    try { return hostingSnapshot(await service.getSnapshot(p || repo)); }
     finally {
       snapshotReads.delete(request);
       const elapsed = Date.now() - started;
@@ -235,6 +258,22 @@ app.whenReady().then(async () => {
     }
     throw new Error(`UI did not become ready: ${expression}`);
   };
+  // Native frame sizes and zoom updates are asynchronous on Windows. Verify the
+  // content viewport before asserting a layout, just like the welcome checks.
+  const resizeContent = async (width, height, zoom = 1) => {
+    if (win.isMaximized()) win.unmaximize();
+    if (win.isMinimized()) win.restore();
+    win.webContents.setZoomFactor(zoom);
+    win.setContentSize(width, height);
+    const expected = Math.round(width / zoom);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (await js(`innerWidth === ${expected}`)) return;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      // A queued Windows restore or zoom event can supersede the first resize.
+      if (attempt % 10 === 9) win.setContentSize(width, height);
+    }
+    throw new Error(`Viewport resize failed: ${JSON.stringify({ expected, content: win.getContentSize(), bounds: win.getBounds(), maximized: win.isMaximized(), zoom: win.webContents.getZoomFactor(), renderer: await js('({width:innerWidth,height:innerHeight,ratio:devicePixelRatio})') })}`);
+  };
   const capture = async name => {
     if (!screenshots) return;
     fs.mkdirSync(screenshots, { recursive: true });
@@ -244,6 +283,33 @@ app.whenReady().then(async () => {
     const nodes = [...document.querySelectorAll('.tool-button, .delivery-actions button, .overview-toggle, .inspector-tabs button, .commit-search, .notification-bell, .chat-compose textarea, .send-button')];
     return nodes.filter(node => { const r = node.getBoundingClientRect(); return r.left < 0 || r.right > innerWidth || r.width < 20 || r.bottom > innerHeight; }).map(node => node.textContent || node.getAttribute('aria-label'));
   })()`), [], 'Primary controls fit the window');
+
+  const assertTitlebarDragging = async () => assert.deepEqual(await js(`(() => {
+    const header = document.querySelector('.topbar');
+    const strip = document.querySelector('.window-tabs').getBoundingClientRect();
+    const tabs = [...document.querySelectorAll('.window-tab')];
+    const controls = [...header.querySelectorAll('button, .window-tab')];
+    const blocked = controls.filter(node => getComputedStyle(node).webkitAppRegion !== 'no-drag');
+    const canDragAt = (x, y) => {
+      let drag = false;
+      for (let node = document.elementFromPoint(x, y); node; node = node.parentElement) {
+        const region = getComputedStyle(node).webkitAppRegion;
+        if (region === 'no-drag') return false;
+        if (region === 'drag') drag = true;
+      }
+      return drag;
+    };
+    // Even a full strip leaves a continuous grip above the reorderable tabs.
+    const tabTop = Math.min(...tabs.map(node => node.getBoundingClientRect().top));
+    const gripY = strip.top + 6;
+    const grip = tabTop - strip.top >= 12 &&
+      Array.from({ length: 20 }, (_, i) => strip.left + 2 + (strip.width - 4) * i / 19)
+        .every(x => canDragAt(x, gripY));
+    // With only a few projects, the large unused part of the title bar also moves the window.
+    const last = tabs.at(-1).getBoundingClientRect();
+    const empty = last.right >= strip.right - 8 || canDragAt((last.right + strip.right) / 2, strip.top + strip.height / 2);
+    return { grip, empty, controls: blocked.map(node => node.className) };
+  })()`), { grip: true, empty: true, controls: [] }, 'Title bar gaps move the window; project tabs and buttons remain interactive');
 
   const assertDialog = async () => {
     assert.deepEqual(await js(`(() => {
@@ -269,6 +335,8 @@ app.whenReady().then(async () => {
   await waitFor('innerWidth === 1480');
   await js(`localStorage.setItem('gitcat-locale', 'es')`);
   await waitFor(`document.querySelectorAll('.window-tab').length === 2`);
+  await assertTitlebarDragging();
+  assert.equal(await js(`document.querySelectorAll('.tab-scroll').length`), 0, 'No overflow controls when every project fits');
   // Dragging reorders available and unavailable tabs without changing the selected project.
   const tabNames = () => js(`[...document.querySelectorAll('.window-tab [role="tab"] span')].map(node => node.textContent)`);
   const startTabDrag = (selector) => js(`(() => {
@@ -318,6 +386,61 @@ app.whenReady().then(async () => {
   await win.loadFile(path.join(root, 'dist/index.html'));
   await waitFor(`document.querySelectorAll('.window-tab').length === 13`);
   assert.equal(await js(`document.querySelector('.window-tabs').scrollWidth > document.querySelector('.window-tabs').clientWidth`), true);
+  await waitFor(`document.querySelectorAll('.tab-scroll').length === 2`);
+  assert.deepEqual(await js(`[...document.querySelectorAll('.tab-scroll')].map(button => button.disabled)`), [true, false]);
+  const activeTabVisible = `(() => {
+    const tab = document.querySelector('.window-tab.active').getBoundingClientRect();
+    const strip = document.querySelector('.window-tabs').getBoundingClientRect();
+    return tab.left >= strip.left - 1 && tab.right <= strip.right + 1;
+  })()`;
+  const addButtonVisible = `(() => {
+    const add = document.querySelector('.tab-add').getBoundingClientRect();
+    const strip = document.querySelector('.window-tabs').getBoundingClientRect();
+    const actions = document.querySelector('.top-actions').getBoundingClientRect();
+    return add.left >= strip.right && add.right <= actions.left;
+  })()`;
+  await capture('tabs-overflow-start');
+  await js(`document.querySelectorAll('.tab-scroll')[1].click()`);
+  await waitFor(`document.querySelector('.window-tabs').scrollLeft > document.querySelector('.window-tabs').clientWidth * .6`);
+  assert.equal(savedWorkspace.activePath, repo, 'Browsing hidden tabs does not switch the selected project');
+  await waitFor(`!document.querySelector('.tab-scroll').disabled`);
+  await js(`document.querySelector('.tab-scroll').click()`);
+  await waitFor(`document.querySelector('.tab-scroll').disabled`);
+  assert.equal(await js(`(() => {
+    const strip = document.querySelector('.window-tabs');
+    const event = new WheelEvent('wheel', { deltaY: 240, bubbles: true, cancelable: true });
+    strip.dispatchEvent(event);
+    return event.defaultPrevented && strip.scrollLeft > 0;
+  })()`), true, 'A conventional mouse wheel moves the project strip horizontally');
+  assert.equal(await js(`(() => {
+    const event = new WheelEvent('wheel', { deltaY: 100, ctrlKey: true, bubbles: true, cancelable: true });
+    document.querySelector('.window-tabs').dispatchEvent(event);
+    return event.defaultPrevented;
+  })()`), false, 'Trackpad zoom remains native');
+  await js(`document.querySelector('.window-tabs').scrollTo({ left: 100000, behavior: 'instant' })`);
+  await waitFor(`document.querySelectorAll('.tab-scroll')[1].disabled`);
+  assert.equal(await js(addButtonVisible), true, 'Add project stays fixed outside the scrolling viewport');
+  await capture('tabs-overflow-end');
+  await js(`document.querySelector('.window-tab.active [role="tab"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }))`);
+  await waitFor(`document.querySelector('.window-tab:last-child.active')`);
+  await waitFor(activeTabVisible);
+  assert.equal(await js(`document.activeElement === document.querySelector('.window-tab.active [role="tab"]')`), true);
+  win.setContentSize(1024, 760);
+  await waitFor('innerWidth === 1024');
+  await waitFor(activeTabVisible);
+  assert.equal(await js(addButtonVisible), true);
+  await capture('tabs-overflow-compact');
+  await assertTitlebarDragging();
+  // Removing the arrows must use the full available width, including the space they occupied.
+  const fittingWidth = await js(`Math.ceil(innerWidth + document.querySelector('.window-tab-items').scrollWidth - document.querySelector('.tab-navigation').clientWidth + 1)`);
+  win.setContentSize(fittingWidth, 940);
+  await waitFor(`document.querySelectorAll('.tab-scroll').length === 0`);
+  win.setContentSize(1480, 940);
+  await waitFor('innerWidth === 1480');
+  await waitFor(activeTabVisible);
+  await js(`document.querySelector('.window-tab.active [role="tab"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }))`);
+  await waitFor(`document.querySelector('.window-tab:first-child.active')`);
+  await waitFor(activeTabVisible);
   await startTabDrag('.window-tab:not(.unavailable) [role="tab"]');
   await js(`(() => {
     const strip = document.querySelector('.window-tabs'), r = strip.getBoundingClientRect();
@@ -360,6 +483,10 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.branch-section input')`);
   await js(`(() => { const input = document.querySelector('.branch-section input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'scroll/item-'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await waitFor(`document.querySelectorAll('.branch-list .branch-row').length === 48`);
+  // Native input requires a focused window; hidden-window wheel delivery is unreliable on hosted Macs.
+  win.show();
+  win.focus();
+  await waitFor('document.hasFocus()');
   for (const height of [940, 720]) {
     win.setContentSize(1480, height);
     await waitFor(`innerHeight === ${height}`);
@@ -376,6 +503,8 @@ app.whenReady().then(async () => {
       })()`);
       assert.equal(viewport.overflows, true, 'The branch list has a bounded scroll viewport');
       assert.ok(viewport.bottomGap <= 12, 'Branches use the space down to the bottom of the sidebar');
+      // Let Chromium paint the mode/size change and reset before hit-testing native wheel input.
+      await js(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
       win.webContents.sendInputEvent({ type: 'mouseMove', x: viewport.x, y: viewport.y });
       win.webContents.sendInputEvent({ type: 'mouseWheel', x: viewport.x, y: viewport.y, deltaY: -400, deltaX: 0 });
       await waitFor(`document.querySelector('.branch-list').scrollTop > 0`);
@@ -467,6 +596,58 @@ app.whenReady().then(async () => {
   assert.equal(await js(`document.querySelector('.share-review .outline-button').disabled`),true);
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
   await waitFor(`!document.querySelector('.share-review')`);
+
+  // The renderer uses scripted hosting replies; publication is exercised against real Git separately.
+  hostingScenario = true;
+  await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+  await waitFor(`document.querySelector('.remote-status')?.innerText.includes('code.company.test')`);
+  await js(`document.querySelector('[aria-label="Compartir para revisión"]').click()`);
+  await waitFor(`document.querySelector('.share-review')`);
+  await js(`(() => {const select=document.querySelectorAll('.share-review select')[1];select.value='gitlab';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  await js(`document.querySelector('.share-review .outline-button').click()`);
+  await waitFor(`document.querySelector('.share-review .activity-record')`);
+  assert.equal(reviewRequests.at(-1).provider, 'gitlab');
+  assert.equal(reviewPublished, false, 'Checking leaves publication behind confirmation');
+  assert.match(await js(`document.querySelector('.share-review .activity-record').innerText`), /GitLab[\s\S]*org\/team\/repo[\s\S]*anna.work[\s\S]*Saved work for review/);
+  await assertDialog();
+  await capture('gitlab-review');
+  await js(`document.querySelector('.share-review .primary-button').click()`);
+  await waitFor(`document.querySelector('.share-review [role="status"]')?.innerText.includes('merge_requests/1')`);
+  assert.equal(reviewPublished, true);
+  await js(`document.querySelector('.share-review [role="status"] button').click()`);
+  assert.deepEqual(reviewLinks, ['https://code.company.test/org/team/repo/-/merge_requests/1']);
+  await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
+  await waitFor(`!document.querySelector('.share-review')`);
+  hostingScenario = false;
+  await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+  await waitFor(`document.querySelector('.remote-status')?.innerText.includes('Sin remoto')`);
+  assert.equal(git('status','--porcelain'),before,'Sharing for review never saves unsaved files');
+
+  for(const provider of ['bitbucket','bitbucket_dc','azure']){
+    hostingScenario=provider;reviewPublished=false;
+    await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+    await waitFor(`document.querySelector('.remote-status')?.innerText.includes(${JSON.stringify(provider==='bitbucket'?'bitbucket.org':provider==='azure'?'ssh.dev.azure.com':'code.company.test')})`);
+    await js(`document.querySelector('[aria-label="Compartir para revisión"]').click()`);
+    await waitFor(`document.querySelector('.share-review')`);
+    await js(`(() => {const select=document.querySelectorAll('.share-review select')[1];select.value=${JSON.stringify(provider)};select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await waitFor(`document.querySelectorAll('.share-review select')[2]?.querySelector('option[value="ui-${provider}"]')`);
+    await js(`(() => {const select=document.querySelectorAll('.share-review select')[2];select.value='ui-${provider}';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await js(`document.querySelector('.share-review .outline-button').click()`);
+    await waitFor(`document.querySelector('.share-review .activity-record')`);
+    assert.equal(reviewRequests.at(-1).connectionId,`ui-${provider}`);assert.equal(reviewPublished,false);
+    assert.match(await js(`document.querySelector('.share-review .activity-record').innerText`),/Anna Work/);
+    assert.match(await js(`document.querySelector('.share-review').innerText`),/HTTPS/);
+    await assertDialog();await capture(`${provider}-review`);
+    await js(`document.querySelector('.share-review .primary-button').click()`);
+    await waitFor(`document.querySelector('.share-review [role="status"] button')`);
+    assert.equal(reviewPublished,true);
+    await js(`document.querySelector('.share-review [role="status"] button').click()`);
+    assert.equal(reviewLinks.at(-1),`${nativeUi[provider].location.webUrl}/${provider==='azure'?'pullrequest':'pull-requests'}/1`);
+    await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);await waitFor(`!document.querySelector('.share-review')`);
+  }
+  hostingScenario=false;
+  await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+  await waitFor(`document.querySelector('.remote-status')?.innerText.includes('Sin remoto')`);
 
   await js(`document.querySelector('.branch-switch').click()`);
   await waitFor(`document.querySelector('.switch-work fieldset')`);
@@ -893,22 +1074,18 @@ app.whenReady().then(async () => {
   await js(`[...document.querySelectorAll('.welcome-ai button')][0].click()`);
   await waitFor(`document.querySelector('.settings-modal.guided')`);
   await assertDialog();
-  win.setSize(1280, 800);
-  win.webContents.setZoomFactor(1.5);
+  await resizeContent(1280, 800, 1.5);
   await js(`document.querySelector('.settings-modal .modal-actions button').focus()`);
   assert.equal(await js(`(() => { const r = document.activeElement.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight && r.right <= innerWidth; })()`), true, 'Dialog primary actions reachable at 150% zoom on a laptop');
   await capture('settings-large-text');
-  win.webContents.setZoomFactor(1);
-  win.setSize(800, 700);
-  await waitFor(`innerWidth <= 820`);
+  await resizeContent(800, 700);
   assert.equal(await js(`(() => {
     const modal = document.querySelector('.settings-modal');
     const ai = modal.querySelector('.ai-section').getBoundingClientRect();
     const readiness = modal.querySelector('.readiness-section').getBoundingClientRect();
     return readiness.top > ai.top && modal.querySelector('.modal-actions').getBoundingClientRect().bottom <= innerHeight;
   })()`), true, 'Settings stacks sections and keeps Close visible in a compact window');
-  win.setSize(1480, 940);
-  await waitFor(`innerWidth >= 1400`);
+  await resizeContent(1480, 940);
   const settingsLayout = await js(`(() => {
     const modal = document.querySelector('.settings-modal');
     const ai = modal.querySelector('.ai-section').getBoundingClientRect();
@@ -928,6 +1105,19 @@ app.whenReady().then(async () => {
   for (const entry of [/Listo para guardar y publicar/, /Git \d\S* está listo/, /Git todavía no sabe quién guarda/, /No es un inicio de sesión/]) assert.match(guide, entry);
   await js(`document.querySelector('.settings-modal .readiness-section').scrollIntoView()`);
   await capture('settings-readiness');
+  await js(`document.querySelector('.settings-modal .hosting-accounts summary').click()`);
+  await waitFor(`document.querySelector('.settings-modal .hosting-accounts[open]')`);
+  const hostingSetText=(selector,value)=>js(`(() => {const input=document.querySelector(${JSON.stringify(selector)});Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(value)});input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+  await hostingSetText('.hosting-accounts label:nth-of-type(3) input','anna@example.test');
+  await hostingSetText('.hosting-accounts input[type="password"]','synthetic-ui-personal-token');
+  await js(`document.querySelector('.hosting-accounts fieldset .outline-button').click()`);
+  await waitFor(`document.querySelector('.hosting-accounts [role="status"]')?.innerText.includes('Cuenta verificada')`);
+  assert.deepEqual(hostingConnectRequests.at(-1),{provider:'bitbucket',baseUrl:'https://bitbucket.org',username:'anna@example.test',hasToken:true});
+  assert.equal(await js(`document.querySelector('.hosting-accounts input[type="password"]').value`),'','The hosting token leaves the field once saved');
+  assert.doesNotMatch(await js(`document.querySelector('.hosting-accounts').innerText`),/synthetic-ui-personal-token/);
+  assert.match(await js(`document.querySelector('.hosting-accounts').innerText`),/cifran en este equipo[\s\S]*nunca se envían al asistente de IA/);
+  await assertDialog();await capture('hosting-account-connection');
+  await js(`document.querySelector('.settings-modal .hosting-accounts summary').click()`);
   await js(`document.querySelector('.settings-modal .modal-heading').scrollIntoView()`);
   for (const entry of [/Asistente de IA \(opcional\)/, /Sin conectar/, /OpenAI cobra a tu cuenta/, /GitCat no cobra nada/, /Crea una clave/, /solo para el asistente de IA/, /recomendado/, /Avanzado: ID de modelo personalizado/,
     /Tres accesos distintos/, /Clave del asistente de IA/, /Identidad de autor en Git/, /Acceso al remoto/]) assert.match(guide, entry);
@@ -1072,8 +1262,22 @@ app.whenReady().then(async () => {
   }
   assert.match(await js(`document.querySelector('.clone-form .setup-problem').innerText`), /contraseña o un token/);
   assert.equal(await js(`document.querySelector('.clone-form .primary-button').disabled`), true, 'Nothing can start from an address that failed the check');
+  if (process.platform === 'win32') {
+    await setText('.clone-form input', 'https://example.test/team/CON.git');
+    await waitFor(`document.querySelectorAll('.clone-form input')[1].value === 'repository-CON'`);
+  }
   await setText('.clone-form input', `https://127.0.0.1:${silent.address().port}/octo/demo.git`);
   await waitFor(`document.querySelectorAll('.clone-form input')[1].value === 'demo'`);
+  if (process.platform === 'win32') {
+    for (const name of ['NUL.txt', 'CON', 'notes.', 'a*b']) {
+      await setText('.clone-form label:nth-of-type(2) input', name);
+      await waitFor(`document.querySelector('.clone-form .setup-problem[role="alert"]')`);
+      assert.equal(await js(`document.querySelector('.clone-form .primary-button').disabled`), true, `Windows refuses ${name} before a clone starts`);
+      assert.equal(await js(`document.querySelector('.setup-preview')`), null);
+    }
+    await setText('.clone-form label:nth-of-type(2) input', 'demo');
+    await waitFor(`!document.querySelector('.clone-form .setup-problem[role="alert"]')`);
+  }
   await js(`document.querySelector('.setup-parent button').click()`);
   await waitFor(`document.querySelector('.setup-preview')`);
   const clonePreview = await js(`document.querySelector('.setup-preview').innerText`);
@@ -1167,10 +1371,18 @@ app.whenReady().then(async () => {
   assert.equal(await js(`Boolean(document.querySelector('.ref-tag.head .branch-sync-badge.diverged .lucide-git-fork'))`), true, 'Divergence stays visible on the current branch');
   await capture('copies-diverged');
   await js(`document.querySelector('.ref-tag.remote').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await waitFor(`document.querySelector('#sync-title')`);
+  assert.equal(await js(`document.querySelector('.input-modal select').value`), 'origin/main');
+  await js(`document.querySelector('.input-modal .ghost-button').click()`);
+  await js(`document.querySelector('.ref-tag.head').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await waitFor(`document.querySelector('#sync-title')`);
+  await js(`(() => { const preference = document.querySelector('.input-modal label:last-of-type select'); preference.value = 'remote'; preference.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await js(`document.querySelector('.input-modal .primary-button').click()`);
   await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
   assert.equal(at(copies, 'rev-parse', 'HEAD'), localTip, 'Remote double click prepares an update for review');
   assert.equal(await js(`Boolean(document.querySelector('.plan-stale'))`), false, 'Fetched facts are shown beside the prepared plan');
   assert.match(await js(`document.querySelector('.plan-goal').innerText`), /origin\/main[\s\S]*conservando tus commits locales/);
+  assert.match(await js(`document.querySelector('.plan-goal').innerText`), /prioridad a origin\/main/);
   await capture('copies-update-review');
   await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
   await waitFor(`!document.querySelector('.plan-card .plan-actions .primary-button') && !document.querySelector('.branch-sync-badge.diverged')`);

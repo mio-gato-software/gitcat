@@ -1,10 +1,13 @@
-import type { Operation } from "../shared/types.js";
+import type { HostingProvider, Operation } from "../shared/types.js";
+import { hostingProviders } from '../shared/hosting.js';
 
 export type PlannerIntent = "git_operation" | "create_repository" | "answer" | "needs_information" | "out_of_scope";
 
 export type PlannedArgs = { name: string; onto: string; to: string; path: string; side: string; message: string; noVerify: string };
 
 export type PlannedRepository = {
+  provider?: HostingProvider | "";
+  connectionId?: string;
   localPath: string;
   repository: string;
   owner: string;
@@ -36,7 +39,7 @@ export const commitMessageLimit = 120;
 export const planStepLimit = 6;
 
 export const executableOperations = new Set<Operation>([
-  "status", "checkout", "create_branch", "delete_branch", "rename_branch", "fetch", "pull", "push",
+  "status", "checkout", "create_branch", "delete_branch", "rename_branch", "fetch", "pull", "push", "sync_remote",
   "merge", "rebase", "abort_operation", "continue_operation", "skip_operation", "resolve_conflict", "commit",
   "git_command"
 ]);
@@ -86,8 +89,10 @@ export const planResponseFormat = {
       repository: {
         type: "object",
         additionalProperties: false,
-        required: repositoryKeys,
+        required: [...repositoryKeys, "provider", "connectionId"],
         properties: {
+          provider: { type: "string", enum: [...hostingProviders, ""] },
+          connectionId: { type: "string" },
           localPath: { type: "string" },
           repository: { type: "string" },
           owner: { type: "string" },
@@ -160,7 +165,13 @@ and it is your job to work out which ones and in what order, from the repository
 - If the requested source branch's "mergedInto" already contains the default branch, there is no
   committed work pending for that merge. Do not propose an empty merge or claim that it integrated work.
 - "publish my work" may be commit, then push.
-- "get me up to date and continue" may be fetch, then pull.
+- To update a local branch from a remote copy or work on a remote branch locally, use one
+  sync_remote step. Set args.name to the exact remoteRefs entry, args.to to its local counterpart
+  when known, and args.side to "theirs" only when the user asks to favor remote edits in conflicts.
+  It fetches, switches to the local counterpart (or creates it), and brings in missing commits.
+  Both histories and compatible edits are kept. An exact replacement is a different intention.
+  If several destinations fit, ask which one. A detached HEAD is not a local branch to pull into.
+  Reserve detached checkout for an explicit request to inspect a commit without activating a branch.
 - When a previous Git step failed, or an action could not be prepared, translate the problem into
   plain language before proposing the way forward. Give the user useful alternatives grounded in the
   repository state, not just the failed command. Say what is still safe, what caused the blockage,
@@ -206,7 +217,9 @@ message should be, and never invent one from the file names in the state.
 "repository" is only meaningful for "create_repository". Use "" or false for anything unknown:
 - localPath: absolute path of the local repository to publish. When the user means "this repository", use the open repository path from the state below.
 - repository: remote repository name, 1 to 100 characters from A-Z a-z 0-9 . _ -, never ending in ".git".
-- owner: GitHub user or organization login that will own it.
+- provider: "github", "gitlab", "bitbucket" (Cloud), "bitbucket_dc" (Data Center), or "azure" (Azure DevOps). For an unknown company domain, ask which service it runs; never infer it from its name.
+- connectionId: for Bitbucket and Azure, an ID from savedHostingAccounts below, or "" to use the only matching account. Never invent IDs. If multiple accounts match, use the user's intended account or ask a focused question. GitHub and GitLab use "" and their CLI sign-ins.
+- owner: GitHub user/organization, full GitLab namespace, Bitbucket Cloud workspace, Bitbucket Data Center project key, or the full Azure organization/collection and project path (for example "my-org/My Project"). Azure repository creation always needs an existing private project; never create or make a project public on the user's behalf.
 - host: DNS host name only, such as "github.com". No scheme, no port, no path.
 - protocol: "ssh" or "https", whichever the user asked for.
 - sshHost: leave "" unless the user names a specific SSH host or ~/.ssh/config alias. The application
@@ -219,7 +232,9 @@ Never guess an owner, host, repository name or path. A value like "/foo/bar" is 
 never an owner or a repository name. If part of the data is missing, use "needs_information" and ask
 for the rest instead of filling it in yourself.
 
-Repositories are always created private. The application resolves by itself which authenticated gh
+Repositories are always created private. Bitbucket and Azure use the selected saved hosting account for initial HTTPS publication, keeping any SSH remote configuration the user requested. Never ask for tokens in chat: direct the person to Hosting accounts in Settings when no matching connection exists.
+GitLab uses the active glab account; it never switches accounts.
+The application resolves by itself which authenticated gh
 account and which SSH key correspond to "owner", including accounts that are not the active one and
 keys that are not the default, so do not ask the user about credentials unless a validation issue
 below says the machine genuinely lacks them.
@@ -315,6 +330,7 @@ ${JSON.stringify(issues, null, 2)}`;
 export function operationArgs(step: PlannedStep): Record<string, string> {
   switch (step.operation) {
     case "checkout": case "create_branch": case "delete_branch": case "merge": return { name: step.args.name.trim() };
+    case "sync_remote": return { ref: step.args.name.trim(), name: step.args.to.trim(), side: step.args.side.trim() };
     case "rename_branch": return { name: step.args.name.trim(), to: step.args.to.trim() };
     case "rebase": return { onto: step.args.onto.trim() };
     case "resolve_conflict": return { path: step.args.path.trim(), side: step.args.side.trim() };
@@ -332,6 +348,10 @@ export function operationIssues(step: PlannedStep, index = 0): PlanIssue[] {
   }
   const args = operationArgs(step);
   const issues: PlanIssue[] = [];
+  if (step.operation === "sync_remote") {
+    if (!isBranchNameSafe(args.ref)) issues.push({ field: `${at}.args.name`, problem: "choose the exact remote branch from remoteRefs" });
+    if (args.side && args.side !== "theirs") issues.push({ field: `${at}.args.side`, problem: 'use "theirs" for explicit remote preference or leave empty' });
+  }
   if (branchOperations.has(step.operation)) {
     if (!args.name) issues.push({ field: `${at}.args.name`, problem: `missing; ${step.operation} needs the branch name the user meant` });
     else if (!isBranchNameSafe(args.name)) issues.push({ field: `${at}.args.name`, problem: `"${args.name}" is not a valid Git branch name` });
@@ -376,6 +396,9 @@ export function planIssues(plan: ModelPlan): PlanIssue[] {
   if (!plan.steps.length) return [{ field: "steps", problem: "empty; a git_operation needs at least one step, or use another intent" }];
   if (plan.steps.length > planStepLimit) {
     return [{ field: "steps", problem: `${plan.steps.length} steps; the limit is ${planStepLimit}. Plan only what the request needs` }];
+  }
+  if (plan.steps.length > 1 && plan.steps.some(step => step.operation === "sync_remote")) {
+    return [{ field: "steps", problem: "sync_remote prepares the entire update including the local switch; propose it as a single step" }];
   }
   return plan.steps.flatMap((step, index) => operationIssues(step, index));
 }
@@ -440,8 +463,11 @@ function validate(value: unknown): ModelPlan | undefined {
     if (!Array.isArray(entry.argv) || !entry.argv.every((item) => typeof item === "string")) return undefined;
     if (!hasExactKeys(entry.args, argsKeys) || !Object.values(entry.args as object).every((item) => typeof item === "string")) return undefined;
   }
-  if (!hasExactKeys(record.repository, repositoryKeys)) return undefined;
+  const optionalRepositoryKeys=['provider','connectionId'].filter(key=>record.repository&&typeof record.repository==='object'&&Object.hasOwn(record.repository,key));
+  if (!hasExactKeys(record.repository, [...repositoryKeys,...optionalRepositoryKeys])) return undefined;
   const repository = record.repository as Record<string, unknown>;
+  if (repository.provider !== undefined && ![...hostingProviders, ""].includes(repository.provider as string)) return undefined;
+  if(repository.connectionId!==undefined&&typeof repository.connectionId!=='string')return undefined;
   for (const key of ["localPath", "repository", "owner", "host", "remote", "sshHost"]) if (typeof repository[key] !== "string") return undefined;
   if (!["ssh", "https", ""].includes(repository.protocol as string)) return undefined;
   if (typeof repository.push !== "boolean" || typeof repository.replaceRemote !== "boolean") return undefined;

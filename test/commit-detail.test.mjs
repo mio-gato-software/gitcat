@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -14,7 +14,7 @@ registerHooks({
     return specifier === "electron" ? { url: electronStub, shortCircuit: true } : nextResolve(specifier, context);
   }
 });
-const { getCommitDetail, getCommitFileDiff } = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
+const { getCommitDetail, getCommitFileDiff, getWorkingFileDiff } = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
 
 const repo = mkdtempSync(join(tmpdir(), "gitcat-commit-detail-"));
 const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
@@ -60,4 +60,20 @@ test("el historial trae el cuerpo del mensaje y cuánto cambió cada commit", as
   const detail = await getCommitDetail(repo, page.commits[0].hash);
   assert.deepEqual(detail.stats["three.txt"], { additions: 3, deletions: 0, binary: false });
   assert.equal(detail.body, "Un cuerpo\ncon dos líneas");
+});
+
+test("nested file diffs use Git paths even when Windows resolves native separators", async () => {
+  mkdirSync(join(repo, "diseño"));
+  writeFileSync(join(repo, "diseño", "niño.txt"), "nested saved content\n");
+  git("add", "--", "diseño/niño.txt"); git("commit", "-qm", "Nested file");
+  const hash = git("rev-parse", "HEAD").trim();
+  for (const file of ["diseño/niño.txt", join("diseño", "niño.txt")]) {
+    const detail = await getCommitFileDiff(repo, hash, file);
+    assert.deepEqual(detail.files.map(change => change.path), ["diseño/niño.txt"]);
+    assert.match(detail.diff, /nested saved content/);
+  }
+  writeFileSync(join(repo, "diseño", "new.txt"), "nested unsaved content\n");
+  const working = await getWorkingFileDiff(repo, join("diseño", "new.txt"));
+  assert.match(working.diff, /\+\+\+ b\/diseño\/new\.txt/);
+  assert.match(working.diff, /nested unsaved content/);
 });

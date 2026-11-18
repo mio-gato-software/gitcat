@@ -259,7 +259,7 @@ function checkSource(url: string, allowLocalSource: boolean): { url: string; hos
 export async function previewClone(request: CloneRequest, options: Pick<CloneOptions, "allowLocalSource"> = {}): Promise<ClonePreview> {
   const source = checkSource(typeof request.url === "string" ? request.url.trim() : "", Boolean(options.allowLocalSource));
   if ("problem" in source) return source.problem;
-  if (folderNameProblem(request.name)) return { ok: false, problem: "name_invalid" };
+  if (folderNameProblem(request.name, process.platform)) return { ok: false, problem: "name_invalid" };
   const name = request.name.trim();
   const parent = resolve(request.parent);
   try {

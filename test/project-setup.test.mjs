@@ -181,6 +181,23 @@ test("clone addresses are checked on this computer before Git runs", () => {
   assert.equal(folderNameProblem("  "), "empty");
 });
 
+test("Windows clone names reject device aliases and invalid characters before creating a folder", async (t) => {
+  for (const name of ["CON", "nul.txt", "COM1", "lpt9.log", "COM¹", "conin$", "CONOUT$", "notes.", "a<b", 'a"b', "a|b", "a?b", "a*b"]) {
+    assert.ok(folderNameProblem(name, "win32"), name);
+  }
+  for (const name of ["console", "null", "COM10", "Notes ñ (copy)"]) assert.equal(folderNameProblem(name, "win32"), undefined, name);
+  assert.equal(folderNameProblem("con", "darwin"), undefined);
+  assert.equal(suggestedFolderName("https://example.com/team/CON.git", "win32"), "repository-CON");
+  if (process.platform !== "win32") return;
+  const parent = scratch(t);
+  for (const name of ["NUL", "CON.txt", "notes.", "a*b"]) {
+    const request = { url: "https://example.test/team/repo.git", parent, name };
+    assert.deepEqual(await previewClone(request), { ok: false, problem: "name_invalid" });
+    assert.deepEqual(await cloneRepository(request), { status: "invalid", problem: "name_invalid" });
+  }
+  assert.deepEqual(listing(parent), []);
+});
+
 test("a clone preview names the destination and refuses one that already holds files", async (t) => {
   const parent = scratch(t);
   const url = "https://github.com/octo/hello-world.git";
