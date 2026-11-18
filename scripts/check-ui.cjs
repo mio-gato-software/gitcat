@@ -749,7 +749,7 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.sidebar')`);
   assert.equal(git('status', '--porcelain'), before, 'Reading the graph and its details never mutates Git');
   // Refresh answers "am I up to date?" on its own; Fetch stays beside it because people look for it by name.
-  assert.deepEqual(JSON.parse(await js(`JSON.stringify([...document.querySelectorAll('.toolbar-tools .tool-button')].map((node) => node.innerText.trim()))`)), ['Actualizar', 'Fetch', 'Sincronizar', 'Push', 'Stash', 'Pop (0)', 'Rama']);
+  assert.deepEqual(JSON.parse(await js(`JSON.stringify([...document.querySelectorAll('.toolbar-tools .tool-button')].map((node) => node.innerText.trim()))`)), ['Actualizar', 'Fetch', 'Pull', 'Push', 'Stash', 'Pop (0)', 'Rama']);
   assert.equal(await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Stash').disabled`), false);
   assert.equal(await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Pop (0)').disabled`), true);
   await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Stash').click()`);
@@ -1374,7 +1374,7 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('#sync-title')`);
   assert.equal(await js(`document.querySelector('.input-modal select').value`), 'origin/main');
   await js(`document.querySelector('.input-modal .ghost-button').click()`);
-  await js(`[...document.querySelectorAll('.toolbar-tools button')].find(node => node.textContent === 'Sincronizar').click()`);
+  await js(`document.querySelector('.ref-tag.head').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
   await waitFor(`document.querySelector('#sync-title')`);
   await js(`(() => { const preference = document.querySelector('.input-modal label:last-of-type select'); preference.value = 'remote'; preference.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await js(`document.querySelector('.input-modal .primary-button').click()`);

@@ -89,7 +89,7 @@ test('sync from a detached remote favors overlapping remote edits only after rev
   const local = git('rev-parse', 'HEAD');
   const incoming = remoteCommit('file.txt', 'remote edit\n');
   git('fetch', '-q'); git('switch', '--detach', 'origin/main');
-  await assert.rejects(service.prepareOperation(path, 'pull', {}, 'en'), /Use Sync/);
+  await assert.rejects(service.prepareOperation(path, 'pull', {}, 'en'), /Double-click the branch/);
   const recovery = await service.describeFailure(path, { command: 'git pull --ff-only', summary: 'Pull', skipped: [], error: 'You are not currently on a branch.' });
   assert.equal(recovery.kind, 'detached_pull');
   assert.deepEqual(recovery.actions, [{ kind: 'choose_sync' }]);
