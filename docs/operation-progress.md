@@ -6,7 +6,9 @@ come directly from recognized Git progress messages; arbitrary remote output is 
 
 AI requests and read-only subprocesses are abortable. An aborted or late planning response is
 never remembered as a plan. Cancelling restores the assistant draft and does not start recovery
-AI calls. Duplicate tracked work for the same repository is rejected before entering its queue.
+AI calls. A direct plan, a retry, or a confirmed plan waits for the active operation on that repository to finish.
+Preparation reads the current state after waiting. Execution checks the reviewed state again, and
+the main process accepts each plan ID once. Other overlapping tracked requests are rejected.
 A renderer reload can query active operations; switching tabs shows only that project's work.
 
 A confirmed Git sequence uses cooperative stopping: its current step finishes, subsequent steps

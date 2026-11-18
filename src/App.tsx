@@ -1164,6 +1164,13 @@ export default function App() {
 
   const prepare = async (operation: Operation, args: Record<string, string> = {}, question?: string) => {
     if (!snapshot) return;
+    if (operation === "pull") {
+      const current = snapshot.branches.find(branch => branch.isCurrent);
+      if (snapshot.currentBranch === "HEAD" || (current?.upstream && current.ahead > 0 && current.behind > 0)) {
+        openSync(current?.upstream, current?.name);
+        return;
+      }
+    }
     if (operation === 'checkout') {
       try {
         const current=await window.gitcat.getSnapshot(snapshot.path);
@@ -1291,7 +1298,7 @@ export default function App() {
     if (path !== snapshot.path) return;
     const facts = turn.recovery.facts;
     switch (action.kind) {
-      case "choose_sync": openSync(); return;
+      case "choose_sync": openSync(action.args?.ref, action.args?.name); return;
       case "refresh": await refreshProject(path); return;
       case "retry":
         if (turn.recoveryPlanId) {
@@ -1856,7 +1863,7 @@ export default function App() {
             refreshDisabled={Boolean(refreshingPath)}
             onRefresh={() => void refreshEverything()}
             onFetch={() => void refreshEverything("fetch")}
-            onPull={() => snapshot.currentBranch === "HEAD" ? openSync() : void prepare("pull")}
+            onPull={() => void prepare("pull")}
             onPush={() => void prepare("push")}
             onStash={() => void prepare("stash_push")}
             onStashPop={() => void prepare("stash_pop")}
@@ -3270,7 +3277,7 @@ function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
     case "save_changes": case "first_save": actions.push(button(t("next_save_changes_button"), handlers.onSave)); break;
     case "combine_diverged":
       if (next.upstream) {
-        actions.push(button(t("next_combine_merge_button"), () => handlers.onPrepare("sync_remote", { name: snapshot.currentBranch, ref: next.upstream! })));
+        actions.push(button(t("next_combine_merge_button"), handlers.onPull));
         actions.push(button(t("next_combine_rebase_button"), () => handlers.onPrepare("rebase", { onto: next.upstream! }), false));
       }
       break;
@@ -3660,7 +3667,7 @@ function RecoveryCard({ report, assistant, kept, busy, configured, retryable, on
   const safe = [
     report.completed.length ? t("recoverySafeCompleted") : report.stage !== "execute" ? t("recoverySafeNothingRan") : undefined,
     facts.changes ? t("recoverySafeChanges", { changes: counted(t, facts.changes, "change", "changes") }) : undefined,
-    ["network", "auth", "missing_upstream", "no_remote", "divergent"].includes(kind) ? t("recoverySafeRemote") : undefined,
+    ["network", "auth", "missing_upstream", "no_remote"].includes(kind) ? t("recoverySafeRemote") : undefined,
     ["conflict", "pending"].includes(kind) && operation ? t("recoverySafeBackOut", { operation }) : undefined,
     ["network", "auth", "missing_upstream", "no_remote", "hook", "identity", "lock"].includes(kind) ? t("recoverySafeCommits") : undefined,
     kind === "unknown" && !facts.changes ? t("recoverySafeFiles") : undefined
@@ -3937,13 +3944,28 @@ function SyncModal({ snapshot, initial, onClose, onPrepare, onStash, onGuide, on
   const [preferRemote, setPreferRemote] = useState(false);
   const destinations = syncDestinations(snapshot, ref);
   const name = destinations.includes(chosen) ? chosen : destinations.length === 1 ? destinations[0] : "";
+  const local = snapshot.branches.find(branch => branch.name === name && branch.remoteRef === ref);
+  const ahead = local?.remoteAhead ?? 0;
+  const behind = local?.remoteBehind ?? 0;
+  const knownPair = ref === initial.ref && (name === initial.name || destinations.length === 1);
+  const chooseConflictPolicy = knownPair && ahead > 0 && behind > 0;
   const pending = snapshot.pending || snapshot.conflicts.length > 0;
   const blocked = pending || snapshot.isDirty || !refs.length;
   return <div className="modal-backdrop"><form className="input-modal sync-modal" role="dialog" aria-modal="true" aria-labelledby="sync-title" ref={dialogRef}
-    onSubmit={event => { event.preventDefault(); if (!blocked && name) onPrepare({ ref, name, side: preferRemote ? "theirs" : "" }); }}>
+    onSubmit={event => { event.preventDefault(); if (!blocked && !chooseConflictPolicy && name) onPrepare({ ref, name, side: preferRemote ? "theirs" : "" }); }}>
     <div className="modal-heading"><h2 id="sync-title">{t("syncTitleAction")}</h2>
       <button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div>
-    {blocked ? <p>{t(pending ? "syncPending" : snapshot.isDirty ? "syncDirty" : "syncNoRefs")}</p> : <>
+    {blocked ? <p>{t(pending ? "syncPending" : snapshot.isDirty ? "syncDirty" : "syncNoRefs")}</p> : chooseConflictPolicy ? <>
+      <p>{t("recoveryWhy_divergent", { branch: name, upstream: ref, ahead: counted(t, ahead, "commit", "commits"), behind: counted(t, behind, "commit", "commits") })}</p>
+      <div className="recovery-choice" role="group" aria-label={t("syncOverlap")}>
+        <button type="button" className="recovery-option" onClick={() => onPrepare({ ref, name, side: "theirs" })}>
+          <span>{t("recoveryOption_prefer_remote", { branch: name, upstream: ref })}</span><small>{t("recoveryDetail_prefer_remote")}</small>
+        </button>
+        <button type="button" className="recovery-option" onClick={() => onPrepare({ ref, name })}>
+          <span>{t("recoveryOption_merge_upstream", { branch: name, upstream: ref })}</span><small>{t("recoveryDetail_merge_upstream")}</small>
+        </button>
+      </div>
+    </> : <>
       <label>{t("syncSource")}<select value={ref} onChange={event => { setRef(event.target.value); setChosen(""); }}>
         <option disabled value="">{t("syncChoose")}</option>{refs.map(item => <option key={item}>{item}</option>)}
       </select></label>
@@ -3959,7 +3981,7 @@ function SyncModal({ snapshot, initial, onClose, onPrepare, onStash, onGuide, on
       {pending ? <button type="button" className="primary-button" onClick={onGuide}>{t("resolveConflictsButton")}</button>
         : snapshot.isDirty ? <button type="button" className="primary-button" onClick={onStash}>{t("stashTitle")}</button>
         : !refs.length ? <button type="button" className="primary-button" onClick={snapshot.remotes.length ? onFetch : onConnect}>{t(snapshot.remotes.length ? "fetch" : "connectRemoteTitle")}</button>
-        : <button className="primary-button" disabled={!name}>{t("prepare")}</button>}
+        : !chooseConflictPolicy && <button className="primary-button" disabled={!name}>{t("prepare")}</button>}
     </div>
   </form></div>;
 }

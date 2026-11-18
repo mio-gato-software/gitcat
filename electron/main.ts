@@ -60,9 +60,9 @@ const unavailableProjects = new Map<string, UnavailableProject>();
 /** A folder offered as a project's new location that GitCat could not vouch for, waiting for the person's answer. */
 const pendingLocations = new Map<string, { from: string; to: string; match: RepositoryMatch; fingerprint: RepoFingerprint }>();
 
-function tracked<T>(event: Electron.IpcMainInvokeEvent, path: string, phase: import("../shared/types.js").OperationProgress["phase"], task: () => Promise<T>, mutation = false) {
+function tracked<T>(event: Electron.IpcMainInvokeEvent, path: string, phase: import("../shared/types.js").OperationProgress["phase"], task: () => Promise<T>, mutation = false, onBusy: "reject" | "wait" = "reject") {
   return trackOperation(path, phase, (progress) => { if (!event.sender.isDestroyed()) event.sender.send("operation:progress", progress); },
-    () => exclusive(path, () => { operationCheckpoint(); return task(); }), mutation);
+    () => exclusive(path, () => { operationCheckpoint(); return task(); }), mutation, onBusy);
 }
 
 function workspacePath() { return join(app.getPath("userData"), "gitcat-workspace.json"); }
@@ -667,7 +667,7 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
     const repoPath = assertOpenedRepository(cwd);
     const record = typeof planId === "string" ? failedPlans.get(planId) : undefined;
     if (!record || record.plan.repoPath !== repoPath) throw new Error(localized(locale, "Ese intento ya no está disponible. Actualiza y prepara la acción de nuevo.", "That attempt is no longer available. Refresh and prepare the action again."));
-    return rememberPlan(await tracked(event, repoPath, "planning", () => prepareRetry(repoPath, record, locale)));
+    return rememberPlan(await tracked(event, repoPath, "planning", () => prepareRetry(repoPath, record, locale), false, "wait"));
   });
   ipcMain.handle("action:plan", async (event, cwd: string, request: string, context?: ConversationMessage[], locale?: Locale) => {
     assertTrustedSender(event);
@@ -682,7 +682,7 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
   ipcMain.handle("action:prepare", async (event, cwd: string, operation: Operation, args?: Record<string, string>, locale?: Locale) => {
     assertTrustedSender(event);
     const repoPath = assertOpenedRepository(cwd);
-    return rememberPlan(await tracked(event, repoPath, "planning", () => prepareOperation(repoPath, operation, args, locale)));
+    return rememberPlan(await tracked(event, repoPath, "planning", () => prepareOperation(repoPath, operation, args, locale), false, "wait"));
   });
   ipcMain.handle("action:prepare-delivery", async (event, cwd: string, request: DeliveryRequest, locale?: Locale) => {
     assertTrustedSender(event);
@@ -722,7 +722,7 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
     issuedPlans.delete(planId);
     if (plan.repoPath !== repoPath) throw new Error("El plan pertenece a otro repositorio.");
     try {
-      const result = await tracked(event, repoPath, "executing", () => executePlan(repoPath, plan, locale), true);
+      const result = await tracked(event, repoPath, "executing", () => executePlan(repoPath, plan, locale), true, "wait");
       if (result.error) rememberFailure({ plan, outcomes: result.outcomes, stale: false });
       return result;
     } catch (error) {
