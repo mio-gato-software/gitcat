@@ -1371,10 +1371,18 @@ app.whenReady().then(async () => {
   assert.equal(await js(`Boolean(document.querySelector('.ref-tag.head .branch-sync-badge.diverged .lucide-git-fork'))`), true, 'Divergence stays visible on the current branch');
   await capture('copies-diverged');
   await js(`document.querySelector('.ref-tag.remote').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await waitFor(`document.querySelector('#sync-title')`);
+  assert.equal(await js(`document.querySelector('.input-modal select').value`), 'origin/main');
+  await js(`document.querySelector('.input-modal .ghost-button').click()`);
+  await js(`document.querySelector('.ref-tag.head').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await waitFor(`document.querySelector('#sync-title')`);
+  await js(`(() => { const preference = document.querySelector('.input-modal label:last-of-type select'); preference.value = 'remote'; preference.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await js(`document.querySelector('.input-modal .primary-button').click()`);
   await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
   assert.equal(at(copies, 'rev-parse', 'HEAD'), localTip, 'Remote double click prepares an update for review');
   assert.equal(await js(`Boolean(document.querySelector('.plan-stale'))`), false, 'Fetched facts are shown beside the prepared plan');
   assert.match(await js(`document.querySelector('.plan-goal').innerText`), /origin\/main[\s\S]*conservando tus commits locales/);
+  assert.match(await js(`document.querySelector('.plan-goal').innerText`), /prioridad a origin\/main/);
   await capture('copies-update-review');
   await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
   await waitFor(`!document.querySelector('.plan-card .plan-actions .primary-button') && !document.querySelector('.branch-sync-badge.diverged')`);

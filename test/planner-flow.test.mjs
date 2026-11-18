@@ -86,6 +86,34 @@ test("una petición en inglés se convierte en una operación Git", async () => 
   assert.equal(result.source, "llm");
 });
 
+test("el asistente prepara la sincronización revisada con el estado posterior a fetch", async t => {
+  const root = mkdtempSync(join(tmpdir(), "gitcat-assistant-sync-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const path = join(root, "local");
+  execFileSync("git", ["clone", "-q", repo, path]);
+  const run = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  const writer = join(root, "writer");
+  run(root, "clone", "-q", repo, writer);
+  run(path, "remote", "set-url", "origin", writer);
+  for (const cwd of [path, writer]) {
+    run(cwd, "config", "user.name", "QA"); run(cwd, "config", "user.email", "qa@example.test");
+    writeFileSync(join(cwd, "README.md"), cwd);
+    run(cwd, "commit", "-qam", "edit");
+  }
+  run(path, "switch", "-q", "--detach", "origin/main");
+  reply(plan({ steps: [step("git_command", {}, ["checkout", "origin/main"])] }));
+  reply(plan({ steps: [step("sync_remote", { name: "origin/main", to: "main", side: "theirs" })] }));
+  const prepared = await service.planAction(path, "Actualiza main desde origin/main priorizando el remoto");
+  assert.equal(prepared.requiresConfirmation, true);
+  assert.equal(prepared.stateId, (await service.getSnapshot(path)).stateId);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(prepared.steps.map(item => item.operation), ["checkout", "sync_remote"]);
+  assert.equal(prepared.steps[1].args.mode, "prefer_remote");
+  assert.equal((await service.executePlan(path, prepared)).error, undefined);
+  assert.equal(run(path, "branch", "--show-current"), "main");
+  assert.equal(readFileSync(join(path, "README.md"), "utf8"), writer);
+});
+
 test("una pregunta se responde con el texto del modelo sobre el estado real", async () => {
   reply(plan({ intent: "answer", summary: "Last author", reply: "Prueba Uno wrote the most recent commit on main.", rationale: "From the snapshot." }));
   const result = await service.planAction(repo, "who touched this branch last?");

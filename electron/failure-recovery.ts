@@ -74,6 +74,7 @@ export function classifyFailure(evidence: FailureEvidence, snapshot: RepoSnapsho
   if (patterns.auth.test(detail) && !(snapshot.remotes.length === 0 && patterns.noRemote.test(detail))) return "auth";
   if (patterns.network.test(detail)) return "network";
   if (patterns.noRemote.test(detail) || (!snapshot.remotes.length && operation && remoteOperations.has(operation))) return "no_remote";
+  if (operation === "pull" && snapshot.currentBranch === "HEAD" && !snapshot.pending && !snapshot.conflicts.length) return "detached_pull";
   if (patterns.noUpstream.test(detail)) return "missing_upstream";
   if (patterns.divergent.test(detail)) return "divergent";
   if (evidence.hook && operation && ["commit", "push", "merge", "rebase"].includes(operation)) return "hook";
@@ -120,6 +121,9 @@ export function recoveryActions(kind: FailureKind, facts: RecoveryFacts, evidenc
   };
   const branchKnown = facts.branch !== "HEAD";
   switch (kind) {
+    case "detached_pull":
+      actions.push({ kind: "choose_sync" });
+      break;
     case "stale":
       actions.push(refresh);
       retryOrReview();

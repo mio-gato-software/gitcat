@@ -497,7 +497,7 @@ test("el modelo clasifica la intención, responde preguntas y escribe en el idio
   assert.match(planner, /same language as the user's latest message/);
   assert.match(planner, /"git_operation", "create_repository", "answer", "needs_information", "out_of_scope"/);
   assert.match(service, /function plannerState/);
-  assert.match(service, /if \(plan\.intent === "answer"\) return answerDraft\(plan\)/);
+  assert.match(service, /if \(plan\.intent === "answer"\) return bindPlan\(snapshot, answerDraft\(plan\)\)/);
   assert.match(app, /plan\.answer/);
 });
 
@@ -509,7 +509,7 @@ test("los defectos vuelven al modelo como datos estructurados, no como texto en 
   assert.match(planner, /Validation issues \(JSON\)/);
   assert.match(repositoryPlan, /export type RepositoryIssue = \{ field: RepositoryFieldName; problem: string \}/);
   assert.match(service, /type RepositoryPreparation = \{ draft: PlanDraft \} \| \{ blockers: PlanIssue\[\] \}/);
-  assert.match(service, /return issues\.length \? retry\(issues\) : gitOperationDraft\(plan, snapshot, locale, notes\)/);
+  assert.match(service, /if \(issues\.length\) return retry\(issues\)/);
   assert.match(service, /if \("blockers" in preparation\) return retry\(preparation\.blockers\)/);
 });
 
@@ -684,7 +684,7 @@ test("las preguntas del asistente no se presentan como errores", async () => {
   const styles = await readFile(join(root, "src/styles.css"), "utf8");
   assert.match(types, /kind: "plan" \| "question" \| "refusal"/);
   assert.match(service, /function asking/);
-  assert.match(service, /if \(plan\.intent === "needs_information"\) return asking/);
+  assert.match(service, /if \(plan\.intent === "needs_information"\) return bindPlan\(snapshot, asking/);
   assert.match(planner, /never ask "shall I proceed\?"/);
   assert.match(app, /const asking = plan\.kind === "question"/);
   assert.match(app, /tone: plan\.kind === "refusal" \? "warning" : "neutral"/);

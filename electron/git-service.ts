@@ -1,3 +1,4 @@
+import { syncDestinations } from "../shared/remote-sync.js";
 import { PracticeProjects } from "./practice-project.js";
 import { previewReview, publishReview, type ReviewTools } from "./share-review.js";
 import type { ShareReviewRequest, ShareReviewPreview } from "../shared/types.js";
@@ -80,7 +81,7 @@ const LLM_REQUIRED_EN =
   "To understand what you write, GitCat needs a connected AI provider: only the model interprets requests, never local rules. Connect one in Settings; meanwhile every Git action works from the buttons.";
 
 function llmRequired(locale?: Locale) { return localized(locale, LLM_REQUIRED, LLM_REQUIRED_EN); }
-const allowedOperations = new Set<Operation>([...executableOperations, "sync_remote", "stash_push", "stash_pop", "github_create_repo", "ignore_path", "set_identity", "add_remote", "none"]);
+const allowedOperations = new Set<Operation>([...executableOperations, "stash_push", "stash_pop", "github_create_repo", "ignore_path", "set_identity", "add_remote", "none"]);
 /**
  * Operations that run without asking. The bar is deliberately high: they must leave the working tree,
  * the branch history and everything already published untouched, and running one again must be
@@ -796,7 +797,7 @@ function quoteToken(token: string) {
 
 function buildCommand(operation: Operation, args: Record<string, string>, argv: string[] = []) {
   switch (operation) {
-    case "sync_remote": return `git merge ${args.mode === "ff" ? "--ff-only" : "--no-edit"} refs/remotes/${args.ref}`;
+    case "sync_remote": return `git ${remoteMergeArgs(args).join(" ")}`;
     case "stash_push": return `git stash push --include-untracked -m ${quoteToken(args.message ?? "")}`;
     case "stash_pop": return "git stash pop --index stash@{0}";
     case "checkout": return args.ref ? `git switch --track -c ${args.name} refs/remotes/${args.ref}` : `git switch ${args.name}`;
@@ -1888,6 +1889,7 @@ async function plannerState(snapshot: RepoSnapshot, notes: SharingNotes = newNot
     // Likely credentials replaced by a marker in the conversation or the request before they were sent.
     redactedFromConversation: notes.redacted,
     remotes: snapshot.remotes,
+    remoteRefs: snapshot.remoteRefs,
     branches: snapshot.branches.map((branch) => ({
       name: branch.name,
       isCurrent: branch.isCurrent,
@@ -2035,35 +2037,54 @@ const LAST_RESORT_REFUSAL_EN =
   "I could not turn the request into a verifiable plan and the provider did not explain why. Rephrase the request or check the model configuration.";
 
 /**
- * Turns one model plan into a draft. When local validation or an environment check rejects it, the
+ * Binds the model plan to the snapshot used for its final preparation. When local validation or an environment check rejects it, the
  * defects go back to the model as structured issues so it can correct itself or explain the problem
  * to the user in their own language. Retried once; there is no keyword fallback.
  */
-async function draftFromPlan(
+async function prepareModelPlan(
   plan: ModelPlan, snapshot: RepoSnapshot, request: string, context: ConversationMessage[], locale: Locale = "es", notes: SharingNotes = newNotes(), retried = false
-): Promise<PlanDraft> {
+): Promise<ActionPlan> {
   const fallbackRefusal = localized(locale, LAST_RESORT_REFUSAL, LAST_RESORT_REFUSAL_EN);
-  if (plan.intent === "answer") return answerDraft(plan);
-  if (plan.intent === "needs_information") return asking(plan.reply || plan.rationale || fallbackRefusal, plan.summary);
-  if (plan.intent === "out_of_scope") return refused(plan.reply || plan.rationale || fallbackRefusal, "llm", plan.summary || localized(locale, "Solicitud rechazada", "Request rejected"));
+  if (plan.intent === "answer") return bindPlan(snapshot, answerDraft(plan));
+  if (plan.intent === "needs_information") return bindPlan(snapshot, asking(plan.reply || plan.rationale || fallbackRefusal, plan.summary));
+  if (plan.intent === "out_of_scope") return bindPlan(snapshot, refused(plan.reply || plan.rationale || fallbackRefusal, "llm", plan.summary || localized(locale, "Solicitud rechazada", "Request rejected")));
 
   const retry = async (issues: PlanIssue[]) => {
-    if (retried) return asking(plan.reply || plan.rationale || fallbackRefusal, plan.summary);
-    return draftFromPlan(await requestPlan(request, snapshot, context, issues, notes), snapshot, request, context, locale, notes, true);
+    if (retried) return bindPlan(snapshot, asking(plan.reply || plan.rationale || fallbackRefusal, plan.summary));
+    return prepareModelPlan(await requestPlan(request, snapshot, context, issues, notes), snapshot, request, context, locale, notes, true);
   };
 
   if (plan.intent === "git_operation") {
     const issues = [...planIssues(plan), ...protectedBranchIssues(plan, snapshot)];
-    return issues.length ? retry(issues) : gitOperationDraft(plan, snapshot, locale, notes);
+    for (const [index, step] of plan.steps.entries()) {
+      const [verb, target] = step.argv;
+      if (step.operation === "git_command" && verb === "checkout" && step.argv.length === 2 &&
+          snapshot.remoteRefs?.some(ref => target === ref || target === `refs/remotes/${ref}`)) {
+        issues.push({ field: `steps[${index}].argv`, problem: "Checking out a remote ref detaches HEAD. Use sync_remote to activate its local counterpart. Use checkout --detach only for an explicit request to inspect the commit." });
+      }
+      if (!index && snapshot.currentBranch === "HEAD" && (step.operation === "pull" || (step.operation === "git_command" && verb === "pull"))) {
+        issues.push({ field: "steps[0]", problem: "There is no active local branch. Use sync_remote for the intended remote copy or ask which branch to update." });
+      }
+    }
+    if (issues.length) return retry(issues);
+    const sync = plan.steps.find(step => step.operation === "sync_remote");
+    if (sync) {
+      try {
+        return { ...await prepareRemoteSync(snapshot, operationArgs(sync), locale), source: "llm" };
+      } catch (error) {
+        return bindPlan(snapshot, asking(error instanceof Error ? error.message : String(error), plan.summary));
+      }
+    }
+    return bindPlan(snapshot, await gitOperationDraft(plan, snapshot, locale, notes));
   }
 
   const preparation = await prepareHostedRepository(snapshot, repositoryFieldsFromPlan(plan), "llm");
   if ("blockers" in preparation) return retry(preparation.blockers);
-  return {
+  return bindPlan(snapshot, {
     ...preparation.draft,
     summary: plan.summary || preparation.draft.summary,
     rationale: plan.rationale || preparation.draft.rationale
-  };
+  });
 }
 
 function bindPlan(snapshot: RepoSnapshot, draft: PlanDraft): ActionPlan {
@@ -2071,7 +2092,7 @@ function bindPlan(snapshot: RepoSnapshot, draft: PlanDraft): ActionPlan {
 }
 
 /** A plan that says which files the model could not read while preparing it. */
-function withNotes(draft: PlanDraft, notes: SharingNotes): PlanDraft {
+function withNotes(draft: ActionPlan, notes: SharingNotes): ActionPlan {
   return notes.withheld.length ? { ...draft, withheld: notes.withheld } : draft;
 }
 
@@ -2657,7 +2678,7 @@ export async function planRecovery(cwd: string, failure: ExecutionFailure, conte
   const notes = newNotes();
   try {
     const plan = await requestPlan(RECOVERY_REQUEST, snapshot, context, issues, notes, providerLimits.recoveryMs);
-    return bindPlan(snapshot, withNotes(await draftFromPlan(plan, snapshot, RECOVERY_REQUEST, context, language, notes), notes));
+    return withNotes(await prepareModelPlan(plan, snapshot, RECOVERY_REQUEST, context, language, notes), notes);
   } catch (error) {
     return bindPlan(snapshot, {
       ...refused(localized(language, `No pude consultar el proveedor LLM: ${error instanceof Error ? error.message : "error desconocido"}`, `I could not query the LLM provider: ${error instanceof Error ? error.message : "unknown error"}`), "llm"),
@@ -2679,7 +2700,7 @@ export async function planAction(cwd: string, request: string, context: Conversa
   const notes = newNotes();
   try {
     const plan = await requestPlan(request, snapshot, context, [], notes);
-    return bindPlan(snapshot, withNotes(await draftFromPlan(plan, snapshot, request, context, language, notes), notes));
+    return withNotes(await prepareModelPlan(plan, snapshot, request, context, language, notes), notes);
   } catch (error) {
     return bindPlan(snapshot, {
       ...refused(localized(language, `No pude consultar el proveedor LLM: ${error instanceof Error ? error.message : "error desconocido"}`, `I could not query the LLM provider: ${error instanceof Error ? error.message : "unknown error"}`), "llm"),
@@ -2696,7 +2717,7 @@ function isUnattended(step: PlanStep) {
 
 function operationDraft(operation: Operation, args: Record<string, string>, snapshot?: RepoSnapshot, argv: string[] = [], locale: Locale = "es"): PlanDraft {
   const details: Partial<Record<Operation, [string, string, ActionPlan["risk"]]>> = {
-    sync_remote: [localized(locale, `Unir ${args.name} con ${args.ref}`, `Join ${args.name} with ${args.ref}`), localized(locale, "Trae los commits remotos y conserva todos tus commits locales. Si ambas copias avanzaron, crea una fusión que puede requerir resolver conflictos.", "Brings in remote commits and keeps all your local commits. If both copies advanced, creates a merge that may need conflict resolution."), "high"],
+    sync_remote: [args.mode === "prefer_remote" ? localized(locale, `Unir ${args.name} con ${args.ref} dando prioridad al remoto`, `Merge ${args.ref} into ${args.name}, preferring remote edits`) : localized(locale, `Unir ${args.name} con ${args.ref}`, `Join ${args.name} with ${args.ref}`), localized(locale, "Trae los commits remotos y conserva todos tus commits locales. Si ambas copias avanzaron, crea una fusión que puede requerir resolver conflictos.", "Brings in remote commits and keeps all your local commits. If both copies advanced, creates a merge that may need conflict resolution."), "high"],
     stash_push: [localized(locale, "Apartar los cambios (stash)", "Set changes aside (stash)"), localized(locale, "Guarda las versiones preparadas, los cambios sin preparar y los archivos nuevos en un stash local; limpia esos cambios de los archivos para seguir trabajando. Los archivos ignorados permanecen en su sitio.", "Saves staged versions, unstaged changes and new files in a local stash, then clears those changes from the files so you can keep working. Ignored files stay in place."), "medium"],
     stash_pop: [localized(locale, "Recuperar el último stash (pop)", "Restore the latest stash (pop)"), localized(locale, "Recupera el último stash en la rama actual, incluyendo las versiones preparadas. Solo elimina el stash si la recuperación termina bien; si hay conflictos, conserva el stash y permite resolverlos.", "Restores the latest stash onto the current branch, including staged versions. Removes the stash only after successful restoration; if there are conflicts, keeps the stash so they can be resolved."), "medium"],
     status: [localized(locale, "Actualizar la vista del repositorio", "Refresh the repository view"), localized(locale, "Lee el estado actual sin modificar archivos.", "Reads the current state without changing files."), "low"],
@@ -2837,7 +2858,7 @@ async function validateStashPop(snapshot: RepoSnapshot, stash: string, language:
 export async function prepareOperation(cwd: string, operation: Operation, args: Record<string, string> = {}, locale?: Locale) {
   const language = normalizeLocale(locale);
   const snapshot = await getSnapshot(cwd);
-  if (operation === "sync_remote") return prepareRemoteSync(snapshot, args.ref, language);
+  if (operation === "sync_remote") return prepareRemoteSync(snapshot, args, language);
   if (operation === "stash_pop" && !snapshot.stashCount) throw new Error(localized(language, "No hay cambios apartados. Usa Stash para guardar cambios primero.", "There are no set-aside changes. Use Stash to save changes first."));
   if (operation === "github_create_repo") {
     const preparation = await prepareHostedRepository(snapshot, {
@@ -3245,28 +3266,36 @@ export async function prepareMergeToDefault(cwd: string, branchName: string, loc
   return plan;
 }
 
+function remoteMergeArgs(args: Record<string, string>) {
+  const flags = args.mode === "ff" ? ["--ff-only"] : ["--no-edit"];
+  if (args.mode === "prefer_remote") flags.push("-s", "ort", "-Xtheirs");
+  return ["merge", ...flags, `refs/remotes/${args.ref}`];
+}
+
 /** Fetch the chosen copy, then prepare a reviewed update that never replaces local history. */
-async function prepareRemoteSync(initial: RepoSnapshot, ref: string, language: Locale): Promise<ActionPlan> {
+async function prepareRemoteSync(initial: RepoSnapshot, args: Record<string, string>, language: Locale): Promise<ActionPlan> {
+  const { ref, side } = args;
   const fail = (es: string, en: string): never => { throw new Error(localized(language, es, en)); };
   if (!ref || !isBranchNameSafe(ref) || !initial.remoteRefs?.includes(ref)) fail("La copia remota ya no existe. Actualiza la vista.", "The remote copy no longer exists. Refresh the view.");
   if (initial.pending || initial.conflicts.length) fail("Termina o aborta la operación pendiente antes de actualizar la rama.", "Finish or abort the pending operation before updating the branch.");
   if (initial.isDirty) fail("Hay cambios sin guardar. Usa Stash en la barra o guarda los cambios antes de actualizar; después puedes recuperarlos con Stash pop.", "There are unsaved changes. Use Stash in the toolbar or save changes before updating; restore them afterwards with Stash pop.");
   const remote = [...initial.remotes].sort((a, b) => b.length - a.length).find(name => ref.startsWith(`${name}/`));
   if (!remote) fail("No se reconoce el remoto. Actualiza la vista.", "The remote is not recognized. Refresh the view.");
-  const name = ref.slice(remote!.length + 1);
-  const localFor = (snapshot: RepoSnapshot) => {
-    const tracked = snapshot.branches.filter(branch => branch.presence !== "remote" && branch.upstream === ref);
-    const same = snapshot.branches.find(branch => branch.presence !== "remote" && branch.name === name);
-    if (same) return same;
-    if (tracked.length > 1) fail("Varias ramas locales siguen esta copia. Elige la rama local y usa Pull.", "Several local branches track this copy. Choose the local branch and use Pull.");
-    return tracked[0];
-  };
+  if (side && side !== "theirs") fail("Elige cómo resolver los cambios que coincidan.", "Choose how to handle overlapping edits.");
+  const destinations = syncDestinations(initial, ref);
+  const name = args.name || (destinations.length === 1 ? destinations[0] : "");
+  if (!destinations.includes(name)) fail(`Elige la rama local que quieres actualizar desde ${ref}: ${destinations.join(", ")}.`, `Choose the local branch to update from ${ref}: ${destinations.join(", ")}.`);
+  const localFor = (snapshot: RepoSnapshot) => snapshot.branches.find(branch => branch.presence !== "remote" && branch.name === name);
   const occupied = localFor(initial)?.checkedOutIn;
   if (occupied) fail(`La rama está abierta en ${occupied}. Abre ese proyecto para actualizarla.`, `The branch is open in ${occupied}. Open that project to update it.`);
   await checkedGit(initial.path, ["fetch", "--prune", remote!]);
   const snapshot = await getSnapshot(initial.path);
   if (!snapshot.remoteRefs?.includes(ref)) fail("La rama desapareció del remoto. Tu rama local se conserva; revisa la lista actualizada.", "The branch disappeared from the remote. Your local branch is kept; review the updated list.");
   if (snapshot.isDirty || snapshot.pending || snapshot.conflicts.length || snapshot.head !== initial.head || snapshot.currentBranch !== initial.currentBranch) fail("El repositorio cambió durante la actualización. Revisa la acción de nuevo.", "The repository changed during the update. Review the action again.");
+  if (!syncDestinations(snapshot, ref).includes(name)) fail("La rama de destino cambió. Elige de nuevo la copia local.", "The destination changed. Choose the local copy again.");
+  if (snapshot.currentBranch === "HEAD" && snapshot.head && !(await checkedGit(snapshot.path, ["for-each-ref", "--count=1", "--contains", snapshot.head, "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags"]))) {
+    fail("Este commit solo está aquí. Usa «Crear una rama aquí» para conservarlo y después vuelve a sincronizar.", "This commit is only here. Use “Start a branch here” to keep it, then sync again.");
+  }
   const local = localFor(snapshot);
   if (local?.checkedOutIn) fail(`La rama está abierta en ${local.checkedOutIn}. Abre ese proyecto para actualizarla.`, `The branch is open in ${local.checkedOutIn}. Open that project to update it.`);
   const steps: PlanStep[] = [];
@@ -3277,10 +3306,14 @@ async function prepareRemoteSync(initial: RepoSnapshot, ref: string, language: L
     steps.push(step);
     rationale = step.summary;
   } else {
-    const [ahead, behind] = (await checkedGit(snapshot.path, ["rev-list", "--left-right", "--count", `refs/heads/${local.name}...refs/remotes/${ref}`])).split(/\s+/).map(Number);
+    const [localTip, remoteTip] = (await checkedGit(snapshot.path, ["rev-parse", `refs/heads/${local.name}`, `refs/remotes/${ref}`])).split(/\s+/);
+    const [ahead, behind] = (await checkedGit(snapshot.path, ["rev-list", "--left-right", "--count", `${localTip}...${remoteTip}`])).split(/\s+/).map(Number);
     if (behind && !(await optionalGit(snapshot.path, ["merge-base", `refs/heads/${local.name}`, `refs/remotes/${ref}`]))) fail("Las copias no comparten historia. Revisa ambas ramas antes de decidir cómo unirlas.", "The copies do not share history. Review both branches before choosing how to join them.");
     if (!local.isCurrent) steps.push(stepFrom("checkout", { name: local.name }, [], language)!);
-    if (behind) steps.push(stepFrom("sync_remote", { name: local.name, ref, mode: ahead ? "merge" : "ff" }, [], language)!);
+    if (behind) {
+      const mode = ahead ? (side === "theirs" ? "prefer_remote" : "merge") : "ff";
+      steps.push(stepFrom("sync_remote", { name, ref, mode, localTip, remoteTip }, [], language)!);
+    }
     if (!steps.length) return bindPlan(snapshot, refused(localized(language, `${local.name} ya contiene todos los commits de ${ref}. Tus commits locales se conservan; no hay nada que traer.`, `${local.name} already contains all commits of ${ref}. Your local commits are kept; there is nothing to bring in.`)));
     rationale = localized(language, `Actualiza ${local.name} desde ${ref}: ${behind} commits por traer y ${ahead} commits locales que se conservan.`, `Updates ${local.name} from ${ref}: ${behind} commits to bring in and ${ahead} local commits to keep.`);
   }
@@ -3302,8 +3335,9 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
   if (["sync_remote", "rebase"].includes(operation) && snapshot.isDirty) throw new Error(localized(language, "Hay cambios sin guardar. Revísalos, guárdalos o usa Stash en la barra antes de continuar; después puedes recuperarlos con Stash pop.", "There are unsaved changes. Review them, save them or use Stash in the toolbar before continuing; you can restore them with Stash pop afterwards."));
   if (operation === "stash_push" && (!snapshot.head || !snapshot.isDirty)) throw new Error(localized(language, "Necesitas una primera versión guardada y cambios sin guardar para usar Stash.", "You need a first saved version and unsaved changes to use Stash."));
   if (operation === "stash_pop" && !snapshot.stashCount) throw new Error(localized(language, "No hay ningún stash que recuperar. Actualiza la vista.", "There is no stash to restore. Refresh the view."));
+  if (operation === "pull" && snapshot.currentBranch === "HEAD") throw new Error(localized(language, "Estás viendo un commit suelto. Haz doble clic en la rama que quieres actualizar desde el remoto.", "You are viewing a detached commit. Double-click the branch you want to update from the remote."));
   if (operation === "sync_remote") {
-    if (!args.ref || !snapshot.remoteRefs?.includes(args.ref) || !isBranchNameSafe(args.ref) || !["ff", "merge"].includes(args.mode)) throw new Error(localized(language, "La referencia remota cambió. Actualiza y revisa la acción de nuevo.", "The remote reference changed. Refresh and review the action again."));
+    if (!args.ref || !snapshot.remoteRefs?.includes(args.ref) || !isBranchNameSafe(args.ref) || !["ff", "merge", "prefer_remote"].includes(args.mode)) throw new Error(localized(language, "La referencia remota cambió. Actualiza y revisa la acción de nuevo.", "The remote reference changed. Refresh and review the action again."));
     if (snapshot.currentBranch !== args.name) throw new Error(localized(language, "La rama activa cambió. Revisa la actualización de nuevo.", "The active branch changed. Review the update again."));
   }
   const branchArg = args.name || args.onto;
@@ -3568,7 +3602,13 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
   switch (step.operation) {
     case "status": return "";
     case "checkout": return reportedGit(cwd, args.ref ? ["switch", "--track", "-c", args.name, `refs/remotes/${args.ref}`] : ["switch", args.name]);
-    case "sync_remote": return reportedGit(cwd, ["merge", args.mode === "ff" ? "--ff-only" : "--no-edit", `refs/remotes/${args.ref}`]);
+    case "sync_remote": {
+      const remoteTip = await checkedGit(cwd, ["rev-parse", "--verify", `refs/remotes/${args.ref}`]);
+      if (snapshot.head !== args.localTip || remoteTip !== args.remoteTip) {
+        throw new StalePlanError(localized(locale, "Una de las ramas cambió. Vuelve a sincronizar para revisar sus nuevos commits.", "A branch moved. Sync again to review its new commits."));
+      }
+      return reportedGit(cwd, remoteMergeArgs(args));
+    }
     case "stash_push": return reportedGit(cwd, ["stash", "push", "--include-untracked", "-m", args.message]);
     case "stash_pop": {
       const latest = await checkedGit(cwd, ["rev-parse", "--verify", "refs/stash"]);
@@ -3852,6 +3892,8 @@ export async function prepareRetry(cwd: string, record: FailedPlanRecord, locale
   }
   const start = record.outcomes.findIndex((outcome) => outcome.status !== "completed");
   const remaining = record.plan.steps.slice(start);
+  const sync = remaining.find(step => step.operation === "sync_remote");
+  if (sync) return prepareRemoteSync(snapshot, { ref: sync.args.ref, name: sync.args.name, side: sync.args.mode === "prefer_remote" ? "theirs" : "" }, language);
   const completed = record.outcomes.slice(0, start).map((outcome) => outcome.summary);
   const draft = sequenceDraft(remaining, localized(language,
     "Se prepara de nuevo con el repositorio tal como está ahora. Solo incluye lo que no llegó a completarse.",
