@@ -30,6 +30,7 @@ import { isProtectedBranch, lifecycleOf, staleDays } from "../shared/branch-life
 import { buildCommitGraph, familyColour, maxLanes } from "../shared/commit-graph";
 import { graphWorktrees, withWorktreeWork, worktreeWipHash } from "../shared/worktree-graph";
 import { pullRequestReference } from "../shared/repository-activity";
+import { syncDestinations } from "../shared/remote-sync";
 import { workOverview } from "../shared/work-overview";
 import { completionSummary, planSummary, type CompletionSummary } from "../shared/plan-summary";
 import { refChips } from "../shared/ref-chips";
@@ -462,6 +463,7 @@ export default function App() {
   const [guide, setGuide] = useState<ConflictGuide>();
   const [guideResult, setGuideResult] = useState<ConflictChoiceResult>();
   const [guideBusy, setGuideBusy] = useState(false);
+  const [syncDialog, setSyncDialog] = useState<{ path: string; ref?: string; name?: string }>();
   const [inputDialog, setInputDialog] = useState<InputDialog>();
   const [setup, setSetup] = useState<SetupState>();
   const [identityDialog, setIdentityDialog] = useState<IdentityDialog>();
@@ -543,7 +545,7 @@ export default function App() {
   const conversation = snapshot ? conversations[snapshot.path] ?? [] : [];
   const planning = conversation.some((turn) => turn.status === "loading" || turn.status === "executing");
   // Something prepared against the current state that the user has not decided on yet.
-  const awaitingDecision = conversation.some((turn) => turn.status === "ready") || Boolean(deliveryReview || inputDialog || proposal || generatingDescription
+  const awaitingDecision = conversation.some((turn) => turn.status === "ready") || Boolean(deliveryReview || syncDialog || inputDialog || proposal || generatingDescription
     || (snapshot?.isDirty && deliveryBaseline?.path === snapshot.path && !deliveryStale));
   // A hidden branch panel gives its column to the graph; its saved width waits for it to come back.
   const paneStyle = panes || sidebarHidden
@@ -1155,6 +1157,7 @@ export default function App() {
     // Declining keeps what was typed, so nothing the person wrote is lost.
     if (!(await ensureSharing(path, "planning"))) { setRequest(question); return; }
     const plan = await showPlan(question, () => window.gitcat.planAction(path, question, context, locale), path);
+    if (plan && plan.stateId !== snapshot.stateId) await refreshProject(path, false);
     // When the assistant could not answer, what was typed comes back, unless something new was typed meanwhile.
     if (!plan || plan.assistantUnavailable) setRequest((current) => current || question);
   };
@@ -1201,6 +1204,10 @@ export default function App() {
         if (operation === "sync_remote") await refreshProject(path, false);
       }
     }, path);
+  };
+
+  const openSync = (ref?: string, name?: string) => {
+    if (snapshot) setSyncDialog({ path: snapshot.path, ref, name });
   };
 
   const prepareMergeToDefault = async (name: string) => {
@@ -1254,6 +1261,7 @@ export default function App() {
     try {
       const plan = await window.gitcat.planRecovery(path, failure, context, locale);
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
+      if (plan.steps.some(step => step.operation === "sync_remote")) await refreshProject(path, false);
       if (plan.assistantUnavailable) {
         const reason = plan.assistantUnavailable;
         updateTurn(path, turnId, (turn) => turn.recovery ? { ...turn, assistant: reason } : { ...turn, assistant: reason, error: plan.rationale, status: "error" });
@@ -1283,6 +1291,7 @@ export default function App() {
     if (path !== snapshot.path) return;
     const facts = turn.recovery.facts;
     switch (action.kind) {
+      case "choose_sync": openSync(); return;
       case "refresh": await refreshProject(path); return;
       case "retry":
         if (turn.recoveryPlanId) {
@@ -1474,12 +1483,12 @@ export default function App() {
   const switchBranch = async (name: string) => {
     if (!snapshot || planning) return;
     if (name.startsWith("refs/remotes/")) {
-      await prepare("sync_remote", { ref: name.slice("refs/remotes/".length) });
+      openSync(name.slice("refs/remotes/".length));
       return;
     }
     const remoteOnly = snapshot.branches.find(branch => branch.name === name && branch.presence === "remote");
     if (remoteOnly?.remoteRef) {
-      await prepare("sync_remote", { ref: remoteOnly.remoteRef });
+      openSync(remoteOnly.remoteRef);
       return;
     }
     const path = snapshot.path;
@@ -1692,7 +1701,8 @@ export default function App() {
       const name = branch.name;
       const local = branch.presence !== "remote" && !remoteRef;
       entries.push({ key: "branch-heading", heading: name });
-      if (remoteRef) entries.push({ key: "sync-remote", icon: CloudDownload, label: t("syncRemote", { ref: remoteRef }), onSelect: () => void prepare("sync_remote", { ref: remoteRef }), hint: t("doubleClickRemoteHint") });
+      const syncRef = remoteRef ?? branch.remoteRef;
+      if (syncRef) entries.push({ key: "sync-remote", icon: CloudDownload, label: t("syncRemote", { ref: syncRef }), onSelect: () => openSync(syncRef, local ? name : undefined) });
       if (!branch.isCurrent && !remoteRef) entries.push({ key: "switch", icon: branch.checkedOutIn ? TreePine : ArrowLeftRight, label: branch.checkedOutIn ? t("openWorktreeAction") : t("switchBranch", { name }), onSelect: () => void switchBranch(branch.presence === "remote" ? `refs/remotes/${branch.remoteRef}` : name), hint: t("doubleClickHint") });
       if (branch.isCurrent && !remoteRef && branch.upstream) entries.push({ key: "pull", icon: ArrowDownToLine, label: t("pullLatest"), onSelect: () => void prepare("pull") });
       if (branch.isCurrent && !remoteRef) entries.push({ key: "push", icon: ArrowUpFromLine, label: t(branch.upstream ? "pushBranch" : "publishBranch"), onSelect: () => void prepare("push") });
@@ -1836,7 +1846,7 @@ export default function App() {
             refreshDisabled={Boolean(refreshingPath)}
             onRefresh={() => void refreshEverything()}
             onFetch={() => void refreshEverything("fetch")}
-            onPull={() => void prepare("pull")}
+            onPull={() => openSync()}
             onPush={() => void prepare("push")}
             onStash={() => void prepare("stash_push")}
             onStashPop={() => void prepare("stash_pop")}
@@ -1851,7 +1861,7 @@ export default function App() {
             onNewBranch: () => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" }),
             onSave: () => beginDelivery(false),
             onIntegrate: () => beginDelivery(true),
-            onPull: () => void prepare("pull"),
+            onPull: () => openSync(),
             onFetch: () => void refreshEverything("fetch"),
             onConnectRemote: () => setInputDialog({ operation: "add_remote", title: t("connectRemoteTitle"), label: t("remoteAddress"), value: "" }),
             onPrepare: (operation, args) => void prepare(operation, args)
@@ -1952,6 +1962,14 @@ export default function App() {
         onSetAuthor={snapshot ? () => { setSettingsOpen(false); void openIdentityDialog(); } : undefined}
         repoPath={snapshot?.path} readinessKey={readinessEpoch}
         onConnectRemote={snapshot ? () => { setSettingsOpen(false); readinessActions.onConnectRemote?.(); } : undefined} />}
+      {syncDialog && snapshot?.path === syncDialog.path && <SyncModal snapshot={snapshot} initial={syncDialog}
+        onClose={() => setSyncDialog(undefined)}
+        onPrepare={(args) => { setSyncDialog(undefined); void prepare("sync_remote", args); }}
+        onStash={() => { setSyncDialog(undefined); void prepare("stash_push"); }}
+        onGuide={() => { setSyncDialog(undefined); void openGuide(); }}
+        onFetch={() => { setSyncDialog(undefined); void refreshEverything("fetch"); }}
+        onConnect={() => { setSyncDialog(undefined); setInputDialog({ operation: "add_remote", title: t("connectRemoteTitle"), label: t("remoteAddress"), value: "" }); }}
+      />}
       {identityDialog && <IdentityModal dialog={identityDialog} onChange={setIdentityDialog} onClose={() => setIdentityDialog(undefined)} onSubmit={() => { const identity = identityDialog; setIdentityDialog(undefined); void prepare("set_identity", { user: identity.user.trim(), email: identity.email.trim(), scope: identity.scope }); }} />}
       {inputDialog && <InputModal dialog={inputDialog} branches={snapshot?.branches ?? []} onChange={(value) => setInputDialog({ ...inputDialog, value })} onClose={() => setInputDialog(undefined)} onSubmit={submitInputDialog} />}
       {menu && snapshot && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu)} label={menu.work ? t("uncommittedHeading") : menu.commit ? t("commitActions", { hash: menu.commit.shortHash }) : t("actionsFor", { name: menu.branch ?? "" })} onClose={() => setMenu(undefined)} />}
@@ -3136,7 +3154,7 @@ function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, on
     <div className="toolbar-tools">
       {tool(RefreshCcw, t("refresh"), onRefresh, refreshDisabled, t("refreshTitle"), refreshing)}
       {tool(CloudDownload, t("fetch"), onFetch, refreshDisabled || !snapshot.remotes.length, snapshot.remotes.length ? t("fetchTitle") : t("noRemoteFetchTitle"), fetching)}
-      {tool(ArrowDownToLine, t("pull"), onPull, busy, t("pullTitle"))}
+      {tool(ArrowDownToLine, t("syncBranch"), onPull, busy, t("syncTitleAction"))}
       {tool(ArrowUpFromLine, t("push"), onPush, busy, t("pushTitle"))}
       {tool(Archive, t("stash"), onStash, busy || !snapshot.isDirty || !snapshot.head || Boolean(snapshot.pending) || Boolean(snapshot.conflicts.length), t("stashTitle"))}
       {tool(ArchiveRestore, t("stashPop", { count: snapshot.stashCount ?? 0 }), onStashPop, busy || !snapshot.stashCount || Boolean(snapshot.pending) || Boolean(snapshot.conflicts.length), t("stashPopTitle"))}
@@ -3238,11 +3256,14 @@ function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
   const actions: ReactNode[] = [];
   switch (next.action) {
     case "finish_pending": actions.push(button(t(key("_button")), handlers.onGuide)); break;
-    case "return_to_branch": actions.push(button(t(key("_button")), handlers.onNewBranch)); break;
+    case "return_to_branch":
+      if (snapshot.remoteRefs?.length) actions.push(button(t("syncBranch"), handlers.onPull));
+      actions.push(button(t(key("_button")), handlers.onNewBranch, !snapshot.remoteRefs?.length));
+      break;
     case "save_changes": case "first_save": actions.push(button(t("next_save_changes_button"), handlers.onSave)); break;
     case "combine_diverged":
       if (next.upstream) {
-        actions.push(button(t("next_combine_merge_button"), () => handlers.onPrepare("merge", { name: next.upstream! })));
+        actions.push(button(t("next_combine_merge_button"), handlers.onPull));
         actions.push(button(t("next_combine_rebase_button"), () => handlers.onPrepare("rebase", { onto: next.upstream! }), false));
       }
       break;
@@ -3893,6 +3914,49 @@ function IdentityModal({ dialog, onChange, onClose, onSubmit }: { dialog: Identi
  * starts with a prefix this repo spells differently, it says so and stops there: creation is never
  * blocked, because the convention is the user's to set, not the app's to enforce.
  */
+function SyncModal({ snapshot, initial, onClose, onPrepare, onStash, onGuide, onFetch, onConnect }: {
+  snapshot: RepoSnapshot; initial: { ref?: string; name?: string };
+  onClose: () => void; onPrepare: (args: Record<string, string>) => void;
+  onStash: () => void; onGuide: () => void; onFetch: () => void; onConnect: () => void;
+}) {
+  const { t } = useI18n();
+  const dialogRef = useDialog(onClose);
+  const refs = snapshot.remoteRefs ?? [];
+  const current = snapshot.branches.find(branch => branch.isCurrent);
+  const atHead = snapshot.commits.find(commit => commit.hash === snapshot.head)?.refs ?? [];
+  const matches = refs.filter(ref => atHead.includes(ref));
+  const [ref, setRef] = useState(initial.ref ?? current?.remoteRef ?? (matches.length === 1 ? matches[0] : refs.length === 1 ? refs[0] : ""));
+  const [chosen, setChosen] = useState(initial.name ?? current?.name ?? "");
+  const [preferRemote, setPreferRemote] = useState(false);
+  const destinations = syncDestinations(snapshot, ref);
+  const name = destinations.includes(chosen) ? chosen : destinations.length === 1 ? destinations[0] : "";
+  const pending = snapshot.pending || snapshot.conflicts.length > 0;
+  const blocked = pending || snapshot.isDirty || !refs.length;
+  return <div className="modal-backdrop"><form className="input-modal sync-modal" role="dialog" aria-modal="true" aria-labelledby="sync-title" ref={dialogRef}
+    onSubmit={event => { event.preventDefault(); if (!blocked && name) onPrepare({ ref, name, side: preferRemote ? "theirs" : "" }); }}>
+    <div className="modal-heading"><h2 id="sync-title">{t("syncTitleAction")}</h2>
+      <button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div>
+    {blocked ? <p>{t(pending ? "syncPending" : snapshot.isDirty ? "syncDirty" : "syncNoRefs")}</p> : <>
+      <label>{t("syncSource")}<select value={ref} onChange={event => { setRef(event.target.value); setChosen(""); }}>
+        <option disabled value="">{t("syncChoose")}</option>{refs.map(item => <option key={item}>{item}</option>)}
+      </select></label>
+      {ref && <label>{t("syncDestination")}<select value={name} onChange={event => setChosen(event.target.value)}>
+        <option disabled value="">{t("syncChoose")}</option>{destinations.map(item => <option key={item}>{item}</option>)}
+      </select></label>}
+      <label>{t("syncOverlap")}<select value={preferRemote ? "remote" : "ask"} onChange={event => setPreferRemote(event.target.value === "remote")}>
+        <option value="ask">{t("syncAsk")}</option><option value="remote">{t("syncPrefer")}</option>
+      </select></label>
+      <p>{t("syncPreserves")}</p>
+    </>}
+    <div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button>
+      {pending ? <button type="button" className="primary-button" onClick={onGuide}>{t("resolveConflictsButton")}</button>
+        : snapshot.isDirty ? <button type="button" className="primary-button" onClick={onStash}>{t("stashTitle")}</button>
+        : !refs.length ? <button type="button" className="primary-button" onClick={snapshot.remotes.length ? onFetch : onConnect}>{t(snapshot.remotes.length ? "fetch" : "connectRemoteTitle")}</button>
+        : <button className="primary-button" disabled={!name}>{t("prepare")}</button>}
+    </div>
+  </form></div>;
+}
+
 function InputModal({ dialog, branches, onChange, onClose, onSubmit }: { dialog: InputDialog; branches: Branch[]; onChange: (value: string) => void; onClose: () => void; onSubmit: () => void }) {
   const { t } = useI18n();
   const dialogRef = useDialog(onClose);

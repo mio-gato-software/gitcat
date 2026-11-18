@@ -107,7 +107,11 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
       case "sync_remote":
         summary.local.push(say(`Brings commits from ${args.ref} into ${args.name}, keeping your local commits.`, `Trae los commits de ${args.ref} a ${args.name}, conservando tus commits locales.`));
         summary.from ??= args.ref; summary.to ??= args.name;
-        if (args.mode === "merge") conflictProne.push(say("merge", "fusión"));
+        if (args.mode === "prefer_remote") summary.local.push(say(
+          `Where edits overlap, Git favors ${args.ref}. Compatible local edits are kept. Some conflicts, such as a file deleted on one side, can still need a decision.`,
+          `Donde los cambios se solapen, Git dará prioridad a ${args.ref}. Se conservan los cambios locales compatibles. Algunos conflictos, como un archivo eliminado en un lado, aún pueden necesitar una decisión.`
+        ));
+        if (args.mode !== "ff") conflictProne.push(say("merge", "fusión"));
         break;
       case "stash_push":
         summary.local.push(say("Sets staged changes, unstaged changes and new files aside in a local stash, clearing them from the working files. Ignored files stay in place.", "Aparta las versiones preparadas, los cambios sin preparar y los archivos nuevos en un stash local, limpiándolos de los archivos de trabajo. Los archivos ignorados permanecen en su sitio."));

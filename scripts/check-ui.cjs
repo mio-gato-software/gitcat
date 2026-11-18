@@ -749,7 +749,7 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.sidebar')`);
   assert.equal(git('status', '--porcelain'), before, 'Reading the graph and its details never mutates Git');
   // Refresh answers "am I up to date?" on its own; Fetch stays beside it because people look for it by name.
-  assert.deepEqual(JSON.parse(await js(`JSON.stringify([...document.querySelectorAll('.toolbar-tools .tool-button')].map((node) => node.innerText.trim()))`)), ['Actualizar', 'Fetch', 'Pull', 'Push', 'Stash', 'Pop (0)', 'Rama']);
+  assert.deepEqual(JSON.parse(await js(`JSON.stringify([...document.querySelectorAll('.toolbar-tools .tool-button')].map((node) => node.innerText.trim()))`)), ['Actualizar', 'Fetch', 'Sincronizar', 'Push', 'Stash', 'Pop (0)', 'Rama']);
   assert.equal(await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Stash').disabled`), false);
   assert.equal(await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Pop (0)').disabled`), true);
   await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Stash').click()`);
@@ -1371,10 +1371,18 @@ app.whenReady().then(async () => {
   assert.equal(await js(`Boolean(document.querySelector('.ref-tag.head .branch-sync-badge.diverged .lucide-git-fork'))`), true, 'Divergence stays visible on the current branch');
   await capture('copies-diverged');
   await js(`document.querySelector('.ref-tag.remote').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await waitFor(`document.querySelector('#sync-title')`);
+  assert.equal(await js(`document.querySelector('.input-modal select').value`), 'origin/main');
+  await js(`document.querySelector('.input-modal .ghost-button').click()`);
+  await js(`[...document.querySelectorAll('.toolbar-tools button')].find(node => node.textContent === 'Sincronizar').click()`);
+  await waitFor(`document.querySelector('#sync-title')`);
+  await js(`(() => { const preference = document.querySelector('.input-modal label:last-of-type select'); preference.value = 'remote'; preference.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await js(`document.querySelector('.input-modal .primary-button').click()`);
   await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
   assert.equal(at(copies, 'rev-parse', 'HEAD'), localTip, 'Remote double click prepares an update for review');
   assert.equal(await js(`Boolean(document.querySelector('.plan-stale'))`), false, 'Fetched facts are shown beside the prepared plan');
   assert.match(await js(`document.querySelector('.plan-goal').innerText`), /origin\/main[\s\S]*conservando tus commits locales/);
+  assert.match(await js(`document.querySelector('.plan-goal').innerText`), /prioridad a origin\/main/);
   await capture('copies-update-review');
   await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
   await waitFor(`!document.querySelector('.plan-card .plan-actions .primary-button') && !document.querySelector('.branch-sync-badge.diverged')`);

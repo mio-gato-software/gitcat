@@ -39,7 +39,7 @@ export const commitMessageLimit = 120;
 export const planStepLimit = 6;
 
 export const executableOperations = new Set<Operation>([
-  "status", "checkout", "create_branch", "delete_branch", "rename_branch", "fetch", "pull", "push",
+  "status", "checkout", "create_branch", "delete_branch", "rename_branch", "fetch", "pull", "push", "sync_remote",
   "merge", "rebase", "abort_operation", "continue_operation", "skip_operation", "resolve_conflict", "commit",
   "git_command"
 ]);
@@ -165,7 +165,13 @@ and it is your job to work out which ones and in what order, from the repository
 - If the requested source branch's "mergedInto" already contains the default branch, there is no
   committed work pending for that merge. Do not propose an empty merge or claim that it integrated work.
 - "publish my work" may be commit, then push.
-- "get me up to date and continue" may be fetch, then pull.
+- To update a local branch from a remote copy or work on a remote branch locally, use one
+  sync_remote step. Set args.name to the exact remoteRefs entry, args.to to its local counterpart
+  when known, and args.side to "theirs" only when the user asks to favor remote edits in conflicts.
+  It fetches, switches to the local counterpart (or creates it), and brings in missing commits.
+  Both histories and compatible edits are kept. An exact replacement is a different intention.
+  If several destinations fit, ask which one. A detached HEAD is not a local branch to pull into.
+  Reserve detached checkout for an explicit request to inspect a commit without activating a branch.
 - When a previous Git step failed, or an action could not be prepared, translate the problem into
   plain language before proposing the way forward. Give the user useful alternatives grounded in the
   repository state, not just the failed command. Say what is still safe, what caused the blockage,
@@ -323,6 +329,7 @@ ${JSON.stringify(issues, null, 2)}`;
 export function operationArgs(step: PlannedStep): Record<string, string> {
   switch (step.operation) {
     case "checkout": case "create_branch": case "delete_branch": case "merge": return { name: step.args.name.trim() };
+    case "sync_remote": return { ref: step.args.name.trim(), name: step.args.to.trim(), side: step.args.side.trim() };
     case "rename_branch": return { name: step.args.name.trim(), to: step.args.to.trim() };
     case "rebase": return { onto: step.args.onto.trim() };
     case "resolve_conflict": return { path: step.args.path.trim(), side: step.args.side.trim() };
@@ -340,6 +347,10 @@ export function operationIssues(step: PlannedStep, index = 0): PlanIssue[] {
   }
   const args = operationArgs(step);
   const issues: PlanIssue[] = [];
+  if (step.operation === "sync_remote") {
+    if (!isBranchNameSafe(args.ref)) issues.push({ field: `${at}.args.name`, problem: "choose the exact remote branch from remoteRefs" });
+    if (args.side && args.side !== "theirs") issues.push({ field: `${at}.args.side`, problem: 'use "theirs" for explicit remote preference or leave empty' });
+  }
   if (branchOperations.has(step.operation)) {
     if (!args.name) issues.push({ field: `${at}.args.name`, problem: `missing; ${step.operation} needs the branch name the user meant` });
     else if (!isBranchNameSafe(args.name)) issues.push({ field: `${at}.args.name`, problem: `"${args.name}" is not a valid Git branch name` });
@@ -384,6 +395,9 @@ export function planIssues(plan: ModelPlan): PlanIssue[] {
   if (!plan.steps.length) return [{ field: "steps", problem: "empty; a git_operation needs at least one step, or use another intent" }];
   if (plan.steps.length > planStepLimit) {
     return [{ field: "steps", problem: `${plan.steps.length} steps; the limit is ${planStepLimit}. Plan only what the request needs` }];
+  }
+  if (plan.steps.length > 1 && plan.steps.some(step => step.operation === "sync_remote")) {
+    return [{ field: "steps", problem: "sync_remote prepares the entire update including the local switch; propose it as a single step" }];
   }
   return plan.steps.flatMap((step, index) => operationIssues(step, index));
 }

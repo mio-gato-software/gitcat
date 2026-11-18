@@ -679,7 +679,7 @@ export type ExecutionFailure = {
 /** Why a Git action stopped, as far as Git's own output and the repository state can prove it. */
 export type FailureKind =
   | "network" | "auth" | "missing_upstream" | "no_remote" | "divergent" | "conflict" | "pending"
-  | "hook" | "identity" | "stale" | "lock" | "unknown";
+  | "hook" | "identity" | "stale" | "lock" | "detached_pull" | "unknown";
 
 export type FailureStage = "prepare" | "execute" | "stale";
 
@@ -689,6 +689,7 @@ export type FailureStage = "prepare" | "execute" | "stale";
  * preparation and confirmation. None of them runs a change by itself.
  */
 export type RecoveryActionKind =
+  | "choose_sync"
   /** Re-read the repository. Changes nothing. */
   | "refresh"
   /** Prepare, against a fresh read, only the steps of the stopped plan that never completed. */

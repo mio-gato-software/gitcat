@@ -117,6 +117,9 @@ button:disabled { cursor: default; opacity: .55; }
 .input-modal, .commit-modal { padding: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 25px 90px #000c; }
 .input-modal label { display: flex; flex-direction: column; gap: 8px; color: var(--secondary); font-size: 10px; font-weight: 700; }
 .input-modal input { padding: 11px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; outline: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.sync-modal label + label { margin-top: 14px; }
+.sync-modal select { width: 100%; padding: 8px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; font: inherit; font-size: 12px; }
+.sync-modal p { color: var(--secondary); font-size: 12px; line-height: 1.5; }
 .input-modal input:focus { border-color: #62bbb3; }
 .checkbox-label { flex-direction: row !important; align-items: center; font-weight: 500 !important; }
 .checkbox-label input { width: 14px; height: 14px; margin: 0; padding: 0; accent-color: #68d9ca; }
