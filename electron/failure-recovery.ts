@@ -162,7 +162,7 @@ export function recoveryActions(kind: FailureKind, facts: RecoveryFacts, evidenc
       if (facts.remotes.length === 1) actions.push(prepare("push", "publish", { setUpstream: facts.remotes[0] }));
       else choice = [...facts.remotes.slice(0, 4).map((remote) => prepare("push", "publish", { setUpstream: remote })), keep];
       break;
-    case "divergent":
+    case "divergent": {
       if (!facts.upstream || facts.behind === 0) {
         // The remote has work this computer has not seen yet. Reading it first is safe and settles the numbers.
         actions.push(prepare("fetch", "fetch"));
@@ -170,17 +170,20 @@ export function recoveryActions(kind: FailureKind, facts: RecoveryFacts, evidenc
         break;
       }
       if (facts.ahead === 0) { actions.push(prepare("pull", "pull")); break; }
-      // Both sides have commits the other lacks: merging, replaying and waiting all keep the work, in
-      // different shapes. GitCat never picks one.
+      if (facts.changes) {
+        choice = [{ kind: "choose_sync", args: { ref: facts.upstream, name: facts.branch } }, keep];
+        actions.push(inspect);
+        break;
+      }
+      const copies = { ref: facts.upstream, name: facts.branch };
       choice = [
-        prepare("merge", "merge_upstream", { name: facts.upstream }),
-        // Git refuses to replay commits over uncommitted changes, so that answer is only offered when it can work.
-        ...(facts.changes ? [] : [prepare("rebase", "rebase_upstream", { onto: facts.upstream })]),
+        prepare("sync_remote", "prefer_remote", { ...copies, side: "theirs" }),
+        prepare("sync_remote", "merge_upstream", copies),
+        prepare("rebase", "rebase_upstream", { onto: facts.upstream }),
         keep
       ];
-      if (facts.changes) actions.push(inspect);
-      needsJudgment = true;
       break;
+    }
     case "hook":
       if (evidence.operation === "commit" && facts.changes) actions.push(inspect);
       retryOrReview();

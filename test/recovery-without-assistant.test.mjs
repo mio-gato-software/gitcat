@@ -151,8 +151,10 @@ test("pull divergente: se preguntan las salidas reales, sin elegir ninguna, con 
   seed.run("push", "-q", "-u", "origin", "main");
   const mine = clone(origin.path, "gitcat-rec-div-mine-");
   const theirs = clone(origin.path, "gitcat-rec-div-theirs-");
+  writeFileSync(join(theirs.path, "README.md"), "versión remota\n");
   writeFileSync(join(theirs.path, "suyo.txt"), "de otra persona\n");
   theirs.run("add", "-A"); theirs.run("commit", "-m", "trabajo remoto"); theirs.run("push", "-q");
+  writeFileSync(join(mine.path, "README.md"), "versión local\n");
   writeFileSync(join(mine.path, "mio.txt"), "mío\n");
   mine.run("add", "-A"); mine.run("commit", "-m", "trabajo local");
   mine.run("fetch", "-q");
@@ -167,18 +169,22 @@ test("pull divergente: se preguntan las salidas reales, sin elegir ninguna, con 
   assert.equal(report.facts.ahead, 1);
   assert.equal(report.facts.behind, 1);
   assert.equal(report.facts.upstream, "origin/main");
-  assert.deepEqual(kinds(report.choice), ["merge_upstream", "rebase_upstream", "keep"]);
-  assert.equal(report.needsJudgment, true, "the assistant may weigh in, but the options stand without it");
+  assert.deepEqual(kinds(report.choice), ["prefer_remote", "merge_upstream", "rebase_upstream", "keep"]);
+  assert.equal(report.needsJudgment, false, "the local choices are complete without a provider call");
   assert.equal(report.actions.some((action) => action.kind === "retry"), false, "a pull that cannot fast-forward is not retried blindly");
   assert.equal(mine.run("rev-parse", "HEAD").trim(), head, "describing the failure changes nothing");
 
-  await assistantFallsBack(mine.path, failure, report);
+  await withoutProvider();
 
   // Each option is a real, confirmable operation against the upstream the branch follows.
-  const merge = await service.prepareOperation(mine.path, "merge", report.choice[0].args, "en");
-  assert.equal(merge.command, "git merge --no-edit origin/main");
+  const prepareChoice = action => service.prepareOperation(mine.path, action.operation, action.args, "en");
+  const preferred = await prepareChoice(report.choice[0]);
+  assert.equal(preferred.requiresConfirmation, true);
+  assert.match(preferred.command, /-Xtheirs/);
+  const merge = await prepareChoice(report.choice[1]);
   assert.equal(merge.requiresConfirmation, true);
-  const rebase = await service.prepareOperation(mine.path, "rebase", report.choice[1].args, "en");
+  assert.doesNotMatch(merge.command, /-Xtheirs/);
+  const rebase = await prepareChoice(report.choice[2]);
   assert.equal(rebase.command, "git rebase origin/main");
   await assert.rejects(() => service.prepareOperation(mine.path, "merge", { name: "origin/otra" }, "en"), /does not exist locally/);
   assert.equal(mine.run("rev-parse", "HEAD").trim(), head);
@@ -186,8 +192,20 @@ test("pull divergente: se preguntan las salidas reales, sin elegir ninguna, con 
   // With uncommitted work, replaying is left out: Git would refuse it, so it is not offered.
   writeFileSync(join(mine.path, "mio.txt"), "mío, editado\n");
   const dirty = await service.describeFailure(mine.path, failure, record);
-  assert.deepEqual(kinds(dirty.choice), ["merge_upstream", "keep"]);
+  assert.deepEqual(kinds(dirty.choice), ["choose_sync", "keep"]);
   assert.ok(dirty.actions.some((action) => action.kind === "inspect_changes"));
+  assert.deepEqual(dirty.choice[0].args, { ref: "origin/main", name: "main" });
+
+  mine.run("restore", "--", "mio.txt");
+  const remoteTip = mine.run("rev-parse", "origin/main").trim();
+  const updated = await service.executePlan(mine.path, preferred, "en");
+  assert.equal(updated.error, undefined);
+  assert.equal(updated.snapshot.pending, undefined);
+  assert.equal(mine.run("show", "HEAD:README.md").trim(), "versión remota");
+  assert.equal(mine.run("show", "HEAD:mio.txt").trim(), "mío");
+  assert.equal(mine.run("rev-parse", "HEAD^1").trim(), head);
+  assert.equal(mine.run("rev-parse", "HEAD^2").trim(), remoteTip);
+  assert.equal(theirs.run("ls-remote", "origin", "refs/heads/main").split(/\s+/)[0], remoteTip);
 });
 
 test("un hook pre-commit que falla: el trabajo sigue intacto y reintentar solo repite lo que no se completó", async () => {

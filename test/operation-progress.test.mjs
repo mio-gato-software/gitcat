@@ -24,6 +24,28 @@ test('cancellation rejects late read results, isolates repositories and rejects 
  assert.equal(await trackOperation('/a', 'planning', () => {}, async () => 42), 42);
 });
 
+test('a selected recovery waits for a competing job and reads the state it leaves behind', async () => {
+  let finishFetch;
+  const fetchGate = new Promise(resolve => { finishFetch = resolve; });
+  const order = [];
+  const fetch = trackOperation('/recovery', 'fetching', () => {}, async () => {
+    await fetchGate;
+    order.push('fetch settled');
+    throw new Error('offline');
+  }, true);
+  const failed = assert.rejects(fetch, /offline/);
+  const chosen = trackOperation('/recovery', 'planning', () => {}, async () => {
+    order.push('prepare selection');
+    return 'review';
+  }, false, 'wait');
+  assert.deepEqual(order, []);
+  assert.equal(listOperations().find(op => op.repoPath === '/recovery').phase, 'fetching');
+  finishFetch();
+  await failed;
+  assert.equal(await chosen, 'review');
+  assert.deepEqual(order, ['fetch settled', 'prepare selection']);
+});
+
 test('a stop before a queued step prevents it from running', async () => {
  let release; const gate = new Promise(r => release = r); let ran = false; let id;
  const pending = trackOperation('/queue', 'planning', p => id = p.id, async () => { await gate; operationCheckpoint(); ran = true; });

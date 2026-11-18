@@ -1362,6 +1362,7 @@ app.whenReady().then(async () => {
   const localTip = at(copies, 'rev-parse', 'HEAD');
   fs.writeFileSync(path.join(copiesWriter, 'remote.txt'), 'remote'); at(copiesWriter, 'add', '.'); at(copiesWriter, 'commit', '-qm', 'remote'); at(copiesWriter, 'push', '-q');
   const remoteTip = at(copiesWriter, 'rev-parse', 'HEAD'); at(copies, 'fetch', '-q');
+  at(copies, 'branch', '--set-upstream-to=origin/main', 'main');
   restored = { projects: [await service.getSnapshot(copies)], unavailable: [], order: [copies], activePath: copies };
   await win.loadFile(path.join(root, 'dist/index.html'));
   await waitFor(`document.querySelector('.ref-tag.remote')?.textContent === 'origin/main'`);
@@ -1370,14 +1371,19 @@ app.whenReady().then(async () => {
   assert.equal(await js(`document.querySelectorAll('.commit-row .ref-tag.head .lucide-check').length`), 1);
   assert.equal(await js(`Boolean(document.querySelector('.ref-tag.head .branch-sync-badge.diverged .lucide-git-fork'))`), true, 'Divergence stays visible on the current branch');
   await capture('copies-diverged');
+  await js(`[...document.querySelectorAll('.toolbar-tools button')].find(node => node.textContent === 'Pull').click()`);
+  await waitFor(`document.querySelector('#sync-title')`);
+  assert.match(await js(`document.querySelector('.sync-modal').innerText`), /main tiene 1 commit.*origin\/main tiene 1 commit/);
+  assert.equal(at(copies, 'rev-parse', 'HEAD'), localTip);
+  await js(`document.querySelector('.sync-modal .ghost-button').click()`);
   await js(`document.querySelector('.ref-tag.remote').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
   await waitFor(`document.querySelector('#sync-title')`);
-  assert.equal(await js(`document.querySelector('.input-modal select').value`), 'origin/main');
+  assert.match(await js(`document.querySelector('.sync-modal .recovery-option').innerText`), /Actualizar main dando prioridad a origin\/main/);
   await js(`document.querySelector('.input-modal .ghost-button').click()`);
   await js(`document.querySelector('.ref-tag.head').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
   await waitFor(`document.querySelector('#sync-title')`);
-  await js(`(() => { const preference = document.querySelector('.input-modal label:last-of-type select'); preference.value = 'remote'; preference.dispatchEvent(new Event('change', { bubbles: true })); })()`);
-  await js(`document.querySelector('.input-modal .primary-button').click()`);
+  assert.equal(await js(`document.querySelectorAll('.sync-modal select').length`), 0, 'The clicked copies are already known');
+  await js(`document.querySelector('.sync-modal .recovery-option').click()`);
   await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
   assert.equal(at(copies, 'rev-parse', 'HEAD'), localTip, 'Remote double click prepares an update for review');
   assert.equal(await js(`Boolean(document.querySelector('.plan-stale'))`), false, 'Fetched facts are shown beside the prepared plan');
@@ -1390,6 +1396,29 @@ app.whenReady().then(async () => {
   assert.equal(at(copies, 'rev-parse', 'origin/main'), remoteTip);
   assert.equal(await js(`Boolean(document.querySelector('.ref-tag.head .branch-sync-badge .lucide-arrow-up-from-line'))`), true, 'Outgoing commits stay visible on the current branch');
   await capture('copies-updated');
+
+  // The first pull can discover new divergence. Its recovery card must lead to a working plan as well.
+  const beforeRecovery = at(copies, 'rev-parse', 'HEAD');
+  const previousRecoverCalls = recoverCalls;
+  fs.writeFileSync(path.join(copiesWriter, 'local.txt'), 'remote edit');
+  at(copiesWriter, 'add', 'local.txt');
+  at(copiesWriter, 'commit', '-qm', 'edit the same file remotely');
+  at(copiesWriter, 'push', '-q');
+  await js(`[...document.querySelectorAll('.toolbar-tools button')].find(node => node.textContent === 'Pull').click()`);
+  const confirmPlan = '.plan-card .plan-actions .primary-button';
+  const divergenceCard = '.recovery-card[data-kind="divergent"]';
+  await waitFor(`document.querySelector('${confirmPlan}, ${divergenceCard}')`);
+  await js(`document.querySelector('${confirmPlan}')?.click()`);
+  await waitFor(`document.querySelector('${divergenceCard} .recovery-option')`);
+  assert.equal(recoverCalls, previousRecoverCalls);
+  await js(`document.querySelector('${divergenceCard} .recovery-option').click()`);
+  await waitFor(`document.querySelector('${confirmPlan}')`);
+  assert.equal(at(copies, 'rev-parse', 'HEAD'), beforeRecovery);
+  await js(`document.querySelector('${confirmPlan}').click()`);
+  await waitFor(`!document.querySelector('${confirmPlan}') && !document.querySelector('.branch-sync-badge.diverged')`);
+  assert.equal(at(copies, 'rev-parse', 'HEAD^1'), beforeRecovery);
+  assert.equal(at(copies, 'rev-parse', 'HEAD^2'), at(copiesWriter, 'rev-parse', 'HEAD'));
+  assert.equal(at(copies, 'show', 'HEAD:local.txt'), 'remote edit');
 
   win.destroy();
   console.log('PASS: worktree list, safe opening with separate edits and tree tab badges; unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, a work overview separating edited, saved, integrated and published work with one next step, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, saving without secret warnings, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');

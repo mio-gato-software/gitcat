@@ -709,7 +709,7 @@ export type RecoveryActionKind =
 
 /** Which answer an action is, so the interface can name it and say what it costs. */
 export type RecoveryOption =
-  | "fetch" | "pull" | "publish" | "merge_upstream" | "rebase_upstream" | "push_no_verify" | "abort" | "continue";
+  | "fetch" | "pull" | "publish" | "merge_upstream" | "prefer_remote" | "rebase_upstream" | "push_no_verify" | "abort" | "continue";
 
 export type RecoveryAction = {
   kind: RecoveryActionKind;
