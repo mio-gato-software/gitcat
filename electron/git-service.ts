@@ -21,7 +21,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, readlinkSync, accessSync, constants, copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync, type Stats } from "node:fs";
 import { signalProcessTree } from "./process-tree.js";
 import { homedir, tmpdir } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
 import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
 import { parseWorktrees, parseWorktreeList } from "./worktrees.js";
@@ -988,7 +988,7 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
         if (args.account && args.account !== args.activeAccount) steps.push(`gh auth switch --hostname ${args.host} --user ${args.account}`);
         steps.push(`GH_HOST=${args.host} gh repo create ${args.owner}/${args.name} --private`);
       }
-      steps.push(`git -C ${JSON.stringify(args.source)} remote add ${args.remote} ${args.remoteUrl}`);
+      steps.push(`git -C ${JSON.stringify(args.source)} remote ${args.replaceRemote === "true" ? "set-url" : "add"} ${args.remote} ${args.remoteUrl}`);
       if (args.push === "true") steps.push(`git -C ${JSON.stringify(args.source)} push -u ${args.remote} HEAD`);
       if (args.provider === "github" && args.account && args.account !== args.activeAccount) steps.push(`gh auth switch --hostname ${args.host} --user ${args.activeAccount}`);
       return steps.join(" && ");
@@ -1329,6 +1329,32 @@ async function identityEffects(snapshot: RepoSnapshot, args: Record<string, stri
   ];
 }
 
+async function readHostedRemoteReplacement(cwd: string, remote: string) {
+  const read = (args: string[]) => readGit(cwd, args);
+  const [pushUrls, mirror, names] = await Promise.all([
+    read(["config", "--null", "--get-all", `remote.${remote}.pushurl`]),
+    read(["config", "--type=bool", "--get", `remote.${remote}.mirror`]),
+    checkedGit(cwd, ["remote"])
+  ]);
+  if ([pushUrls, mirror].some(result => result.code !== 0 && result.code !== 1)) {
+    throw new Error("Git could not verify the remote configuration. Review it before creating the repository.");
+  }
+  if (pushUrls.code === 0) throw new Error(`Remote "${remote}" has a separate push destination. Choose a new remote name.`);
+  if (mirror.stdout.trim() === "true") throw new Error(`Remote "${remote}" mirrors references. Choose a new remote name.`);
+  if (!names.split("\n").includes(remote)) return undefined;
+
+  const [urls, local] = await Promise.all([
+    readRemoteUrls(read, remote, "fetch"),
+    read(["config", "--local", "--no-includes", "--null", "--get-all", `remote.${remote}.url`])
+  ]);
+  const raw = local.code === 0 ? local.stdout.split("\0").slice(0, -1) : [];
+  if (urls.length > 1 || raw.length > 1) throw new Error(`Remote "${remote}" has multiple URLs. Choose a new remote name.`);
+  const [rawUrl] = raw;
+  if (!rawUrl) throw new Error(`Remote "${remote}" has no editable URL in this repository. Choose a new remote name.`);
+  const [effectiveUrl] = urls;
+  return { rawUrl, effectiveUrl, binding: createHash("sha256").update(JSON.stringify([rawUrl, effectiveUrl])).digest("hex") };
+}
+
 async function prepareHostedRepository(snapshot: RepoSnapshot, input: RepositoryFields, source: ActionPlan["source"]): Promise<RepositoryPreparation> {
   const validation = validateRepositoryFields(input);
   if (validation.issues.length) return { blockers: validation.issues.map((issue) => ({ field: `repository.${issue.field}`, problem: issue.problem })) };
@@ -1431,11 +1457,14 @@ async function prepareHostedRepository(snapshot: RepoSnapshot, input: Repository
     }
   }
 
-  const remoteResult = await readGit(sourcePath, ["remote", "get-url", remote]);
-  const remoteExists = remoteResult.code === 0;
-  if (remoteExists && await optionalGit(sourcePath, ["config", "--get-all", `remote.${remote}.pushurl`])) return blocked(`remote "${remote}" has a separate push destination. Choose a new remote name so existing publishing settings are preserved`, "repository.remote");
-  if (remoteExists && !replaceRemote) {
-    return blocked(`the local remote "${remote}" already points to ${remoteResult.stdout.trim()}; replacing it requires the user to say so explicitly`, "repository.replaceRemote");
+  let existingRemote: Awaited<ReturnType<typeof readHostedRemoteReplacement>>;
+  try {
+    existingRemote = await readHostedRemoteReplacement(sourcePath, remote);
+  } catch (error) {
+    return blocked(error instanceof Error ? error.message : String(error), "repository.remote");
+  }
+  if (existingRemote && !replaceRemote) {
+    return blocked(`the local remote "${remote}" already points to ${displayPushAddress(existingRemote.effectiveUrl)}; replacing it requires the user to say so explicitly`, "repository.replaceRemote");
   }
   if (push) {
     if (!isBranchNameSafe(sourceSnapshot.currentBranch) || sourceSnapshot.currentBranch === "HEAD") return blocked("Choose a local branch before publishing.");
@@ -1443,7 +1472,7 @@ async function prepareHostedRepository(snapshot: RepoSnapshot, input: Repository
     try {
       await verifyInitialPushUrl(read, remoteUrl);
       if (hosting && hosting.location.gitUrl !== remoteUrl) await verifyInitialPushUrl(read, hosting.location.gitUrl);
-      await readPushDestination(read, sourceSnapshot, remoteExists ? remote : remoteUrl, sourceSnapshot.currentBranch);
+      await readPushDestination(read, sourceSnapshot, existingRemote ? remote : remoteUrl, sourceSnapshot.currentBranch);
     } catch (error) {
       return blocked(error instanceof Error ? error.message : String(error), "repository.remote");
     }
@@ -1452,15 +1481,15 @@ async function prepareHostedRepository(snapshot: RepoSnapshot, input: Repository
   const args = {
     name, owner, host, protocol, sshHost, remoteUrl, visibility: "private", source: sourcePath, remote,
     account, activeAccount, provider, namespaceId, ...(hosting?{connectionId:hosting.connectionId,serviceUrl:hosting.location.baseUrl}:{}),
-    push: String(push), replaceRemote: String(replaceRemote && remoteExists),
-    existingRemoteHash: remoteExists ? createHash("sha256").update(remoteResult.stdout.trim()).digest("hex") : ""
+    push: String(push), replaceRemote: String(replaceRemote && Boolean(existingRemote)),
+    existingRemoteHash: existingRemote?.binding ?? ""
   };
   const effects = [
     `create: ${host}/${owner}/${name} (private)`,
     `local: ${sourcePath}`,
     `${cli} account: ${hosting?.label??account}${account === activeAccount ? " (active)" : ` (temporarily active instead of ${activeAccount}, restored afterwards)`}`,
     ...(protocol === "ssh" ? [`ssh identity: ${sshHost} → ${owner}`] : []),
-    `remote ${remote}: ${remoteExists ? `${remoteResult.stdout.trim()} → ${remoteUrl}` : remoteUrl}`,
+    `remote ${remote}: ${existingRemote ? `${displayPushAddress(existingRemote.effectiveUrl)} → ${remoteUrl}` : remoteUrl}`,
     `push: ${push ? `${remote} HEAD` : "no"}`,
     ...(hosting?[`Initial publication uses the verified saved account over HTTPS: ${hosting.location.gitUrl}. Unsaved files stay local.`]:[])
   ];
@@ -3823,22 +3852,23 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale): P
     if (!/HTTP 404|not found/i.test(`${existing.stderr}\n${existing.stdout}`)) throw new Error(localized(language, "No se pudo confirmar que el repositorio remoto siga disponible.", "Could not confirm that the remote repository is still available."));
   }
 
-  const currentRemote = await readGit(source, ["remote", "get-url", plan.args.remote]);
-  if (currentRemote.code !== 0 && plan.args.existingRemoteHash) throw new Error("The remote was removed after validation. Prepare the action again.");
-  if (currentRemote.code === 0 && plan.args.replaceRemote !== "true") throw new Error(localized(language, `El remoto “${plan.args.remote}” existe y no se autorizó reemplazarlo.`, `Remote “${plan.args.remote}” exists and replacing it was not authorized.`));
-  if (currentRemote.code === 0 && createHash("sha256").update(currentRemote.stdout.trim()).digest("hex") !== plan.args.existingRemoteHash) throw new Error(localized(language, `El remoto “${plan.args.remote}” cambió desde la validación.`, `Remote “${plan.args.remote}” changed after validation.`));
-  const localUrls = currentRemote.code === 0
-    ? await readGit(source, ["config", "--local", "--no-includes", "--null", "--get-all", `remote.${plan.args.remote}.url`])
-    : undefined;
-  const previousRemoteUrl = localUrls?.code === 0 ? localUrls.stdout.split("\0")[0] : "";
-  if (currentRemote.code === 0 && !previousRemoteUrl) throw new Error("This remote has no editable URL in the repository configuration. Choose a new remote name and prepare again.");
-  if (currentRemote.code === 0 && await optionalGit(source, ["config", "--get-all", `remote.${plan.args.remote}.pushurl`])) throw new Error("The remote now has a separate push destination. Choose a new remote name and prepare again.");
+  const checkRemote = async () => {
+    const existing = await readHostedRemoteReplacement(source, plan.args.remote);
+    if ((existing?.binding ?? "") !== plan.args.existingRemoteHash || (existing && plan.args.replaceRemote !== "true")) {
+      throw new Error(localized(language,
+        `El remoto “${plan.args.remote}” cambió desde la revisión. Prepara la acción de nuevo.`,
+        `Remote “${plan.args.remote}” changed after review. Prepare the action again.`));
+    }
+    return existing;
+  };
+  const currentRemote = await checkRemote();
+  const previousRemoteUrl = currentRemote?.rawUrl;
   const read = (args: string[]) => readGit(source, args);
   const verifyInitialPush = async (configuredRemote?: string) => {
     await verifyInitialPushUrl(read, plan.args.remoteUrl, configuredRemote);
     if (hosting && hosting.location.gitUrl !== plan.args.remoteUrl) await verifyInitialPushUrl(read, hosting.location.gitUrl);
     await readPushDestination(read, { ...snapshot, remotes: configuredRemote ? [...snapshot.remotes, configuredRemote] : snapshot.remotes },
-      configuredRemote ?? (currentRemote.code === 0 ? plan.args.remote : plan.args.remoteUrl), snapshot.currentBranch);
+      configuredRemote ?? (currentRemote ? plan.args.remote : plan.args.remoteUrl), snapshot.currentBranch);
   };
   if (plan.args.push === "true") {
     if (!isBranchNameSafe(snapshot.currentBranch) || snapshot.currentBranch === "HEAD") throw new Error("Choose a local branch before publishing.");
@@ -3862,6 +3892,7 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale): P
       const created = JSON.parse(createOutput);
       if (created.path_with_namespace !== `${plan.args.owner}/${plan.args.name}` || created.visibility !== "private") throw new Error("GitLab returned unexpected project details. Check the project before connecting or publishing it.");
     }
+    await checkRemote();
     await reportedGit(source, ["remote", previousRemoteUrl ? "set-url" : "add", plan.args.remote, plan.args.remoteUrl]);
     remoteChanged = true;
     let pushOutput = '';
