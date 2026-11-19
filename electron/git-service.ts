@@ -1,4 +1,6 @@
 import { branchArguments, isBranchNameSafe, parseBranchOperation, validateBranchOperation, type BranchOperation } from "./branch-operation.js";
+import { displayPushAddress, pushRepository, readPushDestination } from "./push-destination.js";
+import { walkPlanSteps } from "../shared/plan-summary.js";
 import { syncDestinations } from "../shared/remote-sync.js";
 import { PracticeProjects } from "./practice-project.js";
 import { previewReview, publishReview, type ReviewTools } from "./share-review.js";
@@ -1966,7 +1968,7 @@ async function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot, locale
   const steps = await writeCommitMessages(proposed as PlanStep[], snapshot, locale, notes);
   if ("blocker" in steps) return asking(steps.blocker, plan.summary);
   const effects = renameEffects(steps, snapshot, locale) ?? [];
-  const draft = sequenceDraft(steps, plan.rationale || "", effects.length ? effects : undefined, locale);
+  const draft = sequenceDraft(await bindPushDestinations(snapshot, steps), plan.rationale || "", effects.length ? effects : undefined, locale);
   return {
     ...draft,
     summary: plan.summary || draft.summary,
@@ -2084,6 +2086,19 @@ async function prepareModelPlan(
 
 function bindPlan(snapshot: RepoSnapshot, draft: PlanDraft): ActionPlan {
   return { ...draft, id: randomUUID(), repoPath: snapshot.path, head: snapshot.head, stateId: snapshot.stateId };
+}
+
+async function bindPushDestinations(snapshot: RepoSnapshot, steps: PlanStep[]) {
+  const bound: PlanStep[] = [];
+  for (const { step, on } of walkPlanSteps(steps, snapshot.currentBranch)) {
+    const target = pushRepository(step);
+    if (target === undefined) { bound.push(step); continue; }
+    const pushDestination = await readPushDestination(
+      args => runGit(snapshot.path, args), { remotes: snapshot.remotes, currentBranch: on }, target
+    );
+    bound.push({ ...step, pushDestination });
+  }
+  return bound;
 }
 
 /** A plan that says which files the model could not read while preparing it. */
@@ -2712,6 +2727,8 @@ function isUnattended(step: PlanStep) {
 
 function operationDraft(operation: Operation, args: Record<string, string>, snapshot?: RepoSnapshot, argv: string[] = [], locale: Locale = "es"): PlanDraft {
   const branch = parseBranchOperation(operation, args, locale);
+  // The preview can include a URL supplied in a raw push. Keep its credentials out of the copy.
+  const displayArgs = argv[0] === "push" ? argv.map(token => token.includes("://") ? displayPushAddress(token) : token) : argv;
   const details: Partial<Record<Operation, [string, string, ActionPlan["risk"]]>> = {
     sync_remote: [args.mode === "prefer_remote" ? localized(locale, `Unir ${args.name} con ${args.ref} dando prioridad al remoto`, `Merge ${args.ref} into ${args.name}, preferring remote edits`) : localized(locale, `Unir ${args.name} con ${args.ref}`, `Join ${args.name} with ${args.ref}`), localized(locale, "Trae los commits remotos y conserva todos tus commits locales. Si ambas copias avanzaron, crea una fusión que puede requerir resolver conflictos.", "Brings in remote commits and keeps all your local commits. If both copies advanced, creates a merge that may need conflict resolution."), "high"],
     stash_push: [localized(locale, "Apartar los cambios (stash)", "Set changes aside (stash)"), localized(locale, "Guarda las versiones preparadas, los cambios sin preparar y los archivos nuevos en un stash local; limpia esos cambios de los archivos para seguir trabajando. Los archivos ignorados permanecen en su sitio.", "Saves staged versions, unstaged changes and new files in a local stash, then clears those changes from the files so you can keep working. Ignored files stay in place."), "medium"],
@@ -2743,14 +2760,14 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     add_remote: [localized(locale, `Conectar este repositorio con ${args.url} como ${args.name}`, `Connect this repository to ${args.url} as ${args.name}`), localized(locale, "Añade la dirección donde se puede publicar este repositorio. Todavía no se envía nada: publicar es otro paso que confirmas aparte.", "Adds the address where this repository can be published. Nothing is sent yet: publishing is a separate step you confirm."), "medium"],
     ignore_path: [localized(locale, `Ignorar los cambios futuros de ${args.path}`, `Ignore future changes to ${args.path}`), localized(locale, "Añade una línea a .gitignore para que Git deje de listar este archivo nuevo. El archivo se queda en tu disco tal como está.", "Adds one line to .gitignore so Git stops listing this new file. The file stays on your disk exactly as it is."), "medium"],
     git_command: [
-      localized(locale, `Ejecutar ${buildCommand("git_command", {}, argv)}`, `Run ${buildCommand("git_command", {}, argv)}`),
+      localized(locale, `Ejecutar ${buildCommand("git_command", {}, displayArgs)}`, `Run ${buildCommand("git_command", {}, displayArgs)}`),
       localized(locale, "Comando Git propuesto por el asistente: se ejecuta tal cual, sin shell, y solo tras tu confirmación.", "Git command proposed by the assistant: it runs as-is, without a shell, only after your confirmation."),
       "high"
     ]
   };
   const detail = details[operation];
   if (!detail || operation === "none") return refused(localized(locale, "La operación solicitada no está permitida.", "The requested operation is not allowed."));
-  const command = branch ? ["git", ...branchArguments(branch)].map(quoteToken).join(" ") : buildCommand(operation, args, argv);
+  const command = branch ? ["git", ...branchArguments(branch)].map(quoteToken).join(" ") : buildCommand(operation, args, displayArgs);
   const steps: PlanStep[] = [{ operation, args, ...(argv.length ? { argv } : {}), command, summary: detail[0], risk: detail[2] }];
   return sequenceDraft(steps, detail[1], renameEffects(steps, snapshot), locale);
 }
@@ -2896,7 +2913,11 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
         "Tus cambios actuales en otros archivos se conservan. El stash se recupera en la rama actual y solo se elimina si termina bien.",
         "Your current changes in other files are kept. The stash is restored onto the current branch and removed only after success.")] : [])]
     : [];
-  return bindPlan(snapshot, effects.length ? { ...draft, effects: [...(draft.effects ?? []), ...effects] } : draft);
+  return bindPlan(snapshot, {
+    ...draft,
+    steps: await bindPushDestinations(snapshot, draft.steps),
+    ...(effects.length ? { effects: [...(draft.effects ?? []), ...effects] } : {})
+  });
 }
 
 /**
@@ -3562,6 +3583,18 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
 }
 
 async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: RepoSnapshot, branch: BranchOperation | undefined, locale?: Locale): Promise<string> {
+  const pushTarget = pushRepository(step);
+  if (pushTarget !== undefined) {
+    const current = await readPushDestination(args => runGit(cwd, args), snapshot, pushTarget).catch(error => {
+      if (error instanceof OperationCancelled) throw error;
+      return undefined;
+    });
+    if (!current || current.binding !== step.pushDestination?.binding) {
+      throw new StalePlanError(localized(locale,
+        "El destino de publicación cambió o ya no se puede comprobar. Revisa y confirma el push de nuevo.",
+        "The publishing destination changed or can no longer be verified. Review and confirm the push again."));
+    }
+  }
   if (branch) return reportedGit(cwd, branchArguments(branch));
   const { args } = step;
   switch (step.operation) {
@@ -3715,6 +3748,7 @@ async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutc
       const branch = index === 0 ? firstBranch : validateStep(step, snapshot, language);
       outcomes[index] = { ...outcomes[index], status: "completed", output: await runStep(cwd, step, plan, snapshot, branch, language) };
     } catch (error) {
+      if (index === 0 && step.pushDestination && error instanceof StalePlanError) throw error;
       const detail = error instanceof Error ? error.message : localized(language, "Git no pudo completar la acción.", "Git could not complete the action.");
       outcomes[index] = { ...outcomes[index], status: "failed", output: detail };
       operationPhase("inspecting");
@@ -3847,7 +3881,7 @@ export async function prepareRetry(cwd: string, record: FailedPlanRecord, locale
       "A Git operation is still half-finished. Finish or abort it first; what already ran stays done and is not repeated."));
   }
   const start = record.outcomes.findIndex((outcome) => outcome.status !== "completed");
-  const remaining = record.plan.steps.slice(start);
+  const remaining = await bindPushDestinations(snapshot, record.plan.steps.slice(start));
   const sync = remaining.find(step => step.operation === "sync_remote");
   if (sync) return prepareRemoteSync(snapshot, { ref: sync.args.ref, name: sync.args.name, side: sync.args.mode === "prefer_remote" ? "theirs" : "" }, language);
   const completed = record.outcomes.slice(0, start).map((outcome) => outcome.summary);
@@ -4135,7 +4169,12 @@ const reviewTools: ReviewTools = {
   publish:async preview=>{
     const snapshot=await getSnapshot(preview.repoPath);
     const argv=['push',preview.request.remote,`${preview.headHash}:refs/heads/${preview.request.head}`];
-    const plan=bindPlan(snapshot,sequenceDraft([stepFrom('git_command',{},argv,'en')!],'Publish the reviewed branch',undefined,'en'));
+    const steps=await bindPushDestinations(snapshot,[stepFrom('git_command',{},argv,'en')!]);
+    const urls=steps[0].pushDestination?.urls;
+    if (urls?.length!==1 || urls[0]!==displayPushAddress(preview.remoteUrl)) {
+      throw new Error('The publishing destination changed. Review sharing again; nothing was published.');
+    }
+    const plan=bindPlan(snapshot,sequenceDraft(steps,'Publish the reviewed branch',undefined,'en'));
     if(preview.hosting)plan.hostingConnection=preview.hosting;
     const result=await executePlan(preview.repoPath,plan,'en'); if(result.error)throw new Error(result.error);
   },

@@ -3638,7 +3638,7 @@ function PlanCard({ plan, snapshot, onApply, onDismiss, busy }: { plan: ActionPl
   return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? t("interpretedByProvider") : t("directAction")}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? t("dismissQuestion") : t("dismissPlan")}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.withheld && plan.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(plan.withheld, t) })}</p>}
     {plan.allowed && <PlanGoal plan={plan} snapshot={snapshot} />}
     {plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}
-    {push && <PublishReadiness repoPath={plan.repoPath} remote={push.args.setUpstream} />}
+    {push && <PublishReadiness repoPath={plan.repoPath} remote={push.pushDestination?.remote ?? push.args.setUpstream} />}
     {plan.allowed && plan.steps.length > 1 && <ol className="plan-steps">{plan.steps.map((step, index) => <li key={`${step.command}-${index}`}><span className="step-summary">{step.summary}</span></li>)}</ol>}
     {(plan.allowed || plan.repositoryPlan) && <details className="technical-details plan-technical">
       <summary><TerminalSquare size={11} /> {t("technicalDetails")}</summary>

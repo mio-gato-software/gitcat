@@ -217,7 +217,7 @@ test("push con --no-verify llega al comando cuando el usuario lo autorizó", asy
   assert.equal(local("rev-parse", "origin/main").trim(), local("rev-parse", "main").trim(), "el push llegó al remoto");
 });
 
-test("un push sin upstream se explica y ofrece publicar la rama por primera vez", async () => {
+test("un push sin upstream se explica y ofrece publicar la rama por primera vez", async (t) => {
   const origin = mkdtempSync(join(tmpdir(), "gitcat-origin-upstream-"));
   execFileSync("git", ["init", "--bare", "-b", "main"], { cwd: origin, encoding: "utf8" });
   const work = mkdtempSync(join(tmpdir(), "gitcat-no-upstream-"));
@@ -258,6 +258,15 @@ test("un push sin upstream se explica y ofrece publicar la rama por primera vez"
   assert.match(requests[0].instructions, /--set-upstream/);
   assert.equal(recovery.steps[0].command, "git push --set-upstream origin feature/no-upstream");
   assert.equal(recovery.requiresConfirmation, true);
+  assert.deepEqual(recovery.steps[0].pushDestination.urls, [origin]);
+
+  // A free-form push from the assistant uses the same confirmation boundary as the Push button.
+  const other = mkdtempSync(join(tmpdir(), "gitcat-push-other-"));
+  t.after(() => rmSync(other, { recursive: true, force: true }));
+  execFileSync("git", ["init", "--bare", "-q", other]);
+  local("remote", "set-url", "--push", "origin", other);
+  await assert.rejects(service.executePlan(work, recovery, "en"), /publishing destination changed/);
+  assert.equal(execFileSync("git", ["--git-dir", other, "for-each-ref", "refs/heads"], { encoding: "utf8" }), "");
 });
 
 test("git_command ejecuta el comando completo que propone el modelo, sin shell", async () => {
