@@ -3781,7 +3781,7 @@ function validateHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
   if (plan.repositoryPlan.remoteUrl !== remoteUrl || plan.repositoryPlan.localPath !== source || plan.repositoryPlan.host !== host || plan.repositoryPlan.owner !== owner || plan.repositoryPlan.repository !== name || plan.repositoryPlan.protocol !== protocol || hostingProvider(host, plan.repositoryPlan.provider) !== provider) throw new Error(localized(language, "El plan JSON no coincide con los argumentos de ejecución.", "The JSON plan does not match the execution arguments."));
 }
 
-async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
+async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale): Promise<StepRunResult> {
   const language = normalizeLocale(locale);
   validateHostedRepositoryPlan(plan, language);
   const source = realpathSync.native(plan.args.source);
@@ -3864,15 +3864,27 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
     }
     await reportedGit(source, ["remote", previousRemoteUrl ? "set-url" : "add", plan.args.remote, plan.args.remoteUrl]);
     remoteChanged = true;
-    let pushOutput='';
+    let pushOutput = '';
+    let postActionIssue: PostActionIssue | undefined;
     if(plan.args.push==='true'){
       if(hosting){
         const facts=await nativeRepositoryFacts((url,method,body)=>hostingConnections().request(hosting.connectionId,url,method,body),hosting.location);
         const bound={...hosting,repositoryId:facts.id};
         await verifyInitialPush(plan.args.remote);
         pushOutput=await nativeGit(source,['push',plan.args.remote,`${snapshot.head}:refs/heads/${snapshot.currentBranch}`],bound);
-        await nativeGit(source,['fetch',plan.args.remote,`+refs/heads/${snapshot.currentBranch}:refs/remotes/${plan.args.remote}/${snapshot.currentBranch}`],bound);
-        await reportedGit(source,['branch',`--set-upstream-to=${plan.args.remote}/${snapshot.currentBranch}`,snapshot.currentBranch]);
+        const upstream = `${plan.args.remote}/${snapshot.currentBranch}`;
+        try {
+          await nativeGit(source, ['fetch', plan.args.remote, `+refs/heads/${snapshot.currentBranch}:refs/remotes/${upstream}`], bound);
+          await reportedGit(source, ['branch', `--set-upstream-to=${upstream}`, snapshot.currentBranch]);
+        } catch (error) {
+          postActionIssue = {
+            kind: "upstream_setup",
+            detail: localized(language,
+              `La rama ${snapshot.currentBranch} ya se publicó y el remoto ${plan.args.remote} quedó conectado. Falló el seguimiento de ${upstream}. Configura el seguimiento antes de sincronizar.`,
+              `Branch ${snapshot.currentBranch} was published and remote ${plan.args.remote} is connected. Tracking setup for ${upstream} failed. Set up tracking before syncing.`)
+              + `\n${error instanceof Error ? error.message : String(error)}`
+          };
+        }
       } else {
         await verifyInitialPush(plan.args.remote);
         pushOutput = await reportedGit(source, pushArguments({
@@ -3891,7 +3903,8 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
       { provider, ...(hosting?{connectionId:hosting.connectionId}:{}), host: plan.args.host, owner: plan.args.owner, protocol: plan.args.protocol as GitProtocol, remote: plan.args.remote },
       now
     ));
-    return [native?`Created private repository ${plan.args.host}/${plan.args.owner}/${plan.args.name}.`:createOutput, pushOutput].filter(Boolean).join("\n");
+    const output = [native?`Created private repository ${plan.args.host}/${plan.args.owner}/${plan.args.name}.`:createOutput, pushOutput].filter(Boolean).join("\n");
+    return { output, ...(postActionIssue ? { postActionIssue } : {}) };
   } catch (error) {
     if (remoteChanged) await reportedGit(source, previousRemoteUrl ? ["remote", "set-url", "--", plan.args.remote, previousRemoteUrl] : ["remote", "remove", plan.args.remote]).catch(() => undefined);
     const message = error instanceof Error ? error.message : localized(language, "gh no pudo crear el repositorio.", "gh could not create the repository.");

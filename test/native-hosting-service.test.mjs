@@ -23,8 +23,12 @@ mock.method(cp,'spawn',(executable,args,options)=>{
    assert.ok(!args.join(' ').includes(current.token));current.gitCalls.push(operation);
   }
   if(current.failPush&&operation==='push')return originalSpawn(process.execPath,['-e',"process.stderr.write('protected branch');process.exit(1)"],options);
+  if(current.failUpstream==='fetch'&&operation==='fetch'&&current.gitCalls.includes('push'))return originalSpawn(process.execPath,['-e',"process.stderr.write('Could not fetch the published branch');process.exit(1)"],options);
   if(current.localPushOnly&&operation==='push')return originalSpawn(executable,args,{...options,env:{...options.env,GIT_ALLOW_PROTOCOL:'file'}});
   return originalSpawn(executable,['-c',`url.${current.bare}.insteadOf=${current.location.gitUrl}`,...args],options);
+ }
+ if(current?.failUpstream==='branch'&&/^git(?:\.exe)?$/i.test(basename(executable))&&args[0]==='branch'&&args.some(arg=>arg.startsWith('--set-upstream-to='))){
+  return originalSpawn(process.execPath,['-e',"process.stderr.write('Could not configure upstream');process.exit(1)"],options);
  }
  return originalSpawn(executable,args,options);
 });
@@ -75,6 +79,28 @@ test('sharing with a saved account rejects a rewrite of its effective HTTPS push
  assert.equal(git(alternate,'branch','--list','work'),'');
  assert.equal(state.reviews.length,0);
 });
+
+for (const command of ['fetch', 'branch']) {
+ test(`initial publication stays completed if upstream setup fails at ${command}`, async()=>{
+  const state=await fixture('bitbucket_dc');
+  state.exists=false;
+  git(state.path,'remote','remove','origin');
+  const args={provider:'bitbucket_dc',connectionId:state.connectionId,host:new URL(state.baseUrl).host,owner:state.location.owner,name:'repo',source:state.path,protocol:'https'};
+  const plan=await service.prepareOperation(state.path,'github_create_repo',args,'en');
+  state.failUpstream=command;
+
+  const result=await service.executePlan(state.path,plan,'en');
+  assert.deepEqual(result.outcomes.map(outcome=>outcome.status),['completed']);
+  assert.equal(result.postActionIssue?.kind,'upstream_setup');
+  assert.match(result.error,/published.*tracking/i);
+  assert.equal(state.exists,true);
+  assert.equal(git(state.path,'remote','get-url','origin'),state.location.gitUrl);
+  assert.equal(git(state.path,'rev-parse','HEAD'),git(state.path,'--git-dir',state.bare,'rev-parse','work'));
+  assert.throws(()=>git(state.path,'rev-parse','@{upstream}'));
+  assert.equal(state.gitCalls.filter(call=>call==='push').length,1);
+  assert.equal(readFileSync(join(state.path,'unsaved.txt'),'utf8'),'keep local');
+ });
+}
 
 test('a partial review-creation failure keeps publication visible and retry creates only the missing review',async()=>{
  const state=await fixture('bitbucket'),request={provider:'bitbucket',connectionId:state.connectionId,remote:'origin',head:'work',base:'main',title:'Review',body:''};
