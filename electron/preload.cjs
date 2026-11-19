@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld("gitcat", {
   getSwitchWork: (path, target) => ipcRenderer.invoke("switch-work:read", path, target),
   prepareSwitchWork: (path, request, locale) => ipcRenderer.invoke("switch-work:prepare", path, request, locale),
   getActivityHistory: (path) => ipcRenderer.invoke("activity:list", path),
+  repairActivityHistory: (path) => ipcRenderer.invoke("activity:repair", path),
   setActivityRetention: (days) => ipcRenderer.invoke("activity:retention", days),
   clearActivityHistory: (path) => ipcRenderer.invoke("activity:clear", path),
   prepareHistoryRecovery: (path, id, mode, locale) => ipcRenderer.invoke("activity:recover", path, id, mode, locale),

@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, renameSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, renameSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 registerHooks({resolve(s,c,n){return s==='electron'?{url:new URL('./helpers/electron-stub.mjs',import.meta.url).href,shortCircuit:true}:n(s,c);}});
 const { ActivityHistory }=await import('../dist-electron/electron/activity-history.js');
 const service=await import('../dist-electron/electron/git-service.js');
+const { app } = await import('./helpers/electron-stub.mjs');
 function fixture(t) {
  const path=mkdtempSync(join(tmpdir(),'gitcat-history-'));t.after(()=>rmSync(path,{recursive:true,force:true}));
  const git=(...args)=>execFileSync('git',args,{cwd:path,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
@@ -120,6 +121,61 @@ test('journal failure before execution leaves Git and local edits untouched',asy
  await assert.rejects(service.executePlan(path,plan,'en'),/simulated disk error/);
  assert.equal(git('rev-parse','HEAD'),head);
  assert.equal(readFileSync(join(path,'file'),'utf8'),'still unsaved');
+});
+
+test('a conflict resolution keeps its applied outcome when the activity journal cannot finish', async t => {
+  const { path, git } = fixture(t);
+  git('switch', '-qc', 'incoming');
+  writeFileSync(join(path, 'file'), 'incoming\n');
+  git('commit', '-qam', 'incoming changes');
+  git('switch', '-q', 'main');
+  writeFileSync(join(path, 'file'), 'local\n');
+  git('commit', '-qam', 'local changes');
+  assert.throws(() => git('merge', 'incoming'));
+  const guide = await service.describeConflicts(path, 'en');
+  const finish = t.mock.method(ActivityHistory.prototype, 'finish', () => { throw new Error('disk unavailable'); });
+
+  const result = await service.applyConflictChoices(path, guide, [{ path: 'file', choice: 'theirs' }], 'en');
+  assert.equal(result.complete, true);
+  assert.equal(result.historyWarning, true);
+  assert.deepEqual(result.outcomes.map(outcome => [outcome.path, outcome.status]), [['file', 'applied']]);
+  assert.equal(result.snapshot.conflicts.length, 0);
+  assert.equal(git('show', ':file'), 'incoming');
+  assert.equal(git('ls-files', '-u'), '');
+  assert.equal(finish.mock.callCount(), 1);
+});
+
+test('repair preserves the unreadable journal and lets a new confirmed save continue', async t => {
+  const { path, git } = fixture(t);
+  const journal = join(app.getPath('userData'), 'gitcat-activity.json');
+  const original = existsSync(journal) ? readFileSync(journal) : undefined;
+  let backup;
+  t.after(() => {
+    if (original) writeFileSync(journal, original);
+    else rmSync(journal, { force: true });
+    if (backup) rmSync(backup, { force: true });
+  });
+  const corrupt = '{"retentionDays":30,"entries":[null]}';
+  writeFileSync(journal, corrupt);
+  writeFileSync(join(path, 'file'), 'waiting to save');
+  const head = git('rev-parse', 'HEAD');
+  const beforeRepair = await service.prepareOperation(path, 'commit', { message: 'save after repair' }, 'en');
+
+  assert.equal((await service.getActivityHistory(path)).recoveryRequired, true);
+  await assert.rejects(service.executePlan(path, beforeRepair, 'en'), /Activity history cannot be read/);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+  assert.equal(readFileSync(journal, 'utf8'), corrupt);
+
+  backup = service.repairActivityHistory();
+  assert.equal(readFileSync(backup, 'utf8'), corrupt);
+  assert.equal(service.repairActivityHistory(), undefined, 'Healthy history is left in place');
+  const history = await service.getActivityHistory(path);
+  assert.deepEqual(history.entries, []);
+  assert.equal(history.recoveryRequired, undefined);
+  const plan = await service.prepareOperation(path, 'commit', { message: 'save after repair' }, 'en');
+  assert.equal((await service.executePlan(path, plan, 'en')).error, undefined);
+  assert.equal(git('show', 'HEAD:file'), 'waiting to save');
+  assert.equal((await service.getActivityHistory(path)).entries[0].steps[0].status, 'completed');
 });
 
 test('a Git failure remains failed when its journal write also fails',async t=>{

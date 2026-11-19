@@ -12,7 +12,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   getHostingConnections, connectHosting, removeHostingConnection,
-  createPractice, getPracticeInfo, setPracticeLesson, editPractice, removePractice, previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
+  createPractice, getPracticeInfo, setPracticeLesson, editPractice, removePractice, previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, repairActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
   getLlmConfig, getSnapshot, openWorktree, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
   prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
   setAiSharingExclusions, setAiSharingReview, type IssuedConflictGuide, type IssuedConflictProposal
@@ -521,6 +521,11 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
     return rememberPlan(await tracked(event,path,'planning',()=>prepareSwitchWork(path,{mode:request.mode,target:request.target,label:request.label,stash:request.stash,includeUntracked:request.includeUntracked===true},locale)));
   });
   ipcMain.handle("activity:list", (event, cwd: string) => { assertTrustedSender(event); return getActivityHistory(assertOpenedRepository(cwd)); });
+  ipcMain.handle("activity:repair", (event, cwd: unknown) => {
+    assertTrustedSender(event);
+    assertOpenedRepository(cwd);
+    return repairActivityHistory();
+  });
   ipcMain.handle("activity:retention", (event, days: unknown) => { assertTrustedSender(event); if (typeof days !== 'number') throw new Error('Invalid retention'); setActivityRetention(days); });
   ipcMain.handle("activity:clear", (event, cwd: string) => { assertTrustedSender(event); return clearActivityHistory(assertOpenedRepository(cwd)); });
   ipcMain.handle("activity:recover", async (event, cwd: string, id: unknown, mode: unknown, locale?: Locale) => {

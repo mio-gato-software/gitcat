@@ -287,6 +287,7 @@ export type ConflictApplyResult = {
    */
   stale?: "files" | "operation" | "repository";
   outcomes: ConflictFileOutcome[];
+  historyWarning?: true;
 };
 
 /**
@@ -389,6 +390,7 @@ export type ConflictChoiceResult = {
   complete: boolean;
   stale?: "files" | "operation" | "repository";
   outcomes: ConflictChoiceOutcome[];
+  historyWarning?: true;
 };
 
 export type Operation =
@@ -979,7 +981,8 @@ export type GitlineApi = {
   openReview: (url:string)=>Promise<void>;
   getSwitchWork: (path: string, target: string) => Promise<SwitchWorkPreview>;
   prepareSwitchWork: (path: string, request: SwitchWorkRequest, locale?: Locale) => Promise<ActionPlan>;
-  getActivityHistory: (path: string) => Promise<{ retentionDays: number; entries: ActivityRecord[] }>;
+  getActivityHistory: (path: string) => Promise<ActivityHistoryView>;
+  repairActivityHistory: (path: string) => Promise<string | undefined>;
   setActivityRetention: (days: number) => Promise<void>;
   clearActivityHistory: (path: string) => Promise<void>;
   prepareHistoryRecovery: (path: string, id: string, mode: HistoryRecovery['mode'], locale?: Locale) => Promise<ActionPlan>;
@@ -1021,6 +1024,11 @@ export type ActivityRecord = {
   before: { head: string; branch: string }; after?: { head: string; branch: string };
   steps: { operation: Operation | 'pull_request'; status: 'pending' | StepOutcome['status']; beforeHead?: string; afterHead?: string; at?: string }[];
   error?: string;
+};
+export type ActivityHistoryView = {
+  retentionDays: number;
+  entries: ActivityRecord[];
+  recoveryRequired?: true;
 };
 export type HistoryRecovery = { mode: 'revert' | 'undo' | 'restore'; commit: string; branch?: string };
 

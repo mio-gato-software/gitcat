@@ -103,6 +103,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('switch-work:read', (_, p, target) => service.getSwitchWork(p,target));
   ipcMain.handle('switch-work:prepare', async (_, p, request, locale) => planHandlers.rememberPlan(await service.prepareSwitchWork(p, request, locale)));
   ipcMain.handle('activity:list', (_, p) => service.getActivityHistory(p));
+  ipcMain.handle('activity:repair', () => service.repairActivityHistory());
   ipcMain.handle('activity:retention', (_, days) => service.setActivityRetention(days));
   ipcMain.handle('activity:clear', (_, p) => service.clearActivityHistory(p));
   ipcMain.handle('practice:info',(_,p)=>service.getPracticeInfo(p));
@@ -919,6 +920,22 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.activity-history .activity-record')`);
   await assertDialog();
   assert.match(await js(`document.querySelector('.activity-history').innerText`), /completado[\s\S]*Revisar una reversión/);
+  await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key:'Escape' }))`);
+  await waitFor(`!document.querySelector('.activity-history')`);
+  const journal = path.join(app.getPath('userData'), 'gitcat-activity.json');
+  const corruptHistory = '{"retentionDays":';
+  const headBeforeRepair = git('rev-parse', 'HEAD');
+  fs.writeFileSync(journal, corruptHistory);
+  await js(`document.querySelector('[data-action="activity"]').click()`);
+  await waitFor(`document.querySelector('.activity-history [role="alert"]')?.innerText.includes('no pudo leer el historial')`);
+  await js(`document.querySelector('.activity-history .outline-button').click()`);
+  await waitFor(`document.querySelector('.activity-history .primary-button')?.innerText.includes('Conservar una copia')`);
+  assert.equal(fs.readFileSync(journal, 'utf8'), corruptHistory, 'Opening the confirmation preserves the original');
+  await js(`document.querySelector('.activity-history .primary-button').click()`);
+  await waitFor(`document.querySelector('.activity-history [role="status"]')?.innerText.includes('El historial ilegible se guardó')`);
+  const backup = fs.readdirSync(path.dirname(journal)).find(name => name.startsWith('gitcat-activity.json.unreadable-'));
+  assert.equal(fs.readFileSync(path.join(path.dirname(journal), backup), 'utf8'), corruptHistory);
+  assert.equal(git('rev-parse', 'HEAD'), headBeforeRepair);
   await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key:'Escape' }))`);
   await waitFor(`!document.querySelector('.activity-history')`);
   // A push with nowhere to go is explained from the repository itself, with the way on, and the

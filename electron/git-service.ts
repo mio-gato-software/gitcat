@@ -11,7 +11,7 @@ import { nativeRepositoryFacts, createNativeReview, nativeCreationFacts, createN
 import type { HostingConnectionInput, NativeHostingContext } from "../shared/types.js";
 import { createReviewArgs } from "./review-provider.js";
 import { assertGitlabProjectAvailable, createGitlabProjectArgs, gitlabCreationFacts } from "./gitlab-repository.js";
-import { ActivityHistory } from "./activity-history.js";
+import { ActivityHistory, InvalidActivityHistoryError } from "./activity-history.js";
 import type { HistoryRecovery, SwitchWorkRequest, SwitchWorkPreview } from "../shared/types.js";
 import { operationContext, operationCheckpoint, operationPhase, inspectOperation, OperationCancelled } from "./operation-progress.js";
 import { execFile, spawn } from "node:child_process";
@@ -54,7 +54,7 @@ import {
   type DiffFinding
 } from "./outbound-content.js";
 import type {
-  ActionPlan, AiSharingFile, AiSharingPreview, AiSharingPurpose, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource,
+  ActionPlan, ActivityHistoryView, AiSharingFile, AiSharingPreview, AiSharingPurpose, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource,
   DeliveryRequest, ExecutionResult, FileChange, GitProtocol, SecretFinding, SecretKind, SelectedChange, WithheldFile,
   ConflictApplyResult, ConflictFileOutcome, ConflictProposal, ConflictChoice, ConflictChoiceOutcome, ConflictChoiceRequest, ConflictChoiceResult,
   ConflictFileVersion, ConflictGuide, ConflictGuideFile, ConflictSideIdentity, ConflictSideId, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput, LlmConnectResult, AiConnectionProblem,
@@ -3992,9 +3992,19 @@ export async function verifyLlmConfig(): Promise<LlmConnectResult> {
 
 
 function activityHistory() { return new ActivityHistory(join(app.getPath("userData"), "gitcat-activity.json")); }
-export async function getActivityHistory(cwd: string) { const snapshot=await getSnapshot(cwd); return activityHistory().list(snapshot.path); }
+export async function getActivityHistory(cwd: string): Promise<ActivityHistoryView> {
+  const root = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
+  try { return activityHistory().list(root); }
+  catch (error) {
+    if (!(error instanceof InvalidActivityHistoryError)) throw error;
+    return { retentionDays: 30, entries: [], recoveryRequired: true };
+  }
+}
+export function repairActivityHistory() { return activityHistory().repair(); }
 export function setActivityRetention(days: number) { activityHistory().retention(days); }
-export async function clearActivityHistory(cwd: string) { activityHistory().clear((await getSnapshot(cwd)).path); }
+export async function clearActivityHistory(cwd: string) {
+  activityHistory().clear(resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"])));
+}
 
 /** Recorded before execution and after each settled step, so a crash leaves uncertainty visible. */
 export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale) {
@@ -4080,18 +4090,30 @@ export async function prepareHistoryRecovery(cwd: string, id: string, mode: Hist
 
 
 async function recordConflictActivity<T extends ConflictApplyResult | ConflictChoiceResult>(cwd: string, count: number, task: () => Promise<T>): Promise<T> {
-  if(practiceProjects().registered(cwd)&&!practiceProjects().owns(cwd))throw new Error('Practice ownership changed. No conflict files were written.');
-  const before=await getSnapshot(cwd), history=activityHistory();
-  const step=stepFrom('resolve_conflict',{},[],'en')!;
-  const id=history.begin(bindPlan(before,sequenceDraft(Array.from({length:Math.max(1,count)},()=>step),'Resolve reviewed conflicts')),before);
+  if (practiceProjects().registered(cwd) && !practiceProjects().owns(cwd)) throw new Error('Practice ownership changed. No conflict files were written.');
+  const before = await getSnapshot(cwd);
+  const history = activityHistory();
+  const steps = Array.from({ length: Math.max(1, count) }, () => ({ operation: 'resolve_conflict' as const }));
+  const id = history.begin({ steps }, before);
+  let result: T;
   try {
-    const result=await task();
-    const outcomes: StepOutcome[]=result.outcomes.map(item=>({command:'',summary:'resolve_conflict',status:item.status==='applied'?'completed':item.status==='not_applied'?'skipped':'failed',output:''}));
-    history.finish(id,result.snapshot,outcomes,result.complete?undefined:'Conflict resolution did not complete. Review the remaining conflicts.');
-    return result;
-  } catch(error) {
-    history.finish(id,await getSnapshot(cwd).catch(()=>undefined),[],error instanceof Error?error.message:String(error)); throw error;
+    result = await task();
+  } catch (error) {
+    try {
+      history.finish(id, await getSnapshot(cwd).catch(() => undefined), [], error instanceof Error ? error.message : String(error));
+    } catch { /* The original operation error remains the result. */ }
+    throw error;
   }
+  const outcomes: StepOutcome[] = result.outcomes.map(item => ({
+    command: '', summary: 'resolve_conflict',
+    status: item.status === 'applied' ? 'completed' : item.status === 'not_applied' ? 'skipped' : 'failed', output: ''
+  }));
+  try {
+    history.finish(id, result.snapshot, outcomes, result.complete ? undefined : 'Conflict resolution did not complete. Review the remaining conflicts.');
+  } catch {
+    return { ...result, historyWarning: true };
+  }
+  return result;
 }
 export async function applyConflictResolution(cwd: string, proposal: IssuedConflictProposal, accepted: string[], locale?: Locale): Promise<ConflictApplyResult> {
   return recordConflictActivity(cwd,Array.isArray(accepted)?accepted.length:0,()=>applyConflictResolutionBody(cwd,proposal,accepted,locale));
