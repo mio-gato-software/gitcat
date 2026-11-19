@@ -446,8 +446,9 @@ export type PushDestination = { binding: string; remote?: string; urls: string[]
 export type PlanStep = {
   operation: Operation;
   args: Record<string, string>;
-  /** Free-form git_command steps: the argument list handed to git verbatim, without the leading "git". */
+  /** Arguments for a supported assistant query or a command constructed by GitCat itself. */
   argv?: string[];
+  assistantQuery?: true;
   /**
    * For a commit that saves selected files only: every path it records, including both sides of a
    * rename. Absent means the commit saves every change, as a planned commit always has.
