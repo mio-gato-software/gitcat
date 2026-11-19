@@ -16,6 +16,7 @@ registerHooks({
 });
 const service = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
 const guideModule = await import(pathToFileURL(join(root, "dist-electron/electron/conflict-guide.js")));
+const { planSummary } = await import(pathToFileURL(join(root, "dist-electron/shared/plan-summary.js")));
 
 // No provider is configured in this file. Any request to one is a failure of the test.
 let providerCalls = 0;
@@ -63,6 +64,33 @@ function mergeConflicts() {
 }
 
 const fileIn = (guide, path) => guide.files.find((file) => file.path === path);
+
+test("conflict plan confirms replacement, removal, or staging before touching a file", async t => {
+  const r = mergeConflicts();
+  t.after(() => rmSync(r.repo, { recursive: true, force: true }));
+  const manual = "manual edit\n";
+  r.write("text.txt", manual);
+
+  const check = async (path, side, command, effect) => {
+    const snapshot = await service.getSnapshot(r.repo);
+    const plan = await service.prepareOperation(r.repo, "resolve_conflict", { path, side }, "en");
+    assert.equal(plan.requiresConfirmation, true);
+    assert.match(plan.steps[0].command, command);
+    assert.match(plan.rationale, effect);
+    assert.ok(planSummary(plan, snapshot, "en").local.some(line => effect.test(line)));
+    return plan;
+  };
+
+  const replace = await check("text.txt", "theirs", /^git checkout --theirs .* && git add /, /Replaces.*other side/);
+  await check("text.txt", "resolved", /^git add /, /Stages.*as it is/);
+  assert.equal(r.read("text.txt"), manual);
+  assert.equal((await service.executePlan(r.repo, replace, "en")).error, undefined);
+  assert.equal(r.read("text.txt"), "uno\nDOS-suyo\ntres\n");
+
+  const remove = await check("gone-there.txt", "theirs", /^git rm /, /Removes.*from the working tree/);
+  assert.equal((await service.executePlan(r.repo, remove, "en")).error, undefined);
+  assert.equal(r.exists("gone-there.txt"), false);
+});
 
 for (const flow of ["guide", "plan"]) {
   test(`the ${flow} treats a conflict filename with brackets as a literal path`, async t => {

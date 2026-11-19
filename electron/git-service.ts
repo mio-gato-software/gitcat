@@ -1,7 +1,8 @@
 import { branchArguments, isBranchNameSafe, parseBranchOperation, validateBranchOperation, type BranchOperation } from "./branch-operation.js";
 import { displayPushAddress, parsePushOperation, pushArguments, pushRepository, readDirectPushEndpoints, readPushDestination, readRemoteUrls, validatePushOperation, verifiedTransportRemote, verifyInitialPushUrl, type PushOperation } from "./push-destination.js";
 import { assistantQueryArguments, parseAssistantCommand, type AssistantCommand } from "./assistant-git-command.js";
-import { walkPlanSteps } from "../shared/plan-summary.js";
+import { conflictResolutionEffect, walkPlanSteps } from "../shared/plan-summary.js";
+import type { ConflictResolutionAction } from "../shared/types.js";
 import { syncDestinations } from "../shared/remote-sync.js";
 import { PracticeProjects } from "./practice-project.js";
 import { previewReview, publishReview, type ReviewTools } from "./share-review.js";
@@ -970,7 +971,6 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
     case "abort_operation": return `git ${args.pending ?? "rebase"} --abort`;
     case "continue_operation": return `git ${args.pending ?? "rebase"} --continue`;
     case "skip_operation": return `git ${args.pending ?? "rebase"} --skip`;
-    case "resolve_conflict": return resolveConflictCommand(args);
     case "commit": return `git add -A && git commit -m "${args.message ?? ""}"`;
     case "ignore_path": return `echo ${JSON.stringify(args.line ?? "")} >> .gitignore`;
     case "git_command": return ["git", ...argv].map(quoteToken).join(" ");
@@ -997,26 +997,21 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
  * their side deleted has no version to check out, so keeping "ours" there means removing the file.
  * The conflict's own shape decides, which is why this reads the snapshot rather than trusting args.
  */
-function conflictPlan(args: Record<string, string>, snapshot?: RepoSnapshot) {
+function conflictResolutionFor(args: Record<string, string>, snapshot?: RepoSnapshot): ConflictResolutionAction | undefined {
   const conflict = snapshot?.conflicts.find((item) => item.path === args.path);
-  if (args.side === "resolved" || !conflict) return { action: "add" as const, conflict };
-  return { action: resolutionFor(conflict.kind, args.side === "theirs" ? "theirs" : "ours"), conflict };
+  if (!conflict) return undefined;
+  return args.side === "resolved" ? "add" : resolutionFor(conflict.kind, args.side === "theirs" ? "theirs" : "ours");
 }
 
-function resolveConflictCommand(args: Record<string, string>, snapshot?: RepoSnapshot) {
-  const { action } = conflictPlan(args, snapshot);
-  const path = JSON.stringify(literalPath(args.path ?? ""));
-  if (action === "remove") return `git rm -- ${path}`;
-  if (action === "checkout") return `git checkout --${args.side} -- ${path} && git add -- ${path}`;
-  return `git add -- ${path}`;
+function resolveConflictArguments(args: Record<string, string>, action: ConflictResolutionAction): string[][] {
+  const path = literalPath(args.path);
+  if (action === "remove") return [["rm", "-q", "--", path]];
+  const stage = ["add", "--", path];
+  return action === "checkout" ? [["checkout", `--${args.side}`, "--", path], stage] : [stage];
 }
 
-async function runResolveConflict(cwd: string, args: Record<string, string>, snapshot: RepoSnapshot, locale?: Locale) {
-  const { action } = conflictPlan(args, snapshot);
-  const pathspec = literalPath(args.path);
-  if (action === "remove") return reportedGit(cwd, ["rm", "-q", "--", pathspec]);
-  if (action === "checkout") await reportedGit(cwd, ["checkout", `--${args.side}`, "--", pathspec]);
-  await reportedGit(cwd, ["add", "--", pathspec]);
+async function runResolveConflict(cwd: string, args: Record<string, string>, action: ConflictResolutionAction, locale?: Locale) {
+  for (const argv of resolveConflictArguments(args, action)) await reportedGit(cwd, argv);
   return localized(locale, `${args.path} resuelto.`, `${args.path} resolved.`);
 }
 
@@ -2119,7 +2114,7 @@ function highestRisk(a: ActionPlan["risk"], b: ActionPlan["risk"]): ActionPlan["
  */
 async function gitOperationDraft(plan: ModelPlan, commands: AssistantCommand[], snapshot: RepoSnapshot, locale: Locale = "es", notes?: SharingNotes): Promise<PlanDraft> {
   const proposed = commands.map(command => {
-    if (command.operation !== "git_command") return stepFrom(command.operation, command.args, [], locale);
+    if (command.operation !== "git_command") return stepFrom(command.operation, command.args, [], locale, snapshot);
     const query = stepFrom(command.operation, {}, command.argv, locale);
     return query && { ...query, assistantQuery: true as const };
   });
@@ -2923,6 +2918,7 @@ function isUnattended(step: PlanStep) {
 function operationDraft(operation: Operation, args: Record<string, string>, snapshot?: RepoSnapshot, argv: string[] = [], locale: Locale = "es"): PlanDraft {
   const branch = parseBranchOperation(operation, args, locale);
   const push = operation === "push" ? parsePushOperation(args, locale) : undefined;
+  const conflictResolution = operation === "resolve_conflict" ? conflictResolutionFor(args, snapshot) : undefined;
   // The preview can include a URL supplied in a raw push. Keep its credentials out of the copy.
   const displayArgs = argv[0] === "push" ? argv.map(token => token.includes("://") ? displayPushAddress(token) : token) : argv;
   const details: Partial<Record<Operation, [string, string, ActionPlan["risk"]]>> = {
@@ -2950,7 +2946,12 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     abort_operation: [localized(locale, `Abortar ${args.pendingLabel ?? "la operación"}`, `Abort ${args.pendingLabel ?? "the operation"}`), localized(locale, "Deshace el trabajo a medias y devuelve el repositorio a como estaba antes de empezar.", "Discards the half-finished work and returns the repository to how it was before it started."), "high"],
     continue_operation: [localized(locale, `Continuar ${args.pendingLabel ?? "la operación"}`, `Continue ${args.pendingLabel ?? "the operation"}`), localized(locale, "Sigue desde donde se detuvo, una vez resueltos los conflictos.", "Continues from where it stopped after conflicts are resolved."), "high"],
     skip_operation: [localized(locale, `Saltar el commit atascado de ${args.pendingLabel ?? "la operación"}`, `Skip the stuck commit from ${args.pendingLabel ?? "the operation"}`), localized(locale, "Descarta el commit en el que se atascó y sigue con el resto.", "Discards the stuck commit and continues with the rest."), "high"],
-    resolve_conflict: [localized(locale, `Resolver ${args.path} quedándose con ${args.side === "theirs" ? "el otro lado" : args.side === "ours" ? "nuestro lado" : "el archivo tal cual está"}`, `Resolve ${args.path} by keeping ${args.side === "theirs" ? "the other side" : args.side === "ours" ? "our side" : "the file as it is"}`), localized(locale, "Marca el conflicto de un archivo como resuelto. No modifica el contenido de ningún archivo.", "Marks a file conflict as resolved. It does not change file content."), "medium"],
+    resolve_conflict: [
+      localized(locale, `Resolver el conflicto en ${args.path}`, `Resolve the conflict in ${args.path}`),
+      conflictResolution ? conflictResolutionEffect(conflictResolution, args.path, args.side, locale)
+        : localized(locale, "Revisa este conflicto antes de elegir una resolución.", "Review this conflict before choosing a resolution."),
+      conflictResolution === "add" ? "medium" : "high"
+    ],
     commit: [localized(locale, `Crear commit “${args.message ?? ""}”`, `Create commit “${args.message ?? ""}”`), localized(locale, "Añade todos los cambios y crea un commit.", "Stages all changes and creates a commit."), "high"],
     set_identity: args.scope === "global"
       ? [localized(locale, `Firmar los commits de todos los repositorios de este equipo como ${args.user} <${args.email}>`, `Sign commits in every repository on this computer as ${args.user} <${args.email}>`), localized(locale, "Guarda el nombre y el correo que Git anota en cada commit en tu configuración global de Git, para todos los repositorios de este equipo que no tengan los suyos. Tus archivos y tu historial no cambian.", "Saves the name and email Git records with each commit in your global Git settings, for every repository on this computer that does not set its own. Your files and history do not change."), "high"]
@@ -2969,8 +2970,10 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     ? ["git", ...branchArguments(branch)].map(quoteToken).join(" ")
     : push
       ? ["git", ...pushArguments(push)].map(quoteToken).join(" ")
-      : buildCommand(operation, args, displayArgs);
-  const steps: PlanStep[] = [{ operation, args, ...(argv.length ? { argv } : {}), command, summary: detail[0], risk: detail[2] }];
+      : conflictResolution
+        ? resolveConflictArguments(args, conflictResolution).map(argv => ["git", ...argv].map(quoteToken).join(" ")).join(" && ")
+        : buildCommand(operation, args, displayArgs);
+  const steps: PlanStep[] = [{ operation, args, ...(argv.length ? { argv } : {}), ...(conflictResolution ? { conflictResolution } : {}), command, summary: detail[0], risk: detail[2] }];
   return sequenceDraft(steps, detail[1], renameEffects(steps, snapshot), locale);
 }
 
@@ -3012,8 +3015,8 @@ function sequenceDraft(steps: PlanStep[], rationale: string, effects?: string[],
 }
 
 /** A step the model asked for, described and priced by the deterministic table above. */
-function stepFrom(operation: Operation, args: Record<string, string>, argv: string[] = [], locale: Locale = "es"): PlanStep | undefined {
-  const draft = operationDraft(operation, args, undefined, argv, locale);
+function stepFrom(operation: Operation, args: Record<string, string>, argv: string[] = [], locale: Locale = "es", snapshot?: RepoSnapshot): PlanStep | undefined {
+  const draft = operationDraft(operation, args, snapshot, argv, locale);
   return draft.allowed ? draft.steps[0] : undefined;
 }
 
@@ -3579,6 +3582,7 @@ async function prepareRemoteSync(initial: RepoSnapshot, args: Record<string, str
 type ValidatedStep =
   | { kind: "branch"; branch: BranchOperation }
   | { kind: "push"; push: PushOperation }
+  | { kind: "resolve_conflict"; action: ConflictResolutionAction }
   | { kind: "git_command"; argv: string[] }
   | undefined;
 
@@ -3681,8 +3685,13 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, plan: ActionPlan, 
     if (!args.line || gitignoreLine(args.path) !== args.line) throw new Error(localized(language, "La regla de .gitignore no es válida.", "The .gitignore rule is invalid."));
   }
   if (operation === "resolve_conflict") {
-    if (!snapshot.conflicts.some((conflict) => conflict.path === args.path)) throw new Error(localized(language, `${args.path} no está en conflicto.`, `${args.path} is not in conflict.`));
     if (!["ours", "theirs", "resolved"].includes(args.side)) throw new Error(localized(language, "Hay que decir con qué lado quedarse.", "The side to keep must be specified."));
+    const action = conflictResolutionFor(args, snapshot);
+    if (!action) throw new Error(localized(language, `${args.path} no está en conflicto.`, `${args.path} is not in conflict.`));
+    if (action !== step.conflictResolution) throw new StalePlanError(localized(language,
+      "El efecto de resolver este conflicto cambió. Revisa y confirma la resolución de nuevo.",
+      "The effect of resolving this conflict changed. Review and confirm the resolution again."));
+    return { kind: "resolve_conflict", action };
   }
   if (operation === "git_command") {
     const argv = step.argv ?? [];
@@ -3900,6 +3909,7 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     return reportedGit(cwd, pushArgs);
   }
   if (validated?.kind === "git_command") return reportedGit(cwd, validated.argv);
+  if (validated?.kind === "resolve_conflict") return runResolveConflict(cwd, step.args, validated.action, locale);
   const { args } = step;
   switch (step.operation) {
     case "status": return "";
@@ -3931,7 +3941,6 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     case "abort_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--abort"]);
     case "continue_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--continue"]);
     case "skip_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--skip"]);
-    case "resolve_conflict": return runResolveConflict(cwd, args, snapshot, locale);
     case "commit": {
       if (step.paths) return commitSelected(snapshot.path, step.paths, args.message, locale);
       await reportedGit(cwd, ["add", "-A"]);
