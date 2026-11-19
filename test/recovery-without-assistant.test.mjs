@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,6 +18,7 @@ registerHooks({
 });
 const service = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
 const recovery = await import(pathToFileURL(join(root, "dist-electron/electron/failure-recovery.js")));
+const { createPlanHandlers } = await import(pathToFileURL(join(root, "dist-electron/electron/plan-handlers.js")));
 
 /** Stubbed Responses API: every call is recorded; the behaviour is set per test. */
 const requests = [];
@@ -65,16 +66,74 @@ function clone(origin, prefix) {
   return { path, run };
 }
 
-/** Runs a plan the way the main process does and keeps the record it would keep. */
+function planIpc(assertOpenedRepository) {
+  const handlers = new Map();
+  const event = {};
+  const plans = createPlanHandlers({
+    assertTrustedSender: (sender) => assert.equal(sender, event),
+    assertOpenedRepository,
+    tracked: (_event, _path, _phase, task) => task()
+  });
+  plans.register({ handle: (channel, handler) => handlers.set(channel, handler) });
+  return {
+    ...plans,
+    prepareDelivery: (path, request) => handlers.get("action:prepare-delivery")(event, path, request, "en"),
+    execute: (path, id) => handlers.get("action:execute")(event, path, id, "en")
+  };
+}
+
 async function run(path, plan) {
+  const ipc = planIpc((opened) => {
+    assert.equal(opened, path);
+    return plan.repoPath;
+  });
+  ipc.rememberPlan(plan);
   try {
-    const result = await service.executePlan(path, plan, "en");
-    return { result, record: result.error ? { plan, outcomes: result.outcomes, stale: false } : undefined };
+    const result = await ipc.execute(path, plan.id);
+    return { result, record: ipc.getFailure(plan.id) };
   } catch (error) {
-    const outcomes = plan.steps.map((step) => ({ command: step.command, summary: step.summary, status: "skipped", output: "" }));
-    return { thrown: error, record: { plan, outcomes, stale: error instanceof service.StalePlanError } };
+    return { thrown: error, record: ipc.getFailure(plan.id) };
   }
 }
+
+test("the delivery IPC accepts a reviewed selection and executes its plan only once in its own repository", async (t) => {
+  const source = seeded("gitcat-delivery-ipc-");
+  const other = seeded("gitcat-delivery-ipc-other-");
+  t.after(() => {
+    rmSync(source.path, { recursive: true, force: true });
+    rmSync(other.path, { recursive: true, force: true });
+  });
+  writeFileSync(join(source.path, "README.md"), "guardado desde IPC\n");
+  writeFileSync(join(source.path, "extra.txt"), "sin guardar\n");
+  const snapshot = await service.getSnapshot(source.path);
+  const destination = await service.getSnapshot(other.path);
+  const ipc = planIpc((path) => {
+    assert.ok([snapshot.path, destination.path].includes(path));
+    return path;
+  });
+  const change = snapshot.changes.find(({ path }) => path === "README.md");
+  const request = {
+    stateId: snapshot.stateId,
+    mergeToDefault: false,
+    message: "Save selected",
+    selection: [{ path: change.path, version: change.version }]
+  };
+  await assert.rejects(ipc.prepareDelivery(snapshot.path, { ...request, selection: [{ path: change.path }] }), /Invalid delivery request/);
+  const plan = await ipc.prepareDelivery(snapshot.path, request);
+  assert.equal(plan.requiresConfirmation, true);
+
+  await assert.rejects(ipc.execute(destination.path, plan.id), /pertenece a otro repositorio/);
+  assert.equal(source.run("rev-parse", "HEAD").trim(), snapshot.head);
+  assert.equal(other.run("rev-parse", "HEAD").trim(), destination.head);
+
+  const reviewed = await ipc.prepareDelivery(snapshot.path, request);
+  const result = await ipc.execute(snapshot.path, reviewed.id);
+  assert.equal(result.error, undefined);
+  assert.equal(source.run("show", "--format=", "--name-only", "HEAD").trim(), "README.md");
+  assert.equal(source.run("status", "--short").trim(), "?? extra.txt");
+  await assert.rejects(ipc.execute(snapshot.path, reviewed.id), /plan ya no es válido/);
+  assert.equal(source.run("rev-parse", "HEAD").trim(), result.snapshot.head);
+});
 
 const failureOf = (plan, record, error) => {
   const failed = record.outcomes.find((outcome) => outcome.status === "failed");
