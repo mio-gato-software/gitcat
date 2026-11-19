@@ -1,5 +1,5 @@
 import { branchArguments, isBranchNameSafe, parseBranchOperation, validateBranchOperation, type BranchOperation } from "./branch-operation.js";
-import { displayPushAddress, parsePushOperation, pushArguments, pushRepository, readPushDestination, validatePushOperation, verifyInitialPushUrl, type PushOperation } from "./push-destination.js";
+import { displayPushAddress, parsePushOperation, pushArguments, pushRepository, readPushDestination, readRemoteUrls, validatePushOperation, verifiedFetchRemote, verifyInitialPushUrl, type PushOperation } from "./push-destination.js";
 import { assistantQueryArguments, parseAssistantCommand, type AssistantCommand } from "./assistant-git-command.js";
 import { walkPlanSteps } from "../shared/plan-summary.js";
 import { syncDestinations } from "../shared/remote-sync.js";
@@ -203,7 +203,7 @@ function outputBuffer() {
   };
 }
 
-async function runCommand(command: string, args: string[], cwd: string, timeoutMs = 60_000, extraEnv: NodeJS.ProcessEnv = {}): Promise<CommandResult> {
+async function runCommand(command: string, args: string[], cwd: string, timeoutMs = 60_000, extraEnv: NodeJS.ProcessEnv = {}, input?: string): Promise<CommandResult> {
   const executable = await resolveTool(command);
   const searchPath = (await toolDirectories()).join(delimiter);
   return new Promise((resolvePromise, reject) => {
@@ -211,7 +211,7 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
       cwd,
       env: commandEnv(searchPath, extraEnv),
       windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       detached: process.platform !== "win32"
     });
     const stdout = outputBuffer();
@@ -232,10 +232,12 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
       if (active.signal.aborted) cancel();
     }
     const cleanup = () => { clearTimeout(timer); if (canAbort) active.signal.removeEventListener("abort", cancel); };
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", stdout.append);
-    child.stderr.on("data", stderr.append);
+    const childStdout = child.stdout!;
+    const childStderr = child.stderr!;
+    childStdout.setEncoding("utf8");
+    childStderr.setEncoding("utf8");
+    childStdout.on("data", stdout.append);
+    childStderr.on("data", stderr.append);
     child.on("error", (error) => { if (!settled) { settled = true; cleanup(); reject(error); } });
     child.on("close", (code) => {
       if (!settled) {
@@ -248,6 +250,11 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
         });
       }
     });
+    if (child.stdin) {
+      // Early exit is reported by Git's exit status.
+      child.stdin.on("error", () => {});
+      child.stdin.end(input);
+    }
   });
 }
 
@@ -4301,7 +4308,7 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
     const safeLocal = new Set(['status','diff','log','show','branch','switch','checkout','add','commit','merge','rebase','stash','revert','reset','ls-files','rev-parse']);
     if ((await getSnapshot(cwd)).remotes.length || plan.steps.some(step=>['push','fetch','pull','add_remote','github_create_repo'].includes(step.operation) || (step.operation==='set_identity'&&step.args.scope==='global') || (step.operation==='git_command'&&!safeLocal.has(step.argv?.[0]??'')))) throw new Error('Practice stays local. Publishing, remote access and global settings are disabled here. Use a real project for collaboration.');
   }
-  if (plan.recovery) await validateHistoryRecovery(cwd, plan.recovery);
+  if (plan.recovery) await validateHistoryRecovery(cwd, plan.recovery, locale);
   if (plan.switchWork) await validateSwitchWork(cwd, plan.switchWork);
   const before = await getSnapshot(cwd);
   const history = activityHistory(), id = history.begin(plan, before);
@@ -4342,7 +4349,50 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
   return result;
 }
 
-async function validateHistoryRecovery(cwd: string, recovery: HistoryRecovery) {
+async function pushEndpointContains(cwd: string, endpoint: string, commit: string) {
+  const namespace = `refs/gitcat/publication-check/${randomUUID()}`;
+  const remote = await verifiedFetchRemote(args => readGit(cwd, args), endpoint);
+  try {
+    await checkedGit(cwd, [...remote.config, "-c", "protocol.ext.allow=never", "fetch", "--atomic", "--no-tags", "--no-recurse-submodules",
+      "--no-write-fetch-head", "--refmap=", "--", remote.name,
+      `+refs/heads/*:${namespace}/heads/*`, `+refs/tags/*:${namespace}/tags/*`]);
+    return Boolean(await checkedGit(cwd, ["for-each-ref", `--contains=${commit}`, "--count=1", "--format=%(refname)", namespace]));
+  } finally {
+    await inspectOperation(async () => {
+      const refs = await checkedGit(cwd, ["for-each-ref", "--format=delete %(refname)", namespace]);
+      if (refs) {
+        const args = ["update-ref", "--stdin"];
+        assertGitSuccess(await runCommand("git", args, cwd, undefined, undefined, `start\n${refs}\nprepare\ncommit\n`), args);
+      }
+    });
+  }
+}
+
+async function historyIsPublished(cwd: string, snapshot: RepoSnapshot, commit: string, locale?: Locale) {
+  const read = (args: string[]) => readGit(cwd, args);
+  const fetchUrls = new Set<string>(), pushUrls = new Set<string>();
+  try {
+    for (const remote of snapshot.remotes) {
+      const [url] = await readRemoteUrls(read, remote, "fetch");
+      fetchUrls.add(url);
+      for (const endpoint of await readRemoteUrls(read, remote, "push")) pushUrls.add(endpoint);
+      await reportedGit(cwd, ["fetch", "--prune", remote,
+        `+refs/heads/*:refs/remotes/${remote}/*`, `+refs/tags/*:refs/gitcat/remotes/${remote}/tags/*`]);
+    }
+    if (await checkedGit(cwd, ["for-each-ref", `--contains=${commit}`, "--count=1", "--format=%(refname)", "refs/remotes", "refs/gitcat/remotes"])) return true;
+    for (const endpoint of pushUrls) {
+      if (!fetchUrls.has(endpoint) && await pushEndpointContains(cwd, endpoint, commit)) return true;
+    }
+    return false;
+  } catch (error) {
+    if (error instanceof OperationCancelled) throw error;
+    throw new Error(localized(locale,
+      "GitCat no pudo verificar todos los destinos de publicación. Usa Revertir para conservar el historial compartido.",
+      "GitCat could not verify every publishing destination. Use Revert to preserve shared history."), { cause: error });
+  }
+}
+
+async function validateHistoryRecovery(cwd: string, recovery: HistoryRecovery, locale?: Locale) {
   if (!/^[a-f0-9]{40,64}$/.test(recovery.commit)) throw new Error("Invalid recovery reference.");
   await checkedGit(cwd, ["cat-file", "-e", `${recovery.commit}^{commit}`]);
   let snapshot = await getSnapshot(cwd);
@@ -4356,9 +4406,9 @@ async function validateHistoryRecovery(cwd: string, recovery: HistoryRecovery) {
   if ((await runGit(cwd,["merge-base","--is-ancestor",recovery.commit,"HEAD"])).code !== 0) throw new Error("That saved version is not part of the active branch. Create a recovery branch to review it.");
   if (recovery.mode === "undo") {
     if (snapshot.head !== recovery.commit) throw new Error("The branch has moved since that save. Review its history; the latest save can be kept as files only while it is still the tip.");
-    // Check all branch tips on every configured remote. Offline/permission failures block rewriting.
-    for (const remote of snapshot.remotes) await reportedGit(cwd,["fetch","--prune",remote,`+refs/heads/*:refs/remotes/${remote}/*`,`+refs/tags/*:refs/gitcat/remotes/${remote}/tags/*`]);
-    if ((await checkedGit(cwd,["for-each-ref",`--contains=${recovery.commit}`,"--format=%(refname)","refs/remotes","refs/gitcat/remotes"])).trim()) throw new Error("This saved version is published. Revert it with a new commit instead; shared history stays intact.");
+    if (await historyIsPublished(cwd, snapshot, recovery.commit, locale)) throw new Error(localized(locale,
+      "Este guardado ya está publicado. Usa Revertir para añadir un commit nuevo y conservar el historial compartido.",
+      "This saved version is published. Revert it with a new commit instead; shared history stays intact."));
     snapshot=await getSnapshot(cwd);
     if (snapshot.head!==recovery.commit || snapshot.isDirty || snapshot.pending) throw new Error("The project changed during the publication check. Review recovery again.");
   }
@@ -4378,7 +4428,7 @@ export async function prepareHistoryRecovery(cwd: string, id: string, mode: Hist
 
 async function buildHistoryRecoveryPlan(cwd: string, recovery: HistoryRecovery, language: Locale) {
   const { mode, commit } = recovery;
-  const current = await validateHistoryRecovery(cwd, recovery);
+  const current = await validateHistoryRecovery(cwd, recovery, language);
   const argv=historyRecoveryArguments(recovery);
   const summary=mode==='restore'?localized(language,'Crear una rama para revisar la versión anterior','Create a branch to review the earlier version'):mode==='revert'?localized(language,'Revertir el guardado con un nuevo commit','Revert the save with a new commit'):localized(language,'Deshacer el último guardado conservando los archivos','Undo the latest save while keeping files');
   const effects=[localized(language,'Solo recupera versiones guardadas en Git. No guarda ni recupera archivos que nunca se guardaron.','Only versions saved in Git can be recovered. Never-saved files are not backed up or recovered.')];
