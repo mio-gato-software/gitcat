@@ -473,7 +473,7 @@ export type PlanStep = {
  * Keeping it separate from the completed Git result lets callers and recovery preserve what landed.
  */
 export type PostActionIssue = {
-  kind: "index_sync" | "snapshot_read" | "history_write";
+  kind: "index_sync" | "snapshot_read" | "history_write" | "temporary_cleanup";
   detail: string;
 };
 

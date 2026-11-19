@@ -17,10 +17,10 @@ import type { HistoryRecovery, SwitchWorkRequest, SwitchWorkPreview } from "../s
 import { operationContext, operationCheckpoint, operationPhase, inspectOperation, OperationCancelled } from "./operation-progress.js";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, readlinkSync, accessSync, constants, copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { createReadStream, readlinkSync, accessSync, constants, copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { signalProcessTree } from "./process-tree.js";
 import { homedir, tmpdir } from "node:os";
-import { basename, delimiter, join, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, join, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
 import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
 import { parseWorktrees, parseWorktreeList } from "./worktrees.js";
@@ -2302,6 +2302,22 @@ function readIfPresent(absolute: string) {
   }
 }
 
+function conflictParentsAreDirectories(repoRoot: string, absolute: string) {
+  for (let directory = dirname(absolute); directory !== repoRoot; directory = dirname(directory)) {
+    if (!lstatSync(directory).isDirectory()) return false;
+  }
+  return true;
+}
+
+function readReviewedConflictFile(repoRoot: string, absolute: string) {
+  try {
+    if (conflictParentsAreDirectories(repoRoot, absolute) && lstatSync(absolute).isFile()) return readFileSync(absolute);
+  } catch (error) {
+    if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+  }
+  return undefined;
+}
+
 /**
  * Every open conflict as the model could read it: the whole file, and the sharing rules applied to it.
  * A binary file, one too large to review, or one a side deleted has no `file`: there is nothing to send.
@@ -2314,7 +2330,8 @@ async function readConflicts(snapshot: RepoSnapshot): Promise<ConflictEntry[]> {
     const absolute = resolve(snapshot.path, conflict.path);
     if (!absolute.startsWith(`${snapshot.path}${sep}`)) return [];
     try {
-      const raw = readFileSync(absolute);
+      const raw = readReviewedConflictFile(snapshot.path, absolute);
+      if (!raw) return [{ conflict }];
       if (raw.includes(0) || raw.length > conflictFileLimit) return [{ conflict, raw }];
       const text = raw.toString("utf8");
       const findings = credentialFindings(conflict.path, text, scanText(conflict.path, text));
@@ -2459,7 +2476,7 @@ async function applyConflictResolutionBody(
   const reviewedNow = (path: string) => {
     const reviewed = proposal.binding.files[path];
     return Boolean(reviewed?.stages) && stages.get(path) === reviewed.stages &&
-      contentVersion(readIfPresent(resolve(repoRoot, path))) === reviewed.content;
+      contentVersion(readReviewedConflictFile(repoRoot, resolve(repoRoot, path))) === reviewed.content;
   };
   const changed = new Set(chosen.filter((resolution) => !reviewedNow(resolution.path)).map((resolution) => resolution.path));
   if (changed.size) {
@@ -2472,9 +2489,9 @@ async function applyConflictResolutionBody(
   const outcomes: ConflictFileOutcome[] = [];
   for (const resolution of chosen) {
     const absolute = resolve(repoRoot, resolution.path);
-    const original = readIfPresent(absolute);
+    const original = readReviewedConflictFile(repoRoot, absolute);
     // The last look before writing: an editor can still save between the check above and here.
-    if (contentVersion(original) !== proposal.binding.files[resolution.path].content) {
+    if (!original || contentVersion(original) !== proposal.binding.files[resolution.path].content) {
       outcomes.push({ path: resolution.path, status: "changed" });
       break;
     }
@@ -2492,8 +2509,8 @@ async function applyConflictResolutionBody(
     }
     let restored = false;
     try {
-      if (original) writeFileSync(absolute, original);
-      restored = contentVersion(readIfPresent(absolute)) === proposal.binding.files[resolution.path].content;
+      if (readReviewedConflictFile(repoRoot, absolute)) writeFileSync(absolute, original);
+      restored = contentVersion(readReviewedConflictFile(repoRoot, absolute)) === proposal.binding.files[resolution.path].content;
     } catch { /* reported below: the file may now hold the proposed content */ }
     outcomes.push({ path: resolution.path, status: "failed", restored, detail: failure });
     break;
@@ -2669,7 +2686,7 @@ export async function describeConflicts(cwd: string, locale?: Locale): Promise<I
     }
     const binary = ours.binary || theirs.binary || working.binary;
     const choices = choicesFor({ ours: ours.present, theirs: theirs.present, binary, working: working.present });
-    binding.files[conflict.path] = { stages: stages.get(conflict.path) ?? "", content: working.binary && !raw ? "special" : contentVersion(raw), choices };
+    binding.files[conflict.path] = { stages: stages.get(conflict.path) ?? "", content: working.binary && !raw ? workingVersion(absolute) : contentVersion(raw), choices };
     files.push({
       path: conflict.path, kind: conflict.kind, binary, renames: renamesFor(conflict.path, renames),
       ours, theirs, base: { present: Boolean(at(1)) }, working, choices
@@ -2694,7 +2711,8 @@ export async function describeConflicts(cwd: string, locale?: Locale): Promise<I
 function workingVersion(absolute: string) {
   try {
     const stat = lstatSync(absolute);
-    if (stat.isSymbolicLink() || !stat.isFile()) return "special";
+    if (stat.isSymbolicLink()) return `link:${readlinkSync(absolute)}`;
+    if (!stat.isFile()) return "special";
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
     throw error;
@@ -2778,15 +2796,19 @@ async function applyConflictChoicesBody(
       outcomes.push({ path: item.path, choice: item.choice, status: "changed" });
       break;
     }
-    const original = readIfPresent(absolute);
     const before = workingVersion(absolute);
+    const original = before === "special" || before.startsWith("link:") ? undefined : readIfPresent(absolute);
     const action = commandFor(item.choice, new Set((entries.get(item.path) ?? []).map((entry) => entry.stage)));
     const pathspec = literalPath(item.path);
     let failure: string | undefined;
     const step = async (args: string[]) => {
       if (failure !== undefined) return;
-      const result = await runGit(repoRoot, args);
-      if (result.code !== 0) failure = result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")}`;
+      try {
+        const result = await runGit(repoRoot, args);
+        if (result.code !== 0) failure = result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")}`;
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
     };
     if (action === "remove") await step(["rm", "-q", "--", pathspec]);
     else {
@@ -2799,9 +2821,11 @@ async function applyConflictChoicesBody(
     }
     let restored = false;
     try {
-      if (workingVersion(absolute) !== before) {
+      const current = workingVersion(absolute);
+      if (current !== before && conflictParentsAreDirectories(repoRoot, absolute)) {
+        if (current !== "missing" && (before === "missing" || before.startsWith("link:") || (original && current.startsWith("link:")))) unlinkSync(absolute);
         if (original) writeFileSync(absolute, original);
-        else if (before === "missing") unlinkSync(absolute);
+        else if (before.startsWith("link:")) symlinkSync(before.slice("link:".length), absolute);
       }
       restored = workingVersion(absolute) === before;
     } catch { /* reported below: the file may now hold the chosen side */ }
@@ -3321,6 +3345,7 @@ async function commitSelected(repoRoot: string, paths: string[], message: string
   const index = join(directory, "index");
   const git = (args: string[], timeoutMs = 120_000) => runCommand("git", args, repoRoot, timeoutMs, { GIT_INDEX_FILE: index });
   const detail = (result: CommandResult, args: string[]) => commandDiagnostics(result) || `git ${args[0]} terminó con código ${result.code}`;
+  let saved: StepRunResult | undefined;
   try {
     if (head) {
       // Starting from a copy keeps what Git knows about unchanged files, so it does not re-read them all.
@@ -3355,7 +3380,7 @@ async function commitSelected(repoRoot: string, paths: string[], message: string
     const verifyHead = ["rev-parse", "--verify", "--quiet", "HEAD"];
     const commitHash = await optionalGit(repoRoot, verifyHead).catch(() => "")
       || await git(verifyHead).then(result => result.code === 0 ? completeGitOutput(result).trim() : "").catch(() => "");
-    const saved = { output, ...(commitHash ? { commitHash } : {}) };
+    saved = { output, ...(commitHash ? { commitHash } : {}) };
     const resetArgs = ["reset", "-q", "--", ...literalPaths(paths)];
     let failure: string;
     try {
@@ -3366,17 +3391,25 @@ async function commitSelected(repoRoot: string, paths: string[], message: string
       failure = error instanceof Error ? error.message : String(error);
     }
     const shortHash = commitHash ? ` ${commitHash.slice(0, 7)}` : "";
-    return {
-      ...saved,
-      postActionIssue: {
-        kind: "index_sync",
-        detail: localized(language,
-          `Los archivos marcados se guardaron en un commit${shortHash}, pero Git no pudo actualizar su lista de cambios preparados para ellos: ${failure}. Tus archivos en disco no cambiaron.`,
-          `The ticked files were saved in a commit${shortHash}, but Git could not update its list of staged changes for them: ${failure}. Your files on disk did not change.`)
-      }
+    saved.postActionIssue = {
+      kind: "index_sync",
+      detail: localized(language,
+        `Los archivos marcados se guardaron en un commit${shortHash}, pero Git no pudo actualizar su lista de cambios preparados para ellos: ${failure}. Tus archivos en disco no cambiaron.`,
+        `The ticked files were saved in a commit${shortHash}, but Git could not update its list of staged changes for them: ${failure}. Your files on disk did not change.`)
     };
+    return saved;
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    try { rmSync(directory, { recursive: true, force: true }); }
+    catch (error) {
+      if (saved) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const cleanup = localized(language,
+          `GitCat guardó el commit. No pudo limpiar su índice temporal: ${reason}`,
+          `GitCat saved the commit. It could not clean up its temporary index: ${reason}`);
+        const problem = saved.postActionIssue;
+        saved.postActionIssue = { kind: problem?.kind ?? "temporary_cleanup", detail: problem ? `${problem.detail}\n${cleanup}` : cleanup };
+      }
+    }
   }
 }
 
