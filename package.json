@@ -24,7 +24,9 @@
     "test:ui": "npm run build && node scripts/check-ui.cjs",
     "test:welcome": "npm run build && node scripts/check-welcome.cjs",
     "start": "electron .",
-    "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write",
+    "format:check": "prettier --check src/HostingAccounts.tsx src/ShareReview.tsx src/SwitchWork.tsx electron/hosting-connections.ts test/switch-work.test.mjs",
+    "lint": "eslint . --max-warnings 0 && npm run format:check",
     "check": "npm run lint && npm run typecheck && npm test && npm run test:ui"
   },
   "dependencies": {
@@ -46,6 +48,7 @@
     "eslint": "^10.14.0",
     "globals": "^17.14.0",
     "js-yaml": "^5.5.0",
+    "prettier": "3.10.1",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.72.1",
     "vite": "^8.3.6",

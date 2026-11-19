@@ -76,6 +76,8 @@ npm run test:welcome
 
 `npm run check` runs the lint, type, unit, and UI checks together. Unit fixtures use disposable Git configuration so personal identity, hooks, signing and line-ending preferences do not change their results. The UI checks build the app and use disposable app profiles; the main UI check also uses disposable repositories. `npm run test:welcome` checks both languages at desktop, compact and zoomed sizes.
 
+Run `npm run format -- <files>` to format the files you are working on. Lint also checks formatting in the hosting and branch-switching modules that have adopted Prettier.
+
 TypeScript stays on 6.0.3 while `typescript-eslint` requires TypeScript below 6.1. The platform-copy tests also use the TypeScript 6 `transpileModule` API; review that API before moving to TypeScript 7. Other direct dependencies use their latest stable releases, and the lockfile records compatible transitive updates.
 
 ### Continuous integration
