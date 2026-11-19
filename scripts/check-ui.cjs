@@ -974,6 +974,25 @@ app.whenReady().then(async () => {
   await waitFor(`!document.querySelector('.input-modal')`);
   assert.equal(git('remote'), '', 'Offering a way on changes nothing');
   assert.equal(git('rev-parse', 'HEAD'), headBeforePush);
+  // A direct push address must not display the access or credentials of a different named remote.
+  const namedRemote = path.join(scratch, 'named-publish.git');
+  const directRemote = path.join(scratch, 'direct-publish.git');
+  git('init', '--bare', namedRemote);
+  git('init', '--bare', directRemote);
+  git('remote', 'add', 'origin', namedRemote);
+  git('config', 'branch.main.pushRemote', directRemote);
+  git('config', 'push.default', 'current');
+  const accessChecks = readinessRequests.filter(entry => entry.access).length;
+  await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Push').click()`);
+  const directPlan = '.plan-card:has(.plan-actions .primary-button)';
+  await waitFor(`document.querySelector(${JSON.stringify(directPlan)} + ' .plan-goal')?.innerText.includes(${JSON.stringify(directRemote)})`);
+  assert.equal(await js(`Boolean(document.querySelector(${JSON.stringify(directPlan)} + ' .readiness-checklist'))`), false);
+  assert.equal(readinessRequests.filter(entry => entry.access).length, accessChecks);
+  await js(`document.querySelector(${JSON.stringify(directPlan)} + ' .plan-header .mini-icon').click()`);
+  await waitFor(`!document.querySelector(${JSON.stringify(directPlan)})`);
+  git('config', '--unset', 'branch.main.pushRemote');
+  git('config', '--unset', 'push.default');
+  git('remote', 'remove', 'origin');
   // Double-clicking a branch label in the graph checks that branch out.
   await waitFor(`[...document.querySelectorAll('.ref-tag')].some((node) => node.textContent === 'feature/search')`);
   await js(`[...document.querySelectorAll('.ref-tag')].find((node) => node.textContent === 'feature/search').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
