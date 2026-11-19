@@ -1,5 +1,5 @@
 import { branchArguments, isBranchNameSafe, parseBranchOperation, validateBranchOperation, type BranchOperation } from "./branch-operation.js";
-import { displayPushAddress, parsePushOperation, pushArguments, pushRepository, readPushDestination, readRemoteUrls, validatePushOperation, verifiedTransportRemote, verifyInitialPushUrl, type PushOperation } from "./push-destination.js";
+import { displayPushAddress, parsePushOperation, pushArguments, pushRepository, readDirectPushEndpoints, readPushDestination, readRemoteUrls, validatePushOperation, verifiedTransportRemote, verifyInitialPushUrl, type PushOperation } from "./push-destination.js";
 import { assistantQueryArguments, parseAssistantCommand, type AssistantCommand } from "./assistant-git-command.js";
 import { walkPlanSteps } from "../shared/plan-summary.js";
 import { syncDestinations } from "../shared/remote-sync.js";
@@ -4426,6 +4426,7 @@ async function historyIsPublished(cwd: string, snapshot: RepoSnapshot, commit: s
   const read = (args: string[]) => readGit(cwd, args);
   const fetchUrls = new Set<string>(), pushUrls = new Set<string>();
   try {
+    for (const endpoint of await readDirectPushEndpoints(read, snapshot.remotes)) pushUrls.add(endpoint);
     for (const remote of snapshot.remotes) {
       const [url] = await readRemoteUrls(read, remote, "fetch");
       fetchUrls.add(url);
