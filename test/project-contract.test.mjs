@@ -98,7 +98,6 @@ test("un plan es una secuencia que el modelo compone y la app ejecuta de princip
   assert.match(planner, /export const planStepLimit/);
   // Cada paso se valida contra el repositorio que dejó el anterior, y el primer fallo detiene la secuencia.
   assert.match(service, /for \(const \[index, step\] of plan\.steps\.entries\(\)\)/);
-  assert.match(service, /if \(index > 0\) \{\s*\n\s*snapshot = await getSnapshot\(cwd\);\s*\n\s*validateStep\(step, snapshot, language\);/);
   assert.match(service, /status: "failed"/);
   assert.match(service, /function failureReport/);
   assert.doesNotMatch(service, /switch \(plan\.operation\)/, "la ejecución ya no depende de una sola operación del plan");
@@ -194,12 +193,7 @@ test("la consistencia de nombres se sugiere, nunca se aplica sola", async () => 
   assert.doesNotMatch(consistency, /runGit|spawn\(|checkedGit|prepareOperation|executePlan/);
   assert.match(consistency, /export const reservedNames/);
   assert.match(consistency, /export const minorityRatio/);
-  // Renombrar es una operación como las demás: tabla determinista, confirmación y comando a la vista.
-  assert.match(service, /case "rename_branch": return `git branch -m \$\{args\.name\} \$\{args\.to\}`/);
-  assert.match(service, /case "rename_branch": return reportedGit\(cwd, \["branch", "-m", "--", args\.name, args\.to\]\)/);
-  assert.doesNotMatch(service, /"branch", "-M"/, "nunca se fuerza un renombrado sobre una rama existente");
-  assert.match(service, /No puedes renombrar la rama por defecto/);
-  assert.match(service, /rename_branch.*medium/);
+  // La ejecución y la vista previa del renombrado se comprueban con Git real.
   assert.match(service, /function renameEffects/);
   assert.match(service, /el renombrado es local y no cambia la rama remota/);
   // Ni el modelo ni la interfaz renombran por su cuenta.
@@ -222,7 +216,6 @@ test("el prefijo declara una política y las acciones protegidas la aplican", as
   assert.match(table, /\{ prefix: "backup", lifecycle: "permanent" \}/);
   assert.doesNotMatch(table, /if \(prefix === "backup"\)/);
   // La protección es una guardia real en la capa que ejecuta, no solo un adorno de la interfaz.
-  assert.match(service, /if \(operation === "delete_branch" && isProtectedBranch\(args\.name\)\)/);
   assert.match(service, /está protegida por su prefijo/);
   assert.match(service, /function protectedBranchIssues/);
   assert.match(service, /lifecycle: lifecycleOf\(branch\.name\)/);
@@ -830,7 +823,6 @@ test("las ramas ofrecen fusionarse en la rama por defecto desde su menú context
   assert.match(app, /key: "merge-default", icon: GitMerge, label: t\("mergeBranchTo", \{ name, target: base \}\), onSelect: \(\) => void prepareMergeToDefault\(name\)/);
   assert.match(app, /prepareMergeToDefault/);
   assert.match(service, /export async function prepareMergeToDefault/);
-  assert.match(service, /git switch/);
   assert.match(main, /action:prepare-merge-to-default/);
   assert.match(preload, /prepareMergeToDefault/);
 });

@@ -1,3 +1,4 @@
+import { branchArguments, isBranchNameSafe, parseBranchOperation, validateBranchOperation, type BranchOperation } from "./branch-operation.js";
 import { syncDestinations } from "../shared/remote-sync.js";
 import { PracticeProjects } from "./practice-project.js";
 import { previewReview, publishReview, type ReviewTools } from "./share-review.js";
@@ -62,7 +63,7 @@ import { classifyProviderFailure, maskKeys, recommendedModel } from "../shared/a
 import { classifyFailure, operationFromCommand, recoveryActions, recoveryFacts, type FailureEvidence } from "./failure-recovery.js";
 import { localized, normalizeLocale } from "./i18n.js";
 import {
-  buildPlannerInstructions, commitMessageLimit, executableOperations, isBranchNameSafe, operationArgs,
+  buildPlannerInstructions, commitMessageLimit, executableOperations, operationArgs,
   planIssues, parseModelPlan, planResponseFormat, type ModelPlan, type PlanIssue
 } from "./llm-plan.js";
 import {
@@ -800,10 +801,6 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
     case "sync_remote": return `git ${remoteMergeArgs(args).join(" ")}`;
     case "stash_push": return `git stash push --include-untracked -m ${quoteToken(args.message ?? "")}`;
     case "stash_pop": return "git stash pop --index stash@{0}";
-    case "checkout": return args.ref ? `git switch --track -c ${args.name} refs/remotes/${args.ref}` : `git switch ${args.name}`;
-    case "create_branch": return `git switch -c ${args.name}${args.from ? ` ${args.from}` : ""}`;
-    case "delete_branch": return `git branch -d ${args.name}`;
-    case "rename_branch": return `git branch -m ${args.name} ${args.to}`;
     case "fetch": return "git fetch --prune";
     case "pull": return "git pull --ff-only";
     case "push": return args.setUpstream
@@ -814,8 +811,6 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
       return `git config${where} user.name ${JSON.stringify(args.user ?? "")} && git config${where} user.email ${JSON.stringify(args.email ?? "")}`;
     }
     case "add_remote": return `git remote add ${args.name ?? ""} ${quoteToken(args.url ?? "")}`;
-    case "merge": return `git merge --no-edit ${args.name}`;
-    case "rebase": return `git rebase ${args.onto}`;
     case "abort_operation": return `git ${args.pending ?? "rebase"} --abort`;
     case "continue_operation": return `git ${args.pending ?? "rebase"} --continue`;
     case "skip_operation": return `git ${args.pending ?? "rebase"} --skip`;
@@ -2716,6 +2711,7 @@ function isUnattended(step: PlanStep) {
 }
 
 function operationDraft(operation: Operation, args: Record<string, string>, snapshot?: RepoSnapshot, argv: string[] = [], locale: Locale = "es"): PlanDraft {
+  const branch = parseBranchOperation(operation, args, locale);
   const details: Partial<Record<Operation, [string, string, ActionPlan["risk"]]>> = {
     sync_remote: [args.mode === "prefer_remote" ? localized(locale, `Unir ${args.name} con ${args.ref} dando prioridad al remoto`, `Merge ${args.ref} into ${args.name}, preferring remote edits`) : localized(locale, `Unir ${args.name} con ${args.ref}`, `Join ${args.name} with ${args.ref}`), localized(locale, "Trae los commits remotos y conserva todos tus commits locales. Si ambas copias avanzaron, crea una fusión que puede requerir resolver conflictos.", "Brings in remote commits and keeps all your local commits. If both copies advanced, creates a merge that may need conflict resolution."), "high"],
     stash_push: [localized(locale, "Apartar los cambios (stash)", "Set changes aside (stash)"), localized(locale, "Guarda las versiones preparadas, los cambios sin preparar y los archivos nuevos en un stash local; limpia esos cambios de los archivos para seguir trabajando. Los archivos ignorados permanecen en su sitio.", "Saves staged versions, unstaged changes and new files in a local stash, then clears those changes from the files so you can keep working. Ignored files stay in place."), "medium"],
@@ -2754,7 +2750,8 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
   };
   const detail = details[operation];
   if (!detail || operation === "none") return refused(localized(locale, "La operación solicitada no está permitida.", "The requested operation is not allowed."));
-  const steps: PlanStep[] = [{ operation, args, ...(argv.length ? { argv } : {}), command: buildCommand(operation, args, argv), summary: detail[0], risk: detail[2] }];
+  const command = branch ? ["git", ...branchArguments(branch)].map(quoteToken).join(" ") : buildCommand(operation, args, argv);
+  const steps: PlanStep[] = [{ operation, args, ...(argv.length ? { argv } : {}), command, summary: detail[0], risk: detail[2] }];
   return sequenceDraft(steps, detail[1], renameEffects(steps, snapshot), locale);
 }
 
@@ -2878,10 +2875,6 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
     return bindPlan(snapshot, preparation.draft);
   }
   if (operation === "ignore_path") return prepareIgnore(snapshot, typeof args.path === "string" ? args.path : "", language);
-  if (operation === "create_branch" && args.from && /^[0-9a-f]{7,40}$/i.test(args.from)
-      && !(await optionalGit(snapshot.path, ["rev-parse", "--verify", "--quiet", `${args.from}^{commit}`]))) {
-    throw new Error(localized(language, "Ese commit ya no existe en este repositorio.", "That commit no longer exists in this repository."));
-  }
   // Only what each direct control needs reaches the step: a publish names the active branch as Git
   // reads it now, and an identity or a remote address is trimmed of stray spaces.
   const normalized = operation === "push" && args.setUpstream ? { setUpstream: args.setUpstream, branch: snapshot.currentBranch, ...(args.noVerify === "true" ? { noVerify: "true" } : {}) }
@@ -2892,6 +2885,10 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
     : args;
   if (operation === "stash_pop") await validateStashPop(snapshot, normalized.stash, language);
   const draft = operationDraft(operation, normalized, snapshot, [], language);
+  if (operation === "create_branch" && normalized.from
+      && !(await optionalGit(snapshot.path, ["rev-parse", "--verify", "--quiet", `${normalized.from}^{commit}`]))) {
+    throw new Error(localized(language, "Ese commit ya no existe en este repositorio.", "That commit no longer exists in this repository."));
+  }
   if (draft.allowed) validateExecution(bindPlan(snapshot, draft), snapshot, language);
   const effects = draft.allowed
     ? [...await pendingEffects(snapshot, operation, language), ...(operation === "set_identity" ? await identityEffects(snapshot, normalized, language) : []),
@@ -3340,44 +3337,16 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
     if (!args.ref || !snapshot.remoteRefs?.includes(args.ref) || !isBranchNameSafe(args.ref) || !["ff", "merge", "prefer_remote"].includes(args.mode)) throw new Error(localized(language, "La referencia remota cambió. Actualiza y revisa la acción de nuevo.", "The remote reference changed. Refresh and review the action again."));
     if (snapshot.currentBranch !== args.name) throw new Error(localized(language, "La rama activa cambió. Revisa la actualización de nuevo.", "The active branch changed. Review the update again."));
   }
+  const branch = parseBranchOperation(operation, args, language);
+  if (branch) {
+    validateBranchOperation(branch, snapshot, language);
+    return branch;
+  }
   const branchArg = args.name || args.onto;
   if (branchArg && !isBranchNameSafe(branchArg)) throw new Error(localized(language, "Nombre de rama no válido.", "Invalid branch name."));
   if (args.to && !isBranchNameSafe(args.to)) throw new Error(localized(language, "Nombre de rama no válido.", "Invalid branch name."));
-  if (["checkout", "create_branch", "delete_branch", "rename_branch", "merge"].includes(operation) && !args.name) throw new Error(localized(language, "Falta el nombre de la rama.", "The branch name is missing."));
-  if (operation === "rebase" && !args.onto) throw new Error(localized(language, "Falta la rama base.", "The base branch is missing."));
   if (operation === "commit" && (!args.message?.trim() || args.message.length > commitMessageLimit)) throw new Error(localized(language, "El mensaje de commit no es válido.", "The commit message is invalid."));
   if (operation === "commit" && !snapshot.changes.length) throw new Error(localized(language, "No hay cambios locales para confirmar.", "There are no local changes to commit."));
-  if (operation === "checkout" && !snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(localized(language, `La rama ${args.name} no existe localmente.`, `Branch ${args.name} does not exist locally.`));
-  if (operation === "checkout" && args.ref && (!snapshot.remoteRefs?.includes(args.ref) || !isBranchNameSafe(args.ref) || snapshot.branches.some(branch => branch.name === args.name && branch.presence !== "remote"))) throw new Error(localized(language, "La copia local o remota cambió. Revisa la acción de nuevo.", "The local or remote copy changed. Review the action again."));
-  // A start point is a commit hash picked in the graph: only hex, so it can never read as an option.
-  if (operation === "create_branch" && args.from !== undefined && !/^[0-9a-f]{7,40}$/i.test(args.from)) throw new Error(localized(language, "El commit de partida no es válido.", "The starting commit is invalid."));
-  if (operation === "create_branch" && snapshot.branches.some((branch) => branch.name === args.name)) throw new Error(localized(language, `La rama ${args.name} ya existe.`, `Branch ${args.name} already exists.`));
-  if (operation === "delete_branch" && args.name === snapshot.defaultBranch) throw new Error(localized(language, `No puedes borrar la rama por defecto (${snapshot.defaultBranch}).`, `You cannot delete the default branch (${snapshot.defaultBranch}).`));
-  if (operation === "delete_branch" && args.name === snapshot.currentBranch) throw new Error(localized(language, "No puedes borrar la rama activa.", "You cannot delete the active branch."));
-  // The prefix states the policy: a permanent branch exists to survive exactly this kind of cleanup.
-  if (operation === "delete_branch" && isProtectedBranch(args.name)) {
-    throw new Error(localized(language, `La rama ${args.name} está protegida por su prefijo: las ramas de ese tipo existen para conservarse.`, `Branch ${args.name} is protected by its prefix: branches of this kind are meant to be kept.`));
-  }
-  if (operation === "rename_branch") {
-    // The default branch is what integration is measured against, so its name is not a detail to change here.
-    if (args.name === snapshot.defaultBranch) throw new Error(localized(language, `No puedes renombrar la rama por defecto (${snapshot.defaultBranch}).`, `You cannot rename the default branch (${snapshot.defaultBranch}).`));
-    if (!args.to) throw new Error(localized(language, "Falta el nombre nuevo de la rama.", "The new branch name is missing."));
-    if (args.to === args.name) throw new Error(localized(language, "El nombre nuevo es el mismo que el actual.", "The new name is the same as the current name."));
-    if (snapshot.branches.some((branch) => branch.name === args.to)) throw new Error(localized(language, `La rama ${args.to} ya existe.`, `Branch ${args.to} already exists.`));
-    const target = snapshot.branches.find((branch) => branch.name === args.name);
-    if (target?.checkedOutIn) throw new Error(localized(language, `La rama ${args.name} está en uso por el worktree ${target.checkedOutIn}.`, `Branch ${args.name} is in use by worktree ${target.checkedOutIn}.`));
-  }
-  if (["delete_branch", "rename_branch", "merge"].includes(operation) && !snapshot.branches.some((branch) => branch.name === args.name)
-      && !(operation === "merge" && isCurrentUpstream(snapshot, args.name))) throw new Error(localized(language, `La rama ${args.name} no existe localmente.`, `Branch ${args.name} does not exist locally.`));
-  // A remote-only branch has no local ref: switching to it creates one, but deleting, renaming or merging it cannot work.
-  if (["delete_branch", "rename_branch", "merge", "rebase"].includes(operation)) {
-    const target = args.name || args.onto;
-    const remoteOnly = snapshot.branches.find((branch) => branch.name === target)?.presence === "remote";
-    if (remoteOnly) throw new Error(localized(language, `La rama ${target} solo existe en el remoto. Cámbiate a ella primero para tenerla en local.`, `Branch ${target} only exists on the remote. Switch to it first to create it locally.`));
-  }
-  if (operation === "merge" && args.name === snapshot.currentBranch) throw new Error(localized(language, `No puedes fusionar ${args.name} consigo misma.`, `You cannot merge ${args.name} into itself.`));
-  if (operation === "rebase" && !snapshot.branches.some((branch) => branch.name === args.onto) && !isCurrentUpstream(snapshot, args.onto) && !snapshot.remoteRefs?.some(ref => `refs/remotes/${ref}` === args.onto)) throw new Error(localized(language, `La rama base ${args.onto} no existe. Actualiza la lista.`, `Base branch ${args.onto} does not exist. Refresh the list.`));
-  if (operation === "rebase" && (snapshot.currentBranch === "HEAD" || args.onto === snapshot.currentBranch)) throw new Error(localized(language, "Elige otra rama como base y trabaja desde una rama local.", "Choose another branch as the base and work from a local branch."));
   if (["abort_operation", "continue_operation", "skip_operation"].includes(operation)) {
     if (!snapshot.pending) throw new Error(localized(language, "No hay ninguna operación de Git a medias.", "There is no half-finished Git operation."));
     if (operation === "skip_operation" && !canSkip(snapshot.pending.kind)) {
@@ -3437,11 +3406,6 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
   }
 }
 
-/** The remote-tracking branch the active branch follows: merging or replaying it is what reconciling means. */
-function isCurrentUpstream(snapshot: RepoSnapshot, ref: string | undefined) {
-  return Boolean(ref) && snapshot.branches.some((branch) => branch.isCurrent && branch.upstream === ref);
-}
-
 /** What a remote address looks like: a URL, an scp-style SSH address, or an absolute path. Never an option. */
 const remoteAddressPattern = /^(?:(?:https?|ssh|git|file):\/\/[^\s]+|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+|\/[^\s]*)$/;
 
@@ -3469,7 +3433,7 @@ function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot, locale?: Lo
       "Un archivo marcado, su versión preparada o la rama de destino cambió después de la revisión, así que no se guardó nada. Revisa los archivos marcados de nuevo.",
       "A ticked file, its staged version or the target branch changed after the review, so nothing was saved. Review the ticked files again."));
   } else if (plan.stateId !== snapshot.stateId) throw new StalePlanError(localized(language, "Los cambios locales variaron desde que se preparó el plan. Prepara la acción de nuevo.", "Local changes moved after this plan was prepared. Prepare the action again."));
-  validateStep(plan.steps[0], snapshot, language);
+  return validateStep(plan.steps[0], snapshot, language);
 }
 
 function validateHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
@@ -3597,11 +3561,11 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
   }
 }
 
-async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: RepoSnapshot, locale?: Locale): Promise<string> {
+async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: RepoSnapshot, branch: BranchOperation | undefined, locale?: Locale): Promise<string> {
+  if (branch) return reportedGit(cwd, branchArguments(branch));
   const { args } = step;
   switch (step.operation) {
     case "status": return "";
-    case "checkout": return reportedGit(cwd, args.ref ? ["switch", "--track", "-c", args.name, `refs/remotes/${args.ref}`] : ["switch", args.name]);
     case "sync_remote": {
       const remoteTip = await checkedGit(cwd, ["rev-parse", "--verify", `refs/remotes/${args.ref}`]);
       if (snapshot.head !== args.localTip || remoteTip !== args.remoteTip) {
@@ -3616,10 +3580,6 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
       await validateStashPop(await getSnapshot(cwd), latest, normalizeLocale(locale));
       return reportedGit(cwd, ["stash", "pop", "--index", "stash@{0}"]);
     }
-    case "create_branch": return reportedGit(cwd, ["switch", "-c", args.name, ...(args.from ? [args.from] : [])]);
-    case "delete_branch": return reportedGit(cwd, ["branch", "-d", "--", args.name]);
-    // "-m" and never "-M": Git must refuse when the new name is taken, rather than overwrite a branch.
-    case "rename_branch": return reportedGit(cwd, ["branch", "-m", "--", args.name, args.to]);
     case "fetch": return reportedGit(cwd, ["fetch", "--prune"]);
     case "pull": return reportedGit(cwd, ["pull", "--ff-only"]);
     case "push": return reportedGit(cwd, [
@@ -3634,8 +3594,6 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
         : localized(locale, `Los commits de este repositorio se firmarán como ${args.user} <${args.email}>.`, `Commits in this repository will be signed as ${args.user} <${args.email}>.`);
     }
     case "add_remote": return reportedGit(cwd, ["remote", "add", args.name, args.url]);
-    case "merge": return reportedGit(cwd, ["merge", "--no-edit", "--", args.name]);
-    case "rebase": return reportedGit(cwd, ["rebase", args.onto]);
     case "abort_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--abort"]);
     case "continue_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--continue"]);
     case "skip_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--skip"]);
@@ -3738,7 +3696,7 @@ async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutc
   const language = normalizeLocale(locale);
   let snapshot = await getSnapshot(cwd);
   const selectionNow = plan.selection ? await selectionBinding(snapshot, currentVersions(snapshot, plan.selection.changes), plan.selection.target) : undefined;
-  validateExecution(plan, snapshot, language, selectionNow);
+  const firstBranch = validateExecution(plan, snapshot, language, selectionNow);
   if (plan.selection?.target) {
     // Files left out can have changed since the review; one that now blocks the switch is named before anything is saved.
     const resolved = resolveSelection(snapshot.changes, plan.selection.changes);
@@ -3753,11 +3711,9 @@ async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutc
     }
     operationPhase("executing", index + 1, plan.steps.length);
     try {
-      if (index > 0) {
-        snapshot = await getSnapshot(cwd);
-        validateStep(step, snapshot, language);
-      }
-      outcomes[index] = { ...outcomes[index], status: "completed", output: await runStep(cwd, step, plan, snapshot, language) };
+      if (index > 0) snapshot = await getSnapshot(cwd);
+      const branch = index === 0 ? firstBranch : validateStep(step, snapshot, language);
+      outcomes[index] = { ...outcomes[index], status: "completed", output: await runStep(cwd, step, plan, snapshot, branch, language) };
     } catch (error) {
       const detail = error instanceof Error ? error.message : localized(language, "Git no pudo completar la acción.", "Git could not complete the action.");
       outcomes[index] = { ...outcomes[index], status: "failed", output: detail };

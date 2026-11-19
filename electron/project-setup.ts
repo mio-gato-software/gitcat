@@ -3,7 +3,7 @@ import { accessSync, constants, existsSync, lstatSync, mkdtempSync, readdirSync,
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { runGit, spawnGit } from "./git-service.js";
-import { isBranchNameSafe } from "./llm-plan.js";
+import { isBranchNameSafe } from "./branch-operation.js";
 import { errorText, volumeRoot } from "./workspace-restore.js";
 import { folderNameProblem, parseCloneUrl } from "../shared/clone-source.js";
 import type {
