@@ -1,5 +1,5 @@
 import { branchArguments, isBranchNameSafe, parseBranchOperation, validateBranchOperation, type BranchOperation } from "./branch-operation.js";
-import { displayPushAddress, parsePushOperation, pushArguments, pushRepository, readPushDestination, readRemoteUrls, validatePushOperation, verifiedFetchRemote, verifyInitialPushUrl, type PushOperation } from "./push-destination.js";
+import { displayPushAddress, parsePushOperation, pushArguments, pushRepository, readPushDestination, readRemoteUrls, validatePushOperation, verifiedTransportRemote, verifyInitialPushUrl, type PushOperation } from "./push-destination.js";
 import { assistantQueryArguments, parseAssistantCommand, type AssistantCommand } from "./assistant-git-command.js";
 import { walkPlanSteps } from "../shared/plan-summary.js";
 import { syncDestinations } from "../shared/remote-sync.js";
@@ -1158,12 +1158,13 @@ export const removeHostingConnection=(id:string)=>hostingConnections().remove(id
 async function nativeGit(cwd:string,args:string[],context:NativeHostingContext) {
   const account=await hostingConnections().verify(context.connectionId);
   if(account.accountId!==context.accountId)throw new Error('The hosting account changed. Review the action again before publishing.');
+  const operation = args[0];
+  if (!["ls-remote", "fetch", "push"].includes(operation)) throw new Error("Only the reviewed remote read, fetch or push can use this hosting connection.");
+  const remote = await verifiedTransportRemote(argv => readGit(cwd, argv), context.location.gitUrl, operation === "push" ? "push" : "fetch");
   const config=nativeGitConfig(context.location,hostingConnections().authorization(context.connectionId,true));
   const argv=[...args];
-  if(argv[0]==='ls-remote')argv[argv[1]==='--heads'?2:1]=context.location.gitUrl;
-  else if(argv[0]==='fetch'||argv[0]==='push')argv[1]=context.location.gitUrl;
-  else throw new Error('Only the reviewed remote read, fetch or push can use this hosting connection.');
-  const result=await runCommand('git',[...config.args,...argv],cwd,60_000,config.env);
+  argv[operation === "ls-remote" && argv[1] === "--heads" ? 2 : 1] = remote.name;
+  const result=await runCommand('git',[...config.args,...remote.config,...argv],cwd,60_000,config.env);
   if(result.code!==0)throw new Error(`The hosting Git operation failed (${classifyAccess({code:result.code,output:result.stderr})}). Check repository access and branch protections, then review again. If Git does not support --config-env, update Git to version 2.31 or later.`);
   if (argv[0] === 'push') return 'Published the reviewed saved commits.';
   return argv[0] === 'ls-remote' ? completeGitOutput(result).trim() : commandDiagnostics(result);
@@ -3756,7 +3757,11 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
   if (currentRemote.code !== 0 && plan.args.existingRemoteHash) throw new Error("The remote was removed after validation. Prepare the action again.");
   if (currentRemote.code === 0 && plan.args.replaceRemote !== "true") throw new Error(localized(language, `El remoto “${plan.args.remote}” existe y no se autorizó reemplazarlo.`, `Remote “${plan.args.remote}” exists and replacing it was not authorized.`));
   if (currentRemote.code === 0 && createHash("sha256").update(currentRemote.stdout.trim()).digest("hex") !== plan.args.existingRemoteHash) throw new Error(localized(language, `El remoto “${plan.args.remote}” cambió desde la validación.`, `Remote “${plan.args.remote}” changed after validation.`));
-  const previousRemoteUrl = currentRemote.code === 0 ? currentRemote.stdout.trim() : "";
+  const localUrls = currentRemote.code === 0
+    ? await readGit(source, ["config", "--local", "--no-includes", "--null", "--get-all", `remote.${plan.args.remote}.url`])
+    : undefined;
+  const previousRemoteUrl = localUrls?.code === 0 ? localUrls.stdout.split("\0")[0] : "";
+  if (currentRemote.code === 0 && !previousRemoteUrl) throw new Error("This remote has no editable URL in the repository configuration. Choose a new remote name and prepare again.");
   if (currentRemote.code === 0 && await optionalGit(source, ["config", "--get-all", `remote.${plan.args.remote}.pushurl`])) throw new Error("The remote now has a separate push destination. Choose a new remote name and prepare again.");
   const read = (args: string[]) => readGit(source, args);
   const verifyInitialPush = async (configuredRemote?: string) => {
@@ -3818,7 +3823,7 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
     ));
     return [native?`Created private repository ${plan.args.host}/${plan.args.owner}/${plan.args.name}.`:createOutput, pushOutput].filter(Boolean).join("\n");
   } catch (error) {
-    if (remoteChanged) await reportedGit(source, previousRemoteUrl ? ["remote", "set-url", plan.args.remote, previousRemoteUrl] : ["remote", "remove", plan.args.remote]).catch(() => undefined);
+    if (remoteChanged) await reportedGit(source, previousRemoteUrl ? ["remote", "set-url", "--", plan.args.remote, previousRemoteUrl] : ["remote", "remove", plan.args.remote]).catch(() => undefined);
     const message = error instanceof Error ? error.message : localized(language, "gh no pudo crear el repositorio.", "gh could not create the repository.");
     if (repositoryCreated) throw new Error(localized(language, `El repositorio remoto se creó, pero no se pudo configurar o publicar el remoto local: ${message}`, `The remote repository was created, but the local remote could not be configured or published: ${message}`), { cause: error });
     if (/forbidden|permission|not accessible|403/i.test(message)) throw new Error(localized(language, "No hay permisos suficientes para crear el repositorio privado solicitado.", "You do not have enough permission to create the requested private repository."), { cause: error });
@@ -4359,7 +4364,7 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
 
 async function pushEndpointContains(cwd: string, endpoint: string, commit: string) {
   const namespace = `refs/gitcat/publication-check/${randomUUID()}`;
-  const remote = await verifiedFetchRemote(args => readGit(cwd, args), endpoint);
+  const remote = await verifiedTransportRemote(args => readGit(cwd, args), endpoint, "fetch");
   try {
     await checkedGit(cwd, [...remote.config, "-c", "protocol.ext.allow=never", "fetch", "--atomic", "--no-tags", "--no-recurse-submodules",
       "--no-write-fetch-head", "--refmap=", "--", remote.name,

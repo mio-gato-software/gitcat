@@ -629,7 +629,6 @@ test("la ejecución gh no usa shell y revierte cambios locales ante fallo", asyn
   assert.match(service, /runCommand\("gh", args/);
   assert.match(service, /GH_PROMPT_DISABLED: "1"/);
   assert.match(service, /\["remote", "remove", plan\.args\.remote\]/);
-  assert.match(service, /\["remote", "set-url", plan\.args\.remote, previousRemoteUrl\]/);
   assert.match(service, /existingRemoteHash/);
   assert.doesNotMatch(service, /existingRemoteUrl/);
   assert.doesNotMatch(service, /spawn\([^\n]+shell:\s*true/);

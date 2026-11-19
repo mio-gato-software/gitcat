@@ -19,6 +19,7 @@ mock.method(cp,'spawn',(executable,args,options)=>{
    assert.ok(!args.join(' ').includes(current.token));current.gitCalls.push(operation);
   }
   if(current.failPush&&operation==='push')return originalSpawn(process.execPath,['-e',"process.stderr.write('protected branch');process.exit(1)"],options);
+  if(current.localPushOnly&&operation==='push')return originalSpawn(executable,args,{...options,env:{...options.env,GIT_ALLOW_PROTOCOL:'file'}});
   return originalSpawn(executable,['-c',`url.${current.bare}.insteadOf=${current.location.gitUrl}`,...args],options);
  }
  return originalSpawn(executable,args,options);
@@ -57,6 +58,18 @@ for(const provider of ['bitbucket','bitbucket_dc','azure']){
   const result=await service.executePlan(path,plan,'en');assert.equal(result.error,undefined);assert.equal(state.exists,true);assert.equal(git(path,'remote','get-url','origin'),state.location.gitUrl);assert.equal(git(path,'rev-parse','@{upstream}'),git(path,'rev-parse','HEAD'));assert.equal(readFileSync(join(path,'unsaved.txt'),'utf8'),'keep local');
  });
 }
+
+test('sharing with a saved account rejects a rewrite of its effective HTTPS push destination',async()=>{
+ const state=await fixture('bitbucket'),request={provider:'bitbucket',connectionId:state.connectionId,remote:'origin',head:'work',base:'main',title:'Review',body:''};
+ const alternate=state.path+'-unexpected.git';
+ git(state.path,'init','--bare','-q',alternate);
+ const preview=await service.previewShareReview(state.path,request);
+ state.localPushOnly=true;
+ git(state.path,'config',`url.${alternate}.pushInsteadOf`,state.location.gitUrl);
+ await assert.rejects(service.publishShareReview(preview),/effective push destination/);
+ assert.equal(git(alternate,'branch','--list','work'),'');
+ assert.equal(state.reviews.length,0);
+});
 
 test('a partial review-creation failure keeps publication visible and retry creates only the missing review',async()=>{
  const state=await fixture('bitbucket'),request={provider:'bitbucket',connectionId:state.connectionId,remote:'origin',head:'work',base:'main',title:'Review',body:''};
