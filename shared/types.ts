@@ -998,7 +998,7 @@ export type GitlineApi = {
   editPractice: (path:string)=>Promise<RepoSnapshot>;
   removePractice: (path:string)=>Promise<void>;
   previewReview: (path:string, request:ShareReviewRequest)=>Promise<ShareReviewPreview>;
-  publishReview: (path:string,id:string)=>Promise<{snapshot:RepoSnapshot;pullRequest:ReviewPullRequest}>;
+  publishReview: (path: string, id: string) => Promise<ShareReviewResult>;
   openReview: (url:string)=>Promise<void>;
   getSwitchWork: (path: string, target: string) => Promise<SwitchWorkPreview>;
   prepareSwitchWork: (path: string, request: SwitchWorkRequest, locale?: Locale) => Promise<ActionPlan>;
@@ -1058,6 +1058,11 @@ export type SwitchWorkPreview = { snapshot: RepoSnapshot; target: string; occupi
 
 export type ShareReviewRequest = { remote:string;head:string;base:string;title:string;body:string;provider?:HostingProvider;connectionId?:string };
 export type ReviewPullRequest = {url:string;state:'OPEN'|'CLOSED'|'MERGED';head:string;base:string};
+export type ShareReviewResult = {
+  pullRequest: ReviewPullRequest;
+  snapshot?: RepoSnapshot;
+  warnings: ("history_write" | "snapshot_read")[];
+};
 export type ShareReviewPreview = {id:string;repoPath:string;request:ShareReviewRequest;provider:HostingProvider;host:string;hosting?:NativeHostingContext;headHash:string;baseHash:string;publishedHash?:string;repository:string;remoteUrl:string;account:string;commits:{hash:string;subject:string}[];existing?:ReviewPullRequest;reviewable:boolean;checkedAt:string};
 
 export type PracticeInfo={id:string;path:string;lesson:number};

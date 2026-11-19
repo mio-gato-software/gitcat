@@ -28,6 +28,7 @@ syncBuiltinESMExports();
 globalThis.fetch=(...args)=>current.transport(...args);
 registerHooks({resolve(specifier,context,next){return specifier==='electron'?{url:pathToFileURL(join(root,'test/helpers/electron-stub.mjs')).href,shortCircuit:true}:next(specifier,context);}});
 const service=await import('../dist-electron/electron/git-service.js');
+const {ActivityHistory}=await import('../dist-electron/electron/activity-history.js');
 after(()=>{mock.restoreAll();syncBuiltinESMExports();globalThis.fetch=originalFetch;rmSync(scratch,{recursive:true,force:true});});
 
 async function fixture(provider,{connect=true}={}){
@@ -75,6 +76,25 @@ test('a partial review-creation failure keeps publication visible and retry crea
  const state=await fixture('bitbucket'),request={provider:'bitbucket',connectionId:state.connectionId,remote:'origin',head:'work',base:'main',title:'Review',body:''};
  const preview=await service.previewShareReview(state.path,request);state.failReview=true;await assert.rejects(service.publishShareReview(preview),/already be published/);assert.equal(state.gitCalls.filter(c=>c==='push').length,1);
  state.failReview=false;await service.publishShareReview(await service.previewShareReview(state.path,request));assert.equal(state.reviews.length,1);assert.equal(state.gitCalls.filter(c=>c==='push').length,1);
+});
+
+test('a confirmed open review survives failure to write its local activity entry',async t=>{
+ const state=await fixture('bitbucket'),request={provider:'bitbucket',connectionId:state.connectionId,remote:'origin',head:'work',base:'main',title:'Review',body:''};
+ const finish=ActivityHistory.prototype.finish;
+ const attempted=[];
+ t.mock.method(ActivityHistory.prototype,'finish',function(id,snapshot,outcomes,error){
+  if(outcomes[0]?.summary==='pull_request'){
+   attempted.push(outcomes[0].status);
+   throw new Error('Activity is read-only');
+  }
+  return finish.call(this,id,snapshot,outcomes,error);
+ });
+ const preview=await service.previewShareReview(state.path,request);
+ const result=await service.publishShareReview(preview);
+ assert.equal(result.pullRequest.state,'OPEN');
+ assert.deepEqual(result.warnings,['history_write']);
+ assert.equal(state.reviews.length,1);
+ assert.deepEqual(attempted,['completed']);
 });
 
 test('stale accounts and repository identities stop before publishing, while failed private publication preserves prior remote settings',async()=>{
