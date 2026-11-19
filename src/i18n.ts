@@ -3,6 +3,13 @@ export type Locale = "en" | "es";
 type MessageValues = Record<string, string | number>;
 
 const en = {
+  activityHistoryUnreadable: "GitCat could not read the shared activity history. Keep a copy and start a new history before confirming another operation.",
+  activityRepair: "Repair activity history",
+  activityRepairPrompt: "This starts a new activity history for all projects. GitCat will keep the unreadable file as a private copy.",
+  activityRepairConfirm: "Keep a copy and start a new history",
+  activityRepairBackup: "The unreadable history was saved to {{path}}.",
+  activityHistoryWarning: "Activity history needs attention",
+  conflictHistoryWarning: "GitCat could not save the activity record. Check the results shown for each file.",
   switchWorkTitle: "Unfinished work",
   switchWorkStay: "Keep working here",
   switchWorkReading: "Reading current work…",
@@ -1238,6 +1245,13 @@ const en = {
 
 const es: { [K in keyof typeof en]: string } = {
   ...en,
+  activityHistoryUnreadable: "GitCat no pudo leer el historial de actividad compartido. Conserva una copia e inicia un historial nuevo antes de confirmar otra operación.",
+  activityRepair: "Reparar historial de actividad",
+  activityRepairPrompt: "Se iniciará un historial nuevo para todos los proyectos. GitCat conservará una copia privada del archivo ilegible.",
+  activityRepairConfirm: "Conservar una copia e iniciar un historial nuevo",
+  activityRepairBackup: "El historial ilegible se guardó en {{path}}.",
+  activityHistoryWarning: "El historial de actividad necesita atención",
+  conflictHistoryWarning: "GitCat no pudo guardar el registro de actividad. Consulta el resultado que se muestra para cada archivo.",
   switchWorkTitle: "Trabajo sin terminar",
   switchWorkStay: "Seguir aquí",
   switchWorkReading: "Leyendo el trabajo actual…",

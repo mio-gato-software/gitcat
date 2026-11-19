@@ -1330,13 +1330,14 @@ export default function App() {
       const result = await window.gitcat.chooseConflictResolutions(path, guide.id, choices, locale);
       updateSnapshot(path, result.snapshot);
       setGuideResult(result);
+      if (result.historyWarning) addActivity({ label: t("activityHistoryWarning"), detail: t("conflictHistoryWarning"), tone: "warning" });
+      const applied = result.outcomes.filter((outcome) => outcome.status === "applied");
       // Conflicts left by something other than a merge, rebase, cherry-pick or revert end here, with nothing to continue.
       if (!result.snapshot.pending && !result.snapshot.conflicts.length) {
-        addActivity({ label: t("conflictsResolved"), detail: counted(t, choices.length, "file", "files"), tone: "success" });
+        if (applied.length) addActivity({ label: t("conflictsResolved"), detail: counted(t, applied.length, "file", "files"), tone: "success" });
         closeGuide();
         return;
       }
-      const applied = result.outcomes.filter((outcome) => outcome.status === "applied").map((outcome) => outcome.path);
       if (applied.length) {
         addActivity({ label: t(result.complete ? "conflictsResolved" : "conflictsPartlyResolved"), detail: counted(t, applied.length, "file", "files"), tone: result.complete ? "success" : "warning" });
       }
@@ -1368,6 +1369,7 @@ export default function App() {
     try {
       const result = await window.gitcat.applyConflictResolution(path, proposal.id, accepted, locale);
       updateSnapshot(path, result.snapshot);
+      if (result.historyWarning) addActivity({ label: t("activityHistoryWarning"), detail: t("conflictHistoryWarning"), tone: "warning" });
       const applied = result.outcomes.filter((outcome) => outcome.status === "applied").map((outcome) => outcome.path);
       if (result.complete) {
         closeProposal();
@@ -1861,7 +1863,7 @@ export default function App() {
       {worktreesPath && projects.find(project => project.snapshot.path === worktreesPath) && <Worktrees
         snapshot={projects.find(project => project.snapshot.path === worktreesPath)!.snapshot} locale={locale}
         onClose={() => setWorktreesPath(undefined)} onOpen={(next) => showWorktree(next, worktreesPath)} />}
-      {historyPath && <ActivityHistory path={historyPath} locale={locale} onClose={() => setHistoryPath(undefined)} onRecover={(id, mode) => {
+      {historyPath && <ActivityHistory key={historyPath} path={historyPath} locale={locale} onClose={() => setHistoryPath(undefined)} onRecover={(id, mode) => {
         const path=historyPath; setHistoryPath(undefined);
         void showPlan(locale === 'es' ? 'Revisar recuperación' : 'Review recovery', () => window.gitcat.prepareHistoryRecovery(path,id,mode,locale),path,true);
       }} />}
