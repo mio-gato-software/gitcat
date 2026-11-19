@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { registerHooks, syncBuiltinESMExports } from 'node:module';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, renameSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, renameSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import cp, { execFileSync } from 'node:child_process';
 registerHooks({resolve(s,c,n){return s==='electron'?{url:new URL('./helpers/electron-stub.mjs',import.meta.url).href,shortCircuit:true}:n(s,c);}});
 const { ActivityHistory }=await import('../dist-electron/electron/activity-history.js');
@@ -45,6 +45,51 @@ test('an unpublished save can be undone while keeping files and index, and resto
  await service.executePlan(path,restore,'en');assert.equal(git('branch','--show-current'),'main');assert.equal(git('write-tree'),index);
  assert.equal(git('rev-parse',restore.recovery.branch),base);
 });
+
+test('retry rebuilds and confirms a history recovery after a transient branch lock', async t => {
+  const { path, git } = fixture(t);
+  const base = git('rev-parse', 'HEAD');
+  const entry = await save(path);
+  const head = git('rev-parse', 'HEAD');
+  const plan = await service.prepareHistoryRecovery(path, entry.id, 'restore', 'en');
+  const branch = plan.recovery.branch;
+  const lock = join(path, '.git', 'refs', 'heads', `${branch}.lock`);
+  mkdirSync(dirname(lock), { recursive: true });
+  writeFileSync(lock, '');
+  const failed = await service.executePlan(path, plan, 'en');
+  assert.equal(failed.outcomes[0].status, 'failed');
+  assert.match(failed.error, /\.lock/);
+  rmSync(lock);
+
+  const retry = await service.prepareRetry(path, { plan, outcomes: failed.outcomes, stale: false }, 'en');
+  assert.notEqual(retry.id, plan.id);
+  assert.equal(retry.requiresConfirmation, true);
+  assert.deepEqual(retry.recovery, plan.recovery);
+  assert.equal(git('branch', '--list', branch), '');
+  const result = await service.executePlan(path, retry, 'en');
+  assert.equal(result.outcomes[0].status, 'completed');
+  assert.equal(git('rev-parse', branch), base);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+});
+
+test('retrying an undo rechecks that the saved commit is still the tip', async t => {
+  const { path, git } = fixture(t);
+  const entry = await save(path);
+  const plan = await service.prepareHistoryRecovery(path, entry.id, 'undo', 'en');
+  const lock = join(path, '.git', 'refs', 'heads', 'main.lock');
+  writeFileSync(lock, '');
+  const failed = await service.executePlan(path, plan, 'en');
+  assert.equal(failed.outcomes[0].status, 'failed');
+  assert.match(failed.error, /\.lock/);
+  rmSync(lock);
+  assert.equal(git('rev-parse', 'HEAD'), plan.recovery.commit);
+
+  git('commit', '-q', '--allow-empty', '-m', 'Newer commit');
+  const head = git('rev-parse', 'HEAD');
+  await assert.rejects(service.prepareRetry(path, { plan, outcomes: failed.outcomes, stale: false }, 'en'), /The branch has moved/);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+});
+
 test('published saves use revert, and publication after preview blocks an undo',async t=>{
  const {path,git}=fixture(t),remote=join(path,'remote.git');git('init','--bare',remote);git('remote','add','origin',remote);
  // Keep the fixture remote out of the working tree.
