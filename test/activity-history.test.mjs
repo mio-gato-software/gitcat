@@ -125,6 +125,27 @@ test('undo checks every push endpoint for commits reachable from a branch tip', 
   assert.equal((await service.prepareHistoryRecovery(path, entry.id, 'revert', 'en')).requiresConfirmation, true);
 });
 
+for (const key of ['branch.main.pushRemote', 'remote.pushDefault', 'branch.main.remote']) {
+  test(`undo rechecks direct publication configured in ${key}`, async t => {
+    const { path, git } = fixture(t);
+    const remote = join(path, '.git', 'remote.git');
+    git('init', '--bare', remote);
+    git('config', key, remote);
+    git('config', 'push.default', 'current');
+    const entry = await save(path);
+    const head = git('rev-parse', 'HEAD');
+    const undo = await service.prepareHistoryRecovery(path, entry.id, 'undo', 'en');
+
+    const push = await service.prepareOperation(path, 'push', {}, 'en');
+    assert.equal((await service.executePlan(path, push, 'en')).error, undefined);
+    assert.equal(git('--git-dir', remote, 'rev-parse', 'main'), head);
+    await assert.rejects(service.executePlan(path, undo, 'en'), /published.*Revert/);
+    await assert.rejects(service.prepareHistoryRecovery(path, entry.id, 'undo', 'en'), /published.*Revert/);
+    assert.equal(git('rev-parse', 'HEAD'), head);
+    assert.equal(git('for-each-ref', 'refs/gitcat/publication-check'), '');
+  });
+}
+
 test('undo is unavailable when a configured push endpoint cannot be verified', async t => {
   const { path, git } = fixture(t);
   writeFileSync(join(path, '.git', 'info', 'exclude'), 'fetch.git/\n');

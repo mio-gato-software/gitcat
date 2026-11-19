@@ -174,12 +174,7 @@ export async function verifiedTransportRemote(read: ReadGit, expected: string, d
   return remote;
 }
 
-export async function readPushDestination(
-  read: ReadGit,
-  snapshot: Pick<RepoSnapshot, "remotes" | "currentBranch">,
-  target: string | null,
-  explicitBranch?: string
-): Promise<PushDestination> {
+async function readPushSettings(read: ReadGit) {
   const config = await read(["config", "--null", "--get-regexp", "^(branch\\.|remote\\.|push\\.|submodule\\.recurse$)"]);
   if (config.code !== 0 && config.code !== 1) throw new Error("Git could not read the publishing configuration.");
   const settings = new Map<string, string[]>();
@@ -189,6 +184,32 @@ export async function readPushDestination(
     const value = separator < 0 ? "" : entry.slice(separator + 1);
     settings.set(key, [...(settings.get(key) ?? []), value]);
   }
+  return settings;
+}
+
+function directPushUrls(read: ReadGit, address: string) {
+  return proposedRemoteUrls(read, commandScopedRemote(address), "push");
+}
+
+export async function readDirectPushEndpoints(read: ReadGit, remotes: string[]): Promise<string[]> {
+  const settings = await readPushSettings(read);
+  const addresses = new Set<string>();
+  for (const [key, values] of settings) {
+    if (key !== "remote.pushdefault" && !/^branch\..+\.(?:pushremote|remote)$/.test(key)) continue;
+    const address = values.at(-1);
+    // A dot denotes this repository rather than a published copy.
+    if (address && address !== "." && !remotes.includes(address)) addresses.add(address);
+  }
+  return (await Promise.all([...addresses].map(address => directPushUrls(read, address)))).flat();
+}
+
+export async function readPushDestination(
+  read: ReadGit,
+  snapshot: Pick<RepoSnapshot, "remotes" | "currentBranch">,
+  target: string | null,
+  explicitBranch?: string
+): Promise<PushDestination> {
+  const settings = await readPushSettings(read);
   const branch = `branch.${snapshot.currentBranch}.`;
   const last = (key: string) => settings.get(key)?.at(-1);
   const chosen = target ?? (last(branch + "pushremote") || last("remote.pushdefault") || last(branch + "remote")
@@ -214,7 +235,7 @@ export async function readPushDestination(
   const targetRef = explicitBranch ? `refs/heads/${explicitBranch}`
     : usesUpstream ? upstreamRef
     : snapshot.currentBranch === "HEAD" ? undefined : `refs/heads/${snapshot.currentBranch}`;
-  const urls = remote ? await readRemoteUrls(read, remote, "push") : chosen ? await proposedRemoteUrls(read, commandScopedRemote(chosen), "push") : [];
+  const urls = remote ? await readRemoteUrls(read, remote, "push") : chosen ? await directPushUrls(read, chosen) : [];
   const routing = [...settings].filter(([key]) => key.startsWith("push.") || key === branch + "merge" || key === "submodule.recurse"
     || (remote && [`remote.${remote}.push`, `remote.${remote}.mirror`].includes(key)));
   const binding = createHash("sha256").update(JSON.stringify([snapshot.currentBranch, chosen, urls, routing, targetRef])).digest("hex");
