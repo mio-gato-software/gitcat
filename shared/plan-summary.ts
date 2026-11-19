@@ -216,7 +216,7 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         break;
       case "push": {
         const branch = args.branch ?? on;
-        const remote = step.pushDestination?.remote ?? args.setUpstream ?? upstreamRemote;
+        const remote = step.pushDestination?.remote ?? args.setUpstream ?? args.remote ?? upstreamRemote;
         const ahead = !walked.some((item) => item.step !== step && writesHistory.has(item.step.operation) && item.on === branch) ? branchNamed(branch)?.ahead : undefined;
         if (!remote) {
           // Nowhere to send it: saying the branch would match a remote would promise something Git cannot do.

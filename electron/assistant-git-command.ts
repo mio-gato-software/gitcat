@@ -21,7 +21,8 @@ const queryOptions = new Map<string, { flags: readonly string[]; values?: RegExp
 ]);
 
 function localOperand(value: string) {
-  return !/^(?:[/\\]|[a-z]:)/i.test(value) && !/(?:^|[:/\\])\.\.(?:[/\\]|$)/.test(value);
+  return !value.startsWith(":(") && !/^:[!^]?[/\\]/.test(value)
+    && !/^(?:[/\\]|[a-z]:)/i.test(value) && !/(?:^|[:/\\)!^])\.\.(?:[/\\]|$)/.test(value);
 }
 
 /** Only built-in queries and actions that have a matching reviewed GitCat operation are accepted. */
