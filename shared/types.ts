@@ -448,6 +448,7 @@ export type RepositoryPlan = {
 
 /** One Git operation inside a plan. The model orders the steps; this shape is what the code validates and runs. */
 export type PushDestination = { binding: string; remote?: string; urls: string[]; targetRef?: string };
+export type ConflictResolutionAction = "checkout" | "add" | "remove";
 
 export type PlanStep = {
   operation: Operation;
@@ -462,6 +463,8 @@ export type PlanStep = {
   paths?: string[];
   /** Effective push endpoints approved with the plan. Addresses are safe to show. */
   pushDestination?: PushDestination;
+  /** The effect on the conflicted file approved in the plan. */
+  conflictResolution?: ConflictResolutionAction;
   command: string;
   summary: string;
   risk: "low" | "medium" | "high";

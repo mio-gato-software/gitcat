@@ -1,4 +1,4 @@
-import type { ActionPlan, Locale, PlanStep, RepoSnapshot, StepOutcome } from "./types.js";
+import type { ActionPlan, ConflictResolutionAction, Locale, PlanStep, RepoSnapshot, StepOutcome } from "./types.js";
 import { workOverview, type NextActionId } from "./work-overview.js";
 
 /**
@@ -47,6 +47,18 @@ export type CompletionSummary = {
 
 type Say = (en: string, es: string) => string;
 const speaker = (locale: Locale | undefined): Say => (en, es) => locale === "en" ? en : es;
+
+export function conflictResolutionEffect(action: ConflictResolutionAction, path: string, side: string, locale?: Locale) {
+  const say = speaker(locale);
+  switch (action) {
+    case "checkout": {
+      const version = side === "theirs" ? say("the other side's version", "la versión del otro lado") : say("our version", "nuestra versión");
+      return say(`Replaces ${path} with ${version} and stages it as resolved.`, `Reemplaza ${path} con ${version} y lo prepara como resuelto.`);
+    }
+    case "remove": return say(`Removes ${path} from the working tree and stages its removal as the resolution.`, `Elimina ${path} de los archivos de trabajo y prepara ese borrado como resolución.`);
+    case "add": return say(`Stages ${path} as it is and marks it resolved.`, `Prepara ${path} tal como está y lo marca como resuelto.`);
+  }
+}
 
 const files = (say: Say, count: number) => count === 1 ? say("1 file", "1 archivo") : say(`${count} files`, `${count} archivos`);
 const commits = (say: Say, count: number) => count === 1 ? say("1 commit", "1 commit") : say(`${count} commits`, `${count} commits`);
@@ -191,7 +203,12 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         summary.irreversible.push(say("The changes of the skipped commit are left out of the result.", "Los cambios del commit saltado quedan fuera del resultado."));
         break;
       case "resolve_conflict":
-        summary.local.push(say(`Marks ${args.path} as resolved.`, `Marca ${args.path} como resuelto.`));
+        if (step.conflictResolution) {
+          summary.local.push(conflictResolutionEffect(step.conflictResolution, args.path, args.side, locale));
+          if (step.conflictResolution !== "add") summary.irreversible.push(say(
+            `Unsaved edits in ${args.path} will be discarded.`, `Se descartarán las ediciones sin guardar en ${args.path}.`
+          ));
+        }
         break;
       case "commit": {
         const all = snapshot?.changes.map((change) => change.path) ?? [];
