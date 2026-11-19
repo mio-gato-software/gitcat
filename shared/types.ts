@@ -439,6 +439,8 @@ export type RepositoryPlan = {
 };
 
 /** One Git operation inside a plan. The model orders the steps; this shape is what the code validates and runs. */
+export type PushDestination = { binding: string; remote?: string; urls: string[] };
+
 export type PlanStep = {
   operation: Operation;
   args: Record<string, string>;
@@ -449,6 +451,8 @@ export type PlanStep = {
    * rename. Absent means the commit saves every change, as a planned commit always has.
    */
   paths?: string[];
+  /** Effective push endpoints approved with the plan. Addresses are safe to show. */
+  pushDestination?: PushDestination;
   command: string;
   summary: string;
   risk: "low" | "medium" | "high";

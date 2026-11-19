@@ -70,7 +70,7 @@ const pendingNames = (say: Say): Record<string, string> => ({
 });
 
 /** Walks the steps with the branch each one runs on, which the previous steps decide. */
-function walk(steps: PlanStep[], start: string) {
+export function walkPlanSteps(steps: PlanStep[], start: string) {
   let branch = start;
   return steps.map((step) => {
     const on = branch;
@@ -91,7 +91,7 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
 
   summary.stale = Boolean(snapshot && snapshot.path === plan.repoPath && (snapshot.head !== plan.head || (!plan.selection && snapshot.stateId !== plan.stateId)));
   summary.noop = plan.steps.every(readsOnly);
-  const walked = walk(plan.steps, start);
+  const walked = walkPlanSteps(plan.steps, start);
   let edited = snapshot?.changes.length ?? 0;
   let saved = false;
   /** Branches with new commits on this computer, and the branches the plan publishes afterwards. */
@@ -216,7 +216,7 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         break;
       case "push": {
         const branch = args.branch ?? on;
-        const remote = args.setUpstream ?? upstreamRemote;
+        const remote = step.pushDestination?.remote ?? args.setUpstream ?? upstreamRemote;
         const ahead = !walked.some((item) => item.step !== step && writesHistory.has(item.step.operation) && item.on === branch) ? branchNamed(branch)?.ahead : undefined;
         if (!remote) {
           // Nowhere to send it: saying the branch would match a remote would promise something Git cannot do.
@@ -255,6 +255,12 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
           : say("Runs a Git command the assistant proposed as is; the exact command is in the technical details.", "Ejecuta tal cual un comando Git que propuso el asistente; el comando exacto está en los detalles técnicos."));
         break;
       default: break;
+    }
+    if (step.pushDestination?.urls.length) {
+      summary.remote.name ??= step.pushDestination.remote;
+      for (const url of step.pushDestination.urls) {
+        summary.remote.effects.push(say(`Publishing destination: ${url}.`, `Destino de publicación: ${url}.`));
+      }
     }
     if (writesHistory.has(step.operation) && on) unpublished.add(on);
   }
@@ -343,7 +349,7 @@ function changes(plan: ActionPlan, outcomes: StepOutcome[], before: RepoSnapshot
   const lines: string[] = [];
   const local = (snapshot: RepoSnapshot) => new Map(snapshot.branches.filter((branch) => branch.presence !== "remote").map((branch) => [branch.name, branch]));
   const was = local(before), now = local(after);
-  const ran = walk(plan.steps, before.currentBranch).filter((_, index) => outcomes[index]?.status === "completed");
+  const ran = walkPlanSteps(plan.steps, before.currentBranch).filter((_, index) => outcomes[index]?.status === "completed");
   const ranOn = (operation: string, branch: string) => ran.find(({ step, on }) => step.operation === operation && on === branch);
   const created = [...now.keys()].filter((name) => !was.has(name));
   const removed = [...was.keys()].filter((name) => !now.has(name));
