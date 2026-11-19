@@ -80,12 +80,29 @@ test('an in-flight save finishes and later integration steps are skipped with a 
 });
 
 test('a timeout waits for the Git child to exit before repository inspection and keeps partial effects', async t => {
- const {path,git} = fixture(t);
- // Git alias simulates a slow mutation without network or paid services.
- git('config','alias.slow','!touch partial; sleep 10');
- await assert.rejects(service.runGit(path,['slow'],100), /timed out/);
- assert.equal(existsSync(join(path,'partial')),true);
- assert.equal((await service.getSnapshot(path)).changes.some(f => f.path === 'partial'),true);
+  const { path, git } = fixture(t);
+  const partial = join(path, 'partial');
+  git('config', 'alias.slow', '!touch partial; sleep 30');
+  await service.runGit(path, ['status', '--short']);
+
+  // The child runs on the real clock. Advance the command's timer only after the mutation exists.
+  const realTimeout = globalThis.setTimeout;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const timedOut = assert.rejects(service.runGit(path, ['slow'], 100), /timed out/);
+  try {
+    const deadline = performance.now() + 10_000;
+    while (!existsSync(partial) && performance.now() < deadline) {
+      await new Promise(resolve => realTimeout(resolve, 20));
+    }
+    assert.ok(existsSync(partial), 'The Git child recorded a partial change before timing out');
+  } finally {
+    t.mock.timers.tick(100);
+    await timedOut;
+    t.mock.timers.reset();
+  }
+
+  const snapshot = await service.getSnapshot(path);
+  assert.ok(snapshot.changes.some(file => file.path === 'partial'));
 });
 
 test('provider abort reaches fetch and late provider data cannot become a result', async () => {
