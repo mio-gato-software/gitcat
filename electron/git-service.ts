@@ -4176,6 +4176,14 @@ export async function prepareRetry(cwd: string, record: FailedPlanRecord, locale
   }
   if (record.plan.recovery) return buildHistoryRecoveryPlan(snapshot.path, record.plan.recovery, language);
   const start = record.outcomes.findIndex((outcome) => outcome.status !== "completed");
+  const work = record.plan.switchWork;
+  if (work && start === 0) return prepareSwitchWork(snapshot.path, work, language);
+  if (work?.mode === "set_aside" && start === 1) {
+    const retry = await prepareSwitchWork(snapshot.path, { mode: "carry", target: work.target }, language);
+    return { ...retry, effects: [localized(language,
+      "El trabajo que ya apartaste sigue disponible en su entrada de stash.",
+      "Work already set aside is still available in its stash entry."), ...(retry.effects ?? [])] };
+  }
   const remaining = await bindPushDestinations(snapshot, record.plan.steps.slice(start));
   const sync = remaining.find(step => step.operation === "sync_remote");
   if (sync) return prepareRemoteSync(snapshot, { ref: sync.args.ref, name: sync.args.name, side: sync.args.mode === "prefer_remote" ? "theirs" : "" }, language);
