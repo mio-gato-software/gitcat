@@ -4049,6 +4049,12 @@ function showsWithheld(plan: ActionPlan, outcomes: StepOutcome[]) {
     outcomes.some((outcome) => redactText(outcome.output).redacted > 0);
 }
 
+class PostActionSnapshotError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
 /**
  * Runs the approved plan end to end. Each step is validated against the repository the previous step
  * produced, and the first failure stops the sequence: a half-finished merge must never be reported as
@@ -4130,12 +4136,13 @@ async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutc
       after = await inspectOperation(() => getSnapshot(cwd));
     } catch (error) {
       try { activityHistory().step(activityId, index, outcomes[index], snapshot, undefined, stepResult.commitHash); } catch { /* reported by executePlan */ }
-      throw error;
+      throw new PostActionSnapshotError(error);
     }
     activityHistory().step(activityId, index, outcomes[index], snapshot, after, stepResult.commitHash ?? after.head);
+    snapshot = after;
   }
   operationPhase("inspecting");
-  return { snapshot: await inspectOperation(() => getSnapshot(cwd)), output: executionReport(outcomes, language), outcomes, ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {}) };
+  return { snapshot, output: executionReport(outcomes, language), outcomes, ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {}) };
 }
 
 /**
@@ -4417,7 +4424,7 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
       ...(!after ? { snapshotStale: true } : {}),
       output: executionReport(outcomes, language),
       error: detail,
-      postActionIssue: { kind: after ? "history_write" : "snapshot_read", detail },
+      postActionIssue: { kind: error instanceof PostActionSnapshotError || !after ? "snapshot_read" : "history_write", detail },
       outcomes,
       ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {})
     };
@@ -4636,12 +4643,25 @@ const reviewTools: ReviewTools = {
     }
     const plan=bindPlan(snapshot,sequenceDraft(steps,'Publish the reviewed branch',undefined,'en'));
     if(preview.hosting)plan.hostingConnection=preview.hosting;
-    const result=await executePlan(preview.repoPath,plan,'en'); if(result.error)throw new Error(result.error);
+    const result=await executePlan(preview.repoPath,plan,'en');
+    if(result.outcomes[0]?.status==='completed'){
+      const issue=result.postActionIssue?.kind;
+      if(issue==='history_write'||issue==='snapshot_read')return issue;
+      if(!result.error)return;
+    }
+    throw new Error(result.error ?? 'Git did not complete the push.');
   },
   create:async preview=>{
-    const snapshot=await getSnapshot(preview.repoPath),history=activityHistory();
-    const id=history.begin({steps:[{operation:'pull_request'}]},snapshot);
+    const snapshot=await inspectOperation(()=>getSnapshot(preview.repoPath)).catch(()=>undefined);
+    const history=activityHistory();
+    let warning: 'history_write' | 'snapshot_read' | undefined;
+    let id: string | undefined;
+    if(snapshot){
+      try { id=history.begin({steps:[{operation:'pull_request'}]},snapshot); }
+      catch { warning='history_write'; }
+    } else warning='snapshot_read';
     try {
+      operationCheckpoint();
       if(preview.hosting){
         const api=(url:string,method?:string,body?:unknown)=>hostingConnections().request(preview.hosting!.connectionId,url,method,body);
         const facts=await nativeRepositoryFacts(api,preview.hosting.location);
@@ -4658,7 +4678,8 @@ const reviewTools: ReviewTools = {
       throw error;
     }
     try { history.finish(id,snapshot,[{command:'',summary:'pull_request',status:'completed',output:''}]); }
-    catch { return 'history_write'; }
+    catch { warning ??= 'history_write'; }
+    return warning;
   }
 };
 export const previewShareReview=(cwd:string,request:ShareReviewRequest)=>previewReview(reviewTools,cwd,request);

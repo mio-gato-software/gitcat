@@ -7,6 +7,7 @@ import { nativeRepository } from '../shared/native-hosting.js';
 import { findNativeReview, nativeRepositoryFacts } from './native-reviews.js';
 import { checkedReview, checkReviewPermission, findReview, type ReviewCommand } from './review-provider.js';
 
+type ReviewWarning = ShareReviewResult['warnings'][number];
 export type ReviewTools = {
  snapshot: (path:string)=>Promise<RepoSnapshot>;
  remote: (path:string,name:string,provider?:HostingProvider,connectionId?:string)=>Promise<RemoteReadiness>;
@@ -14,8 +15,8 @@ export type ReviewTools = {
  gh: (path:string,args:string[],host:string)=>Promise<string>;
  glab: (path:string,args:string[],host:string)=>Promise<string>;
  api?: (context:NativeHostingContext,url:string,method?:string,body?:unknown)=>Promise<unknown>;
- publish: (preview:ShareReviewPreview)=>Promise<void>;
- create: (preview:ShareReviewPreview)=>Promise<'history_write' | void>;
+ publish: (preview:ShareReviewPreview)=>Promise<ReviewWarning | void>;
+ create: (preview:ShareReviewPreview)=>Promise<ReviewWarning | void>;
 };
 const hashPattern=/^[a-f0-9]{40,64}$/;
 export function checkedPullRequest(value: unknown, repository: string, head: string, base: string) {
@@ -82,10 +83,14 @@ export async function publishReview(tools:ReviewTools,preview:ShareReviewPreview
  for(const key of ['provider','host','headHash','baseHash','publishedHash','repository','remoteUrl','account'] as const)if(fresh[key]!==preview[key])throw new Error('The branch, remote or account changed. Review sharing again; nothing was published.');
  if(JSON.stringify(fresh.hosting)!==JSON.stringify(preview.hosting))throw new Error('The hosting account or remote repository identity changed. Review sharing again; nothing was published.');
  if(fresh.existing?.url!==preview.existing?.url || fresh.existing?.state!==preview.existing?.state)throw new Error('Pull-request status changed. Review sharing again before publishing.');
+ const warnings = new Set<ReviewWarning>();
  operationCheckpoint();
  operationPhase("executing",1,2);
  if(fresh.commits.length) {
-  try { await tools.publish(fresh); } catch(error) { throw new Error(`Publishing was not confirmed. Check remote state before retrying. A protected branch or permission rule may require a topic branch or writable fork. No force-push was attempted. ${error instanceof Error?error.message:String(error)}`, {cause:error}); }
+  try {
+   const warning = await tools.publish(fresh);
+   if (warning) warnings.add(warning);
+  } catch(error) { throw new Error(`Publishing was not confirmed. Check remote state before retrying. A protected branch or permission rule may require a topic branch or writable fork. No force-push was attempted. ${error instanceof Error?error.message:String(error)}`, {cause:error}); }
  }
  operationCheckpoint();
  operationPhase("executing",2,2);
@@ -99,16 +104,15 @@ export async function publishReview(tools:ReviewTools,preview:ShareReviewPreview
  const repository=fresh.hosting?undefined:await checkReviewPermission(command,{provider:fresh.provider,host:fresh.host,repository:fresh.repository});
  const live=()=>fresh.hosting?findNativeReview(api!,fresh.hosting,facts!,fresh.request.head,fresh.request.base):findReview(command,repository!,fresh.request.head,fresh.request.base);
  let current=await live();
- const warnings: ShareReviewResult['warnings'] = [];
  if(current?.state!=='OPEN') {
   try {
    const warning = await tools.create(fresh);
-   if (warning) warnings.push(warning);
+   if (warning) warnings.add(warning);
   } catch(error) { throw new Error(`The branch may already be published, but review creation was not confirmed. Check the live review status before retrying. ${error instanceof Error?error.message:String(error)}`, {cause:error}); }
   current=await live();
  }
  if(!current || current.state!=='OPEN')throw new Error('The branch is published, but an open review could not be verified. Refresh live status before retrying.');
  const snapshot = await tools.snapshot(fresh.repoPath).catch(() => undefined);
- if (!snapshot) warnings.push('snapshot_read');
- return { snapshot, pullRequest: current, warnings };
+ if (!snapshot) warnings.add('snapshot_read');
+ return { snapshot, pullRequest: current, warnings: [...warnings] };
 }
