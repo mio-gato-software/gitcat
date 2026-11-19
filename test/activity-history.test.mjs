@@ -101,6 +101,45 @@ test('published saves use revert, and publication after preview blocks an undo',
  const revert=await service.prepareHistoryRecovery(path,entry.id,'revert','en');
  await service.executePlan(path,revert,'en');assert.equal(readFileSync(join(path,'file'),'utf8'),'base');assert.equal(git('rev-list','--count','HEAD'),'3');
 });
+
+test('undo checks every push endpoint for commits reachable from a branch tip', async t => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, '.git', 'info', 'exclude'), '*.git/\n');
+  const fetch = join(path, 'fetch.git');
+  const first = join(path, 'first.git');
+  const second = join(path, 'second.git');
+  for (const remote of [fetch, first, second]) git('init', '--bare', remote);
+  git('remote', 'add', 'origin', fetch);
+  git('remote', 'set-url', '--add', '--push', 'origin', first);
+  git('remote', 'set-url', '--add', '--push', 'origin', second);
+  const entry = await save(path);
+  const head = git('rev-parse', 'HEAD');
+  const undo = await service.prepareHistoryRecovery(path, entry.id, 'undo', 'en');
+
+  const descendant = git('commit-tree', 'HEAD^{tree}', '-p', head, '-m', 'Published descendant');
+  git('push', second, `${descendant}:refs/heads/published`);
+  await assert.rejects(service.executePlan(path, undo, 'en'), /published.*Revert/);
+  await assert.rejects(service.prepareHistoryRecovery(path, entry.id, 'undo', 'en'), /published.*Revert/);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+  assert.equal(git('for-each-ref', 'refs/gitcat/publication-check'), '');
+  assert.equal((await service.prepareHistoryRecovery(path, entry.id, 'revert', 'en')).requiresConfirmation, true);
+});
+
+test('undo is unavailable when a configured push endpoint cannot be verified', async t => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, '.git', 'info', 'exclude'), 'fetch.git/\n');
+  const fetch = join(path, 'fetch.git');
+  git('init', '--bare', fetch);
+  git('remote', 'add', 'origin', fetch);
+  git('remote', 'set-url', '--push', 'origin', join(path, 'unavailable.git'));
+  const entry = await save(path);
+  const head = git('rev-parse', 'HEAD');
+  await assert.rejects(service.prepareHistoryRecovery(path, entry.id, 'undo', 'en'), /could not verify.*Revert/i);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+  assert.equal(git('for-each-ref', 'refs/gitcat/publication-check'), '');
+  assert.equal((await service.prepareHistoryRecovery(path, entry.id, 'revert', 'en')).requiresConfirmation, true);
+});
+
 test('unrelated dirty work and externally moved history refuse recovery before changing anything',async t=>{
  const {path,git}=fixture(t),entry=await save(path),plan=await service.prepareHistoryRecovery(path,entry.id,'undo','en');
  writeFileSync(join(path,'unrelated'),'mine');await assert.rejects(service.executePlan(path,plan,'en'),/unfinished work/);

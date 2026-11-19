@@ -140,24 +140,35 @@ export async function readRemoteUrls(read: ReadGit, remote: string, direction: "
   return urls;
 }
 
-async function proposedPushUrls(read: ReadGit, url: string) {
+function commandScopedRemote(url: string) {
   const name = `gitcat-url-${randomUUID()}`;
+  return { name, config: ["-c", `remote.${name}.url=${url}`] };
+}
+
+async function proposedRemoteUrls(read: ReadGit, remote: ReturnType<typeof commandScopedRemote>, direction: "fetch" | "push") {
   // Git lists command-scoped remotes in -v even when get-url requires a saved remote.
-  const result = await read(["-c", `remote.${name}.url=${url}`, "remote", "-v"]);
-  const suffix = " (push)";
-  const prefix = `${name}\t`;
+  const result = await read([...remote.config, "remote", "-v"]);
+  const suffix = ` (${direction})`;
+  const prefix = `${remote.name}\t`;
   const urls = result.stdout.split("\n")
     .filter(line => line.startsWith(prefix) && line.endsWith(suffix))
     .map(line => line.slice(prefix.length, -suffix.length));
-  if (result.code !== 0 || !urls.length) throw new Error("Git could not verify the proposed push destination.");
+  if (result.code !== 0 || !urls.length) throw new Error(`Git could not verify the proposed ${direction} destination.`);
   return urls;
 }
 
 export async function verifyInitialPushUrl(read: ReadGit, expected: string, remote?: string) {
-  const urls = remote === undefined ? await proposedPushUrls(read, expected) : await readRemoteUrls(read, remote, "push");
+  const urls = remote === undefined ? await proposedRemoteUrls(read, commandScopedRemote(expected), "push") : await readRemoteUrls(read, remote, "push");
   if (urls.length !== 1 || urls[0] !== expected) {
     throw new Error("The effective push destination differs from the private repository address. Review Git's URL rewrites before publishing.");
   }
+}
+
+export async function verifiedFetchRemote(read: ReadGit, expected: string) {
+  const remote = commandScopedRemote(expected);
+  const urls = await proposedRemoteUrls(read, remote, "fetch");
+  if (urls.length !== 1 || urls[0] !== expected) throw new Error("Git would fetch from a different destination.");
+  return remote;
 }
 
 export async function readPushDestination(
@@ -200,7 +211,7 @@ export async function readPushDestination(
   const targetRef = explicitBranch ? `refs/heads/${explicitBranch}`
     : usesUpstream ? upstreamRef
     : snapshot.currentBranch === "HEAD" ? undefined : `refs/heads/${snapshot.currentBranch}`;
-  const urls = remote ? await readRemoteUrls(read, remote, "push") : chosen ? await proposedPushUrls(read, chosen) : [];
+  const urls = remote ? await readRemoteUrls(read, remote, "push") : chosen ? await proposedRemoteUrls(read, commandScopedRemote(chosen), "push") : [];
   const routing = [...settings].filter(([key]) => key.startsWith("push.") || key === branch + "merge" || key === "submodule.recurse"
     || (remote && [`remote.${remote}.push`, `remote.${remote}.mirror`].includes(key)));
   const binding = createHash("sha256").update(JSON.stringify([snapshot.currentBranch, chosen, urls, routing, targetRef])).digest("hex");
