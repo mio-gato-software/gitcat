@@ -41,3 +41,38 @@ test("el punto de partida solo puede ser un commit que exista", async () => {
   await assert.rejects(service.prepareOperation(repo, "create_branch", { name: "x", from: "--orphan" }, "en"), /starting commit is invalid/);
   await assert.rejects(service.prepareOperation(repo, "create_branch", { name: "x", from: "deadbeefdeadbeef" }, "en"), /no longer exists/);
 });
+
+test("renaming a branch previews the exact non-overwriting command and preserves both tips", async () => {
+  git("branch", "feature/original", first);
+  git("branch", "feature/occupied", "main");
+  const main = git("rev-parse", "main");
+  const before = git("status", "--porcelain");
+
+  await assert.rejects(service.prepareOperation(repo, "rename_branch", { name: "feature/original" }, "en"), /new branch name is missing/);
+  await assert.rejects(service.prepareOperation(repo, "rename_branch", { name: "feature/original", to: "feature/occupied" }, "en"), /already exists/);
+  await assert.rejects(service.prepareOperation(repo, "rename_branch", { name: "main", to: "primary" }, "en"), /cannot rename the default branch/);
+
+  const plan = await service.prepareOperation(repo, "rename_branch", { name: "feature/original", to: "feature/renamed" }, "en");
+  assert.equal(plan.requiresConfirmation, true);
+  assert.equal(plan.command, "git branch -m -- feature/original feature/renamed");
+  assert.equal(git("rev-parse", "feature/original"), first);
+
+  const result = await service.executePlan(repo, plan, "en");
+  assert.equal(result.error, undefined);
+  assert.equal(git("branch", "--list", "feature/original"), "");
+  assert.equal(git("rev-parse", "feature/renamed"), first);
+  assert.equal(git("rev-parse", "feature/occupied"), main);
+  assert.equal(git("branch", "--show-current"), "main");
+  assert.equal(git("status", "--porcelain"), before);
+});
+
+test("branch cleanup keeps a protected branch even when Git could delete it", async () => {
+  git("branch", "backup/keep", first);
+  git("branch", "feature/cleanup", first);
+  await assert.rejects(service.prepareOperation(repo, "delete_branch", { name: "backup/keep" }, "en"), /protected by its prefix/);
+  const plan = await service.prepareOperation(repo, "delete_branch", { name: "feature/cleanup" }, "en");
+  assert.equal(plan.command, "git branch -d -- feature/cleanup");
+  assert.equal((await service.executePlan(repo, plan, "en")).error, undefined);
+  assert.equal(git("branch", "--list", "feature/cleanup"), "");
+  assert.equal(git("rev-parse", "backup/keep"), first);
+});

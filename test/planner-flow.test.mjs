@@ -366,8 +366,8 @@ test("“merge this branch to main” se planifica y se ejecuta de principio a f
   const result = await service.planAction(repo, "merge this branch to main");
   assert.equal(requests.length, 1, "una sola pasada al modelo planifica toda la secuencia");
   assert.equal(result.allowed, true);
-  assert.deepEqual(result.steps.map((item) => item.command), ["git switch main", "git merge --no-edit feature/x"]);
-  assert.equal(result.command, "git switch main && git merge --no-edit feature/x");
+  assert.deepEqual(result.steps.map((item) => item.command), ["git switch main", "git merge --no-edit -- feature/x"]);
+  assert.equal(result.command, "git switch main && git merge --no-edit -- feature/x");
 
   const execution = await service.executePlan(repo, result);
   assert.equal(execution.error, undefined, execution.error);
@@ -386,7 +386,7 @@ test("el menú contextual prepara fusionar la rama elegida en la rama por defect
 
   const result = await service.prepareMergeToDefault(repo, "feature/context-menu");
   assert.equal(result.summary, "Merge feature/context-menu to main");
-  assert.deepEqual(result.steps.map((item) => item.command), ["git switch main", "git merge --no-edit feature/context-menu"]);
+  assert.deepEqual(result.steps.map((item) => item.command), ["git switch main", "git merge --no-edit -- feature/context-menu"]);
 
   const execution = await service.executePlan(repo, result);
   assert.equal(execution.error, undefined, execution.error);
@@ -439,7 +439,7 @@ test("una fusión desde una rama sucia deja que el modelo decida si debe confirm
   assert.deepEqual(result.steps.map((item) => item.command), [
     'git add -A && git commit -m "Añade el cambio pendiente"',
     "git switch main",
-    "git merge --no-edit feature/dirty"
+    "git merge --no-edit -- feature/dirty"
   ]);
 
   const execution = await service.executePlan(work, result);

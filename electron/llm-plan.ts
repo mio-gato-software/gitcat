@@ -1,3 +1,4 @@
+import { isBranchNameSafe } from "./branch-operation.js";
 import type { HostingProvider, Operation } from "../shared/types.js";
 import { hostingProviders } from '../shared/hosting.js';
 
@@ -50,13 +51,7 @@ const planKeys = ["intent", "rationale", "reply", "repository", "risk", "steps",
 const stepKeys = ["args", "argv", "operation"];
 const argsKeys = ["message", "name", "noVerify", "onto", "path", "side", "to"];
 const repositoryKeys = ["host", "localPath", "owner", "protocol", "push", "remote", "replaceRemote", "repository", "sshHost"];
-const branchNamePattern = /^[A-Za-z0-9._/@-]+$/;
-
-export function isBranchNameSafe(name: string) {
-  return Boolean(name) && branchNamePattern.test(name) && !name.includes("..") && !name.includes("@{") &&
-    !name.startsWith("-") && !name.startsWith(".") && !name.startsWith("/") && !name.endsWith("/") &&
-    !name.endsWith(".") && !name.includes("//") && !name.includes("/.") && !name.endsWith(".lock");
-}
+export { isBranchNameSafe } from "./branch-operation.js";
 
 export const planResponseFormat = {
   type: "json_schema",
