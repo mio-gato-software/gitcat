@@ -472,11 +472,12 @@ export type PlanStep = {
 
 /**
  * A problem that happened after Git had already recorded one or more changes: syncing the real
- * index after a selected save, re-reading the repository afterwards, or persisting activity history.
+ * index after a selected save, setting up tracking after publication, re-reading the repository
+ * afterwards, or persisting activity history.
  * Keeping it separate from the completed Git result lets callers and recovery preserve what landed.
  */
 export type PostActionIssue = {
-  kind: "index_sync" | "snapshot_read" | "history_write" | "temporary_cleanup";
+  kind: "index_sync" | "upstream_setup" | "snapshot_read" | "history_write" | "temporary_cleanup";
   detail: string;
 };
 
