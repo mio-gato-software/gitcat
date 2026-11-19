@@ -1,3 +1,4 @@
+import { createPlanHandlers } from "./plan-handlers.js";
 import { trackOperation, cancelOperation, listOperations, operationCheckpoint } from "./operation-progress.js";
 import { legacyAppName, migrateProfileFiles, profilePath } from "./app-identity.js";
 import { exclusive } from "./repository-queue.js";
@@ -11,10 +12,10 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   getHostingConnections, connectHosting, removeHostingConnection,
-  createPractice, getPracticeInfo, setPracticeLesson, editPractice, removePractice, previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, executePlan, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
+  createPractice, getPracticeInfo, setPracticeLesson, editPractice, removePractice, previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
   getLlmConfig, getSnapshot, openWorktree, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
-  prepareBranchDelivery, prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
-  setAiSharingExclusions, setAiSharingReview, StalePlanError, type FailedPlanRecord, type IssuedConflictGuide, type IssuedConflictProposal
+  prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
+  setAiSharingExclusions, setAiSharingReview, type IssuedConflictGuide, type IssuedConflictProposal
 } from "./git-service.js";
 import { localized } from "./i18n.js";
 import { remoteNamePattern } from "./repository-plan.js";
@@ -25,7 +26,7 @@ import {
   parseWorkspace, relocateProject, restoreProjects, type RepoFingerprint, type WorkspaceRecord
 } from "./workspace-restore.js";
 import type {
-  ActionPlan, AiSharingPurpose, CloneParentResult, HelpPage, ReadinessRequest, ClonePreview, CloneResult, ConflictChoiceRequest, ConflictGuide, ConflictProposal, ConversationMessage, DeliveryRequest, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, ProviderPage, Operation, ProjectLocateResult,
+  AiSharingPurpose, CloneParentResult, HelpPage, ReadinessRequest, ClonePreview, CloneResult, ConflictChoiceRequest, ConflictGuide, ConflictProposal, ConversationMessage, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, ProviderPage, Operation, ProjectLocateResult,
   ProjectSelectResult, RepoSnapshot, RepositoryMatch, StartTrackingResult, UnavailableProject
 } from "../shared/types.js";
 
@@ -47,9 +48,8 @@ function rememberReviewUrl(url: string | undefined) {
   if (verifiedReviewUrls.size >= 200) verifiedReviewUrls.delete(verifiedReviewUrls.values().next().value ?? "");
   verifiedReviewUrls.add(url);
 }
-const issuedPlans = new Map<string, ActionPlan>();
-/** Plans that stopped, with what each step did: recovery reads completed steps from here, never from the renderer. */
-const failedPlans = new Map<string, FailedPlanRecord>();
+const planHandlers = createPlanHandlers({ assertTrustedSender, assertOpenedRepository, tracked });
+const { rememberPlan } = planHandlers;
 /** Conflict proposals keep their reviewed content and state binding here; the renderer only holds the id. */
 const issuedProposals = new Map<string, IssuedConflictProposal>();
 /** Conflict guides keep what each file was read against here; choosing names the id and the choices, never content. */
@@ -254,19 +254,6 @@ const helpPages: Record<HelpPage, string> = {
 };
 const sharingPurposes = new Set<AiSharingPurpose>(["planning", "description", "conflicts", "recovery"]);
 
-function rememberPlan(plan: ActionPlan) {
-  if (plan.allowed && !plan.answer) {
-    if (issuedPlans.size >= 100) issuedPlans.delete(issuedPlans.keys().next().value ?? "");
-    issuedPlans.set(plan.id, plan);
-  }
-  return plan;
-}
-
-function rememberFailure(record: FailedPlanRecord) {
-  if (failedPlans.size >= 20) failedPlans.delete(failedPlans.keys().next().value ?? "");
-  failedPlans.set(record.plan.id, record);
-}
-
 const failureStages = new Set(["prepare", "execute", "stale"]);
 
 /** Shape only: what the failure means is read from the repository and the plan's own record. */
@@ -282,7 +269,7 @@ function assertFailure(failure: unknown): ExecutionFailure {
 
 /** The facts behind a failure, read in the main process: the plan's record when it has one. */
 function failureRecord(repoPath: string, failure: ExecutionFailure) {
-  const record = failure.planId ? failedPlans.get(failure.planId) : undefined;
+  const record = planHandlers.getFailure(failure.planId);
   if (record && record.plan.repoPath !== repoPath) throw new Error("El plan pertenece a otro repositorio.");
   // A plan the interface names but this process no longer holds expired before it could run.
   return { record, known: { stale: Boolean(failure.planId && !record) } };
@@ -374,7 +361,7 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
     for (const path of openedRepositories) if (!normalized.includes(path)) openedRepositories.delete(path);
     for (const path of unavailableProjects.keys()) if (!normalized.includes(path)) unavailableProjects.delete(path);
     for (const [id, pending] of pendingLocations) if (!normalized.includes(pending.from)) pendingLocations.delete(id);
-    for (const [id, plan] of issuedPlans) if (!normalized.includes(plan.repoPath)) issuedPlans.delete(id);
+    planHandlers.retainOpenedPlans(normalized);
     for (const [id, proposal] of issuedProposals) if (!normalized.includes(proposal.repoPath)) issuedProposals.delete(id);
     saveWorkspace();
   });
@@ -665,7 +652,7 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
   ipcMain.handle("action:prepare-retry", async (event, cwd: string, planId: unknown, locale?: Locale) => {
     assertTrustedSender(event);
     const repoPath = assertOpenedRepository(cwd);
-    const record = typeof planId === "string" ? failedPlans.get(planId) : undefined;
+    const record = planHandlers.getFailure(planId);
     if (!record || record.plan.repoPath !== repoPath) throw new Error(localized(locale, "Ese intento ya no está disponible. Actualiza y prepara la acción de nuevo.", "That attempt is no longer available. Refresh and prepare the action again."));
     return rememberPlan(await tracked(event, repoPath, "planning", () => prepareRetry(repoPath, record, locale), false, "wait"));
   });
@@ -684,19 +671,7 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
     const repoPath = assertOpenedRepository(cwd);
     return rememberPlan(await tracked(event, repoPath, "planning", () => prepareOperation(repoPath, operation, args, locale), false, "wait"));
   });
-  ipcMain.handle("action:prepare-delivery", async (event, cwd: string, request: DeliveryRequest, locale?: Locale) => {
-    assertTrustedSender(event);
-    if (!request || typeof request.stateId !== "string" || typeof request.mergeToDefault !== "boolean" || (request.message !== undefined && typeof request.message !== "string")) throw new Error("Invalid delivery request.");
-    // Shape only: whether each file is still an unsaved change, at the version reviewed, is the service's to check against Git.
-    if (request.selection !== undefined && (!Array.isArray(request.selection) || request.selection.length > 20_000 || request.selection.some((item) =>
-      !item || typeof item.path !== "string" || !item.path || typeof item.version !== "string"))) throw new Error("Invalid delivery request.");
-    const repoPath = assertOpenedRepository(cwd);
-    const delivery: DeliveryRequest = {
-      stateId: request.stateId, mergeToDefault: request.mergeToDefault, message: request.message,
-      ...(request.selection ? { selection: request.selection.map((item) => ({ path: item.path, version: item.version })) } : {})
-    };
-    return rememberPlan(await tracked(event, repoPath, "planning", () => prepareBranchDelivery(repoPath, delivery, locale)));
-  });
+  planHandlers.register(ipcMain);
   ipcMain.handle("action:prepare-merge-to-default", async (event, cwd: string, branch: string, locale?: Locale) => {
     assertTrustedSender(event);
     if (typeof branch !== "string") throw new Error("La rama que quieres fusionar no es válida.");
@@ -713,23 +688,6 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
     assertTrustedSender(event);
     const selected = assertPathList(paths);
     return getSelectionDiff(assertOpenedRepository(cwd), selected, locale);
-  });
-  ipcMain.handle("action:execute", async (event, cwd: string, planId: string, locale?: Locale) => {
-    assertTrustedSender(event);
-    const repoPath = assertOpenedRepository(cwd);
-    const plan = typeof planId === "string" ? issuedPlans.get(planId) : undefined;
-    if (!plan) throw new Error("El plan ya no es válido. Prepara la acción de nuevo.");
-    issuedPlans.delete(planId);
-    if (plan.repoPath !== repoPath) throw new Error("El plan pertenece a otro repositorio.");
-    try {
-      const result = await tracked(event, repoPath, "executing", () => executePlan(repoPath, plan, locale), true, "wait");
-      if (result.error) rememberFailure({ plan, outcomes: result.outcomes, stale: false });
-      return result;
-    } catch (error) {
-      // Nothing ran: every step is still to do, and a plan the repository moved under is told apart.
-      rememberFailure({ plan, outcomes: plan.steps.map((step) => ({ command: step.command, summary: step.summary, status: "skipped", output: "" })), stale: error instanceof StalePlanError });
-      throw error;
-    }
   });
   ipcMain.handle("sharing:get", (event, cwd: string, purpose: unknown, paths?: unknown, locale?: Locale) => {
     assertTrustedSender(event);

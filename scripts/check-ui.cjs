@@ -61,6 +61,17 @@ app.whenReady().then(async () => {
   git('worktree', 'add', '--detach', detachedWorktree);
   fs.writeFileSync(path.join(linkedWorktree, 'worktree-only.txt'), 'separate edits');
   const service = await import(pathToFileURL(path.join(root, 'dist-electron/electron/git-service.js')));
+  const { createPlanHandlers } = await import(pathToFileURL(path.join(root, 'dist-electron/electron/plan-handlers.js')));
+  const planHandlers = createPlanHandlers({
+    assertTrustedSender: event => assert.equal(event.senderFrame?.url, pathToFileURL(path.join(root, 'dist/index.html')).href),
+    assertOpenedRepository: repoPath => {
+      assert.equal(typeof repoPath, 'string');
+      assert.ok(path.resolve(repoPath).startsWith(scratch + path.sep), 'Only disposable repositories are available to the fixture');
+      return path.resolve(repoPath);
+    },
+    tracked: (_event, _path, _phase, task) => task()
+  });
+  planHandlers.register(ipcMain);
   ipcMain.handle('worktree:open', (_, source, target, locale) => service.openWorktree(source, target, locale));
   const snapshot = await service.getSnapshot(repo);
   const { nativeFixture } = await import(pathToFileURL(path.join(root, 'test/helpers/native-hosting-fixture.mjs')));
@@ -90,7 +101,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('operation:cancel', () => false);
   ipcMain.handle('repo:fetch', async (_, p) => hostingSnapshot(await service.fetchRemotes(p)));
   ipcMain.handle('switch-work:read', (_, p, target) => service.getSwitchWork(p,target));
-  ipcMain.handle('switch-work:prepare', async (_, p, request, locale) => { const plan=await service.prepareSwitchWork(p,request,locale); plans.set(plan.id,plan); return plan; });
+  ipcMain.handle('switch-work:prepare', async (_, p, request, locale) => planHandlers.rememberPlan(await service.prepareSwitchWork(p, request, locale)));
   ipcMain.handle('activity:list', (_, p) => service.getActivityHistory(p));
   ipcMain.handle('activity:retention', (_, days) => service.setActivityRetention(days));
   ipcMain.handle('activity:clear', (_, p) => service.clearActivityHistory(p));
@@ -99,7 +110,6 @@ app.whenReady().then(async () => {
   ipcMain.handle('practice:lesson',(_,p,lesson)=>service.setPracticeLesson(p,lesson));
   ipcMain.handle('practice:edit',(_,p)=>service.editPractice(p));
   ipcMain.handle('practice:remove',(_,p)=>service.removePractice(p));
-  const plans = new Map();
   let refreshError = false;
   // A second saved project whose folder is gone: it must stay listed and explain itself instead of vanishing.
   const movedPath = path.join(scratch, 'Moved project');
@@ -179,28 +189,14 @@ app.whenReady().then(async () => {
   ipcMain.handle('sharing:acknowledge', (_, p) => service.acknowledgeAiSharing(p));
   ipcMain.handle('sharing:set-exclusions', (_, p, exclusions, locale) => service.setAiSharingExclusions(p, exclusions, locale));
   ipcMain.handle('sharing:review', (_, p, file, share, locale) => service.setAiSharingReview(p, file, share, locale));
-  ipcMain.handle('action:prepare-delivery', async (_, p, request, locale) => {
-    const plan = await service.prepareBranchDelivery(p, request, locale);
-    plans.set(plan.id, plan); return plan;
-  });
-  // Like the main process, a plan that stops is kept with what each step did, so recovery reads facts.
-  const failed = new Map();
   let recoverCalls = 0;
-  ipcMain.handle('action:execute', async (_, p, id, locale) => {
-    const plan = plans.get(id);
-    const result = await service.executePlan(p, plan, locale);
-    if (result.error) failed.set(id, { plan, outcomes: result.outcomes, stale: false });
-    return result;
-  });
-  ipcMain.handle('action:describe-failure', (_, p, failure) => service.describeFailure(p, failure, failure.planId ? failed.get(failure.planId) : undefined));
+  ipcMain.handle('action:describe-failure', (_, p, failure) => service.describeFailure(p, failure, planHandlers.getFailure(failure.planId)));
   ipcMain.handle('action:recover', (_, p, failure, context, locale) => { recoverCalls += 1; return service.planRecovery(p, failure, context, locale); });
   ipcMain.handle('action:prepare-retry', async (_, p, id, locale) => {
-    const plan = await service.prepareRetry(p, failed.get(id), locale);
-    plans.set(plan.id, plan); return plan;
+    return planHandlers.rememberPlan(await service.prepareRetry(p, planHandlers.getFailure(id), locale));
   });
   ipcMain.handle('action:prepare', async (_, p, operation, args, locale) => {
-    const plan = await service.prepareOperation(p, operation, args, locale);
-    plans.set(plan.id, plan); return plan;
+    return planHandlers.rememberPlan(await service.prepareOperation(p, operation, args, locale));
   });
 
   // Getting a first project in runs on the real setup service against disposable folders. The only

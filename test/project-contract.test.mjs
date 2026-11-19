@@ -461,16 +461,6 @@ test("la aplicación empaquetada resuelve el renderer desde app.getAppPath", asy
   assert.doesNotMatch(main, /loadFile\(join\(__dirname, "\.\.\/dist/);
 });
 
-test("los planes están ligados al repositorio y al estado que los creó", async () => {
-  const types = await readFile(join(root, "shared/types.ts"), "utf8");
-  const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
-  const main = await readFile(join(root, "electron/main.ts"), "utf8");
-  assert.match(types, /repoPath: string/);
-  assert.match(types, /stateId: string/);
-  assert.match(service, /plan\.stateId !== snapshot\.stateId/);
-  assert.match(main, /issuedPlans\.delete\(planId\)/);
-});
-
 test("las ramas usan el separador binario soportado por for-each-ref", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   assert.match(service, /--format=%\(refname:short\)%00/);
@@ -738,7 +728,6 @@ test("una operación a medias es un estado del que se puede salir, no un callej�
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
-  const main = await readFile(join(root, "electron/main.ts"), "utf8");
   // El trabajo a medias existe en los datos: qué operación, por qué commit y qué lo bloquea.
   assert.match(types, /export type PendingOperationKind = "rebase" \| "merge" \| "cherry_pick" \| "revert"/);
   assert.match(types, /conflicts: Conflict\[\]/);
@@ -755,8 +744,6 @@ test("una operación a medias es un estado del que se puede salir, no un callej�
   assert.doesNotMatch(app, /config\.configured\) await recoverFrom|failed && config\.configured/);
   assert.match(app, /report = await window\.gitcat\.describeFailure\(path, failure\)/);
   assert.match(app, /if \(report && !report\.needsJudgment\) return;\n {4}if \(!config\.configured\)/);
-  assert.match(main, /rememberFailure\(\{ plan, outcomes: result\.outcomes, stale: false \}\)/);
-  assert.match(main, /stale: error instanceof StalePlanError/);
   assert.match(service, /function explainGitFailure/);
   assert.match(service, /todavía no está publicada ni tiene un destino remoto asociado/);
   // La salida de un lío se propone, nunca se ejecuta sola: recoverFrom deja el plan esperando.

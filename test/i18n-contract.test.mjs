@@ -31,7 +31,6 @@ test("el idioma elegido llega a los planes, la ejecución y los mensajes determi
   assert.match(preload, /planAction: \(path, request, context, locale\) => ipcRenderer\.invoke\("action:plan", path, request, context, locale\)/);
   assert.match(preload, /executePlan: \(path, planId, locale\) => ipcRenderer\.invoke\("action:execute", path, planId, locale\)/);
   assert.match(main, /ipcMain\.handle\("action:plan", async \(event, cwd: string, request: string, context\?: ConversationMessage\[\], locale\?: Locale\)/);
-  assert.match(main, /ipcMain\.handle\("action:execute", async \(event, cwd: string, planId: string, locale\?: Locale\)/);
   assert.match(service, /import \{ localized, normalizeLocale \} from "\.\/i18n\.js"/);
   assert.match(service, /operationDraft\(operation: Operation, args: Record<string, string>, snapshot\?: RepoSnapshot, argv: string\[\] = \[\], locale: Locale = "es"\)/);
   assert.match(service, /There are no local changes to commit/);
