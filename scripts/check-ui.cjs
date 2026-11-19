@@ -617,7 +617,9 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.share-review .primary-button').click()`);
   await waitFor(`document.querySelector('.share-review [role="status"]')?.innerText.includes('merge_requests/1')`);
   assert.equal(reviewPublished, true);
-  assert.match(await js(`document.querySelector('.share-review [role="status"]').innerText`), /no pudo guardar el registro local[\s\S]*Actualiza el proyecto/);
+  const reviewStatus = await js(`document.querySelector('.share-review [role="status"]').innerText`);
+  assert.match(reviewStatus, /no pudo guardar toda la operación en Actividad/);
+  assert.match(reviewStatus, /Falló una comprobación del repositorio local[\s\S]*Actualiza el proyecto/);
   await js(`document.querySelector('.share-review [role="status"] button').click()`);
   assert.deepEqual(reviewLinks, ['https://code.company.test/org/team/repo/-/merge_requests/1']);
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
