@@ -12,6 +12,10 @@ const root=fileURLToPath(new URL('../',import.meta.url)),scratch=realpathSync(mk
 let current;
 const git=(cwd,...args)=>cp.execFileSync('git',args,{cwd,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
 mock.method(cp,'spawn',(executable,args,options)=>{
+ if(current?.failPostPushSnapshot && current.gitCalls.includes('push') && /^git(?:\.exe)?$/i.test(basename(executable)) && args.includes('status')){
+  current.failPostPushSnapshot=false;
+  return originalSpawn(process.execPath,['-e',"process.stderr.write('Snapshot unavailable after push');process.exit(1)"],options);
+ }
  if(/^git(?:\.exe)?$/i.test(basename(executable))&&args.some(a=>['ls-remote','fetch','push'].includes(a))){
   const operation=args.find(a=>['ls-remote','fetch','push'].includes(a));
   if(options.env.GITCAT_HOST_AUTH){
@@ -96,6 +100,35 @@ test('a confirmed open review survives failure to write its local activity entry
  assert.equal(state.reviews.length,1);
  assert.deepEqual(attempted,['completed']);
 });
+
+for (const failure of ['history_write', 'snapshot_read']) {
+ test(`a published branch still gets its review after ${failure} fails following the push`, async t=>{
+  const state=await fixture('bitbucket');
+  const request={provider:'bitbucket',connectionId:state.connectionId,remote:'origin',head:'work',base:'main',title:'Review',body:''};
+  const preview=await service.previewShareReview(state.path,request);
+  if(failure==='history_write'){
+   const begin=ActivityHistory.prototype.begin;
+   t.mock.method(ActivityHistory.prototype,'begin',function(plan,snapshot){
+    if(state.gitCalls.includes('push')) throw new Error('Activity is read-only');
+    return begin.call(this,plan,snapshot);
+   });
+   for(const method of ['step','finish']){
+    const record=ActivityHistory.prototype[method];
+    t.mock.method(ActivityHistory.prototype,method,function(...args){
+     if(state.gitCalls.includes('push')) throw new Error('Activity is read-only');
+     return record.apply(this,args);
+    });
+   }
+  } else state.failPostPushSnapshot=true;
+
+  const result=await service.publishShareReview(preview);
+  assert.equal(result.pullRequest.state,'OPEN');
+  assert.deepEqual(result.warnings,[failure]);
+  assert.equal(git(state.path,'rev-parse','HEAD'),git(state.path,'--git-dir',state.bare,'rev-parse','work'));
+  assert.equal(state.reviews.length,1);
+  assert.equal(state.gitCalls.filter(call=>call==='push').length,1);
+ });
+}
 
 test('stale accounts and repository identities stop before publishing, while failed private publication preserves prior remote settings',async()=>{
  let state=await fixture('azure'),request={provider:'azure',connectionId:state.connectionId,remote:'origin',head:'work',base:'main',title:'Review',body:''};
