@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -16,6 +16,7 @@ registerHooks({
 });
 const service = await import(pathToFileURL(join(root, 'dist-electron/electron/git-service.js')));
 const { exclusive } = await import(pathToFileURL(join(root, 'dist-electron/electron/repository-queue.js')));
+const { refreshedProject } = await import(pathToFileURL(join(root, 'dist-electron/shared/auto-refresh.js')));
 
 const repository = (prefix) => {
   const path = mkdtempSync(join(tmpdir(), prefix));
@@ -65,6 +66,35 @@ test('refresh without a remote only reads this repository', async () => {
   const snapshot = await service.fetchRemotes(alone.path);
   assert.deepEqual(snapshot.remotes, []);
   assert.equal(snapshot.currentBranch, 'main');
+});
+
+test('quiet refresh shows externally added, edited and removed remotes with no tracking refs', async (t) => {
+  const { path, git } = repository('gitcat-refresh-config-');
+  t.after(() => rmSync(path, { recursive: true, force: true }));
+  git('init', '-q', '-b', 'main');
+  identify(git);
+  git('commit', '--allow-empty', '-qm', 'base');
+
+  const initial = await service.getSnapshot(path);
+  let project = { snapshot: initial, loadedAt: 'initial' };
+  const firstUrl = 'https://example.invalid/owner/first.git';
+  const secondUrl = 'https://example.invalid/owner/second.git';
+
+  git('remote', 'add', 'origin', firstUrl);
+  project = refreshedProject(project, await service.getSnapshot(path), 'added');
+  assert.deepEqual(project.snapshot.remotes, ['origin']);
+  assert.equal(project.snapshot.remoteUrls.origin, firstUrl);
+  assert.equal(project.snapshot.stateId, initial.stateId);
+
+  git('remote', 'set-url', 'origin', secondUrl);
+  project = refreshedProject(project, await service.getSnapshot(path), 'edited');
+  assert.equal(project.snapshot.remoteUrls.origin, secondUrl);
+  assert.equal(project.snapshot.stateId, initial.stateId);
+
+  git('remote', 'remove', 'origin');
+  project = refreshedProject(project, await service.getSnapshot(path), 'removed');
+  assert.deepEqual(project.snapshot.remotes, []);
+  assert.equal(project.snapshot.stateId, initial.stateId);
 });
 
 test('an unreachable remote fails the check with Git\'s explanation and changes nothing', async () => {

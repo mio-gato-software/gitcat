@@ -14,14 +14,13 @@ export const autoRefreshIntervalMs = 30_000;
 export const remoteRefreshIntervalMs = 5 * 60_000;
 
 /**
- * A quiet re-read only replaces the snapshot when Git reports a different state. An unchanged
- * repository keeps the same object, so the graph, the selection and the scroll stay where they are;
- * only the "last read" time moves forward.
+ * An unchanged view keeps the same snapshot object, so only the "last read" time moves forward.
+ * Compare the complete snapshot DTO: stateId binds an operation to Git state, while the view also
+ * shows data such as remote configuration and changes in sibling worktrees.
  */
 export function refreshedProject<T extends { snapshot: RepoSnapshot; loadedAt: string; fetchedAt?: string }>(project: T, next: RepoSnapshot, loadedAt: string, fetchedAt?: string): T {
   const times = fetchedAt ? { loadedAt, fetchedAt } : { loadedAt };
-  return next.stateId === project.snapshot.stateId && next.path === project.snapshot.path
-    && JSON.stringify(next.worktrees) === JSON.stringify(project.snapshot.worktrees)
+  return JSON.stringify(next) === JSON.stringify(project.snapshot)
     ? { ...project, ...times }
     : { ...project, snapshot: next, ...times };
 }

@@ -15,7 +15,7 @@ test('sibling folder edits refresh the graph without changing the current operat
 
 test('an unchanged repository keeps its snapshot and only records the new read time', () => {
   const current = project(snapshot('same'));
-  const next = refreshedProject(current, snapshot('same', { currentBranch: 'stale-copy' }), '2026-09-25T10:00:30.000Z');
+  const next = refreshedProject(current, structuredClone(current.snapshot), '2026-09-25T10:00:30.000Z');
   assert.equal(next.snapshot, current.snapshot);
   assert.equal(next.loadedAt, '2026-09-25T10:00:30.000Z');
   assert.equal(next.fetchedAt, undefined);
