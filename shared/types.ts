@@ -349,7 +349,7 @@ export type ConflictGuideFile = {
   /** The common ancestor's copy, when there is one. */
   base: { present: boolean };
   /** What the file on disk holds right now. */
-  working: { present: boolean; binary: boolean; markers: boolean };
+  working: { present: boolean; binary: boolean; markers: boolean; blocked?: true };
   /** The only choices this file's shape supports, in the order they are offered. */
   choices: ConflictChoice[];
 };
@@ -377,13 +377,13 @@ export type ConflictChoiceRequest = { path: string; choice: ConflictChoice };
 
 /**
  * What happened to one chosen file. "refused" means the choice itself cannot be applied to the file
- * as it is — conflict markers are still in it, or it is not on disk — and nothing was written.
+ * as it is — conflict markers remain or the file is unavailable — and nothing was written.
  */
 export type ConflictChoiceOutcome = {
   path: string;
   choice: ConflictChoice;
   status: "applied" | "changed" | "not_applied" | "failed" | "refused";
-  reason?: "markers" | "missing";
+  reason?: "markers" | "missing" | "path";
   restored?: boolean;
   detail?: string;
 };
