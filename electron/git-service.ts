@@ -4139,6 +4139,7 @@ export async function prepareRetry(cwd: string, record: FailedPlanRecord, locale
       "Hay una operación de Git a medias. Termínala o abórtala primero; lo que ya se hizo sigue hecho y no se repite.",
       "A Git operation is still half-finished. Finish or abort it first; what already ran stays done and is not repeated."));
   }
+  if (record.plan.recovery) return buildHistoryRecoveryPlan(snapshot.path, record.plan.recovery, language);
   const start = record.outcomes.findIndex((outcome) => outcome.status !== "completed");
   const remaining = await bindPushDestinations(snapshot, record.plan.steps.slice(start));
   const sync = remaining.find(step => step.operation === "sync_remote");
@@ -4319,7 +4320,7 @@ async function validateHistoryRecovery(cwd: string, recovery: HistoryRecovery) {
   let snapshot = await getSnapshot(cwd);
   if (recovery.mode === "restore") {
     if (!recovery.branch || !isBranchNameSafe(recovery.branch) || snapshot.branches.some(b=>b.name===recovery.branch)) throw new Error("The recovery branch already exists or its name is invalid. No branch was overwritten.");
-    return;
+    return snapshot;
   }
   if (snapshot.isDirty || snapshot.pending) throw new Error("Review or set aside your unfinished work first. Recovery will not combine it with other changes.");
   const parents = (await checkedGit(cwd,["rev-list","--parents","-n","1",recovery.commit])).split(/\s+/);
@@ -4333,6 +4334,7 @@ async function validateHistoryRecovery(cwd: string, recovery: HistoryRecovery) {
     snapshot=await getSnapshot(cwd);
     if (snapshot.head!==recovery.commit || snapshot.isDirty || snapshot.pending) throw new Error("The project changed during the publication check. Review recovery again.");
   }
+  return snapshot;
 }
 
 export async function prepareHistoryRecovery(cwd: string, id: string, mode: HistoryRecovery['mode'], locale?: Locale) {
@@ -4343,8 +4345,12 @@ export async function prepareHistoryRecovery(cwd: string, id: string, mode: Hist
   const commit = mode === "restore" ? entry.before.head : [...entry.steps].reverse().find(step=>step.status==='completed' && step.operation==='commit')?.afterHead;
   if (!commit) throw new Error("This entry has no confirmed saved version for that recovery. Never-saved files cannot be recovered from this history.");
   const recovery: HistoryRecovery={mode,commit,...(mode==='restore'?{branch:`recovered/${id.slice(0,8)}`}:{})};
-  await validateHistoryRecovery(cwd,recovery);
-  const current=await getSnapshot(cwd), language=normalizeLocale(locale);
+  return buildHistoryRecoveryPlan(snapshot.path, recovery, normalizeLocale(locale));
+}
+
+async function buildHistoryRecoveryPlan(cwd: string, recovery: HistoryRecovery, language: Locale) {
+  const { mode, commit } = recovery;
+  const current = await validateHistoryRecovery(cwd, recovery);
   const argv=historyRecoveryArguments(recovery);
   const summary=mode==='restore'?localized(language,'Crear una rama para revisar la versión anterior','Create a branch to review the earlier version'):mode==='revert'?localized(language,'Revertir el guardado con un nuevo commit','Revert the save with a new commit'):localized(language,'Deshacer el último guardado conservando los archivos','Undo the latest save while keeping files');
   const effects=[localized(language,'Solo recupera versiones guardadas en Git. No guarda ni recupera archivos que nunca se guardaron.','Only versions saved in Git can be recovered. Never-saved files are not backed up or recovered.')];
