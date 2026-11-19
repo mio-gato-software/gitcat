@@ -94,7 +94,10 @@ app.whenReady().then(async () => {
   ipcMain.handle('review:publish', async (_, p, id) => {
     assert.equal(id, 'hosting-ui');reviewPublished = true;
     const native=nativeUi[hostingScenario];
-    return { snapshot: hostingSnapshot(await service.getSnapshot(p)), pullRequest: { url: native?`${native.location.webUrl}/${native.provider==='azure'?'pullrequest':'pull-requests'}/1`:'https://code.company.test/org/team/repo/-/merge_requests/1', state: 'OPEN' } };
+    const pullRequest = { url: native?`${native.location.webUrl}/${native.provider==='azure'?'pullrequest':'pull-requests'}/1`:'https://code.company.test/org/team/repo/-/merge_requests/1', state: 'OPEN' };
+    return native
+      ? { snapshot: hostingSnapshot(await service.getSnapshot(p)), pullRequest, warnings: [] }
+      : { pullRequest, warnings: ['history_write', 'snapshot_read'] };
   });
   ipcMain.handle('review:open', (_, url) => { reviewLinks.push(url); });
   ipcMain.handle('operation:list', () => []);
@@ -614,6 +617,7 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.share-review .primary-button').click()`);
   await waitFor(`document.querySelector('.share-review [role="status"]')?.innerText.includes('merge_requests/1')`);
   assert.equal(reviewPublished, true);
+  assert.match(await js(`document.querySelector('.share-review [role="status"]').innerText`), /no pudo guardar el registro local[\s\S]*Actualiza el proyecto/);
   await js(`document.querySelector('.share-review [role="status"] button').click()`);
   assert.deepEqual(reviewLinks, ['https://code.company.test/org/team/repo/-/merge_requests/1']);
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);

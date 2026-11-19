@@ -1,7 +1,7 @@
 import { operationCheckpoint, operationPhase } from "./operation-progress.js";
 import { parseRemoteAddress } from './readiness.js';
 import { randomUUID } from 'node:crypto';
-import type { HostingProvider, NativeHostingContext, RemoteReadiness, RepoSnapshot, ShareReviewRequest, ShareReviewPreview } from '../shared/types.js';
+import type { HostingProvider, NativeHostingContext, RemoteReadiness, RepoSnapshot, ShareReviewRequest, ShareReviewPreview, ShareReviewResult } from '../shared/types.js';
 import { hostingProvider, validHostingHost, validHostingRepository, isNativeProvider } from '../shared/hosting.js';
 import { nativeRepository } from '../shared/native-hosting.js';
 import { findNativeReview, nativeRepositoryFacts } from './native-reviews.js';
@@ -15,7 +15,7 @@ export type ReviewTools = {
  glab: (path:string,args:string[],host:string)=>Promise<string>;
  api?: (context:NativeHostingContext,url:string,method?:string,body?:unknown)=>Promise<unknown>;
  publish: (preview:ShareReviewPreview)=>Promise<void>;
- create: (preview:ShareReviewPreview)=>Promise<void>;
+ create: (preview:ShareReviewPreview)=>Promise<'history_write' | void>;
 };
 const hashPattern=/^[a-f0-9]{40,64}$/;
 export function checkedPullRequest(value: unknown, repository: string, head: string, base: string) {
@@ -76,7 +76,7 @@ export async function previewReview(tools:ReviewTools,path:string,input:ShareRev
  if(!reviewable&&!existing)throw new Error('There are no commits to review against that base. Choose the correct base or save work first.');
  return {id:randomUUID(),repoPath:snapshot.path,request,provider,host,...(hosting?{hosting}:{}),headHash,baseHash,publishedHash,repository:hosting?.location.repository??remote.path,remoteUrl:remote.url,account,commits,existing,reviewable,checkedAt:new Date().toISOString()};
 }
-export async function publishReview(tools:ReviewTools,preview:ShareReviewPreview) {
+export async function publishReview(tools:ReviewTools,preview:ShareReviewPreview): Promise<ShareReviewResult> {
  const fresh=await previewReview(tools,preview.repoPath,preview.request);
  if(!fresh.reviewable)throw new Error("There are no remaining commits to review against this base. The live review state is available without publishing again.");
  for(const key of ['provider','host','headHash','baseHash','publishedHash','repository','remoteUrl','account'] as const)if(fresh[key]!==preview[key])throw new Error('The branch, remote or account changed. Review sharing again; nothing was published.');
@@ -99,10 +99,16 @@ export async function publishReview(tools:ReviewTools,preview:ShareReviewPreview
  const repository=fresh.hosting?undefined:await checkReviewPermission(command,{provider:fresh.provider,host:fresh.host,repository:fresh.repository});
  const live=()=>fresh.hosting?findNativeReview(api!,fresh.hosting,facts!,fresh.request.head,fresh.request.base):findReview(command,repository!,fresh.request.head,fresh.request.base);
  let current=await live();
+ const warnings: ShareReviewResult['warnings'] = [];
  if(current?.state!=='OPEN') {
-  try { await tools.create(fresh); } catch(error) { throw new Error(`The branch may already be published, but review creation was not confirmed. Check the live review status before retrying. ${error instanceof Error?error.message:String(error)}`, {cause:error}); }
+  try {
+   const warning = await tools.create(fresh);
+   if (warning) warnings.push(warning);
+  } catch(error) { throw new Error(`The branch may already be published, but review creation was not confirmed. Check the live review status before retrying. ${error instanceof Error?error.message:String(error)}`, {cause:error}); }
   current=await live();
  }
  if(!current || current.state!=='OPEN')throw new Error('The branch is published, but an open review could not be verified. Refresh live status before retrying.');
- return {snapshot:await tools.snapshot(fresh.repoPath),pullRequest:current};
+ const snapshot = await tools.snapshot(fresh.repoPath).catch(() => undefined);
+ if (!snapshot) warnings.push('snapshot_read');
+ return { snapshot, pullRequest: current, warnings };
 }

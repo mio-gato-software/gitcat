@@ -20,6 +20,18 @@ function fixture(options={}){
  return {state,request,tools};
 }
 test('a review names its remote, verified account, base, head and commits before publication',async()=>{const{state,request,tools}=fixture();const p=await previewReview(tools,'/project',request);assert.equal(p.account,'alice');assert.equal(p.commits[0].hash,a);assert.deepEqual(state.writes,[]);const result=await publishReview(tools,p);assert.equal(result.pullRequest.url,'https://github.com/org/repo/pull/12');assert.deepEqual(state.writes,[['push',a],['create','feature/work','main']]);});
+test('a confirmed open review survives a failure reading the final local snapshot',async()=>{
+ const {state,request,tools}=fixture();
+ const snapshot=tools.snapshot;
+ tools.snapshot=async path=>{
+  if(state.prs.length)throw new Error('Local repository unavailable');
+  return snapshot(path);
+ };
+ const result=await publishReview(tools,await previewReview(tools,'/project',request));
+ assert.equal(result.pullRequest.url,'https://github.com/org/repo/pull/12');
+ assert.equal(result.snapshot,undefined);
+ assert.deepEqual(result.warnings,['snapshot_read']);
+});
 test('an existing open review is updated without creating a duplicate',async()=>{const{state,request,tools}=fixture();state.prs=[{url:'https://github.com/org/repo/pull/2',state:'OPEN',headRefName:request.head,baseRefName:request.base}];const p=await previewReview(tools,'/project',request);await publishReview(tools,p);assert.deepEqual(state.writes,[['push',a]]);});
 test('closed and merged live states are distinguished and a new review is explicitly created',async()=>{for(const status of ['CLOSED','MERGED']){const{state,request,tools}=fixture();state.prs=[{url:'https://github.com/org/repo/pull/2',state:status,headRefName:request.head,baseRefName:request.base}];const p=await previewReview(tools,'/project',request);assert.equal(p.existing.state,status);assert.equal((await publishReview(tools,p)).pullRequest.state,'OPEN');}});
 test('wrong base, offline access, unsupported hosts and multiple-account mismatch block before publication',async()=>{

@@ -4589,8 +4589,13 @@ const reviewTools: ReviewTools = {
         if(preview.provider==='github')await checkedGh(args,preview.repoPath,preview.host);
         else await checkedGlab(args,preview.repoPath,preview.host);
       }
-      history.finish(id,snapshot,[{command:'',summary:'pull_request',status:'completed',output:''}]);
-    } catch(error){history.finish(id,snapshot,[{command:'',summary:'pull_request',status:'failed',output:''}],String(error));throw error;}
+    } catch(error) {
+      try { history.finish(id,snapshot,[{command:'',summary:'pull_request',status:'failed',output:''}],String(error)); }
+      catch { /* Preserve the provider's failure. */ }
+      throw error;
+    }
+    try { history.finish(id,snapshot,[{command:'',summary:'pull_request',status:'completed',output:''}]); }
+    catch { return 'history_write'; }
   }
 };
 export const previewShareReview=(cwd:string,request:ShareReviewRequest)=>previewReview(reviewTools,cwd,request);
