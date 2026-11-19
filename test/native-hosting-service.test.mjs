@@ -102,6 +102,44 @@ for (const command of ['fetch', 'branch']) {
  });
 }
 
+for (const push of ['false', 'true']) {
+ test(`private creation rejects multiple remote URLs before calling the provider (push=${push})`, async()=>{
+  const state=await fixture('bitbucket_dc');
+  state.exists=false;
+  const args={provider:'bitbucket_dc',connectionId:state.connectionId,host:new URL(state.baseUrl).host,owner:state.location.owner,name:'repo',source:state.path,protocol:'https',replaceRemote:'true',push};
+  const plan=await service.prepareOperation(state.path,'github_create_repo',args,'en');
+  git(state.path,'remote','set-url','--add','origin','https://old.example.test/scm/TEAM/other.git');
+  const config=readFileSync(join(state.path,'.git/config'),'utf8');
+
+  await assert.rejects(service.prepareOperation(state.path,'github_create_repo',args,'en'),/multiple URLs/);
+  const result=await service.executePlan(state.path,plan,'en');
+  assert.match(result.error,/multiple URLs/);
+  assert.equal(state.exists,false);
+  assert.equal(state.gitCalls.includes('push'),false);
+  assert.equal(readFileSync(join(state.path,'.git/config'),'utf8'),config);
+ });
+}
+
+for (const [key,value,problem] of [
+ ['remote.origin.pushurl','https://old.example.test/scm/TEAM/other.git',/separate push destination/],
+ ['remote.origin.mirror','true',/mirrors references/]
+]) {
+ test(`private creation rejects ${key} even without an existing fetch URL`, async()=>{
+  const state=await fixture('bitbucket_dc');
+  state.exists=false;
+  git(state.path,'remote','remove','origin');
+  const args={provider:'bitbucket_dc',connectionId:state.connectionId,host:new URL(state.baseUrl).host,owner:state.location.owner,name:'repo',source:state.path,protocol:'https',push:'false'};
+  const plan=await service.prepareOperation(state.path,'github_create_repo',args,'en');
+  git(state.path,'config',key,value);
+  const config=readFileSync(join(state.path,'.git/config'),'utf8');
+  await assert.rejects(service.prepareOperation(state.path,'github_create_repo',args,'en'),problem);
+  const result=await service.executePlan(state.path,plan,'en');
+  assert.match(result.error,problem);
+  assert.equal(state.exists,false);
+  assert.equal(readFileSync(join(state.path,'.git/config'),'utf8'),config);
+ });
+}
+
 test('a partial review-creation failure keeps publication visible and retry creates only the missing review',async()=>{
  const state=await fixture('bitbucket'),request={provider:'bitbucket',connectionId:state.connectionId,remote:'origin',head:'work',base:'main',title:'Review',body:''};
  const preview=await service.previewShareReview(state.path,request);state.failReview=true;await assert.rejects(service.publishShareReview(preview),/already be published/);assert.equal(state.gitCalls.filter(c=>c==='push').length,1);
