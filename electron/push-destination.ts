@@ -158,16 +158,19 @@ async function proposedRemoteUrls(read: ReadGit, remote: ReturnType<typeof comma
 }
 
 export async function verifyInitialPushUrl(read: ReadGit, expected: string, remote?: string) {
-  const urls = remote === undefined ? await proposedRemoteUrls(read, commandScopedRemote(expected), "push") : await readRemoteUrls(read, remote, "push");
+  if (remote === undefined) await verifiedTransportRemote(read, expected, "push");
+  else assertTransportUrl(await readRemoteUrls(read, remote, "push"), expected, "push");
+}
+
+function assertTransportUrl(urls: string[], expected: string, direction: "fetch" | "push") {
   if (urls.length !== 1 || urls[0] !== expected) {
-    throw new Error("The effective push destination differs from the private repository address. Review Git's URL rewrites before publishing.");
+    throw new Error(`The effective ${direction} destination differs from the verified repository address. Review Git's URL rewrites and try again.`);
   }
 }
 
-export async function verifiedFetchRemote(read: ReadGit, expected: string) {
+export async function verifiedTransportRemote(read: ReadGit, expected: string, direction: "fetch" | "push") {
   const remote = commandScopedRemote(expected);
-  const urls = await proposedRemoteUrls(read, remote, "fetch");
-  if (urls.length !== 1 || urls[0] !== expected) throw new Error("Git would fetch from a different destination.");
+  assertTransportUrl(await proposedRemoteUrls(read, remote, direction), expected, direction);
   return remote;
 }
 

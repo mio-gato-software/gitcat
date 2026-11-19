@@ -84,7 +84,7 @@ test('GitLab private creation, publishing, account readiness and review creation
 });
 
 test('a changed GitLab account prevents creation and an execution failure preserves the previous remote configuration',async()=>{
- const {path}=fixture();git(path,'remote','add','origin','https://old.company.test/org/repo.git');git(path,'config','remote.origin.tagOpt','--no-tags');
+ const {path}=fixture();git(path,'remote','add','origin','company:org/repo.git');git(path,'config','url.https://old.company.test/.insteadOf','company:');git(path,'config','remote.origin.tagOpt','--no-tags');
  const config=readFileSync(join(path,'.git/config'),'utf8');
  const args={provider:'gitlab',owner:'org/team',host:'code.company.test',name:'repo',source:path,protocol:'https',replaceRemote:'true'};
  let plan=await service.prepareOperation(path,'github_create_repo',args,'en');changeState({account:'other'});
