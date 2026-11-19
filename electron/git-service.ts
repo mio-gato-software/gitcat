@@ -1,5 +1,6 @@
 import { branchArguments, isBranchNameSafe, parseBranchOperation, validateBranchOperation, type BranchOperation } from "./branch-operation.js";
-import { displayPushAddress, pushRepository, readPushDestination } from "./push-destination.js";
+import { displayPushAddress, pushArguments, pushRepository, readPushDestination } from "./push-destination.js";
+import { assistantQueryArguments, parseAssistantCommand, type AssistantCommand } from "./assistant-git-command.js";
 import { walkPlanSteps } from "../shared/plan-summary.js";
 import { syncDestinations } from "../shared/remote-sync.js";
 import { PracticeProjects } from "./practice-project.js";
@@ -856,9 +857,7 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
     case "stash_pop": return "git stash pop --index stash@{0}";
     case "fetch": return "git fetch --prune";
     case "pull": return "git pull --ff-only";
-    case "push": return args.setUpstream
-      ? `git push${args.noVerify === "true" ? " --no-verify" : ""} --set-upstream ${args.setUpstream} ${args.branch ?? ""}`.trimEnd()
-      : `git push${args.noVerify === "true" ? " --no-verify" : ""}`;
+    case "push": return ["git", ...pushArguments(args)].map(quoteToken).join(" ");
     case "set_identity": {
       const where = args.scope === "global" ? " --global" : "";
       return `git config${where} user.name ${JSON.stringify(args.user ?? "")} && git config${where} user.email ${JSON.stringify(args.email ?? "")}`;
@@ -2001,8 +2000,12 @@ function highestRisk(a: ActionPlan["risk"], b: ActionPlan["risk"]): ActionPlan["
  * each command, its risk and whether the plan needs confirmation. A step the table does not recognise
  * cannot reach Git, so an unknown operation collapses the whole plan into a refusal.
  */
-async function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot, locale: Locale = "es", notes?: SharingNotes): Promise<PlanDraft> {
-  const proposed = plan.steps.map((step) => stepFrom(step.operation, operationArgs(step), step.argv, locale));
+async function gitOperationDraft(plan: ModelPlan, commands: AssistantCommand[], snapshot: RepoSnapshot, locale: Locale = "es", notes?: SharingNotes): Promise<PlanDraft> {
+  const proposed = commands.map(command => {
+    if (command.operation !== "git_command") return stepFrom(command.operation, command.args, [], locale);
+    const query = stepFrom(command.operation, {}, command.argv, locale);
+    return query && { ...query, assistantQuery: true as const };
+  });
   if (proposed.some((step) => !step)) return refused(localized(locale, "El plan incluye una operación que no está permitida.", "The plan includes an operation that is not allowed."), "llm", plan.summary);
   const steps = await writeCommitMessages(proposed as PlanStep[], snapshot, locale, notes);
   if ("blocker" in steps) return asking(steps.blocker, plan.summary);
@@ -2018,36 +2021,16 @@ async function gitOperationDraft(plan: ModelPlan, snapshot: RepoSnapshot, locale
 }
 
 /**
- * Branch names a free-form "git branch -d/-D" would delete. Those flags take no value, so every
- * non-flag token after the subcommand is a branch name.
- */
-function gitBranchDeletions(argv: string[]): string[] {
-  if (argv[0] !== "branch") return [];
-  const tokens = argv.slice(1).filter((token) => token !== "--");
-  if (!tokens.some((token) => token === "-d" || token === "-D" || token === "--delete")) return [];
-  return tokens.filter((token) => !token.startsWith("-"));
-}
-
-/**
  * Deletions the repository protects, handed back as structured defects so the model corrects itself
  * and explains why in the user's own language, instead of running into the guardrail as a raw error.
  */
-function protectedBranchIssues(plan: ModelPlan, snapshot: RepoSnapshot): PlanIssue[] {
-  return plan.steps.flatMap((step, index) => {
-    const names = step.operation === "delete_branch" ? [operationArgs(step).name]
-      : step.operation === "git_command" ? gitBranchDeletions(step.argv)
-      : [];
-    const field = step.operation === "git_command" ? `steps[${index}].argv` : `steps[${index}].args.name`;
-    return names.flatMap((name) => {
-      if (snapshot.defaultBranch && name === snapshot.defaultBranch) {
-        return [{ field, problem: `"${name}" is the repository's default branch and is protected; choose a non-default branch` }];
-      }
-      if (isProtectedBranch(name)) {
-        return [{ field, problem: `"${name}" has a prefix whose branches are kept permanently; they exist to survive cleanups and are never deletion candidates` }];
-      }
-      return [];
-    });
-  });
+function protectedBranchIssue(name: string, snapshot: RepoSnapshot): string | undefined {
+  if (snapshot.defaultBranch && name === snapshot.defaultBranch) {
+    return `"${name}" is the repository's default branch and is protected; choose a non-default branch`;
+  }
+  if (name && isProtectedBranch(name)) {
+    return `"${name}" has a prefix whose branches are kept permanently; they exist to survive cleanups and are never deletion candidates`;
+  }
 }
 
 function repositoryFieldsFromPlan(plan: ModelPlan): RepositoryFields {
@@ -2091,12 +2074,25 @@ async function prepareModelPlan(
   };
 
   if (plan.intent === "git_operation") {
-    const issues = [...planIssues(plan), ...protectedBranchIssues(plan, snapshot)];
+    const issues = planIssues(plan);
+    const commands: AssistantCommand[] = [];
     for (const [index, step] of plan.steps.entries()) {
+      const command = step.operation === "git_command"
+        ? parseAssistantCommand(step.argv)
+        : { operation: step.operation, args: operationArgs(step) };
+      if (!command) {
+        issues.push({ field: `steps[${index}].argv`, problem: "This Git command uses an unsupported command or options. Use a structured operation or a supported read-only query within the open repository." });
+        continue;
+      }
+      commands.push(command);
+      if (command.operation === "delete_branch") {
+        const problem = protectedBranchIssue(command.args.name, snapshot);
+        if (problem) issues.push({ field: `steps[${index}]`, problem });
+      }
       const [verb, target] = step.argv;
       if (step.operation === "git_command" && verb === "checkout" && step.argv.length === 2 &&
           snapshot.remoteRefs?.some(ref => target === ref || target === `refs/remotes/${ref}`)) {
-        issues.push({ field: `steps[${index}].argv`, problem: "Checking out a remote ref detaches HEAD. Use sync_remote to activate its local counterpart. Use checkout --detach only for an explicit request to inspect the commit." });
+        issues.push({ field: `steps[${index}].argv`, problem: "Checking out a remote ref detaches HEAD. Use sync_remote to activate its local counterpart." });
       }
       if (!index && snapshot.currentBranch === "HEAD" && (step.operation === "pull" || (step.operation === "git_command" && verb === "pull"))) {
         issues.push({ field: "steps[0]", problem: "There is no active local branch. Use sync_remote for the intended remote copy or ask which branch to update." });
@@ -2111,7 +2107,7 @@ async function prepareModelPlan(
         return bindPlan(snapshot, asking(error instanceof Error ? error.message : String(error), plan.summary));
       }
     }
-    return bindPlan(snapshot, await gitOperationDraft(plan, snapshot, locale, notes));
+    return bindPlan(snapshot, await gitOperationDraft(plan, commands, snapshot, locale, notes));
   }
 
   const preparation = await prepareHostedRepository(snapshot, repositoryFieldsFromPlan(plan), "llm");
@@ -3424,8 +3420,9 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
     const missing = step.paths.find((path) => !listed.has(path));
     if (!step.paths.length || missing) throw new Error(localized(language, `${missing ?? "—"} ya no es un cambio sin guardar. Revisa los archivos de nuevo.`, `${missing ?? "—"} is no longer an unsaved change. Review the files again.`));
   }
-  if (operation === "push" && args.setUpstream !== undefined) {
-    if (!snapshot.remotes.includes(args.setUpstream)) throw new Error(localized(language, `El remoto ${args.setUpstream} no existe en este repositorio.`, `Remote ${args.setUpstream} does not exist in this repository.`));
+  if (operation === "push" && (args.setUpstream !== undefined || args.remote !== undefined)) {
+    const remote = args.setUpstream ?? args.remote;
+    if (!remoteNamePattern.test(remote) || !snapshot.remotes.includes(remote)) throw new Error(localized(language, `El remoto ${remote} no existe en este repositorio.`, `Remote ${remote} does not exist in this repository.`));
     if (snapshot.currentBranch === "HEAD" || args.branch !== snapshot.currentBranch || !isBranchNameSafe(args.branch)) {
       throw new Error(localized(language, "Solo se puede publicar la rama activa, y no es la que nombra este plan.", "Only the active branch can be published, and it is not the one this plan names."));
     }
@@ -3456,15 +3453,6 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
   if (operation === "git_command") {
     const argv = step.argv ?? [];
     if (!argv.length || argv.some((token) => !token.trim())) throw new Error(localized(language, "El comando Git propuesto no es válido.", "The proposed Git command is invalid."));
-    // A free command must not sneak past the protections the structured delete carries.
-    for (const name of gitBranchDeletions(argv)) {
-      if (!isBranchNameSafe(name)) throw new Error(localized(language, "Nombre de rama no válido.", "Invalid branch name."));
-      if (name === snapshot.defaultBranch) throw new Error(localized(language, `No puedes borrar la rama por defecto (${snapshot.defaultBranch}).`, `You cannot delete the default branch (${snapshot.defaultBranch}).`));
-      if (name === snapshot.currentBranch) throw new Error(localized(language, "No puedes borrar la rama activa.", "You cannot delete the active branch."));
-      if (isProtectedBranch(name)) {
-        throw new Error(localized(language, `La rama ${name} está protegida por su prefijo: las ramas de ese tipo existen para conservarse.`, `Branch ${name} is protected by its prefix: branches of this kind are meant to be kept.`));
-      }
-    }
   }
 }
 
@@ -3656,9 +3644,7 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     }
     case "fetch": return reportedGit(cwd, ["fetch", "--prune"]);
     case "pull": return reportedGit(cwd, ["pull", "--ff-only"]);
-    case "push": return reportedGit(cwd, [
-      "push", ...(args.noVerify === "true" ? ["--no-verify"] : []), ...(args.setUpstream ? ["--set-upstream", args.setUpstream, args.branch] : [])
-    ]);
+    case "push": return reportedGit(cwd, pushArguments(args));
     case "set_identity": {
       const global = args.scope === "global";
       await reportedGit(cwd, ["config", global ? "--global" : "--local", "user.name", args.user]);
@@ -3678,6 +3664,8 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
       return reportedGit(cwd, ["commit", "-m", args.message]);
     case "ignore_path": return ignorePath(snapshot.path, args, locale);
     case "git_command": {
+      if (step.assistantQuery) return reportedGit(cwd, assistantQueryArguments(step.argv ?? []));
+      if (plan.source === "llm") throw new Error("An assistant command must be approved as a GitCat operation or an inspection query.");
       if(plan.hostingConnection){if(step.argv?.[0]!=='push')throw new Error('The saved hosting connection can only publish the reviewed branch.');return nativeGit(cwd,step.argv,plan.hostingConnection);}
       return reportedGit(cwd, step.argv ?? []);
     }

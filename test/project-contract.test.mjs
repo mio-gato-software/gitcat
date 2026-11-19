@@ -68,20 +68,16 @@ test("la capa de Git evita ejecutar comandos libres", async () => {
   assert.doesNotMatch(service, /exec\(.*command/);
 });
 
-test("git_command da libertad al modelo sin shell y sin saltarse protecciones", async () => {
+test("el asistente recibe instrucciones para consultar Git sin shell", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
-  // El comando libre se ejecuta como lista de argumentos: nunca se interpreta por un shell.
-  assert.match(service, /case "git_command": \{[\s\S]{0,400}return reportedGit\(cwd, step\.argv \?\? \[\]\)/);
   assert.doesNotMatch(service, /exec\(.*command/);
-  assert.match(planner, /there is no shell/);
+  assert.match(planner, /there is no shell/i);
   // Investigar sigue siendo su primer instinto; la política de confirmación se prueba con Git real.
   assert.match(planner, /first instinct/);
   // Anunciar que lo hará no vale: la investigación es un git_operation, en este turno.
   assert.match(planner, /is "git_operation" with read-only "git_command" steps, never "answer" or\n"needs_information"/);
   assert.match(planner, /is a failed turn/);
-  // La protección de ramas también cubre los borrados por comando libre.
-  assert.match(service, /gitBranchDeletions/);
   assert.match(planner, /only git_command takes an argument list/);
 });
 
@@ -216,8 +212,8 @@ test("el prefijo declara una política y las acciones protegidas la aplican", as
   assert.match(table, /\{ prefix: "backup", lifecycle: "permanent" \}/);
   assert.doesNotMatch(table, /if \(prefix === "backup"\)/);
   // La protección es una guardia real en la capa que ejecuta, no solo un adorno de la interfaz.
-  assert.match(service, /está protegida por su prefijo/);
-  assert.match(service, /function protectedBranchIssues/);
+  const branch = await readFile(join(root, "electron/branch-operation.ts"), "utf8");
+  assert.match(branch, /está protegida por su prefijo/);
   assert.match(service, /lifecycle: lifecycleOf\(branch\.name\)/);
   assert.match(planner, /never deletion\ncandidates/);
   // Y una rama permanente jamás se pinta como integrada ni ofrece su papelera.
@@ -349,7 +345,8 @@ test("la integración de una rama es un hecho de Git en el estado, no algo que e
   assert.match(service, /symbolic-ref", "--short", `refs\/remotes\/\$\{remote\}\/HEAD/);
   assert.match(service, /mergedInto: branch\.mergedInto/);
   assert.match(service, /isDefault: branch\.name === snapshot\.defaultBranch/);
-  assert.match(service, /No puedes borrar la rama por defecto/);
+  const branch = await readFile(join(root, "electron/branch-operation.ts"), "utf8");
+  assert.match(branch, /No puedes borrar la rama por defecto/);
   // El modelo tiene que saber que ahead\/behind no responden esta pregunta.
   assert.match(planner, /Treat the default branch and the current branch\n+as protected/);
   assert.match(planner, /Never fall back to\ncomparing "ahead" and "behind" for this/);

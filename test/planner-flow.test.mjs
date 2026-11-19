@@ -257,6 +257,8 @@ test("un push sin upstream se explica y ofrece publicar la rama por primera vez"
   assert.equal(requests.length, 1);
   assert.match(requests[0].instructions, /--set-upstream/);
   assert.equal(recovery.steps[0].command, "git push --set-upstream origin feature/no-upstream");
+  assert.equal(recovery.steps[0].operation, "push");
+  assert.equal(recovery.steps[0].argv, undefined);
   assert.equal(recovery.requiresConfirmation, true);
   assert.deepEqual(recovery.steps[0].pushDestination.urls, [origin]);
 
@@ -269,7 +271,7 @@ test("un push sin upstream se explica y ofrece publicar la rama por primera vez"
   assert.equal(execFileSync("git", ["--git-dir", other, "for-each-ref", "refs/heads"], { encoding: "utf8" }), "");
 });
 
-test("git_command ejecuta el comando completo que propone el modelo, sin shell", async () => {
+test("git_command convierte switch -c en la misma operación que usa el botón", async () => {
   reply(plan({
     intent: "git_operation",
     steps: [step("git_command", {}, ["switch", "-c", "libre"])],
@@ -277,9 +279,10 @@ test("git_command ejecuta el comando completo que propone el modelo, sin shell",
   }));
   const result = await service.planAction(repo, "crea la rama libre con git switch -c");
   assert.equal(result.allowed, true, result.rationale);
+  assert.equal(result.steps[0].operation, "create_branch");
+  assert.equal(result.steps[0].argv, undefined);
   assert.equal(result.steps[0].command, "git switch -c libre");
-  assert.equal(result.steps[0].risk, "high");
-  assert.equal(result.requiresConfirmation, true, "un comando libre que escribe siempre pasa por la tarjeta");
+  assert.equal(result.requiresConfirmation, true, "crear una rama siempre pasa por la tarjeta");
 
   const execution = await service.executePlan(repo, result);
   assert.equal(execution.error, undefined, execution.error);
@@ -291,11 +294,11 @@ test("git_command ejecuta el comando completo que propone el modelo, sin shell",
 test("git_command no cuela el borrado de una rama protegida", async () => {
   reply(plan({
     intent: "git_operation",
-    steps: [step("git_command", {}, ["branch", "-D", "main"])],
+    steps: [step("git_command", {}, ["branch", "-d", "main"])],
     summary: "Borrar main", rationale: "…", risk: "high"
   }));
   reply(plan({ intent: "needs_information", summary: "Rama protegida", reply: "main es la rama por defecto y está protegida; no puedo borrarla." }));
-  const result = await service.planAction(repo, "borra main a la fuerza");
+  const result = await service.planAction(repo, "borra main");
   assert.equal(requests.length, 2, "la protección vuelve al modelo como incidencia");
   assert.match(requests[1].instructions, /default branch and is protected/);
   assert.equal(result.allowed, false);
@@ -688,8 +691,8 @@ test("un fallo de red conserva su causa y no cambia la configuración guardada",
   }
 });
 
-for (const variant of ['output-equals', 'output-separate', 'external-diff', 'pager', 'global-option']) {
-  test(`un comando libre con efectos posibles espera confirmación: ${variant}`, async t => {
+for (const variant of ['output-equals', 'output-separate', 'external-diff', 'pager', 'global-option', 'other-project', 'unbound-push', 'force-delete', 'outside-diff']) {
+  test(`el asistente rechaza un comando fuera del alcance que puede comprobar: ${variant}`, async t => {
     const sentinel = join(repo, 'README.md');
     const original = readFileSync(sentinel);
     t.after(() => writeFileSync(sentinel, original));
@@ -700,15 +703,18 @@ for (const variant of ['output-equals', 'output-separate', 'external-diff', 'pag
       'output-separate': ['log', '-1', '--output', sentinel],
       'external-diff': ['diff', '--ext-diff'],
       'pager': ['grep', '--open-files-in-pager=echo', 'trabajo'],
-      'global-option': ['-c', 'alias.inspect=!echo unsafe', 'inspect']
+      'global-option': ['-c', 'alias.inspect=log', 'inspect'],
+      'other-project': ['-C', tmpdir(), 'branch', 'outside'],
+      'unbound-push': ['--no-optional-locks', 'push', 'origin', 'main'],
+      'force-delete': ['branch', '-D', 'main'],
+      'outside-diff': ['diff', '--', '../other.txt', 'README.md']
     }[variant];
     reply(plan({ steps: [step('git_command', {}, argv)], summary: 'Inspect', rationale: 'Read only', risk: 'low' }));
+    reply(plan({ intent: 'out_of_scope', summary: 'Unsupported command', reply: 'Use an operation GitCat can review.' }));
     const proposed = await service.planAction(repo, 'Inspect the project');
-    assert.equal(proposed.allowed, true, proposed.rationale);
-    assert.equal(proposed.requiresConfirmation, true);
-    assert.equal(proposed.risk, 'high');
-    // Exercise the renderer's unattended gate with the real executor and a dirty tracked file.
-    if (proposed.allowed && !proposed.requiresConfirmation) await service.executePlan(repo, proposed);
+    assert.equal(proposed.allowed, false, proposed.rationale);
+    assert.match(requests[1].instructions, /unsupported command or options/);
+    await assert.rejects(service.executePlan(repo, proposed), /acción no está permitida/);
     assert.deepEqual(readFileSync(sentinel), dirty);
   });
 }

@@ -6,9 +6,15 @@ import { redactText } from "./outbound-content.js";
 type ReadGit = (args: string[]) => Promise<{ code: number; stdout: string }>;
 const valueOptions = new Set(["--repo", "--receive-pack", "--exec", "--push-option", "-o"]);
 
+export function pushArguments(args: Record<string, string>) {
+  const remote = args.setUpstream || args.remote;
+  return ["push", ...(args.noVerify === "true" ? ["--no-verify"] : []),
+    ...(args.setUpstream ? ["--set-upstream"] : []), ...(remote ? [remote, args.branch] : [])];
+}
+
 /** A null target tells Git to choose its default. Undefined means this is another operation. */
 export function pushRepository(step: PlanStep): string | null | undefined {
-  if (step.operation === "push") return step.args.setUpstream || null;
+  if (step.operation === "push") return step.args.setUpstream || step.args.remote || null;
   if (step.operation !== "git_command" || step.argv?.[0] !== "push") return undefined;
   const args = step.argv.slice(1);
   let repository: string | null = null;
