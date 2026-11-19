@@ -691,7 +691,7 @@ test("un fallo de red conserva su causa y no cambia la configuración guardada",
   }
 });
 
-for (const variant of ['output-equals', 'output-separate', 'external-diff', 'pager', 'global-option', 'other-project', 'unbound-push', 'force-delete', 'outside-diff']) {
+for (const variant of ['output-equals', 'output-separate', 'external-diff', 'pager', 'global-option', 'other-project', 'unbound-push', 'force-delete', 'outside-diff', 'pathspec-magic']) {
   test(`el asistente rechaza un comando fuera del alcance que puede comprobar: ${variant}`, async t => {
     const sentinel = join(repo, 'README.md');
     const original = readFileSync(sentinel);
@@ -707,7 +707,8 @@ for (const variant of ['output-equals', 'output-separate', 'external-diff', 'pag
       'other-project': ['-C', tmpdir(), 'branch', 'outside'],
       'unbound-push': ['--no-optional-locks', 'push', 'origin', 'main'],
       'force-delete': ['branch', '-D', 'main'],
-      'outside-diff': ['diff', '--', '../other.txt', 'README.md']
+      'outside-diff': ['diff', '--', '../other.txt', 'README.md'],
+      'pathspec-magic': ['diff', '--', ':(glob)../other.txt', 'README.md']
     }[variant];
     reply(plan({ steps: [step('git_command', {}, argv)], summary: 'Inspect', rationale: 'Read only', risk: 'low' }));
     reply(plan({ intent: 'out_of_scope', summary: 'Unsupported command', reply: 'Use an operation GitCat can review.' }));
@@ -718,3 +719,53 @@ for (const variant of ['output-equals', 'output-separate', 'external-diff', 'pag
     assert.deepEqual(readFileSync(sentinel), dirty);
   });
 }
+
+test("executePlan rechaza antes de ejecutar cualquier paso un git_command de escritura sin representación tipada", async t => {
+  const other = mkdtempSync(join(tmpdir(), "gitcat-other-project-"));
+  t.after(() => rmSync(other, { recursive: true, force: true }));
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: other });
+  execFileSync("git", ["config", "user.name", "Other"], { cwd: other });
+  execFileSync("git", ["config", "user.email", "other@example.test"], { cwd: other });
+  execFileSync("git", ["commit", "--allow-empty", "-qm", "init"], { cwd: other });
+
+  const snapshot = await service.getSnapshot(repo);
+  const forgedStep = {
+    operation: "git_command",
+    args: {},
+    argv: ["-C", other, "branch", "sneaky"],
+    command: `git -C ${other} branch sneaky`,
+    summary: "Run git",
+    risk: "high"
+  };
+  const basePlan = {
+    id: "forged-plan",
+    repoPath: snapshot.path,
+    head: snapshot.head,
+    stateId: snapshot.stateId,
+    allowed: true,
+    steps: [forgedStep],
+    operation: "git_command",
+    args: {},
+    command: forgedStep.command,
+    summary: "Run git",
+    rationale: "forged",
+    risk: "high",
+    requiresConfirmation: true,
+    kind: "plan",
+    source: "llm"
+  };
+
+  await assert.rejects(service.executePlan(repo, basePlan, "en"), /approved as a GitCat operation or an inspection query/);
+  await assert.rejects(
+    service.executePlan(repo, { ...basePlan, steps: [{ ...forgedStep, assistantQuery: true }] }, "en"),
+    /not supported for this project/
+  );
+  // Even as a second step after a valid branch creation, the unapproved git_command stops the whole plan before step 0 runs.
+  const createBranchPlan = await service.prepareOperation(repo, "create_branch", { name: "never-created" }, "en");
+  await assert.rejects(
+    service.executePlan(repo, { ...createBranchPlan, source: "llm", steps: [createBranchPlan.steps[0], forgedStep] }, "en"),
+    /approved as a GitCat operation or an inspection query/
+  );
+  assert.equal(execFileSync("git", ["branch", "--list", "sneaky"], { cwd: other, encoding: "utf8" }).trim(), "");
+  assert.equal(execFileSync("git", ["branch", "--list", "never-created"], { cwd: repo, encoding: "utf8" }).trim(), "");
+});

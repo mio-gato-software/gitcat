@@ -1,5 +1,5 @@
 import { branchArguments, isBranchNameSafe, parseBranchOperation, validateBranchOperation, type BranchOperation } from "./branch-operation.js";
-import { displayPushAddress, pushArguments, pushRepository, readPushDestination } from "./push-destination.js";
+import { displayPushAddress, parsePushOperation, pushArguments, pushRepository, readPushDestination, validatePushOperation, type PushOperation } from "./push-destination.js";
 import { assistantQueryArguments, parseAssistantCommand, type AssistantCommand } from "./assistant-git-command.js";
 import { walkPlanSteps } from "../shared/plan-summary.js";
 import { syncDestinations } from "../shared/remote-sync.js";
@@ -857,7 +857,7 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
     case "stash_pop": return "git stash pop --index stash@{0}";
     case "fetch": return "git fetch --prune";
     case "pull": return "git pull --ff-only";
-    case "push": return ["git", ...pushArguments(args)].map(quoteToken).join(" ");
+    case "push": return ["git", ...pushArguments(parsePushOperation(args))].map(quoteToken).join(" ");
     case "set_identity": {
       const where = args.scope === "global" ? " --global" : "";
       return `git config${where} user.name ${JSON.stringify(args.user ?? "")} && git config${where} user.email ${JSON.stringify(args.email ?? "")}`;
@@ -2090,7 +2090,7 @@ async function prepareModelPlan(
         if (problem) issues.push({ field: `steps[${index}]`, problem });
       }
       const [verb, target] = step.argv;
-      if (step.operation === "git_command" && verb === "checkout" && step.argv.length === 2 &&
+      if (step.operation === "git_command" && (verb === "checkout" || verb === "switch") && step.argv.length === 2 &&
           snapshot.remoteRefs?.some(ref => target === ref || target === `refs/remotes/${ref}`)) {
         issues.push({ field: `steps[${index}].argv`, problem: "Checking out a remote ref detaches HEAD. Use sync_remote to activate its local counterpart." });
       }
@@ -2762,6 +2762,7 @@ function isUnattended(step: PlanStep) {
 
 function operationDraft(operation: Operation, args: Record<string, string>, snapshot?: RepoSnapshot, argv: string[] = [], locale: Locale = "es"): PlanDraft {
   const branch = parseBranchOperation(operation, args, locale);
+  const push = operation === "push" ? parsePushOperation(args, locale) : undefined;
   // The preview can include a URL supplied in a raw push. Keep its credentials out of the copy.
   const displayArgs = argv[0] === "push" ? argv.map(token => token.includes("://") ? displayPushAddress(token) : token) : argv;
   const details: Partial<Record<Operation, [string, string, ActionPlan["risk"]]>> = {
@@ -2777,9 +2778,11 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     rename_branch: [localized(locale, `Renombrar ${args.name} a ${args.to}`, `Rename ${args.name} to ${args.to}`), localized(locale, "Cambia el nombre de una rama local. No toca su historia ni la rama remota.", "Renames a local branch. It does not change its history or the remote branch."), "medium"],
     fetch: [localized(locale, "Actualizar referencias remotas", "Update remote references"), localized(locale, "Descarga referencias y elimina remotas obsoletas.", "Downloads references and prunes stale remote-tracking branches."), "low"],
     pull: [localized(locale, "Actualizar la rama actual", "Update the current branch"), localized(locale, "Usa pull --ff-only para evitar merges implícitos.", "Uses pull --ff-only to avoid implicit merges."), "high"],
-    push: args.setUpstream
-      ? [localized(locale, `Publicar ${args.branch} en ${args.setUpstream}`, `Publish ${args.branch} to ${args.setUpstream}`), localized(locale, `Envía tus commits a ${args.setUpstream} y lo recuerda como el destino de esta rama, para que los próximos push y pull sepan adónde ir. Tus archivos locales no cambian.`, `Sends your commits to ${args.setUpstream} and remembers it as this branch's destination, so later pushes and pulls know where to go. Your local files do not change.`), "high"]
-      : args.noVerify === "true"
+    push: push?.kind === "set_upstream"
+      ? [localized(locale, `Publicar ${push.branch} en ${push.remote}`, `Publish ${push.branch} to ${push.remote}`), localized(locale, `Envía tus commits a ${push.remote} y lo recuerda como el destino de esta rama, para que los próximos push y pull sepan adónde ir. Tus archivos locales no cambian.`, `Sends your commits to ${push.remote} and remembers it as this branch's destination, so later pushes and pulls know where to go. Your local files do not change.`), "high"]
+      : push?.kind === "branch" || push?.kind === "refspec"
+      ? [localized(locale, `Publicar ${push.branch} en ${push.remote}`, `Publish ${push.branch} to ${push.remote}`), localized(locale, `Envía los commits de ${push.branch} a ${push.remote}.`, `Sends commits of ${push.branch} to ${push.remote}.`), "high"]
+      : push?.noVerify
       ? [localized(locale, "Publicar la rama actual omitiendo las verificaciones", "Publish the current branch without verification"), localized(locale, "Envía los commits al upstream configurado con --no-verify: los hooks pre-push no se ejecutan.", "Pushes commits to the configured upstream with --no-verify: pre-push hooks do not run."), "high"]
       : [localized(locale, "Publicar la rama actual", "Publish the current branch"), localized(locale, "Envía los commits al upstream configurado.", "Pushes commits to the configured upstream."), "high"],
     merge: [localized(locale, `Fusionar ${args.name}`, `Merge ${args.name}`), localized(locale, "Integra la rama seleccionada en la rama actual.", "Integrates the selected branch into the current branch."), "high"],
@@ -2802,7 +2805,11 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
   };
   const detail = details[operation];
   if (!detail || operation === "none") return refused(localized(locale, "La operación solicitada no está permitida.", "The requested operation is not allowed."));
-  const command = branch ? ["git", ...branchArguments(branch)].map(quoteToken).join(" ") : buildCommand(operation, args, displayArgs);
+  const command = branch
+    ? ["git", ...branchArguments(branch)].map(quoteToken).join(" ")
+    : push
+      ? ["git", ...pushArguments(push)].map(quoteToken).join(" ")
+      : buildCommand(operation, args, displayArgs);
   const steps: PlanStep[] = [{ operation, args, ...(argv.length ? { argv } : {}), command, summary: detail[0], risk: detail[2] }];
   return sequenceDraft(steps, detail[1], renameEffects(steps, snapshot), locale);
 }
@@ -2930,6 +2937,7 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
   // Only what each direct control needs reaches the step: a publish names the active branch as Git
   // reads it now, and an identity or a remote address is trimmed of stray spaces.
   const normalized = operation === "push" && args.setUpstream ? { setUpstream: args.setUpstream, branch: snapshot.currentBranch, ...(args.noVerify === "true" ? { noVerify: "true" } : {}) }
+    : operation === "push" && args.remote ? { remote: args.remote, branch: args.branch ?? snapshot.currentBranch, ...(args.noVerify === "true" ? { noVerify: "true" } : {}) }
     : operation === "set_identity" ? { user: (args.user ?? "").trim(), email: (args.email ?? "").trim(), scope: typeof args.scope === "string" ? args.scope : "local" }
     : operation === "add_remote" ? { name: (args.name ?? "origin").trim() || "origin", url: (args.url ?? "").trim() }
     : operation === "stash_push" ? { message: `GitCat set aside: ${snapshot.currentBranch}` }
@@ -3377,12 +3385,49 @@ async function prepareRemoteSync(initial: RepoSnapshot, args: Record<string, str
   return plan;
 }
 
+type ValidatedStep =
+  | { kind: "branch"; branch: BranchOperation }
+  | { kind: "push"; push: PushOperation }
+  | { kind: "git_command"; argv: string[] }
+  | undefined;
+
+function equalArgv(actual: string[], expected: string[]) {
+  return actual.length === expected.length && actual.every((token, index) => token === expected[index]);
+}
+
+function historyRecoveryArguments(recovery: HistoryRecovery): string[] {
+  if (recovery.mode === "restore") return ["branch", recovery.branch!, recovery.commit];
+  if (recovery.mode === "revert") return ["revert", "--no-edit", recovery.commit];
+  return ["reset", "--soft", `${recovery.commit}^`];
+}
+
+function switchWorkCommandArguments(request: SwitchWorkRequest, branch: string): string[] | undefined {
+  if (request.mode === "restore" && request.stash) return ["stash", "apply", "--index", request.stash];
+  if (request.mode === "set_aside" && request.label) {
+    const label = `GitCat set aside: ${request.label.trim()} [${branch}]`;
+    return ["stash", "push", ...(request.includeUntracked ? ["--include-untracked"] : []), "-m", label];
+  }
+  return undefined;
+}
+
+function expectedInternalGitCommand(plan: ActionPlan, snapshot: RepoSnapshot, argv: string[]): string[] | undefined {
+  if (plan.recovery) {
+    const expected = historyRecoveryArguments(plan.recovery);
+    if (equalArgv(argv, expected)) return expected;
+  }
+  if (plan.switchWork) {
+    const expected = switchWorkCommandArguments(plan.switchWork, snapshot.currentBranch);
+    if (expected && equalArgv(argv, expected)) return expected;
+  }
+  return undefined;
+}
+
 /**
  * A step against the repository as it stands right now. Every step of a sequence goes through this,
  * including the ones prepared before the earlier steps moved the repository, so nothing runs on a
  * state it was not checked against.
  */
-function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
+function validateStep(step: PlanStep, snapshot: RepoSnapshot, plan: ActionPlan, locale?: Locale): ValidatedStep {
   const language = normalizeLocale(locale);
   const { operation, args } = step;
   if (operation === "none" || !allowedOperations.has(operation)) throw new Error(localized(language, "La acción no está permitida.", "The action is not allowed."));
@@ -3398,7 +3443,7 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
   const branch = parseBranchOperation(operation, args, language);
   if (branch) {
     validateBranchOperation(branch, snapshot, language);
-    return branch;
+    return { kind: "branch", branch };
   }
   const branchArg = args.name || args.onto;
   if (branchArg && !isBranchNameSafe(branchArg)) throw new Error(localized(language, "Nombre de rama no válido.", "Invalid branch name."));
@@ -3420,12 +3465,10 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
     const missing = step.paths.find((path) => !listed.has(path));
     if (!step.paths.length || missing) throw new Error(localized(language, `${missing ?? "—"} ya no es un cambio sin guardar. Revisa los archivos de nuevo.`, `${missing ?? "—"} is no longer an unsaved change. Review the files again.`));
   }
-  if (operation === "push" && (args.setUpstream !== undefined || args.remote !== undefined)) {
-    const remote = args.setUpstream ?? args.remote;
-    if (!remoteNamePattern.test(remote) || !snapshot.remotes.includes(remote)) throw new Error(localized(language, `El remoto ${remote} no existe en este repositorio.`, `Remote ${remote} does not exist in this repository.`));
-    if (snapshot.currentBranch === "HEAD" || args.branch !== snapshot.currentBranch || !isBranchNameSafe(args.branch)) {
-      throw new Error(localized(language, "Solo se puede publicar la rama activa, y no es la que nombra este plan.", "Only the active branch can be published, and it is not the one this plan names."));
-    }
+  if (operation === "push") {
+    const push = parsePushOperation(args, language);
+    validatePushOperation(push, snapshot, language);
+    return { kind: "push", push };
   }
   if (operation === "set_identity") {
     const user = args.user?.trim() ?? "";
@@ -3453,6 +3496,11 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
   if (operation === "git_command") {
     const argv = step.argv ?? [];
     if (!argv.length || argv.some((token) => !token.trim())) throw new Error(localized(language, "El comando Git propuesto no es válido.", "The proposed Git command is invalid."));
+    if (step.assistantQuery) return { kind: "git_command", argv: assistantQueryArguments(argv) };
+    if (plan.source === "llm") throw new Error("An assistant command must be approved as a GitCat operation or an inspection query.");
+    const internal = expectedInternalGitCommand(plan, snapshot, argv);
+    if (!internal) throw new Error(localized(language, "La acción no está permitida.", "The action is not allowed."));
+    return { kind: "git_command", argv: internal };
   }
 }
 
@@ -3483,7 +3531,13 @@ function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot, locale?: Lo
       "Un archivo marcado, su versión preparada o la rama de destino cambió después de la revisión, así que no se guardó nada. Revisa los archivos marcados de nuevo.",
       "A ticked file, its staged version or the target branch changed after the review, so nothing was saved. Review the ticked files again."));
   } else if (plan.stateId !== snapshot.stateId) throw new StalePlanError(localized(language, "Los cambios locales variaron desde que se preparó el plan. Prepara la acción de nuevo.", "Local changes moved after this plan was prepared. Prepare the action again."));
-  return validateStep(plan.steps[0], snapshot, language);
+  for (const step of plan.steps) {
+    if (step.operation === "git_command") {
+      if (step.assistantQuery) assistantQueryArguments(step.argv ?? []);
+      else if (plan.source === "llm") throw new Error("An assistant command must be approved as a GitCat operation or an inspection query.");
+    }
+  }
+  return validateStep(plan.steps[0], snapshot, plan, language);
 }
 
 function validateHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
@@ -3611,7 +3665,7 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
   }
 }
 
-async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: RepoSnapshot, branch: BranchOperation | undefined, locale?: Locale): Promise<string> {
+async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: RepoSnapshot, validated: ValidatedStep, locale?: Locale): Promise<string> {
   const pushTarget = pushRepository(step);
   if (pushTarget !== undefined) {
     const current = await readPushDestination(args => readGit(cwd, args), snapshot, pushTarget).catch(error => {
@@ -3624,7 +3678,16 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
         "The publishing destination changed or can no longer be verified. Review and confirm the push again."));
     }
   }
-  if (branch) return reportedGit(cwd, branchArguments(branch));
+  if (validated?.kind === "branch") return reportedGit(cwd, branchArguments(validated.branch));
+  if (validated?.kind === "push") {
+    const pushArgs = pushArguments(validated.push);
+    if (plan.hostingConnection) {
+      if (validated.push.kind !== "refspec") throw new Error("The saved hosting connection can only publish the reviewed branch.");
+      return nativeGit(cwd, pushArgs, plan.hostingConnection);
+    }
+    return reportedGit(cwd, pushArgs);
+  }
+  if (validated?.kind === "git_command") return reportedGit(cwd, validated.argv);
   const { args } = step;
   switch (step.operation) {
     case "status": return "";
@@ -3644,7 +3707,6 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     }
     case "fetch": return reportedGit(cwd, ["fetch", "--prune"]);
     case "pull": return reportedGit(cwd, ["pull", "--ff-only"]);
-    case "push": return reportedGit(cwd, pushArguments(args));
     case "set_identity": {
       const global = args.scope === "global";
       await reportedGit(cwd, ["config", global ? "--global" : "--local", "user.name", args.user]);
@@ -3663,12 +3725,6 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
       await reportedGit(cwd, ["add", "-A"]);
       return reportedGit(cwd, ["commit", "-m", args.message]);
     case "ignore_path": return ignorePath(snapshot.path, args, locale);
-    case "git_command": {
-      if (step.assistantQuery) return reportedGit(cwd, assistantQueryArguments(step.argv ?? []));
-      if (plan.source === "llm") throw new Error("An assistant command must be approved as a GitCat operation or an inspection query.");
-      if(plan.hostingConnection){if(step.argv?.[0]!=='push')throw new Error('The saved hosting connection can only publish the reviewed branch.');return nativeGit(cwd,step.argv,plan.hostingConnection);}
-      return reportedGit(cwd, step.argv ?? []);
-    }
     case "github_create_repo": return executeHostedRepositoryPlan(plan, locale);
     default: throw new Error(localized(locale, "La acción no está permitida.", "The action is not allowed."));
   }
@@ -3758,7 +3814,7 @@ async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutc
   const language = normalizeLocale(locale);
   let snapshot = await getSnapshot(cwd);
   const selectionNow = plan.selection ? await selectionBinding(snapshot, currentVersions(snapshot, plan.selection.changes), plan.selection.target) : undefined;
-  const firstBranch = validateExecution(plan, snapshot, language, selectionNow);
+  const firstValidated = validateExecution(plan, snapshot, language, selectionNow);
   if (plan.selection?.target) {
     // Files left out can have changed since the review; one that now blocks the switch is named before anything is saved.
     const resolved = resolveSelection(snapshot.changes, plan.selection.changes);
@@ -3774,10 +3830,10 @@ async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutc
     operationPhase("executing", index + 1, plan.steps.length);
     try {
       if (index > 0) snapshot = await getSnapshot(cwd);
-      const branch = index === 0 ? firstBranch : validateStep(step, snapshot, language);
-      outcomes[index] = { ...outcomes[index], status: "completed", output: await runStep(cwd, step, plan, snapshot, branch, language) };
+      const validated = index === 0 ? firstValidated : validateStep(step, snapshot, plan, language);
+      outcomes[index] = { ...outcomes[index], status: "completed", output: await runStep(cwd, step, plan, snapshot, validated, language) };
     } catch (error) {
-      if (index === 0 && step.pushDestination && error instanceof StalePlanError) throw error;
+      if (index === 0 && (step.pushDestination || step.operation === "push") && error instanceof StalePlanError) throw error;
       const detail = error instanceof Error ? error.message : localized(language, "Git no pudo completar la acción.", "Git could not complete the action.");
       outcomes[index] = { ...outcomes[index], status: "failed", output: detail };
       operationPhase("inspecting");
@@ -4109,7 +4165,7 @@ export async function prepareHistoryRecovery(cwd: string, id: string, mode: Hist
   const recovery: HistoryRecovery={mode,commit,...(mode==='restore'?{branch:`recovered/${id.slice(0,8)}`}:{})};
   await validateHistoryRecovery(cwd,recovery);
   const current=await getSnapshot(cwd), language=normalizeLocale(locale);
-  const argv=mode==='restore'?['branch',recovery.branch!,commit]:mode==='revert'?['revert','--no-edit',commit]:['reset','--soft',`${commit}^`];
+  const argv=historyRecoveryArguments(recovery);
   const summary=mode==='restore'?localized(language,'Crear una rama para revisar la versión anterior','Create a branch to review the earlier version'):mode==='revert'?localized(language,'Revertir el guardado con un nuevo commit','Revert the save with a new commit'):localized(language,'Deshacer el último guardado conservando los archivos','Undo the latest save while keeping files');
   const effects=[localized(language,'Solo recupera versiones guardadas en Git. No guarda ni recupera archivos que nunca se guardaron.','Only versions saved in Git can be recovered. Never-saved files are not backed up or recovered.')];
   if (mode==='undo') effects.push(localized(language,'Se comprueban ramas y etiquetas de los remotos configurados. GitCat no puede demostrar que nunca se compartió en otro lugar. Si alguien lo recibió, usa revertir.','Configured remote branches and tags are checked. GitCat cannot prove this was never shared elsewhere. If someone received it, use revert.'));
@@ -4193,7 +4249,7 @@ export async function prepareSwitchWork(cwd: string, request: SwitchWorkRequest,
   const snapshot=await getSnapshot(cwd),language=normalizeLocale(locale);
   let steps:PlanStep[], summary:string, effects:string[];
   if (request.mode==='restore') {
-    steps=[stepFrom('git_command',{},['stash','apply','--index',request.stash!],language)!];
+    steps=[stepFrom('git_command',{},switchWorkCommandArguments(request, snapshot.currentBranch)!,language)!];
     summary=localized(language,`Restaurar trabajo apartado en ${snapshot.currentBranch}`,`Restore set-aside work on ${snapshot.currentBranch}`);
     effects=[localized(language,'Restaura los archivos y lo que estaba preparado. Puede detenerse con conflictos; la entrada se conserva, incluso si falla. Revisa los archivos antes de volver a aplicar.','Restores files and their staged state. It may stop with conflicts; the entry is retained even on failure. Review the files before applying it again.')];
   } else {
@@ -4203,8 +4259,7 @@ export async function prepareSwitchWork(cwd: string, request: SwitchWorkRequest,
     effects=[localized(language,`La rama activa será ${target}. No se publica nada.`,`The active branch will be ${target}. Nothing is published.`)];
     if (request.mode==='carry') effects.push(localized(language,`Los ${snapshot.changes.length} archivos sin guardar te acompañan a ${target}, conservando el índice.`,`The ${snapshot.changes.length} unsaved files come with you to ${target}, keeping the index.`));
     else {
-      const label=`GitCat set aside: ${request.label!.trim()} [${snapshot.currentBranch}]`;
-      steps.unshift(stepFrom('git_command',{},['stash','push',...(request.includeUntracked?['--include-untracked']:[]),'-m',label],language)!);
+      steps.unshift(stepFrom('git_command',{},switchWorkCommandArguments(request, snapshot.currentBranch)!,language)!);
       effects.push(localized(language,`Aparta los cambios seguidos${request.includeUntracked?' y archivos nuevos':''} como “${request.label}”. Conserva el estado preparado para restaurarlo. Los archivos ignorados${request.includeUntracked?'':' y nuevos'} permanecen en la carpeta. Si el cambio de rama falla, la entrada sigue disponible.`,`Sets aside tracked edits${request.includeUntracked?' and new files':''} as “${request.label}”, preserving staged state for restoration. Ignored files${request.includeUntracked?'':' and new files'} remain in the folder. If switching fails, the entry remains available.`));
     }
   }
@@ -4219,8 +4274,7 @@ const reviewTools: ReviewTools = {
   api:(context,url,method,body)=>hostingConnections().request(context.connectionId,url,method,body),
   publish:async preview=>{
     const snapshot=await getSnapshot(preview.repoPath);
-    const argv=['push',preview.request.remote,`${preview.headHash}:refs/heads/${preview.request.head}`];
-    const steps=await bindPushDestinations(snapshot,[stepFrom('git_command',{},argv,'en')!]);
+    const steps=await bindPushDestinations(snapshot,[stepFrom('push',{remote:preview.request.remote,commit:preview.headHash,branch:preview.request.head},[],'en')!]);
     const urls=steps[0].pushDestination?.urls;
     if (urls?.length!==1 || urls[0]!==displayPushAddress(preview.remoteUrl)) {
       throw new Error('The publishing destination changed. Review sharing again; nothing was published.');

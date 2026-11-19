@@ -13,6 +13,7 @@ registerHooks({
   }
 });
 const { executePlan, getSnapshot, prepareOperation, StalePlanError } = await import("../dist-electron/electron/git-service.js");
+const { parsePushOperation, pushArguments, pushRepository } = await import("../dist-electron/electron/push-destination.js");
 const { planSummary } = await import("../dist-electron/shared/plan-summary.js");
 
 function fixture(t) {
@@ -80,4 +81,28 @@ test("the default push honors the branch's publishing remote and binds every pus
   assert.equal((await executePlan(repo, reviewedAgain, "en")).error, undefined);
   assert.equal(published(first), "");
   assert.equal(published(second), git("rev-parse", "HEAD"));
+});
+
+test("typed push operations share arguments between confirmation and execution and detect global-option pushes", async t => {
+  assert.equal(pushRepository({ operation: "git_command", args: {}, argv: ["--no-optional-locks", "push", "origin", "main"], command: "", summary: "", risk: "high" }), "origin");
+  assert.equal(pushRepository({ operation: "git_command", args: {}, argv: ["-c", "remote.origin.url=/evil", "push"], command: "", summary: "", risk: "high" }), null);
+  assert.equal(pushRepository({ operation: "git_command", args: {}, argv: ["log", "-1", "push"], command: "", summary: "", risk: "low" }), undefined);
+
+  assert.throws(() => parsePushOperation({ setUpstream: "origin", remote: "work", branch: "main" }, "en"), /push arguments are invalid/);
+  assert.throws(() => parsePushOperation({ remote: "origin" }, "en"), /active branch/);
+  assert.throws(() => parsePushOperation({ noVerify: "yes" }, "en"), /push arguments are invalid/);
+
+  const typed = parsePushOperation({ remote: "origin", branch: "main", noVerify: "true" }, "en");
+  assert.deepEqual(pushArguments(typed), ["push", "--no-verify", "origin", "main"]);
+
+  const { repo, first, second, git, published } = fixture(t);
+  git("remote", "add", "origin", first);
+  const plan = await prepareOperation(repo, "push", { remote: "origin" }, "en");
+  assert.equal(plan.steps[0].command, "git push origin main");
+  assert.deepEqual(plan.steps[0].pushDestination.urls, [first]);
+
+  git("remote", "set-url", "--push", "origin", second);
+  await assert.rejects(executePlan(repo, plan, "en"), { name: StalePlanError.name, message: /publishing destination changed/ });
+  assert.equal(published(first), "");
+  assert.equal(published(second), "");
 });
