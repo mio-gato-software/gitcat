@@ -316,16 +316,107 @@ function parseStatus(raw: string) {
   return changes;
 }
 
-/** The staged entries of every path, as `ls-files --stage -z` lists them, so each change can be bound to its own. */
-function parseStage(raw: string) {
-  const entries = new Map<string, string[]>();
-  for (const record of raw.split("\0").filter(Boolean)) {
-    const tab = record.indexOf("\t");
-    if (tab < 0) continue;
-    const path = record.slice(tab + 1);
-    entries.set(path, [...(entries.get(path) ?? []), record.slice(0, tab)]);
-  }
-  return entries;
+const stageHeaderPattern = /^[0-7]{6} [0-9a-f]{40,64} [0-3]$/;
+const incompleteIndexMessage = "Git returned an incomplete index listing. GitCat could not verify the repository state.";
+
+/**
+ * Streams `git ls-files --stage -z` so large tracked indexes never hit the buffered-output cap.
+ * Every record is validated and hashed into the repository fingerprint, while only staged entries
+ * for paths with local changes are retained in memory.
+ */
+async function readStageIndex(
+  repoRoot: string,
+  neededPaths: ReadonlySet<string>,
+  timeoutMs = 60_000
+): Promise<{ digest: string; entries: Map<string, string[]> }> {
+  const child = await spawnGit(repoRoot, ["ls-files", "--stage", "-z"], { group: true });
+  return new Promise((resolvePromise, reject) => {
+    const digest = createHash("sha256");
+    const entries = new Map<string, string[]>();
+    const stderr = outputBuffer();
+    let pending: Buffer = Buffer.alloc(0);
+    let settled = false;
+    let stopped: Error | undefined;
+    const active = operationContext();
+    const stop = (error: Error) => {
+      if (stopped) return;
+      stopped = error;
+      signalProcessTree(child, "SIGTERM");
+      setTimeout(() => { if (!settled) signalProcessTree(child, "SIGKILL"); }, 2_000).unref();
+    };
+    const timer = setTimeout(() => stop(new Error("git ls-files timed out. The final repository state must be checked; changes may have completed.")), timeoutMs);
+    const cancel = () => stop(new OperationCancelled());
+    const canAbort = active && !active.mutation && !active.inspecting;
+    if (canAbort) {
+      active.signal.addEventListener("abort", cancel, { once: true });
+      if (active.signal.aborted) cancel();
+    }
+    const cleanup = () => {
+      clearTimeout(timer);
+      if (canAbort) active.signal.removeEventListener("abort", cancel);
+    };
+
+    const consumeRecord = (raw: Buffer) => {
+      const record = raw.toString("utf8");
+      const tab = record.indexOf("\t");
+      if (tab < 0) return false;
+      const header = record.slice(0, tab);
+      const path = record.slice(tab + 1);
+      if (!path || !stageHeaderPattern.test(header)) return false;
+      if (neededPaths.has(path)) {
+        const list = entries.get(path);
+        if (list) list.push(header);
+        else entries.set(path, [header]);
+      }
+      return true;
+    };
+
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      if (stopped) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      digest.update(buffer);
+      let start = 0;
+      while (start < buffer.length) {
+        const nul = buffer.indexOf(0, start);
+        if (nul < 0) break;
+        const slice = buffer.subarray(start, nul);
+        const record = pending.length ? Buffer.concat([pending, slice]) : slice;
+        pending = Buffer.alloc(0);
+        if (!consumeRecord(record)) {
+          stop(new Error(incompleteIndexMessage));
+          return;
+        }
+        start = nul + 1;
+      }
+      if (start < buffer.length) {
+        const tail = buffer.subarray(start);
+        pending = pending.length ? Buffer.concat([pending, tail]) : Buffer.from(tail);
+        if (pending.length > commandOutputLimit) {
+          stop(new Error(incompleteIndexMessage));
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", stderr.append);
+    child.stdout.on("error", (error) => { if (!settled) { settled = true; cleanup(); reject(error); } });
+    child.on("error", (error) => { if (!settled) { settled = true; cleanup(); reject(error); } });
+    child.on("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (stopped) { reject(stopped); return; }
+      if (signal) { reject(new Error(incompleteIndexMessage)); return; }
+      if (code !== 0) {
+        reject(new Error(stderr.text.trim() || `git ls-files --stage -z terminó con código ${code ?? 1}`));
+        return;
+      }
+      if (pending.length > 0) {
+        reject(new Error(incompleteIndexMessage));
+        return;
+      }
+      resolvePromise({ digest: digest.digest("hex"), entries });
+    });
+  });
 }
 
 /** A pathspec that means this exact path: no glob, no magic, whatever characters the name has. */
@@ -605,13 +696,13 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
       worktree.changes = parseStatus(await checkedGit(worktree.path, ["--no-optional-locks", "status", "--short", "--untracked-files=all", "-z"], true));
     } catch { worktree.statusUnavailable = true; }
   }));
-  const stageRaw = await checkedGit(repoRoot, ["ls-files", "--stage", "-z"], true);
-  const stage = parseStage(stageRaw);
+  const neededStagePaths = new Set(changes.flatMap((change) => change.from ? [change.path, change.from] : [change.path]));
+  const { digest: stageDigest, entries: stage } = await readStageIndex(repoRoot, neededStagePaths);
   const stashRaw = await checkedGit(repoRoot, ["stash", "list", "--format=%H"]);
   // A file can change while keeping exactly the same status code. Bind reviews to its
   // contents, the staged version, the branch refs and checkout, not just "M file.txt".
   const fingerprint = createHash("sha256").update(JSON.stringify([
-    head, currentBranch, statusRaw, branchRaw, remoteBranchRaw, pending, worktreeBinding, stageRaw, stashRaw
+    head, currentBranch, statusRaw, branchRaw, remoteBranchRaw, pending, worktreeBinding, stageDigest, stashRaw
   ]));
   for (const change of changes) {
     // Each change also gets a version of its own: the commit and branch it sits on, its status, the
@@ -4330,8 +4421,8 @@ async function validateSwitchWork(cwd: string, request: SwitchWorkRequest) {
     if (!selected.length) throw new Error('Only new files are present. Include new files to set them aside.');
     const untracked=snapshot.changes.filter(isUntracked);
     if (!request.includeUntracked && preview.blockers.some(p=>untracked.some(c=>c.path===p))) throw new Error('New files would block the switch. Include them in the set-aside entry or keep working here.');
-    const staged=await checkedGit(cwd,['ls-files','--stage']);
-    if (selected.some(c=>staged.split('\n').some(line=>line.startsWith('160000 ') && line.endsWith('\t'+c.path)))) throw new Error('A submodule has unfinished work. Save or set it aside inside that submodule first.');
+    const { entries: staged } = await readStageIndex(cwd, new Set(selected.map(c => c.path)));
+    if (selected.some(c => (staged.get(c.path) ?? []).some(header => header.startsWith('160000 ')))) throw new Error('A submodule has unfinished work. Save or set it aside inside that submodule first.');
   }
 }
 export async function prepareSwitchWork(cwd: string, request: SwitchWorkRequest, locale?: Locale) {
