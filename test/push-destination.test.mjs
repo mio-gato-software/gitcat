@@ -83,6 +83,25 @@ test("the default push honors the branch's publishing remote and binds every pus
   assert.equal(published(second), git("rev-parse", "HEAD"));
 });
 
+test("the ordinary publish action refuses to mirror or force configured refs", async t => {
+  const { repo, first, git, published } = fixture(t);
+  git("remote", "add", "origin", first);
+  git("push", "origin", "main:refs/heads/remote-only");
+  const before = published(first);
+  git("config", "remote.origin.mirror", "true");
+  await assert.rejects(prepareOperation(repo, "push", {}, "en"), /mirrors references/);
+  assert.equal(published(first), before);
+
+  git("config", "--unset", "remote.origin.mirror");
+  git("config", "remote.origin.push", "+refs/heads/*:refs/heads/*");
+  await assert.rejects(prepareOperation(repo, "push", {}, "en"), /custom push refspec/);
+  assert.equal(published(first), before);
+  const explicit = await prepareOperation(repo, "push", { remote: "origin" }, "en");
+  assert.equal(explicit.steps[0].pushDestination.targetRef, "refs/heads/main");
+  assert.equal((await executePlan(repo, explicit, "en")).error, undefined);
+  assert.equal(published(first).split("\n").length, 2);
+});
+
 test("typed push operations share arguments between confirmation and execution and detect global-option pushes", async t => {
   assert.equal(pushRepository({ operation: "git_command", args: {}, argv: ["--no-optional-locks", "push", "origin", "main"], command: "", summary: "", risk: "high" }), "origin");
   assert.equal(pushRepository({ operation: "git_command", args: {}, argv: ["-c", "remote.origin.url=/evil", "push"], command: "", summary: "", risk: "high" }), null);
@@ -93,12 +112,12 @@ test("typed push operations share arguments between confirmation and execution a
   assert.throws(() => parsePushOperation({ noVerify: "yes" }, "en"), /push arguments are invalid/);
 
   const typed = parsePushOperation({ remote: "origin", branch: "main", noVerify: "true" }, "en");
-  assert.deepEqual(pushArguments(typed), ["push", "--no-verify", "origin", "main"]);
+  assert.deepEqual(pushArguments(typed), ["push", "--no-verify", "origin", "refs/heads/main:refs/heads/main"]);
 
   const { repo, first, second, git, published } = fixture(t);
   git("remote", "add", "origin", first);
   const plan = await prepareOperation(repo, "push", { remote: "origin" }, "en");
-  assert.equal(plan.steps[0].command, "git push origin main");
+  assert.equal(plan.steps[0].command, "git push origin refs/heads/main:refs/heads/main");
   assert.deepEqual(plan.steps[0].pushDestination.urls, [first]);
 
   git("remote", "set-url", "--push", "origin", second);

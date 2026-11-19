@@ -1,5 +1,5 @@
 import { branchArguments, isBranchNameSafe, parseBranchOperation, validateBranchOperation, type BranchOperation } from "./branch-operation.js";
-import { displayPushAddress, parsePushOperation, pushArguments, pushRepository, readPushDestination, validatePushOperation, type PushOperation } from "./push-destination.js";
+import { displayPushAddress, parsePushOperation, pushArguments, pushRepository, readPushDestination, validatePushOperation, verifyInitialPushUrl, type PushOperation } from "./push-destination.js";
 import { assistantQueryArguments, parseAssistantCommand, type AssistantCommand } from "./assistant-git-command.js";
 import { walkPlanSteps } from "../shared/plan-summary.js";
 import { syncDestinations } from "../shared/remote-sync.js";
@@ -1421,6 +1421,17 @@ async function prepareHostedRepository(snapshot: RepoSnapshot, input: Repository
   if (remoteExists && !replaceRemote) {
     return blocked(`the local remote "${remote}" already points to ${remoteResult.stdout.trim()}; replacing it requires the user to say so explicitly`, "repository.replaceRemote");
   }
+  if (push) {
+    if (!isBranchNameSafe(sourceSnapshot.currentBranch) || sourceSnapshot.currentBranch === "HEAD") return blocked("Choose a local branch before publishing.");
+    const read = (args: string[]) => readGit(sourcePath, args);
+    try {
+      await verifyInitialPushUrl(read, remoteUrl);
+      if (hosting && hosting.location.gitUrl !== remoteUrl) await verifyInitialPushUrl(read, hosting.location.gitUrl);
+      await readPushDestination(read, sourceSnapshot, remoteExists ? remote : remoteUrl, sourceSnapshot.currentBranch);
+    } catch (error) {
+      return blocked(error instanceof Error ? error.message : String(error), "repository.remote");
+    }
+  }
 
   const args = {
     name, owner, host, protocol, sshHost, remoteUrl, visibility: "private", source: sourcePath, remote,
@@ -2220,7 +2231,7 @@ async function bindPushDestinations(snapshot: RepoSnapshot, steps: PlanStep[]) {
     const target = pushRepository(step);
     if (target === undefined) { bound.push(step); continue; }
     const pushDestination = await readPushDestination(
-      args => readGit(snapshot.path, args), { remotes: snapshot.remotes, currentBranch: on }, target
+      args => readGit(snapshot.path, args), { remotes: snapshot.remotes, currentBranch: on }, target, step.args.branch
     );
     bound.push({ ...step, pushDestination });
   }
@@ -3740,6 +3751,17 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
   if (currentRemote.code === 0 && createHash("sha256").update(currentRemote.stdout.trim()).digest("hex") !== plan.args.existingRemoteHash) throw new Error(localized(language, `El remoto “${plan.args.remote}” cambió desde la validación.`, `Remote “${plan.args.remote}” changed after validation.`));
   const previousRemoteUrl = currentRemote.code === 0 ? currentRemote.stdout.trim() : "";
   if (currentRemote.code === 0 && await optionalGit(source, ["config", "--get-all", `remote.${plan.args.remote}.pushurl`])) throw new Error("The remote now has a separate push destination. Choose a new remote name and prepare again.");
+  const read = (args: string[]) => readGit(source, args);
+  const verifyInitialPush = async (configuredRemote?: string) => {
+    await verifyInitialPushUrl(read, plan.args.remoteUrl, configuredRemote);
+    if (hosting && hosting.location.gitUrl !== plan.args.remoteUrl) await verifyInitialPushUrl(read, hosting.location.gitUrl);
+    await readPushDestination(read, { ...snapshot, remotes: configuredRemote ? [...snapshot.remotes, configuredRemote] : snapshot.remotes },
+      configuredRemote ?? (currentRemote.code === 0 ? plan.args.remote : plan.args.remoteUrl), snapshot.currentBranch);
+  };
+  if (plan.args.push === "true") {
+    if (!isBranchNameSafe(snapshot.currentBranch) || snapshot.currentBranch === "HEAD") throw new Error("Choose a local branch before publishing.");
+    await verifyInitialPush();
+  }
 
   // gh has no per-command account flag, so the active one is switched and restored around the work.
   const switching = provider === "github" && plan.args.account !== plan.args.activeAccount;
@@ -3765,10 +3787,16 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
       if(hosting){
         const facts=await nativeRepositoryFacts((url,method,body)=>hostingConnections().request(hosting.connectionId,url,method,body),hosting.location);
         const bound={...hosting,repositoryId:facts.id};
+        await verifyInitialPush(plan.args.remote);
         pushOutput=await nativeGit(source,['push',plan.args.remote,`${snapshot.head}:refs/heads/${snapshot.currentBranch}`],bound);
         await nativeGit(source,['fetch',plan.args.remote,`+refs/heads/${snapshot.currentBranch}:refs/remotes/${plan.args.remote}/${snapshot.currentBranch}`],bound);
         await reportedGit(source,['branch',`--set-upstream-to=${plan.args.remote}/${snapshot.currentBranch}`,snapshot.currentBranch]);
-      }else pushOutput=await reportedGit(source,["push", "-u", plan.args.remote, "HEAD"]);
+      } else {
+        await verifyInitialPush(plan.args.remote);
+        pushOutput = await reportedGit(source, pushArguments({
+          kind: "set_upstream", remote: plan.args.remote, branch: snapshot.currentBranch, noVerify: false
+        }));
+      }
     }
     // The user confirmed it and it worked: this is the moment the choice becomes worth remembering.
     const now = new Date().toISOString();
@@ -3799,7 +3827,7 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
 async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: RepoSnapshot, validated: ValidatedStep, locale?: Locale): Promise<string | StepRunResult> {
   const pushTarget = pushRepository(step);
   if (pushTarget !== undefined) {
-    const current = await readPushDestination(args => readGit(cwd, args), snapshot, pushTarget).catch(error => {
+    const current = await readPushDestination(args => readGit(cwd, args), snapshot, pushTarget, step.args.branch).catch(error => {
       if (error instanceof OperationCancelled) throw error;
       return undefined;
     });
