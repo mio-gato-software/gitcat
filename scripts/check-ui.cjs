@@ -178,10 +178,13 @@ app.whenReady().then(async () => {
   ipcMain.handle('conflicts:propose', () => { proposals += 1; throw new Error('no provider in this scenario'); });
   // The description is written from the ticked files only; the stub records which ones it was asked about.
   const described = [];
+  const descriptionGates = new Map();
   ipcMain.handle('commit:generate-description', async (_, p, locale, paths) => {
+    const current = await service.getSnapshot(p);
     described.push([...paths].sort());
-    const current = await service.getSnapshot(repo);
-    return { description: 'Update menu and add a new file', stateId: current.stateId, selection: current.changes.filter((change) => paths.includes(change.path)).map((change) => ({ path: change.path, version: change.version })) };
+    const gate = descriptionGates.get(p);
+    const description = gate ? await gate : 'Update menu and add a new file';
+    return { description, stateId: current.stateId, selection: current.changes.filter((change) => paths.includes(change.path)).map((change) => ({ path: change.path, version: change.version })) };
   });
   ipcMain.handle('commit:selection-diff', (_, p, paths, locale) => service.getSelectionDiff(p, paths, locale));
   // Sharing decisions are the real service's, kept in this disposable profile.
@@ -1415,6 +1418,52 @@ app.whenReady().then(async () => {
   assert.equal(at(copies, 'rev-parse', 'HEAD^1'), beforeRecovery);
   assert.equal(at(copies, 'rev-parse', 'HEAD^2'), at(copiesWriter, 'rev-parse', 'HEAD'));
   assert.equal(at(copies, 'show', 'HEAD:local.txt'), 'remote edit');
+
+  // A reply that arrives after a tab switch must leave the other project's request and draft alone.
+  configured = true;
+  fs.writeFileSync(path.join(repo, 'delivery-draft.txt'), 'changes in the first repository\n');
+  fs.writeFileSync(path.join(copies, 'draft.txt'), 'changes in the second repository\n');
+  await service.acknowledgeAiSharing(repo);
+  await service.acknowledgeAiSharing(copies);
+  const firstDraft = await service.getSnapshot(repo);
+  const secondDraft = await service.getSnapshot(copies);
+  restored = {
+    projects: [firstDraft, secondDraft], unavailable: [],
+    order: [firstDraft.path, secondDraft.path], activePath: firstDraft.path
+  };
+  const firstDescription = Promise.withResolvers();
+  const secondDescription = Promise.withResolvers();
+  descriptionGates.set(firstDraft.path, firstDescription.promise);
+  descriptionGates.set(secondDraft.path, secondDescription.promise);
+  const descriptionStart = described.length;
+  const openDescription = async () => {
+    await waitFor(`document.querySelector('.commit-row.wip[data-hash="working-tree"]')`);
+    await js(`document.querySelector('.commit-row.wip[data-hash="working-tree"]').click()`);
+    await waitFor(`document.querySelector('.commit-form-heading button:not(:disabled)')`);
+    await js(`document.querySelector('.commit-form-heading button').click()`);
+    await waitFor(`document.querySelector('#commit-description:disabled')`);
+  };
+  const waitForDescriptionRequest = async count => {
+    for (let attempt = 0; attempt < 1200 && described.length < count; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(described.length, count);
+  };
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await openDescription();
+  await waitForDescriptionRequest(descriptionStart + 1);
+  await js(`[...document.querySelectorAll('.window-tab [role="tab"]')].find(tab => tab.innerText === ${JSON.stringify(secondDraft.name)}).click()`);
+  await waitFor(`document.querySelector('.window-tab.active')?.innerText === ${JSON.stringify(secondDraft.name)}`);
+  await openDescription();
+  await waitForDescriptionRequest(descriptionStart + 2);
+
+  firstDescription.resolve('Description from the first tab');
+  // Let the renderer receive the expired reply while the second request is still held.
+  await js(`new Promise(resolve => setTimeout(resolve, 150))`);
+  assert.equal(await js(`document.querySelector('#commit-description').disabled`), true, 'The first reply cannot clear the second tab’s pending state');
+  assert.equal(await js(`document.querySelector('#commit-description').value`), '');
+  secondDescription.resolve('Description from the second tab');
+  await waitFor(`document.querySelector('#commit-description:not(:disabled)')?.value === 'Description from the second tab'`);
 
   win.destroy();
   console.log('PASS: worktree list, safe opening with separate edits and tree tab badges; unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, a work overview separating edited, saved, integrated and published work with one next step, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, saving without secret warnings, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');
