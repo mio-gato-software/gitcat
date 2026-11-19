@@ -3324,24 +3324,30 @@ async function commitSelected(repoRoot: string, paths: string[], message: string
     const committed = await git(["commit", "-m", message], 600_000);
     const output = detail(committed, ["commit"]);
     if (committed.code !== 0) throw new Error(output);
-    // Capture the confirmed commit hash before touching the real index, so a lock cannot hide the save.
-    const commitHash = await optionalGit(repoRoot, ["rev-parse", "--verify", "--quiet", "HEAD"])
-      || (await git(["rev-parse", "--verify", "--quiet", "HEAD"])).stdout.trim();
-    const reset = await runGit(repoRoot, ["reset", "-q", "--", ...literalPaths(paths)]);
-    if (reset.code !== 0) {
-      const saved = commitHash ? commitHash.slice(0, 7) : await optionalGit(repoRoot, ["rev-parse", "--short", "HEAD"]);
-      return {
-        output,
-        ...(commitHash ? { commitHash } : {}),
-        postActionIssue: {
-          kind: "index_sync",
-          detail: localized(language,
-            `Los archivos marcados se guardaron en el commit ${saved}, pero Git no pudo actualizar su lista de cambios preparados para ellos: ${detail(reset, ["reset"])}. Tus archivos en disco no cambiaron.`,
-            `The ticked files were saved in commit ${saved}, but Git could not update its list of staged changes for them: ${detail(reset, ["reset"])}. Your files on disk did not change.`)
-        }
-      };
+    // Git has saved the commit. Later child-process failures must preserve that result.
+    const verifyHead = ["rev-parse", "--verify", "--quiet", "HEAD"];
+    const commitHash = await optionalGit(repoRoot, verifyHead).catch(() => "")
+      || await git(verifyHead).then(result => result.code === 0 ? completeGitOutput(result).trim() : "").catch(() => "");
+    const saved = { output, ...(commitHash ? { commitHash } : {}) };
+    const resetArgs = ["reset", "-q", "--", ...literalPaths(paths)];
+    let failure: string;
+    try {
+      const reset = await runGit(repoRoot, resetArgs);
+      if (reset.code === 0) return saved;
+      failure = detail(reset, resetArgs);
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
     }
-    return { output, ...(commitHash ? { commitHash } : {}) };
+    const shortHash = commitHash ? ` ${commitHash.slice(0, 7)}` : "";
+    return {
+      ...saved,
+      postActionIssue: {
+        kind: "index_sync",
+        detail: localized(language,
+          `Los archivos marcados se guardaron en un commit${shortHash}, pero Git no pudo actualizar su lista de cambios preparados para ellos: ${failure}. Tus archivos en disco no cambiaron.`,
+          `The ticked files were saved in a commit${shortHash}, but Git could not update its list of staged changes for them: ${failure}. Your files on disk did not change.`)
+      }
+    };
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

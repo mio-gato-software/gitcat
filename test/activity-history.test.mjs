@@ -265,6 +265,43 @@ test('selective save plus integrate stops subsequent steps without marking the c
   assert.equal(entry.steps[0].afterHead, committedHash);
 });
 
+test('a rejected index sync preserves the selected commit and skips integration', async t => {
+  const { path, git } = fixture(t);
+  const main = git('rev-parse', 'HEAD');
+  git('switch', '-qc', 'feature');
+  writeFileSync(join(path, 'file'), 'saved before the index sync error\n');
+  const before = await service.getSnapshot(path);
+  const selection = before.changes.map(({ path, version }) => ({ path, version }));
+  const plan = await service.prepareBranchDelivery(path, {
+    stateId: before.stateId, message: 'save feature', mergeToDefault: true, selection
+  }, 'en');
+
+  const spawn = cp.spawn;
+  t.mock.method(cp, 'spawn', (exe, args, options) => {
+    if (args.includes('reset') && args.includes(':(literal)file')) {
+      throw new Error('Could not start index synchronization');
+    }
+    return spawn(exe, args, options);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+
+  const result = await service.executePlan(path, plan, 'en');
+  const saved = git('rev-parse', 'HEAD');
+  assert.notEqual(saved, main);
+  assert.equal(git('show', 'HEAD:file'), 'saved before the index sync error');
+  assert.equal(git('branch', '--show-current'), 'feature');
+  assert.equal(git('rev-parse', 'main'), main);
+  assert.deepEqual(result.outcomes.map(step => step.status), ['completed', 'skipped', 'skipped']);
+  assert.equal(result.outcomes[0].commitHash, saved);
+  assert.equal(result.postActionIssue?.kind, 'index_sync');
+  assert.match(result.error, /Could not start index synchronization/);
+
+  const entry = (await service.getActivityHistory(path)).entries[0];
+  assert.deepEqual(entry.steps.map(step => step.status), ['completed', 'skipped', 'skipped']);
+  assert.equal(entry.steps[0].afterHead, saved);
+});
+
 for (const mode of ['choices', 'proposal']) {
   test(`conflict resolution (${mode}) preserves per-file outcomes when final snapshot read fails`, async t => {
     const { path, git } = fixture(t);
