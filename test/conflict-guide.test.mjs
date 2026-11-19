@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { rmSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { rmSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -64,6 +64,50 @@ function mergeConflicts() {
 }
 
 const fileIn = (guide, path) => guide.files.find((file) => file.path === path);
+
+test("a conflicting path blocked by a parent file leaves the rest of the guide usable", async t => {
+  const r = repository();
+  t.after(() => rmSync(r.repo, { recursive: true, force: true }));
+  mkdirSync(join(r.repo, "nested"));
+  const nested = "nested/a.txt", other = "b.txt";
+  const save = (content) => {
+    r.write(nested, content);
+    r.write(other, content);
+    r.git("add", ".");
+    r.git("commit", "-qm", content);
+  };
+  save("base");
+  r.git("switch", "-qc", "incoming");
+  save("incoming");
+  r.git("switch", "-q", "main");
+  save("local");
+  assert.throws(() => r.git("merge", "incoming"));
+  rmSync(join(r.repo, "nested"), { recursive: true });
+  r.write("nested", "keep this file");
+
+  const guide = await service.describeConflicts(r.repo, "en");
+  assert.equal(fileIn(guide, nested).working.blocked, true);
+  assert.deepEqual(fileIn(guide, nested).choices, []);
+  const result = await service.applyConflictChoices(r.repo, guide, [{ path: other, choice: "theirs" }], "en");
+  assert.equal(result.outcomes[0].status, "applied");
+  assert.equal(r.read(other), "incoming");
+  assert.equal(r.read("nested"), "keep this file");
+});
+
+test("the guide refuses a hand edit replaced by a symlink", { skip: process.platform === "win32" }, async t => {
+  const r = mergeConflicts();
+  t.after(() => rmSync(r.repo, { recursive: true, force: true }));
+  const guide = await service.describeConflicts(r.repo, "en");
+  const stages = r.unmerged();
+  r.write("manual.txt", "ordinary text");
+  rmSync(join(r.repo, "text.txt"));
+  symlinkSync("manual.txt", join(r.repo, "text.txt"));
+
+  const result = await service.applyConflictChoices(r.repo, guide, [{ path: "text.txt", choice: "edited" }], "en");
+  assert.deepEqual(result.outcomes, [{ path: "text.txt", choice: "edited", status: "refused", reason: "path" }]);
+  assert.equal(r.unmerged(), stages);
+  assert.equal(r.read("manual.txt"), "ordinary text");
+});
 
 test("conflict plan confirms replacement, removal, or staging before touching a file", async t => {
   const r = mergeConflicts();

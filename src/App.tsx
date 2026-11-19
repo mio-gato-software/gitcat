@@ -4034,7 +4034,7 @@ function ConflictResolverModal({ guide, result, snapshot, busy, configured, onAp
         {result.stale === "files" && <span>{t("guideStaleFiles")}</span>}
         {result.stale === "operation" && <span>{t("guideStaleOperation")}</span>}
         {result.stale === "repository" && <span>{t("guideStaleRepository")}</span>}
-        {result.outcomes.filter((outcome) => outcome.status === "refused").map((outcome) => <span key={outcome.path}>{t(outcome.reason === "missing" ? "guideRefusedMissing" : "guideRefusedMarkers", { path: outcome.path })}</span>)}
+        {result.outcomes.filter((outcome) => outcome.status === "refused").map((outcome) => <span key={outcome.path}>{t(outcome.reason === "path" ? "guideRefusedPath" : outcome.reason === "missing" ? "guideRefusedMissing" : "guideRefusedMarkers", { path: outcome.path })}</span>)}
         {result.outcomes.filter((outcome) => outcome.status === "failed").map((outcome) => <span key={outcome.path}>{t(outcome.restored ? "guideFailedRestored" : "guideFailedNotRestored", { path: outcome.path })}{outcome.detail ? ` (${outcome.detail})` : ""}</span>)}
         {notReached.length > 0 && <span>{t("guideNotReached", { files: notReached.map((outcome) => outcome.path).join(", ") })}</span>}
       </div></div>}
@@ -4052,7 +4052,7 @@ function ConflictResolverModal({ guide, result, snapshot, busy, configured, onAp
               <span>{t(conflictShapeKey(file.kind), { ours, theirs })}{file.binary ? ` ${t("conflictBinary")}` : ""}</span>
               {file.renames.map((rename) => <span key={`${rename.side}:${rename.from}:${rename.to}`}>{t("conflictRenamed", { side: nameOf(rename.side), from: rename.from, to: rename.to })}</span>)}
               {file.working.present && !file.binary && <span className={file.working.markers ? "guide-markers" : "guide-clean"}>{t(file.working.markers ? "stillHasMarkers" : "noMarkersLeft")}</span>}
-              {!file.working.present && <span>{t("notOnDisk")}</span>}
+              {!file.working.present && <span>{t(file.working.blocked ? "guideBlockedPath" : "notOnDisk")}</span>}
             </div>
             <div className="guide-file-tools">
               {(file.ours.present || file.theirs.present) && <button className="ghost-button small" onClick={() => setCompared((items) => open ? items.filter((item) => item !== file.path) : [...items, file.path])}>{t(open ? "hideVersions" : "compareVersions")}</button>}

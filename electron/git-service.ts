@@ -18,10 +18,10 @@ import type { HistoryRecovery, SwitchWorkRequest, SwitchWorkPreview } from "../s
 import { operationContext, operationCheckpoint, operationPhase, inspectOperation, OperationCancelled } from "./operation-progress.js";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, readlinkSync, accessSync, constants, copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { createReadStream, readlinkSync, accessSync, constants, copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync, type Stats } from "node:fs";
 import { signalProcessTree } from "./process-tree.js";
 import { homedir, tmpdir } from "node:os";
-import { basename, delimiter, dirname, join, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
 import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
 import { parseWorktrees, parseWorktreeList } from "./worktrees.js";
@@ -727,15 +727,21 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
       const file = resolve(repoRoot, path);
       version.update(`\0${path}\0`);
       try {
-        const stat = lstatSync(file);
+        const state = inspectWorktreePath(repoRoot, file);
+        if (state.kind !== "present") {
+          version.update(state.kind);
+          continue;
+        }
+        const { stat } = state;
         version.update(String(stat.mode));
         if (stat.isSymbolicLink()) version.update(readlinkSync(file));
         else if (stat.isFile()) {
           for await (const chunk of createReadStream(file)) version.update(chunk);
         } else if (stat.isDirectory()) version.update(await optionalGit(file, ["rev-parse", "HEAD"]));
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        version.update("missing");
+        const kind = unavailableWorktreePath(error);
+        if (!kind) throw error;
+        version.update(kind);
       }
     }
     change.version = version.digest("hex");
@@ -2288,29 +2294,52 @@ function contentVersion(raw: Buffer | undefined) {
   return raw ? createHash("sha256").update(raw).digest("hex") : "missing";
 }
 
-function readIfPresent(absolute: string) {
+function unavailableWorktreePath(error: unknown): "missing" | "blocked" | undefined {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "ENOENT") return "missing";
+  if (code === "ENOTDIR" || code === "EISDIR" || code === "ELOOP") return "blocked";
+}
+
+function inspectWorktreePath(repoRoot: string, absolute: string): { kind: "present"; stat: Stats } | { kind: "missing" | "blocked" } {
+  const path = relative(repoRoot, absolute);
+  const parts = path.split(sep);
+  if (!path || isAbsolute(path) || parts[0] === "..") return { kind: "blocked" };
   try {
-    return readFileSync(absolute);
+    let directory = repoRoot;
+    for (const part of parts.slice(0, -1)) {
+      directory = join(directory, part);
+      if (!lstatSync(directory).isDirectory()) return { kind: "blocked" };
+    }
+    return { kind: "present", stat: lstatSync(absolute) };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
+    const kind = unavailableWorktreePath(error);
+    if (!kind) throw error;
+    return { kind };
   }
 }
 
-function conflictParentsAreDirectories(repoRoot: string, absolute: string) {
-  for (let directory = dirname(absolute); directory !== repoRoot; directory = dirname(directory)) {
-    if (!lstatSync(directory).isDirectory()) return false;
+type WorkingConflictFile =
+  | { kind: "file"; raw: Buffer }
+  | { kind: "link"; target: string }
+  | { kind: "missing" | "blocked" | "special" };
+
+function readWorkingConflictFile(repoRoot: string, absolute: string): WorkingConflictFile {
+  const state = inspectWorktreePath(repoRoot, absolute);
+  if (state.kind !== "present") return state;
+  try {
+    if (state.stat.isSymbolicLink()) return { kind: "link", target: readlinkSync(absolute) };
+    if (!state.stat.isFile()) return { kind: "special" };
+    return { kind: "file", raw: readFileSync(absolute, { flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) }) };
+  } catch (error) {
+    const kind = unavailableWorktreePath(error);
+    if (!kind) throw error;
+    return { kind };
   }
-  return true;
 }
 
 function readReviewedConflictFile(repoRoot: string, absolute: string) {
-  try {
-    if (conflictParentsAreDirectories(repoRoot, absolute) && lstatSync(absolute).isFile()) return readFileSync(absolute);
-  } catch (error) {
-    if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
-  }
-  return undefined;
+  const working = readWorkingConflictFile(repoRoot, absolute);
+  return working.kind === "file" ? working.raw : undefined;
 }
 
 /**
@@ -2666,22 +2695,18 @@ export async function describeConflicts(cwd: string, locale?: Locale): Promise<I
     const held = entries.get(conflict.path) ?? [];
     const at = (stage: number) => held.find((entry) => entry.stage === stage);
     const [ours, theirs] = await Promise.all([versionFrom(repoRoot, at(sideStage.ours)), versionFrom(repoRoot, at(sideStage.theirs))]);
-    let working: ConflictGuideFile["working"] = { present: false, binary: false, markers: false };
-    let raw: Buffer | undefined;
-    try {
-      const stat = lstatSync(absolute);
-      if (stat.isSymbolicLink() || !stat.isFile()) working = { present: true, binary: true, markers: false };
-      else {
-        raw = readFileSync(absolute);
-        const binary = isBinaryContent(raw);
-        working = { present: true, binary, markers: !binary && hasConflictMarkers(raw.toString("utf8")) };
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
+    const current = readWorkingConflictFile(repoRoot, absolute);
+    const present = current.kind !== "missing" && current.kind !== "blocked";
+    const working: ConflictGuideFile["working"] = {
+      present,
+      binary: current.kind === "file" ? isBinaryContent(current.raw) : present,
+      markers: false,
+      ...(current.kind === "blocked" ? { blocked: true } : {})
+    };
+    if (current.kind === "file" && !working.binary) working.markers = hasConflictMarkers(current.raw.toString("utf8"));
     const binary = ours.binary || theirs.binary || working.binary;
-    const choices = choicesFor({ ours: ours.present, theirs: theirs.present, binary, working: working.present });
-    binding.files[conflict.path] = { stages: stages.get(conflict.path) ?? "", content: working.binary && !raw ? workingVersion(absolute) : contentVersion(raw), choices };
+    const choices = working.blocked ? [] : choicesFor({ ours: ours.present, theirs: theirs.present, binary, working: present });
+    binding.files[conflict.path] = { stages: stages.get(conflict.path) ?? "", content: workingVersion(current), choices };
     files.push({
       path: conflict.path, kind: conflict.kind, binary, renames: renamesFor(conflict.path, renames),
       ours, theirs, base: { present: Boolean(at(1)) }, working, choices
@@ -2703,23 +2728,16 @@ export async function describeConflicts(cwd: string, locale?: Locale): Promise<I
 }
 
 /** The bytes a file holds now, in the same terms the guide recorded them. */
-function workingVersion(absolute: string) {
-  try {
-    const stat = lstatSync(absolute);
-    if (stat.isSymbolicLink()) return `link:${readlinkSync(absolute)}`;
-    if (!stat.isFile()) return "special";
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
-    throw error;
-  }
-  return contentVersion(readIfPresent(absolute));
+function workingVersion(working: WorkingConflictFile) {
+  if (working.kind === "file") return contentVersion(working.raw);
+  if (working.kind === "link") return `link:${working.target}`;
+  return working.kind;
 }
 
 /** Why a hand edit cannot be marked resolved as it is, or nothing when it can. */
-function editProblem(absolute: string): ConflictChoiceOutcome["reason"] | undefined {
-  const raw = readIfPresent(absolute);
-  if (!raw) return "missing";
-  return !isBinaryContent(raw) && hasConflictMarkers(raw.toString("utf8")) ? "markers" : undefined;
+function editProblem(working: WorkingConflictFile): ConflictChoiceOutcome["reason"] | undefined {
+  if (working.kind !== "file") return working.kind === "missing" ? "missing" : "path";
+  return !isBinaryContent(working.raw) && hasConflictMarkers(working.raw.toString("utf8")) ? "markers" : undefined;
 }
 
 const conflictChoices = new Set<ConflictChoice>(["ours", "theirs", "delete", "edited"]);
@@ -2765,10 +2783,11 @@ async function applyConflictChoicesBody(
     const bound = guide.binding.files[item.path];
     const absolute = resolve(repoRoot, item.path);
     if (!bound.stages || stages.get(item.path) !== bound.stages) { changed.add(item.path); continue; }
+    const working = readWorkingConflictFile(repoRoot, absolute);
     if (item.choice === "edited") {
-      const problem = editProblem(absolute);
+      const problem = editProblem(working);
       if (problem) refused.set(item.path, problem);
-    } else if (workingVersion(absolute) !== bound.content) changed.add(item.path);
+    } else if (workingVersion(working) !== bound.content) changed.add(item.path);
   }
   if (changed.size || refused.size) {
     return {
@@ -2784,15 +2803,16 @@ async function applyConflictChoicesBody(
     const bound = guide.binding.files[item.path];
     const absolute = resolve(repoRoot, item.path);
     // The last look before writing: an editor can still save between the check above and here.
+    const working = readWorkingConflictFile(repoRoot, absolute);
+    const before = workingVersion(working);
     if (item.choice === "edited") {
-      const problem = editProblem(absolute);
+      const problem = editProblem(working);
       if (problem) { outcomes.push({ path: item.path, choice: item.choice, status: "refused", reason: problem }); break; }
-    } else if (workingVersion(absolute) !== bound.content) {
+    } else if (before !== bound.content) {
       outcomes.push({ path: item.path, choice: item.choice, status: "changed" });
       break;
     }
-    const before = workingVersion(absolute);
-    const original = before === "special" || before.startsWith("link:") ? undefined : readIfPresent(absolute);
+    const original = working.kind === "file" ? working.raw : undefined;
     const action = commandFor(item.choice, new Set((entries.get(item.path) ?? []).map((entry) => entry.stage)));
     const pathspec = literalPath(item.path);
     let failure: string | undefined;
@@ -2816,13 +2836,13 @@ async function applyConflictChoicesBody(
     }
     let restored = false;
     try {
-      const current = workingVersion(absolute);
-      if (current !== before && conflictParentsAreDirectories(repoRoot, absolute)) {
+      const current = workingVersion(readWorkingConflictFile(repoRoot, absolute));
+      if (current !== before && current !== "blocked") {
         if (current !== "missing" && (before === "missing" || before.startsWith("link:") || (original && current.startsWith("link:")))) unlinkSync(absolute);
         if (original) writeFileSync(absolute, original);
         else if (before.startsWith("link:")) symlinkSync(before.slice("link:".length), absolute);
       }
-      restored = workingVersion(absolute) === before;
+      restored = workingVersion(readWorkingConflictFile(repoRoot, absolute)) === before;
     } catch { /* reported below: the file may now hold the chosen side */ }
     outcomes.push({ path: item.path, choice: item.choice, status: "failed", restored, detail: failure });
     break;
