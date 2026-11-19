@@ -427,8 +427,12 @@ async function readStageIndex(
 }
 
 /** A pathspec that means this exact path: no glob, no magic, whatever characters the name has. */
+function literalPath(path: string) {
+  return `:(literal)${path}`;
+}
+
 function literalPaths(paths: string[]) {
-  return paths.map((path) => `:(literal)${path}`);
+  return paths.map(literalPath);
 }
 
 function parseTrack(track: string) {
@@ -898,9 +902,10 @@ export async function getCommitFileDiff(cwd: string, hash: string, file: string)
   const files = parseNameStatus(statusRaw);
   const selected = files.filter((change) => change.path === relative || change.from === relative);
   if (!selected.length) throw new Error("Ese archivo no forma parte de este commit.");
+  const pathspec = literalPath(relative);
   const patch = base
-    ? await readDiffPreview(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", base, commit, "--", relative])
-    : await readDiffPreview(repoRoot, ["show", "--no-color", "--no-ext-diff", "--unified=3", "--format=", commit, "--", relative]);
+    ? await readDiffPreview(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", base, commit, "--", pathspec])
+    : await readDiffPreview(repoRoot, ["show", "--no-color", "--no-ext-diff", "--unified=3", "--format=", commit, "--", pathspec]);
   const stats = await commitFileStats(repoRoot, commit, base);
   return { hash: commit, files: selected, stats: Object.fromEntries(selected.flatMap((change) => stats[change.path] ? [[change.path, stats[change.path]]] : [])), ...cutDiff(patch.stdout.trim(), patch.stdoutTruncated) };
 }
@@ -912,14 +917,15 @@ export async function getWorkingFileDiff(cwd: string, file: string): Promise<Com
   // A path from the interface is still a path: it has to land inside the repository that asked.
   if (absolute !== repoRoot && !absolute.startsWith(`${repoRoot}${sep}`)) throw new Error("La ruta no pertenece a este repositorio.");
   const relative = absolute.slice(repoRoot.length + 1).split(sep).join("/");
+  const pathspec = literalPath(relative);
   const head = await optionalGit(repoRoot, ["rev-parse", "HEAD"]);
-  const tracked = await readDiffPreview(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", ...(head ? ["HEAD"] : []), "--", relative]);
+  const tracked = await readDiffPreview(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", ...(head ? ["HEAD"] : []), "--", pathspec]);
   if (tracked.stdoutTruncated || tracked.stdout.trim()) {
     return { hash: "", files: [], stats: {}, ...cutDiff(tracked.stdout.trim(), tracked.stdoutTruncated) };
   }
 
   // Untracked files have nothing to diff against, so the file itself is the change.
-  const untracked = await checkedGit(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z", "--", relative]);
+  const untracked = await checkedGit(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z", "--", pathspec]);
   if (!untracked.split("\0").filter(Boolean).length) return { hash: "", files: [], stats: {}, diff: "", truncated: false };
   try {
     const content = readFileSync(absolute);
@@ -999,7 +1005,7 @@ function conflictPlan(args: Record<string, string>, snapshot?: RepoSnapshot) {
 
 function resolveConflictCommand(args: Record<string, string>, snapshot?: RepoSnapshot) {
   const { action } = conflictPlan(args, snapshot);
-  const path = JSON.stringify(args.path ?? "");
+  const path = JSON.stringify(literalPath(args.path ?? ""));
   if (action === "remove") return `git rm -- ${path}`;
   if (action === "checkout") return `git checkout --${args.side} -- ${path} && git add -- ${path}`;
   return `git add -- ${path}`;
@@ -1007,9 +1013,10 @@ function resolveConflictCommand(args: Record<string, string>, snapshot?: RepoSna
 
 async function runResolveConflict(cwd: string, args: Record<string, string>, snapshot: RepoSnapshot, locale?: Locale) {
   const { action } = conflictPlan(args, snapshot);
-  if (action === "remove") return reportedGit(cwd, ["rm", "-q", "--", args.path]);
-  if (action === "checkout") await reportedGit(cwd, ["checkout", `--${args.side}`, "--", args.path]);
-  await reportedGit(cwd, ["add", "--", args.path]);
+  const pathspec = literalPath(args.path);
+  if (action === "remove") return reportedGit(cwd, ["rm", "-q", "--", pathspec]);
+  if (action === "checkout") await reportedGit(cwd, ["checkout", `--${args.side}`, "--", pathspec]);
+  await reportedGit(cwd, ["add", "--", pathspec]);
   return localized(locale, `${args.path} resuelto.`, `${args.path} resolved.`);
 }
 
@@ -2474,7 +2481,7 @@ async function applyConflictResolutionBody(
     let failure: string | undefined;
     try {
       writeFileSync(absolute, resolution.content, "utf8");
-      const staged = await runGit(repoRoot, ["add", "--", resolution.path]);
+      const staged = await runGit(repoRoot, ["add", "--", literalPath(resolution.path)]);
       if (staged.code !== 0) failure = staged.stderr.trim() || staged.stdout.trim() || `git add -- ${resolution.path}`;
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
@@ -2774,16 +2781,17 @@ async function applyConflictChoicesBody(
     const original = readIfPresent(absolute);
     const before = workingVersion(absolute);
     const action = commandFor(item.choice, new Set((entries.get(item.path) ?? []).map((entry) => entry.stage)));
+    const pathspec = literalPath(item.path);
     let failure: string | undefined;
     const step = async (args: string[]) => {
       if (failure !== undefined) return;
       const result = await runGit(repoRoot, args);
       if (result.code !== 0) failure = result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")}`;
     };
-    if (action === "remove") await step(["rm", "-q", "--", item.path]);
+    if (action === "remove") await step(["rm", "-q", "--", pathspec]);
     else {
-      if (action === "checkout") await step(["checkout", `--${item.choice}`, "--", item.path]);
-      await step(["add", "--", item.path]);
+      if (action === "checkout") await step(["checkout", `--${item.choice}`, "--", pathspec]);
+      await step(["add", "--", pathspec]);
     }
     if (failure === undefined) {
       outcomes.push({ path: item.path, choice: item.choice, status: "applied" });

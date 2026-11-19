@@ -64,6 +64,40 @@ function mergeConflicts() {
 
 const fileIn = (guide, path) => guide.files.find((file) => file.path === path);
 
+for (const flow of ["guide", "plan"]) {
+  test(`the ${flow} treats a conflict filename with brackets as a literal path`, async t => {
+    const r = repository();
+    t.after(() => rmSync(r.repo, { recursive: true, force: true }));
+    const selected = "file[1].txt", other = "file1.txt";
+    const save = (content) => {
+      for (const file of [selected, other]) r.write(file, `${content} ${file}\n`);
+      r.git("add", "-A");
+      r.git("commit", "-qm", content);
+    };
+    save("base");
+    r.git("switch", "-qc", "incoming");
+    save("incoming");
+    r.git("switch", "-q", "main");
+    save("local");
+    assert.throws(() => r.git("merge", "incoming"));
+    const otherContents = r.read(other);
+    const otherStages = r.git("ls-files", "-u", "--", other);
+
+    if (flow === "guide") {
+      const guide = await service.describeConflicts(r.repo, "en");
+      const result = await service.applyConflictChoices(r.repo, guide, [{ path: selected, choice: "theirs" }], "en");
+      assert.deepEqual(result.outcomes.map(o => [o.path, o.status]), [[selected, "applied"]]);
+    } else {
+      const plan = await service.prepareOperation(r.repo, "resolve_conflict", { path: selected, side: "theirs" }, "en");
+      assert.equal((await service.executePlan(r.repo, plan, "en")).error, undefined);
+    }
+    assert.equal(r.read(selected), `incoming ${selected}\n`);
+    assert.equal(r.git("ls-files", "-u", "--", `:(literal)${selected}`), "");
+    assert.equal(r.read(other), otherContents);
+    assert.equal(r.git("ls-files", "-u", "--", other), otherStages);
+  });
+}
+
 test("a merge conflict is explained from the repository alone, with real branch names and supported choices", async () => {
   const r = mergeConflicts();
   const guide = await service.describeConflicts(r.repo, "en");

@@ -48,6 +48,20 @@ test("el diff de un archivo solo acepta rutas que pertenecen al commit", async (
   await assert.rejects(() => getCommitFileDiff(repo, commit, "../outside.txt"), /no pertenece a este repositorio/);
 });
 
+test("file previews treat bracketed filenames as exact paths", async () => {
+  const selected = "sample[1].txt", other = "sample1.txt";
+  writeFileSync(join(repo, selected), "chosen content\n");
+  writeFileSync(join(repo, other), "content of a different file\n");
+  git("add", "-A");
+  const working = await getWorkingFileDiff(repo, selected);
+  assert.match(working.diff, /chosen content/);
+  assert.doesNotMatch(working.diff, /content of a different file/);
+  git("commit", "-qm", "add exact paths");
+  const saved = await getCommitFileDiff(repo, git("rev-parse", "HEAD").trim(), selected);
+  assert.match(saved.diff, /chosen content/);
+  assert.doesNotMatch(saved.diff, /content of a different file/);
+});
+
 test("el historial trae el cuerpo del mensaje y cuánto cambió cada commit", async () => {
   const { loadHistory } = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
   writeFileSync(join(repo, "three.txt"), "a\nb\nc\n");
