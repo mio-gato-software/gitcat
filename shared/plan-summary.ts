@@ -68,6 +68,10 @@ function remoteOf(upstream: string | undefined, remotes: string[]) {
   return [...remotes].sort((a, b) => b.length - a.length).find((remote) => upstream.startsWith(`${remote}/`));
 }
 
+function directPushAddress(step: PlanStep) {
+  return step.operation === "push" && !step.pushDestination?.remote ? step.pushDestination?.urls[0] : undefined;
+}
+
 /** Steps that only read. A plan made only of these leaves files, commits and branches as they are. */
 function readsOnly(step: PlanStep) {
   return step.operation === "status" || step.operation === "fetch" || (step.operation === "git_command" && step.risk === "low");
@@ -233,9 +237,10 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         break;
       case "push": {
         const branch = args.branch ?? on;
-        const remote = step.pushDestination?.remote ?? args.setUpstream ?? args.remote ?? upstreamRemote;
-        const ahead = !walked.some((item) => item.step !== step && writesHistory.has(item.step.operation) && item.on === branch) ? branchNamed(branch)?.ahead : undefined;
-        if (!remote) {
+        const remote = step.pushDestination ? step.pushDestination.remote : args.setUpstream ?? args.remote ?? upstreamRemote;
+        const destination = remote ?? directPushAddress(step);
+        const ahead = remote && !walked.some((item) => item.step !== step && writesHistory.has(item.step.operation) && item.on === branch) ? branchNamed(branch)?.ahead : undefined;
+        if (!destination) {
           // Nowhere to send it: saying the branch would match a remote would promise something Git cannot do.
           summary.remote.effects.push(remotes.length
             ? say(`${branch} has no destination on a remote yet, so Git has nowhere to send it.`, `${branch} todavía no tiene destino en un remoto, así que Git no tiene adónde enviarla.`)
@@ -244,13 +249,13 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         }
         summary.remote.name ??= remote;
         summary.remote.effects.push(args.setUpstream
-          ? say(`Publishes ${branch} to ${remote} for the first time and remembers it as its destination.`, `Publica ${branch} en ${remote} por primera vez y la recuerda como su destino.`)
+          ? say(`Publishes ${branch} to ${destination} for the first time and remembers it as its destination.`, `Publica ${branch} en ${destination} por primera vez y la recuerda como su destino.`)
           : ahead
-            ? say(`Sends ${commits(say, ahead)} of ${branch} to ${remote}.`, `Envía ${commits(say, ahead)} de ${branch} a ${remote}.`)
-            : say(`Sends the saved commits of ${branch} to ${remote}.`, `Envía los commits guardados de ${branch} a ${remote}.`));
-        summary.irreversible.push(say(`Once on ${remote}, anyone with access can fetch these commits; taking them back means rewriting the remote.`, `Una vez en ${remote}, cualquiera con acceso puede descargar estos commits; retirarlos obliga a reescribir el remoto.`));
+            ? say(`Sends ${commits(say, ahead)} of ${branch} to ${destination}.`, `Envía ${commits(say, ahead)} de ${branch} a ${destination}.`)
+            : say(`Sends the saved commits of ${branch} to ${destination}.`, `Envía los commits guardados de ${branch} a ${destination}.`));
+        summary.irreversible.push(say(`Once on ${destination}, anyone with access can fetch these commits; taking them back means rewriting the remote.`, `Una vez en ${destination}, cualquiera con acceso puede descargar estos commits; retirarlos obliga a reescribir el remoto.`));
         if (args.noVerify === "true") summary.irreversible.push(say("The checks this project runs before publishing (pre-push hooks) are skipped.", "Se saltan las comprobaciones que este proyecto ejecuta antes de publicar (hooks pre-push)."));
-        published.set(branch, remote);
+        published.set(branch, destination);
         unpublished.delete(branch);
         break;
       }
@@ -338,11 +343,19 @@ export function completionSummary(input: CompletionInput, locale?: Locale): Comp
   const steps = outcomes.map(({ summary, status }) => ({ summary, status }));
   const failed = outcomes.find((outcome) => outcome.status === "failed");
   const done = outcomes.filter((outcome) => outcome.status === "completed").length;
+  const ran = before ? walkPlanSteps(plan.steps, before.currentBranch)
+    .map((item, index) => ({ ...item, index }))
+    .filter(({ index }) => outcomes[index]?.status === "completed") : [];
+  const confirmedPublications = ran.flatMap(({ step, on, index }) => {
+    const direct = directPushAddress(step);
+    const destination = direct ?? (step.operation === "github_create_repo" && step.args.push === "true" ? step.args.remote : undefined);
+    return destination ? [{ branch: step.args.branch ?? on, destination, direct: Boolean(direct), index }] : [];
+  });
   const moved = before && after ? fingerprint(before) !== fingerprint(after) : true;
   const status: CompletionStatus = failed ? (done ? "partial" : "failed")
     : input.error ? (done ? "partial" : "not_run")
     : !done ? "not_run"
-    : !moved && plan.steps.every((step) => observable.has(step.operation)) ? "no_change"
+    : !moved && !confirmedPublications.length && plan.steps.every((step) => observable.has(step.operation)) ? "no_change"
     : "completed";
 
   const headline = status === "completed" ? (outcomes.length === 1 ? say(`Done: ${outcomes[0].summary}.`, `Hecho: ${outcomes[0].summary}.`) : say(`All ${outcomes.length} steps completed.`, `Se completaron los ${outcomes.length} pasos.`))
@@ -355,19 +368,19 @@ export function completionSummary(input: CompletionInput, locale?: Locale): Comp
       : say(`“${failed!.summary}” did not complete.`, `«${failed!.summary}» no se completó.`))
     : say("Nothing ran: GitCat stopped before the first step, so the project is as it was.", "No se ejecutó nada: GitCat se detuvo antes del primer paso, así que el proyecto sigue como estaba.");
 
-  const hostedPublication = before && walkPlanSteps(plan.steps, before.currentBranch).find(({ step }, index) =>
-    step.operation === "github_create_repo" && step.args.push === "true" && outcomes[index]?.status === "completed");
   const changed = before && after && status !== "not_run" ? changes(plan, outcomes, before, after, say) : [];
-  if (hostedPublication) {
-    const { on, step: { args: { remote } } } = hostedPublication;
-    changed.push(say(`${on} is now published on ${remote}.`, `${on} ya está publicada en ${remote}.`));
+  for (const { branch, destination } of confirmedPublications) {
+    changed.push(say(`${branch} is now published on ${destination}.`, `${branch} ya está publicada en ${destination}.`));
   }
   if (status === "completed" && !changed.length) changed.push(...outcomes.map((outcome) => outcome.summary));
-  const publishedRemote = hostedPublication && hostedPublication.on === after?.currentBranch ? hostedPublication.step.args.remote : undefined;
-  const summary: CompletionSummary = { status, headline, steps, changed, remaining: after ? remaining(after, input.fetchedAt, say, publishedRemote) : [] };
+  const lastSave = ran.filter(({ step, on }) => on === after?.currentBranch && writesHistory.has(step.operation)).at(-1)?.index ?? -1;
+  const publication = confirmedPublications.filter(({ branch, index }) => branch === after?.currentBranch && index > lastSave).at(-1);
+  const summary: CompletionSummary = { status, headline, steps, changed, remaining: after ? remaining(after, input.fetchedAt, say, publication?.destination) : [] };
   if (after && (status === "completed" || status === "no_change")) {
     const next = workOverview(after, { fetchedAt: input.fetchedAt }).next;
-    summary.next = { action: next.action, label: nextLabel(next, after, say) };
+    if (!publication?.direct || (next.action !== "publish_branch" && next.action !== "connect_remote")) {
+      summary.next = { action: next.action, label: nextLabel(next, after, say) };
+    }
   }
   return summary;
 }

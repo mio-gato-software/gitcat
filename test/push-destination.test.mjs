@@ -14,7 +14,7 @@ registerHooks({
 });
 const { executePlan, getSnapshot, prepareOperation, StalePlanError } = await import("../dist-electron/electron/git-service.js");
 const { parsePushOperation, pushArguments, pushRepository } = await import("../dist-electron/electron/push-destination.js");
-const { planSummary } = await import("../dist-electron/shared/plan-summary.js");
+const { completionSummary, planSummary } = await import("../dist-electron/shared/plan-summary.js");
 
 function fixture(t) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "gitcat-push-destination-")));
@@ -82,6 +82,35 @@ test("the default push honors the branch's publishing remote and binds every pus
   assert.equal(published(first), "");
   assert.equal(published(second), git("rev-parse", "HEAD"));
 });
+
+for (const namedUpstream of [false, true]) {
+  test(`confirmation and result name the direct push address (named upstream: ${namedUpstream})`, async t => {
+    const { repo, first, second, git, published } = fixture(t);
+    if (namedUpstream) {
+      git("remote", "add", "origin", first);
+      git("push", "-u", "origin", "main");
+    }
+    git("config", "push.default", "current");
+    git("config", "branch.main.pushRemote", second);
+    const before = await getSnapshot(repo);
+    const plan = await prepareOperation(repo, "push", { noVerify: "true" }, "en");
+    assert.doesNotMatch(plan.rationale, /upstream/);
+    const reviewed = planSummary(plan, before, "en");
+    assert.equal(reviewed.remote.name, undefined);
+    assert.ok(reviewed.remote.effects.some(effect => effect.includes(`to ${second}`)));
+    assert.ok(!reviewed.remote.effects.some(effect => /origin|nowhere/.test(effect)));
+    assert.ok(reviewed.irreversible.some(effect => effect.includes(second)));
+    assert.ok(reviewed.irreversible.some(effect => /pre-push hooks/.test(effect)));
+
+    const outcome = await executePlan(repo, plan, "en");
+    assert.equal(outcome.error, undefined);
+    assert.equal(published(second), git("rev-parse", "HEAD"));
+    const summary = completionSummary({ plan, before, after: outcome.snapshot, outcomes: outcome.outcomes }, "en");
+    assert.equal(summary.status, "completed");
+    assert.ok(summary.changed.some(line => line.includes(`published on ${second}`)));
+    assert.ok(!summary.remaining.some(line => /everything stays on this computer/.test(line)));
+  });
+}
 
 test("the ordinary publish action refuses to mirror or force configured refs", async t => {
   const { repo, first, git, published } = fixture(t);
