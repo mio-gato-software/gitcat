@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { registerHooks } from "node:module";
+import cp, { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { registerHooks, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -91,6 +91,50 @@ test("una edición que deja el mismo estado de conflicto no se sobrescribe", asy
   assert.equal(read("a.txt"), edited, "la edición se conserva");
   assert.equal(unmerged(), before, "el índice sigue en conflicto como estaba");
   assert.equal(result.snapshot.conflicts[0]?.path, "a.txt");
+});
+
+test("a reviewed text file replaced by a symlink is left for fresh review", { skip: process.platform === "win32" }, async t => {
+  const { repo, read, unmerged } = conflictedRepository(["a.txt"]);
+  const outside = mkdtempSync(join(tmpdir(), "gitcat-untouched-"));
+  t.after(() => { rmSync(repo, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
+  const proposal = await propose(repo, ["a.txt"]);
+  const stages = unmerged();
+  const original = read("a.txt");
+  const target = join(outside, "outside.txt");
+  writeFileSync(target, original);
+  unlinkSync(join(repo, "a.txt"));
+  symlinkSync(target, join(repo, "a.txt"));
+
+  assert.deepEqual((await service.getAiSharing(repo, "conflicts", undefined, "en")).files, []);
+  const result = await service.applyConflictResolution(repo, proposal, ["a.txt"], "en");
+  assert.deepEqual(result.outcomes, [{ path: "a.txt", status: "changed" }]);
+  assert.equal(readFileSync(target, "utf8"), original);
+  assert.equal(unmerged(), stages);
+});
+
+test("guided conflict choices retain earlier results when a later Git process rejects", async t => {
+  const { repo, read, git } = conflictedRepository();
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  const guide = await service.describeConflicts(repo, "en");
+  const before = read("b.txt");
+  const spawn = cp.spawn;
+  t.mock.method(cp, "spawn", (exe, args, options) => {
+    if (args.includes("add") && args.includes(":(literal)b.txt")) throw new Error("Could not start git add");
+    return spawn(exe, args, options);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const result = await service.applyConflictChoices(repo, guide, [
+    { path: "a.txt", choice: "theirs" }, { path: "b.txt", choice: "theirs" }
+  ], "en");
+  assert.deepEqual(result.outcomes.map(({ status }) => status), ["applied", "failed"]);
+  assert.equal(result.outcomes[1].restored, true);
+  assert.equal(read("a.txt"), "suyo\n");
+  assert.equal(read("b.txt"), before);
+  assert.equal(git("ls-files", "-u", "--", "a.txt"), "");
+  assert.ok(git("ls-files", "-u", "--", "b.txt"));
+  const entry = (await service.getActivityHistory(repo)).entries[0];
+  assert.deepEqual(entry.steps.map(({ status }) => status), ["completed", "failed"]);
 });
 
 test("un índice que cambió por debajo invalida la propuesta aunque el archivo sea idéntico", async () => {

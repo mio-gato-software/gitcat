@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { registerHooks, syncBuiltinESMExports } from 'node:module';
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, renameSync, existsSync } from 'node:fs';
+import fs, { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, renameSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import cp, { execFileSync } from 'node:child_process';
 registerHooks({resolve(s,c,n){return s==='electron'?{url:new URL('./helpers/electron-stub.mjs',import.meta.url).href,shortCircuit:true}:n(s,c);}});
 const { ActivityHistory }=await import('../dist-electron/electron/activity-history.js');
@@ -384,6 +384,39 @@ test('a rejected index sync preserves the selected commit and skips integration'
   const entry = (await service.getActivityHistory(path)).entries[0];
   assert.deepEqual(entry.steps.map(step => step.status), ['completed', 'skipped', 'skipped']);
   assert.equal(entry.steps[0].afterHead, saved);
+});
+
+test('failure to clean the private index does not hide a confirmed selected save', async t => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, 'file'), 'saved before cleanup\n');
+  const before = await service.getSnapshot(path);
+  const plan = await service.prepareBranchDelivery(path, {
+    stateId: before.stateId, message: 'Save before cleanup', mergeToDefault: false,
+    selection: before.changes.map(({ path, version }) => ({ path, version }))
+  }, 'en');
+  const remove = fs.rmSync;
+  let privateIndexDir;
+  t.mock.method(fs, 'rmSync', (target, options) => {
+    if (typeof target === 'string' && basename(target).startsWith('gitcat-save-')) {
+      privateIndexDir = target;
+      throw new Error('Temporary index is in use');
+    }
+    return remove(target, options);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    if (privateIndexDir) remove(privateIndexDir, { recursive: true, force: true });
+  });
+
+  const result = await service.executePlan(path, plan, 'en');
+  const head = git('rev-parse', 'HEAD');
+  assert.notEqual(head, before.head);
+  assert.equal(git('show', 'HEAD:file'), 'saved before cleanup');
+  assert.equal(result.outcomes[0].status, 'completed');
+  assert.equal(result.outcomes[0].commitHash, head);
+  assert.equal(result.postActionIssue?.kind, 'temporary_cleanup');
+  assert.equal((await service.getActivityHistory(path)).entries[0].steps[0].afterHead, head);
 });
 
 for (const mode of ['choices', 'proposal']) {
