@@ -2537,8 +2537,7 @@ async function applyConflictResolutionBody(
   }
 
   // Everything still matches the review. Write and stage one file at a time, and stop at the first
-  // failure: what was applied stays applied and is reported as such, the file that failed is put back
-  // as it was, and the rest is left alone for another try.
+  // failure: completed resolutions stay applied, and rollback only replaces bytes we wrote.
   const outcomes: ConflictFileOutcome[] = [];
   for (const resolution of chosen) {
     const absolute = resolve(repoRoot, resolution.path);
@@ -2549,8 +2548,9 @@ async function applyConflictResolutionBody(
       break;
     }
     let failure: string | undefined;
+    const proposed = Buffer.from(resolution.content, "utf8");
     try {
-      writeFileSync(absolute, resolution.content, "utf8");
+      writeFileSync(absolute, proposed);
       const staged = await runGit(repoRoot, ["add", "--", literalPath(resolution.path)]);
       if (staged.code !== 0) failure = staged.stderr.trim() || staged.stdout.trim() || `git add -- ${resolution.path}`;
     } catch (error) {
@@ -2562,7 +2562,7 @@ async function applyConflictResolutionBody(
     }
     let restored = false;
     try {
-      if (readReviewedConflictFile(repoRoot, absolute)) writeFileSync(absolute, original);
+      if (readReviewedConflictFile(repoRoot, absolute)?.equals(proposed)) writeFileSync(absolute, original);
       restored = contentVersion(readReviewedConflictFile(repoRoot, absolute)) === proposal.binding.files[resolution.path].content;
     } catch { /* reported below: the file may now hold the proposed content */ }
     outcomes.push({ path: resolution.path, status: "failed", restored, detail: failure });
@@ -2776,8 +2776,7 @@ const conflictChoices = new Set<ConflictChoice>(["ours", "theirs", "delete", "ed
  * the repository as it is now before anything is written — the same repository, the same operation,
  * the same conflict stages, and for a side choice the very bytes that were on screen — because taking
  * a side overwrites the file, and an edit made meanwhile must never be lost to it. Files are then
- * settled one at a time; the first failure stops the run and is reported exactly, with the file put
- * back as it was.
+ * settled one at a time. Rollback after a failure is limited to the version GitCat just checked out.
  */
 async function applyConflictChoicesBody(
   cwd: string, guide: IssuedConflictGuide, requested: ConflictChoiceRequest[], fallbackSnapshot: RepoSnapshot, locale?: Locale
@@ -2845,6 +2844,7 @@ async function applyConflictChoicesBody(
     const action = commandFor(item.choice, new Set((entries.get(item.path) ?? []).map((entry) => entry.stage)));
     const pathspec = literalPath(item.path);
     let failure: string | undefined;
+    let checkedOutVersion: string | undefined;
     const step = async (args: string[]) => {
       if (failure !== undefined) return;
       try {
@@ -2856,7 +2856,16 @@ async function applyConflictChoicesBody(
     };
     if (action === "remove") await step(["rm", "-q", "--", pathspec]);
     else {
-      if (action === "checkout") await step(["checkout", `--${item.choice}`, "--", pathspec]);
+      if (action === "checkout") {
+        await step(["checkout", `--${item.choice}`, "--", pathspec]);
+        if (failure === undefined) {
+          try {
+            checkedOutVersion = workingVersion(readWorkingConflictFile(repoRoot, absolute));
+          } catch (error) {
+            failure = error instanceof Error ? error.message : String(error);
+          }
+        }
+      }
       await step(["add", "--", pathspec]);
     }
     if (failure === undefined) {
@@ -2866,8 +2875,12 @@ async function applyConflictChoicesBody(
     let restored = false;
     try {
       const current = workingVersion(readWorkingConflictFile(repoRoot, absolute));
-      if (current !== before && current !== "blocked") {
-        if (current !== "missing" && (before === "missing" || before.startsWith("link:") || (original && current.startsWith("link:")))) unlinkSync(absolute);
+      if (current === "missing" && action === "checkout") {
+        // A failed checkout can remove the old file before a filter rejects the replacement.
+        if (original) writeFileSync(absolute, original, { flag: "wx" });
+        else if (working.kind === "link") symlinkSync(working.target, absolute);
+      } else if (current === checkedOutVersion && current !== before && current !== "blocked") {
+        if (before === "missing" || before.startsWith("link:") || (original && current.startsWith("link:"))) unlinkSync(absolute);
         if (original) writeFileSync(absolute, original);
         else if (before.startsWith("link:")) symlinkSync(before.slice("link:".length), absolute);
       }

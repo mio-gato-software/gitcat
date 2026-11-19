@@ -137,6 +137,34 @@ test("guided conflict choices retain earlier results when a later Git process re
   assert.deepEqual(entry.steps.map(({ status }) => status), ["completed", "failed"]);
 });
 
+for (const flow of ["manual", "side", "assistant"]) {
+  test(`a newer editor save survives a staging failure in the ${flow} flow`, async t => {
+    const { repo, read, unmerged } = conflictedRepository(["a.txt"]);
+    t.after(() => rmSync(repo, { recursive: true, force: true }));
+    const issued = flow === "assistant" ? await propose(repo, ["a.txt"]) : await service.describeConflicts(repo, "en");
+    const stages = unmerged();
+    if (flow === "manual") writeFileSync(join(repo, "a.txt"), "edit reviewed by the user\n");
+    const newerEdit = "edit saved while Git was staging\n";
+    const spawn = cp.spawn;
+    t.mock.method(cp, "spawn", (exe, args, options) => {
+      if (args.includes("add") && args.includes(":(literal)a.txt")) {
+        writeFileSync(join(repo, "a.txt"), newerEdit);
+        throw new Error("Could not stage the conflict resolution");
+      }
+      return spawn(exe, args, options);
+    });
+    syncBuiltinESMExports();
+    t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+
+    const result = flow === "assistant" ? await service.applyConflictResolution(repo, issued, ["a.txt"], "en")
+      : await service.applyConflictChoices(repo, issued, [{ path: "a.txt", choice: flow === "manual" ? "edited" : "theirs" }], "en");
+    assert.equal(result.outcomes[0].status, "failed");
+    assert.equal(result.outcomes[0].restored, false);
+    assert.equal(read("a.txt"), newerEdit);
+    assert.equal(unmerged(), stages);
+  });
+}
+
 test("un índice que cambió por debajo invalida la propuesta aunque el archivo sea idéntico", async () => {
   const { repo, git, read, unmerged } = conflictedRepository(["a.txt"]);
   const proposal = await propose(repo, ["a.txt"]);
