@@ -447,7 +447,7 @@ export type RepositoryPlan = {
 };
 
 /** One Git operation inside a plan. The model orders the steps; this shape is what the code validates and runs. */
-export type PushDestination = { binding: string; remote?: string; urls: string[] };
+export type PushDestination = { binding: string; remote?: string; urls: string[]; targetRef?: string };
 
 export type PlanStep = {
   operation: Operation;

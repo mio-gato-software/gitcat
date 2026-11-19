@@ -63,12 +63,17 @@ export function pushArguments(push: PushOperation): string[] {
     case "default":
       return ["push", ...(push.noVerify ? ["--no-verify"] : [])];
     case "set_upstream":
-      return ["push", ...(push.noVerify ? ["--no-verify"] : []), "--set-upstream", push.remote, push.branch];
+      return ["push", ...(push.noVerify ? ["--no-verify"] : []), "--set-upstream", push.remote, branchRefspec(push.branch)];
     case "branch":
-      return ["push", ...(push.noVerify ? ["--no-verify"] : []), push.remote, push.branch];
+      return ["push", ...(push.noVerify ? ["--no-verify"] : []), push.remote, branchRefspec(push.branch)];
     case "refspec":
       return ["push", push.remote, `${push.commit}:refs/heads/${push.branch}`];
   }
+}
+
+function branchRefspec(branch: string) {
+  const ref = `refs/heads/${branch}`;
+  return `${ref}:${ref}`;
 }
 
 export function validatePushOperation(
@@ -128,12 +133,40 @@ export function displayPushAddress(address: string) {
   return redactText(display.includes("://") ? display.split(/[?#]/, 1)[0] : display).text;
 }
 
+export async function readRemoteUrls(read: ReadGit, remote: string, direction: "fetch" | "push") {
+  const result = await read(["remote", "get-url", ...(direction === "push" ? ["--push"] : []), "--all", "--", remote]);
+  const urls = result.stdout.trimEnd().split("\n").filter(Boolean);
+  if (result.code !== 0 || !urls.length) throw new Error(`Git could not verify the ${direction} destination.`);
+  return urls;
+}
+
+async function proposedPushUrls(read: ReadGit, url: string) {
+  const name = `gitcat-url-${randomUUID()}`;
+  // Git lists command-scoped remotes in -v even when get-url requires a saved remote.
+  const result = await read(["-c", `remote.${name}.url=${url}`, "remote", "-v"]);
+  const suffix = " (push)";
+  const prefix = `${name}\t`;
+  const urls = result.stdout.split("\n")
+    .filter(line => line.startsWith(prefix) && line.endsWith(suffix))
+    .map(line => line.slice(prefix.length, -suffix.length));
+  if (result.code !== 0 || !urls.length) throw new Error("Git could not verify the proposed push destination.");
+  return urls;
+}
+
+export async function verifyInitialPushUrl(read: ReadGit, expected: string, remote?: string) {
+  const urls = remote === undefined ? await proposedPushUrls(read, expected) : await readRemoteUrls(read, remote, "push");
+  if (urls.length !== 1 || urls[0] !== expected) {
+    throw new Error("The effective push destination differs from the private repository address. Review Git's URL rewrites before publishing.");
+  }
+}
+
 export async function readPushDestination(
   read: ReadGit,
   snapshot: Pick<RepoSnapshot, "remotes" | "currentBranch">,
-  target: string | null
+  target: string | null,
+  explicitBranch?: string
 ): Promise<PushDestination> {
-  const config = await read(["config", "--null", "--get-regexp", "^(branch\\.|remote\\.|push\\.)"]);
+  const config = await read(["config", "--null", "--get-regexp", "^(branch\\.|remote\\.|push\\.|submodule\\.recurse$)"]);
   if (config.code !== 0 && config.code !== 1) throw new Error("Git could not read the publishing configuration.");
   const settings = new Map<string, string[]>();
   for (const entry of config.stdout.split("\0").filter(Boolean)) {
@@ -147,18 +180,29 @@ export async function readPushDestination(
   const chosen = target ?? (last(branch + "pushremote") || last("remote.pushdefault") || last(branch + "remote")
     || (snapshot.remotes.length === 1 ? snapshot.remotes[0] : snapshot.remotes.find(name => name === "origin")));
   const remote = chosen && snapshot.remotes.includes(chosen) ? chosen : undefined;
-  let urls: string[] = [];
-  if (chosen) {
-    // Let Git resolve URL rewrites for both named remotes and explicit addresses without connecting.
-    const temporary = `gitcat-url-${randomUUID()}`;
-    const args = remote ? [] : ["-c", `remote.${temporary}.url=${chosen}`];
-    const result = await read([...args, "remote", "get-url", "--push", "--all", "--", remote ?? temporary]);
-    if (result.code !== 0) throw new Error("Git could not verify the publishing destination.");
-    urls = result.stdout.trimEnd().split("\n").filter(Boolean);
-    if (!urls.length) throw new Error("Git returned an empty publishing destination.");
+  const enabled = (key: string) => settings.has(key) && !/^(false|off|no|0+)$/i.test(last(key)!.trim());
+  if (remote && enabled(`remote.${remote}.mirror`)) {
+    throw new Error("This remote mirrors references and can delete remote branches. Choose a remote configured for branch publishing.");
   }
-  const routing = [...settings].filter(([key]) => key.startsWith("push.") || key === branch + "merge"
+  const defaultMode = last("push.default")?.toLowerCase();
+  if (target === null && (defaultMode === "matching" || (remote && settings.has(`remote.${remote}.push`)))) {
+    throw new Error("Git uses matching branches or a custom push refspec. Choose an explicit branch and remote to publish.");
+  }
+  const recurse = last("push.recursesubmodules")?.toLowerCase();
+  if (enabled("push.followtags") || recurse === "on-demand" || recurse === "only" || (recurse === undefined && enabled("submodule.recurse"))) {
+    throw new Error("This Git configuration can also publish tags or submodules. Review those settings before publishing a single branch.");
+  }
+  const upstreamRef = last(branch + "merge");
+  const usesUpstream = target === null && ["upstream", "tracking"].includes(defaultMode ?? "");
+  if (usesUpstream && upstreamRef && !upstreamRef.startsWith("refs/heads/")) {
+    throw new Error("The configured push upstream is outside the branch namespace. Choose an explicit branch and remote.");
+  }
+  const targetRef = explicitBranch ? `refs/heads/${explicitBranch}`
+    : usesUpstream ? upstreamRef
+    : snapshot.currentBranch === "HEAD" ? undefined : `refs/heads/${snapshot.currentBranch}`;
+  const urls = remote ? await readRemoteUrls(read, remote, "push") : chosen ? await proposedPushUrls(read, chosen) : [];
+  const routing = [...settings].filter(([key]) => key.startsWith("push.") || key === branch + "merge" || key === "submodule.recurse"
     || (remote && [`remote.${remote}.push`, `remote.${remote}.mirror`].includes(key)));
-  const binding = createHash("sha256").update(JSON.stringify([snapshot.currentBranch, chosen, urls, routing])).digest("hex");
-  return { binding, remote, urls: urls.map(displayPushAddress) };
+  const binding = createHash("sha256").update(JSON.stringify([snapshot.currentBranch, chosen, urls, routing, targetRef])).digest("hex");
+  return { binding, remote, urls: urls.map(displayPushAddress), targetRef };
 }

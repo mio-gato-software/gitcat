@@ -256,7 +256,7 @@ test("un push sin upstream se explica y ofrece publicar la rama por primera vez"
   });
   assert.equal(requests.length, 1);
   assert.match(requests[0].instructions, /--set-upstream/);
-  assert.equal(recovery.steps[0].command, "git push --set-upstream origin feature/no-upstream");
+  assert.equal(recovery.steps[0].command, "git push --set-upstream origin refs/heads/feature/no-upstream:refs/heads/feature/no-upstream");
   assert.equal(recovery.steps[0].operation, "push");
   assert.equal(recovery.steps[0].argv, undefined);
   assert.equal(recovery.requiresConfirmation, true);

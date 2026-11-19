@@ -259,7 +259,10 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
     if (step.pushDestination?.urls.length) {
       summary.remote.name ??= step.pushDestination.remote;
       for (const url of step.pushDestination.urls) {
-        summary.remote.effects.push(say(`Publishing destination: ${url}.`, `Destino de publicación: ${url}.`));
+        const ref = step.pushDestination?.targetRef;
+        summary.remote.effects.push(ref
+          ? say(`Publishing destination: ${url} (${ref}).`, `Destino de publicación: ${url} (${ref}).`)
+          : say(`Publishing destination: ${url}.`, `Destino de publicación: ${url}.`));
       }
     }
     if (writesHistory.has(step.operation) && on) unpublished.add(on);
