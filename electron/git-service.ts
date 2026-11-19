@@ -73,8 +73,9 @@ import {
   repositoryOwnerPattern, sshHostPattern, validateRepositoryFields, type RepositoryFields
 } from "./repository-plan.js";
 
-type CommandResult = { stdout: string; stderr: string; code: number };
+type CommandResult = { stdout: string; stderr: string; stdoutTruncated: boolean; stderrTruncated: boolean; code: number };
 type PlanDraft = Omit<ActionPlan, "id" | "repoPath" | "head" | "stateId">;
+const commandOutputLimit = 2_000_000;
 
 const MODEL_FALLBACK = recommendedModel;
 const RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses";
@@ -187,6 +188,20 @@ export async function spawnGit(cwd: string, args: string[], { extraEnv = {}, gro
   return spawn(executable, gitArguments(args), { cwd, env: commandEnv(searchPath, extraEnv), windowsHide: true, stdio: ["ignore", "pipe", "pipe"], detached: group && process.platform !== "win32" });
 }
 
+function outputBuffer() {
+  let text = "";
+  let truncated = false;
+  return {
+    append(chunk: string) {
+      const remaining = commandOutputLimit - text.length;
+      if (chunk.length > remaining) truncated = true;
+      if (remaining > 0) text += chunk.slice(0, remaining);
+    },
+    get text() { return text; },
+    get truncated() { return truncated; }
+  };
+}
+
 async function runCommand(command: string, args: string[], cwd: string, timeoutMs = 60_000, extraEnv: NodeJS.ProcessEnv = {}): Promise<CommandResult> {
   const executable = await resolveTool(command);
   const searchPath = (await toolDirectories()).join(delimiter);
@@ -198,8 +213,8 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32"
     });
-    let stdout = "";
-    let stderr = "";
+    const stdout = outputBuffer();
+    const stderr = outputBuffer();
     let settled = false;
     const active = operationContext();
     let stopped: Error | undefined;
@@ -218,37 +233,67 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
     const cleanup = () => { clearTimeout(timer); if (canAbort) active.signal.removeEventListener("abort", cancel); };
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => { if (stdout.length < 2_000_000) stdout += chunk; });
-    child.stderr.on("data", (chunk: string) => { if (stderr.length < 2_000_000) stderr += chunk; });
+    child.stdout.on("data", stdout.append);
+    child.stderr.on("data", stderr.append);
     child.on("error", (error) => { if (!settled) { settled = true; cleanup(); reject(error); } });
     child.on("close", (code) => {
-      if (!settled) { settled = true; cleanup(); if (stopped) reject(stopped); else resolvePromise({ stdout, stderr, code: code ?? 1 }); }
+      if (!settled) {
+        settled = true;
+        cleanup();
+        if (stopped) reject(stopped);
+        else resolvePromise({
+          stdout: stdout.text, stderr: stderr.text, stdoutTruncated: stdout.truncated,
+          stderrTruncated: stderr.truncated, code: code ?? 1
+        });
+      }
     });
   });
 }
 
-async function checkedGit(cwd: string, args: string[], raw = false): Promise<string> {
+function completeGitOutput(result: CommandResult) {
+  if (result.stdoutTruncated) {
+    throw new Error("Git output exceeded the read limit. GitCat could not verify the complete result.");
+  }
+  return result.stdout;
+}
+
+/** Reads used as facts must never hand a partial record to a parser or plan binding. */
+async function readGit(cwd: string, args: string[]): Promise<CommandResult> {
   const result = await runGit(cwd, args);
+  completeGitOutput(result);
+  return result;
+}
+
+function assertGitSuccess(result: CommandResult, args: string[]) {
   if (result.code !== 0) {
     const detail = result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")} terminó con código ${result.code}`;
     throw new Error(detail);
   }
+}
+
+async function checkedGit(cwd: string, args: string[], raw = false): Promise<string> {
+  const result = await readGit(cwd, args);
+  assertGitSuccess(result, args);
   return raw ? result.stdout : result.stdout.trim();
 }
 
-/**
- * Like checkedGit, but keeps what Git says on stderr. Most of what a person needs to read
- * ("Switched to branch 'main'", "Fast-forward") is written there, not to stdout.
- */
+function commandDiagnostics(result: CommandResult) {
+  return [
+    result.stdout.trim(), result.stderr.trim(),
+    result.stdoutTruncated || result.stderrTruncated ? "[Command output shortened]" : ""
+  ].filter(Boolean).join("\n");
+}
+
+/** A command's diagnostics can be shortened without changing whether Git completed the command. */
 async function reportedGit(cwd: string, args: string[]): Promise<string> {
   const result = await runGit(cwd, args);
-  const detail = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
+  const detail = commandDiagnostics(result);
   if (result.code !== 0) throw new Error(detail || `git ${args.join(" ")} terminó con código ${result.code}`);
   return detail;
 }
 
 async function optionalGit(cwd: string, args: string[]): Promise<string> {
-  const result = await runGit(cwd, args);
+  const result = await readGit(cwd, args);
   return result.code === 0 ? result.stdout.trim() : "";
 }
 
@@ -661,10 +706,16 @@ async function verifiedRevision(repoRoot: string, name: string) {
   return name;
 }
 
-function cutDiff(diff: string) {
-  return diff.length > diffLimit
-    ? { diff: `${diff.slice(0, diffLimit)}\n\n[diff recortado: ${diff.length} caracteres en total]`, truncated: true }
-    : { diff, truncated: false };
+function cutDiff(diff: string, outputTruncated = false) {
+  if (!outputTruncated && diff.length <= diffLimit) return { diff, truncated: false };
+  const marker = outputTruncated ? "[diff recortado]" : `[diff recortado: ${diff.length} caracteres en total]`;
+  return { diff: `${diff.slice(0, diffLimit)}\n\n${marker}`, truncated: true };
+}
+
+async function readDiffPreview(cwd: string, args: string[]) {
+  const result = await runGit(cwd, args);
+  assertGitSuccess(result, args);
+  return result;
 }
 
 /**
@@ -717,11 +768,11 @@ export async function getCommitDetail(cwd: string, hash: string): Promise<Commit
   const statusRaw = base
     ? await checkedGit(repoRoot, ["diff", "--no-color", "--name-status", "-z", base, commit, "--"])
     : await checkedGit(repoRoot, ["show", "--no-color", "--name-status", "-z", "--format=", commit, "--"]);
-  const diffRaw = base
-    ? await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", base, commit, "--"])
-    : await checkedGit(repoRoot, ["show", "--no-color", "--no-ext-diff", "--unified=3", "--format=", commit, "--"]);
+  const patch = base
+    ? await readDiffPreview(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", base, commit, "--"])
+    : await readDiffPreview(repoRoot, ["show", "--no-color", "--no-ext-diff", "--unified=3", "--format=", commit, "--"]);
   const body = (await checkedGit(repoRoot, ["show", "-s", "--no-color", "--format=%b", commit])).trim();
-  return { hash: commit, body: body || undefined, files: parseNameStatus(statusRaw), stats: await commitFileStats(repoRoot, commit, base), ...cutDiff(diffRaw) };
+  return { hash: commit, body: body || undefined, files: parseNameStatus(statusRaw), stats: await commitFileStats(repoRoot, commit, base), ...cutDiff(patch.stdout.trim(), patch.stdoutTruncated) };
 }
 
 /** Lines gained and lost per file, against the same first parent the rest of the detail uses. */
@@ -748,11 +799,11 @@ export async function getCommitFileDiff(cwd: string, hash: string, file: string)
   const files = parseNameStatus(statusRaw);
   const selected = files.filter((change) => change.path === relative || change.from === relative);
   if (!selected.length) throw new Error("Ese archivo no forma parte de este commit.");
-  const diffRaw = base
-    ? await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", base, commit, "--", relative])
-    : await checkedGit(repoRoot, ["show", "--no-color", "--no-ext-diff", "--unified=3", "--format=", commit, "--", relative]);
+  const patch = base
+    ? await readDiffPreview(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", base, commit, "--", relative])
+    : await readDiffPreview(repoRoot, ["show", "--no-color", "--no-ext-diff", "--unified=3", "--format=", commit, "--", relative]);
   const stats = await commitFileStats(repoRoot, commit, base);
-  return { hash: commit, files: selected, stats: Object.fromEntries(selected.flatMap((change) => stats[change.path] ? [[change.path, stats[change.path]]] : [])), ...cutDiff(diffRaw) };
+  return { hash: commit, files: selected, stats: Object.fromEntries(selected.flatMap((change) => stats[change.path] ? [[change.path, stats[change.path]]] : [])), ...cutDiff(patch.stdout.trim(), patch.stdoutTruncated) };
 }
 
 /** One uncommitted file, so the changes tab can show what changed rather than only that it did. */
@@ -763,10 +814,10 @@ export async function getWorkingFileDiff(cwd: string, file: string): Promise<Com
   if (absolute !== repoRoot && !absolute.startsWith(`${repoRoot}${sep}`)) throw new Error("La ruta no pertenece a este repositorio.");
   const relative = absolute.slice(repoRoot.length + 1).split(sep).join("/");
   const head = await optionalGit(repoRoot, ["rev-parse", "HEAD"]);
-  const tracked = head
-    ? await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", "HEAD", "--", relative])
-    : await checkedGit(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", "--", relative]);
-  if (tracked.trim()) return { hash: "", files: [], stats: {}, ...cutDiff(tracked) };
+  const tracked = await readDiffPreview(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", ...(head ? ["HEAD"] : []), "--", relative]);
+  if (tracked.stdoutTruncated || tracked.stdout.trim()) {
+    return { hash: "", files: [], stats: {}, ...cutDiff(tracked.stdout.trim(), tracked.stdoutTruncated) };
+  }
 
   // Untracked files have nothing to diff against, so the file itself is the change.
   const untracked = await checkedGit(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z", "--", relative]);
@@ -860,8 +911,8 @@ function resolveConflictCommand(args: Record<string, string>, snapshot?: RepoSna
 async function runResolveConflict(cwd: string, args: Record<string, string>, snapshot: RepoSnapshot, locale?: Locale) {
   const { action } = conflictPlan(args, snapshot);
   if (action === "remove") return reportedGit(cwd, ["rm", "-q", "--", args.path]);
-  if (action === "checkout") await checkedGit(cwd, ["checkout", `--${args.side}`, "--", args.path]);
-  await checkedGit(cwd, ["add", "--", args.path]);
+  if (action === "checkout") await reportedGit(cwd, ["checkout", `--${args.side}`, "--", args.path]);
+  await reportedGit(cwd, ["add", "--", args.path]);
   return localized(locale, `${args.path} resuelto.`, `${args.path} resolved.`);
 }
 
@@ -997,7 +1048,7 @@ async function checkedGlab(args: string[], cwd: string, host: string) {
 /** The settings files user.name and user.email come from, read the way Git reads them. Without a repository, only this computer's. */
 async function readAuthor(cwd: string | undefined): Promise<AuthorReadiness> {
   const result = await runGit(cwd ?? homedir(), ["config", "--show-scope", "--get-regexp", "^user\\.(name|email)$"], 10_000).catch(() => undefined);
-  return authorReadiness(parseIdentityConfig(result?.stdout ?? ""), { repository: Boolean(cwd) });
+  return authorReadiness(parseIdentityConfig(result ? completeGitOutput(result) : ""), { repository: Boolean(cwd) });
 }
 
 const accessTimeoutMs = 15_000;
@@ -1017,14 +1068,15 @@ async function nativeGit(cwd:string,args:string[],context:NativeHostingContext) 
   else throw new Error('Only the reviewed remote read, fetch or push can use this hosting connection.');
   const result=await runCommand('git',[...config.args,...argv],cwd,60_000,config.env);
   if(result.code!==0)throw new Error(`The hosting Git operation failed (${classifyAccess({code:result.code,output:result.stderr})}). Check repository access and branch protections, then review again. If Git does not support --config-env, update Git to version 2.31 or later.`);
-  return argv[0]==='push'?'Published the reviewed saved commits.':result.stdout.trim();
+  if (argv[0] === 'push') return 'Published the reviewed saved commits.';
+  return argv[0] === 'ls-remote' ? completeGitOutput(result).trim() : commandDiagnostics(result);
 }
 
 /** Git's config query returns only the last URL-matched helper; credentials try every matching helper.
  * Keep their original order and resets, using Git itself to match each URL-specific subsection.
  */
 async function configuredCredentialHelper(cwd: string, url: string): Promise<CredentialHelper> {
-  const result = await runGit(cwd, ["config", "--null", "--get-regexp", "^credential(\\..*)?\\.helper$"]);
+  const result = await readGit(cwd, ["config", "--null", "--get-regexp", "^credential(\\..*)?\\.helper$"]);
   if (result.code === 1) return "none";
   if (result.code !== 0) return "other";
   const matches = new Map<string, boolean>();
@@ -1273,7 +1325,7 @@ async function prepareHostedRepository(snapshot: RepoSnapshot, input: Repository
     }
   }
 
-  const remoteResult = await runGit(sourcePath, ["remote", "get-url", remote]);
+  const remoteResult = await readGit(sourcePath, ["remote", "get-url", remote]);
   const remoteExists = remoteResult.code === 0;
   if (remoteExists && await optionalGit(sourcePath, ["config", "--get-all", `remote.${remote}.pushurl`])) return blocked(`remote "${remote}" has a separate push destination. Choose a new remote name so existing publishing settings are preserved`, "repository.remote");
   if (remoteExists && !replaceRemote) {
@@ -1463,25 +1515,16 @@ async function emptyTree(repoRoot: string) {
   return checkedGit(repoRoot, ["hash-object", "-t", "tree", "--stdin"]);
 }
 
-/**
- * The working tree as a diff against the last saved version. With `paths`, only those files, each
- * read whole as it is on disk: that is exactly what a save of selected files records, so the model
- * describing it and the person reviewing it read the same thing the commit will contain.
- */
-async function getWorkingTreeDiff(snapshot: RepoSnapshot, paths?: string[], display = false) {
-  const scope = paths ? literalPaths(paths) : [];
-  const trackedDiff = paths
-    ? await checkedGit(snapshot.path, ["diff", "--no-ext-diff", "--unified=3", snapshot.head || await emptyTree(snapshot.path), "--", ...scope])
-    : snapshot.head
-    ? await checkedGit(snapshot.path, ["diff", "--no-ext-diff", "--unified=3", "HEAD", "--"])
-    : [
-        await checkedGit(snapshot.path, ["diff", "--cached", "--no-ext-diff", "--unified=3", "--"]),
-        await checkedGit(snapshot.path, ["diff", "--no-ext-diff", "--unified=3", "--"])
-      ].filter(Boolean).join("\n");
-  const untrackedRaw = await checkedGit(snapshot.path, ["ls-files", "--others", "--exclude-standard", "-z", ...(paths ? ["--", ...scope] : [])]);
-  const sections = [trackedDiff];
+/** What the selected working files would save, including new files Git cannot diff yet. */
+async function selectionDiffPreview(snapshot: RepoSnapshot, paths: string[]) {
+  const scope = literalPaths(paths);
+  const base = snapshot.head || await emptyTree(snapshot.path);
+  const patch = await readDiffPreview(snapshot.path, ["diff", "--no-ext-diff", "--unified=3", base, "--", ...scope]);
+  const trackedDiff = patch.stdout.trim();
+  if (patch.stdoutTruncated) return cutDiff(trackedDiff, true);
 
-  // Nothing is truncated: whatever the working tree holds is what the model gets to read.
+  const untrackedRaw = await checkedGit(snapshot.path, ["ls-files", "--others", "--exclude-standard", "-z", "--", ...scope], true);
+  const sections = [trackedDiff];
   for (const relativePath of untrackedRaw.split("\0").filter(Boolean)) {
     const absolutePath = resolve(snapshot.path, relativePath);
     if (!absolutePath.startsWith(`${snapshot.path}${sep}`)) continue;
@@ -1492,17 +1535,14 @@ async function getWorkingTreeDiff(snapshot: RepoSnapshot, paths?: string[], disp
       }
       const content = readFileSync(absolutePath);
       const header = `\n--- /dev/null\n+++ b/${relativePath}\n@@ archivo nuevo @@\n`;
-      // Shown to a person, a new file reads as added lines, the way the single-file diff shows it.
-      const text = display ? content.toString("utf8").split("\n").map((line) => `+${line}`).join("\n") : content.toString("utf8");
-      sections.push(`${header}${content.includes(0) ? "[archivo binario omitido]" : text}`);
+      const text = content.includes(0) ? "[archivo binario omitido]" : content.toString("utf8").split("\n").map((line) => `+${line}`).join("\n");
+      sections.push(`${header}${text}`);
     } catch (reason) {
       // A file too large for a single Buffer, or unreadable: reported, never silently dropped.
       sections.push(`\n+++ b/${relativePath}\n[no se pudo leer: ${reason instanceof Error ? reason.message : "error desconocido"}]`);
     }
   }
-  const diff = sections.filter(Boolean).join("\n");
-  if (!diff.trim()) throw new Error("No hay un diff de texto disponible para describir.");
-  return diff;
+  return cutDiff(sections.filter(Boolean).join("\n"));
 }
 
 /**
@@ -1851,8 +1891,7 @@ export async function getSelectionDiff(cwd: string, paths: string[], locale?: Lo
   const language = normalizeLocale(locale);
   const snapshot = await getSnapshot(cwd);
   const selection = currentSelection(snapshot, paths, language);
-  const diff = await getWorkingTreeDiff(snapshot, selection.paths, true).catch(() => "");
-  return { hash: "", files: selection.selected, stats: {}, ...cutDiff(diff) };
+  return { hash: "", files: selection.selected, stats: {}, ...await selectionDiffPreview(snapshot, selection.paths) };
 }
 
 /** Everything the model is allowed to reason about: verified repository facts, never raw guesses. */
@@ -2094,7 +2133,7 @@ async function bindPushDestinations(snapshot: RepoSnapshot, steps: PlanStep[]) {
     const target = pushRepository(step);
     if (target === undefined) { bound.push(step); continue; }
     const pushDestination = await readPushDestination(
-      args => runGit(snapshot.path, args), { remotes: snapshot.remotes, currentBranch: on }, target
+      args => readGit(snapshot.path, args), { remotes: snapshot.remotes, currentBranch: on }, target
     );
     bound.push({ ...step, pushDestination });
   }
@@ -3135,7 +3174,7 @@ async function commitSelected(repoRoot: string, paths: string[], message: string
   const directory = mkdtempSync(join(tmpdir(), "gitcat-save-"));
   const index = join(directory, "index");
   const git = (args: string[], timeoutMs = 120_000) => runCommand("git", args, repoRoot, timeoutMs, { GIT_INDEX_FILE: index });
-  const detail = (result: CommandResult, args: string[]) => [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n") || `git ${args[0]} terminó con código ${result.code}`;
+  const detail = (result: CommandResult, args: string[]) => commandDiagnostics(result) || `git ${args[0]} terminó con código ${result.code}`;
   try {
     if (head) {
       // Starting from a copy keeps what Git knows about unchanged files, so it does not re-read them all.
@@ -3149,8 +3188,10 @@ async function commitSelected(repoRoot: string, paths: string[], message: string
       }
     }
     // A path that is neither on disk nor in the last saved version has nothing to record.
-    const listed = await git(["ls-files", "-z", "--", ...literalPaths(paths)]);
-    const known = new Set(listed.stdout.split("\0").filter(Boolean));
+    const listArgs = ["ls-files", "-z", "--", ...literalPaths(paths)];
+    const listed = await git(listArgs);
+    assertGitSuccess(listed, listArgs);
+    const known = new Set(completeGitOutput(listed).split("\0").filter(Boolean));
     const present = paths.filter((path) => known.has(path) || existsSync(resolve(repoRoot, path)) || isSymlink(resolve(repoRoot, path)));
     if (present.length) {
       const added = await git(["add", "-A", "--", ...literalPaths(present)]);
@@ -3306,7 +3347,7 @@ async function prepareRemoteSync(initial: RepoSnapshot, args: Record<string, str
   const localFor = (snapshot: RepoSnapshot) => snapshot.branches.find(branch => branch.presence !== "remote" && branch.name === name);
   const occupied = localFor(initial)?.checkedOutIn;
   if (occupied) fail(`La rama está abierta en ${occupied}. Abre ese proyecto para actualizarla.`, `The branch is open in ${occupied}. Open that project to update it.`);
-  await checkedGit(initial.path, ["fetch", "--prune", remote!]);
+  await reportedGit(initial.path, ["fetch", "--prune", remote!]);
   const snapshot = await getSnapshot(initial.path);
   if (!snapshot.remoteRefs?.includes(ref)) fail("La rama desapareció del remoto. Tu rama local se conserva; revisa la lista actualizada.", "The branch disappeared from the remote. Your local branch is kept; review the updated list.");
   if (snapshot.isDirty || snapshot.pending || snapshot.conflicts.length || snapshot.head !== initial.head || snapshot.currentBranch !== initial.currentBranch) fail("El repositorio cambió durante la actualización. Revisa la acción de nuevo.", "The repository changed during the update. Review the action again.");
@@ -3520,7 +3561,7 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
     if (!/HTTP 404|not found/i.test(`${existing.stderr}\n${existing.stdout}`)) throw new Error(localized(language, "No se pudo confirmar que el repositorio remoto siga disponible.", "Could not confirm that the remote repository is still available."));
   }
 
-  const currentRemote = await runGit(source, ["remote", "get-url", plan.args.remote]);
+  const currentRemote = await readGit(source, ["remote", "get-url", plan.args.remote]);
   if (currentRemote.code !== 0 && plan.args.existingRemoteHash) throw new Error("The remote was removed after validation. Prepare the action again.");
   if (currentRemote.code === 0 && plan.args.replaceRemote !== "true") throw new Error(localized(language, `El remoto “${plan.args.remote}” existe y no se autorizó reemplazarlo.`, `Remote “${plan.args.remote}” exists and replacing it was not authorized.`));
   if (currentRemote.code === 0 && createHash("sha256").update(currentRemote.stdout.trim()).digest("hex") !== plan.args.existingRemoteHash) throw new Error(localized(language, `El remoto “${plan.args.remote}” cambió desde la validación.`, `Remote “${plan.args.remote}” changed after validation.`));
@@ -3544,7 +3585,7 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
       const created = JSON.parse(createOutput);
       if (created.path_with_namespace !== `${plan.args.owner}/${plan.args.name}` || created.visibility !== "private") throw new Error("GitLab returned unexpected project details. Check the project before connecting or publishing it.");
     }
-    await checkedGit(source, ["remote", previousRemoteUrl ? "set-url" : "add", plan.args.remote, plan.args.remoteUrl]);
+    await reportedGit(source, ["remote", previousRemoteUrl ? "set-url" : "add", plan.args.remote, plan.args.remoteUrl]);
     remoteChanged = true;
     let pushOutput='';
     if(plan.args.push==='true'){
@@ -3553,8 +3594,8 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
         const bound={...hosting,repositoryId:facts.id};
         pushOutput=await nativeGit(source,['push',plan.args.remote,`${snapshot.head}:refs/heads/${snapshot.currentBranch}`],bound);
         await nativeGit(source,['fetch',plan.args.remote,`+refs/heads/${snapshot.currentBranch}:refs/remotes/${plan.args.remote}/${snapshot.currentBranch}`],bound);
-        await checkedGit(source,['branch',`--set-upstream-to=${plan.args.remote}/${snapshot.currentBranch}`,snapshot.currentBranch]);
-      }else pushOutput=await checkedGit(source,["push", "-u", plan.args.remote, "HEAD"]);
+        await reportedGit(source,['branch',`--set-upstream-to=${plan.args.remote}/${snapshot.currentBranch}`,snapshot.currentBranch]);
+      }else pushOutput=await reportedGit(source,["push", "-u", plan.args.remote, "HEAD"]);
     }
     // The user confirmed it and it worked: this is the moment the choice becomes worth remembering.
     const now = new Date().toISOString();
@@ -3569,7 +3610,7 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
     ));
     return [native?`Created private repository ${plan.args.host}/${plan.args.owner}/${plan.args.name}.`:createOutput, pushOutput].filter(Boolean).join("\n");
   } catch (error) {
-    if (remoteChanged) await checkedGit(source, previousRemoteUrl ? ["remote", "set-url", plan.args.remote, previousRemoteUrl] : ["remote", "remove", plan.args.remote]).catch(() => undefined);
+    if (remoteChanged) await reportedGit(source, previousRemoteUrl ? ["remote", "set-url", plan.args.remote, previousRemoteUrl] : ["remote", "remove", plan.args.remote]).catch(() => undefined);
     const message = error instanceof Error ? error.message : localized(language, "gh no pudo crear el repositorio.", "gh could not create the repository.");
     if (repositoryCreated) throw new Error(localized(language, `El repositorio remoto se creó, pero no se pudo configurar o publicar el remoto local: ${message}`, `The remote repository was created, but the local remote could not be configured or published: ${message}`), { cause: error });
     if (/forbidden|permission|not accessible|403/i.test(message)) throw new Error(localized(language, "No hay permisos suficientes para crear el repositorio privado solicitado.", "You do not have enough permission to create the requested private repository."), { cause: error });
@@ -3585,7 +3626,7 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
 async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: RepoSnapshot, branch: BranchOperation | undefined, locale?: Locale): Promise<string> {
   const pushTarget = pushRepository(step);
   if (pushTarget !== undefined) {
-    const current = await readPushDestination(args => runGit(cwd, args), snapshot, pushTarget).catch(error => {
+    const current = await readPushDestination(args => readGit(cwd, args), snapshot, pushTarget).catch(error => {
       if (error instanceof OperationCancelled) throw error;
       return undefined;
     });
@@ -3620,8 +3661,8 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     ]);
     case "set_identity": {
       const global = args.scope === "global";
-      await checkedGit(cwd, ["config", global ? "--global" : "--local", "user.name", args.user]);
-      await checkedGit(cwd, ["config", global ? "--global" : "--local", "user.email", args.email]);
+      await reportedGit(cwd, ["config", global ? "--global" : "--local", "user.name", args.user]);
+      await reportedGit(cwd, ["config", global ? "--global" : "--local", "user.email", args.email]);
       return global
         ? localized(locale, `Los commits de los repositorios de este equipo sin identidad propia se firmarán como ${args.user} <${args.email}>.`, `Commits in repositories on this computer without their own identity will be signed as ${args.user} <${args.email}>.`)
         : localized(locale, `Los commits de este repositorio se firmarán como ${args.user} <${args.email}>.`, `Commits in this repository will be signed as ${args.user} <${args.email}>.`);
@@ -3633,7 +3674,7 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     case "resolve_conflict": return runResolveConflict(cwd, args, snapshot, locale);
     case "commit":
       if (step.paths) return commitSelected(snapshot.path, step.paths, args.message, locale);
-      await checkedGit(cwd, ["add", "-A"]);
+      await reportedGit(cwd, ["add", "-A"]);
       return reportedGit(cwd, ["commit", "-m", args.message]);
     case "ignore_path": return ignorePath(snapshot.path, args, locale);
     case "git_command": {
@@ -4063,7 +4104,7 @@ async function validateHistoryRecovery(cwd: string, recovery: HistoryRecovery) {
   if (recovery.mode === "undo") {
     if (snapshot.head !== recovery.commit) throw new Error("The branch has moved since that save. Review its history; the latest save can be kept as files only while it is still the tip.");
     // Check all branch tips on every configured remote. Offline/permission failures block rewriting.
-    for (const remote of snapshot.remotes) await checkedGit(cwd,["fetch","--prune",remote,`+refs/heads/*:refs/remotes/${remote}/*`,`+refs/tags/*:refs/gitcat/remotes/${remote}/tags/*`]);
+    for (const remote of snapshot.remotes) await reportedGit(cwd,["fetch","--prune",remote,`+refs/heads/*:refs/remotes/${remote}/*`,`+refs/tags/*:refs/gitcat/remotes/${remote}/tags/*`]);
     if ((await checkedGit(cwd,["for-each-ref",`--contains=${recovery.commit}`,"--format=%(refname)","refs/remotes","refs/gitcat/remotes"])).trim()) throw new Error("This saved version is published. Revert it with a new commit instead; shared history stays intact.");
     snapshot=await getSnapshot(cwd);
     if (snapshot.head!==recovery.commit || snapshot.isDirty || snapshot.pending) throw new Error("The project changed during the publication check. Review recovery again.");

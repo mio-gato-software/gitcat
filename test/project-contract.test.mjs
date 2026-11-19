@@ -550,13 +550,11 @@ test("las notificaciones usan un espacio fijo y el detalle se abre solo a petici
   assert.doesNotMatch(styles, /\.notification-center|\.activity-dock|\.toast/);
 });
 
-test("la descripción de commit usa el diff real y conserva la confirmación", async () => {
+test("la descripción de commit conecta el IPC y comprueba cambios durante la generación", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const main = await readFile(join(root, "electron/main.ts"), "utf8");
   const preload = await readFile(join(root, "electron/preload.cjs"), "utf8");
   assert.match(service, /export async function generateCommitDescription/);
-  assert.match(service, /"diff", "--no-ext-diff", "--unified=3", "HEAD"/);
-  assert.match(service, /"ls-files", "--others", "--exclude-standard", "-z"/);
   assert.match(service, /Los cambios variaron durante la generación/);
   assert.match(main, /ipcMain\.handle\("commit:generate-description"/);
   assert.match(preload, /generateCommitDescription/);
