@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { registerHooks } from 'node:module';
+import { createHash } from 'node:crypto';
+import { registerHooks, syncBuiltinESMExports } from 'node:module';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, renameSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import cp, { execFileSync } from 'node:child_process';
 registerHooks({resolve(s,c,n){return s==='electron'?{url:new URL('./helpers/electron-stub.mjs',import.meta.url).href,shortCircuit:true}:n(s,c);}});
 const { ActivityHistory }=await import('../dist-electron/electron/activity-history.js');
 const service=await import('../dist-electron/electron/git-service.js');
@@ -205,3 +206,131 @@ test('failed post-execution inspection marks its fallback stale without losing t
  assert.equal(git('show','HEAD:file'),'saved before inspection failed');
  assert.equal((await service.getActivityHistory(path)).entries[0].after,undefined);
 });
+
+test('selective save preserves completed commit hash and history recovery when index sync is locked', async t => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, 'file'), 'ticked version\n');
+  writeFileSync(join(path, 'other.txt'), 'left out\n');
+  const before = await service.getSnapshot(path);
+  const selected = before.changes.filter(change => change.path === 'file').map(({ path: p, version }) => ({ path: p, version }));
+  const plan = await service.prepareBranchDelivery(path, { stateId: before.stateId, message: 'save file only', mergeToDefault: false, selection: selected }, 'en');
+
+  const lock = join(path, '.git', 'index.lock');
+  writeFileSync(lock, '');
+  t.after(() => rmSync(lock, { force: true }));
+
+  const result = await service.executePlan(path, plan, 'en');
+  const committedHash = git('rev-parse', 'HEAD');
+  assert.equal(git('rev-list', '--count', 'HEAD'), '2');
+  assert.equal(git('show', 'HEAD:file'), 'ticked version');
+  assert.deepEqual(result.outcomes.map(step => step.status), ['completed']);
+  assert.equal(result.outcomes[0].commitHash, committedHash);
+  assert.equal(result.postActionIssue?.kind, 'index_sync');
+  assert.match(result.error ?? '', new RegExp(committedHash.slice(0, 7)));
+
+  const entry = (await service.getActivityHistory(path)).entries[0];
+  assert.equal(entry.steps[0].status, 'completed');
+  assert.equal(entry.steps[0].afterHead, committedHash);
+
+  // Removing the lock lets history recovery use the recorded commit hash directly.
+  rmSync(lock, { force: true });
+  git('reset', '-q', '--', 'file');
+  rmSync(join(path, 'other.txt'), { force: true });
+  const undoPlan = await service.prepareHistoryRecovery(path, entry.id, 'undo', 'en');
+  assert.deepEqual(undoPlan.steps[0].argv, ['reset', '--soft', `${committedHash}^`]);
+  const revertPlan = await service.prepareHistoryRecovery(path, entry.id, 'revert', 'en');
+  assert.deepEqual(revertPlan.steps[0].argv, ['revert', '--no-edit', committedHash]);
+});
+
+test('selective save plus integrate stops subsequent steps without marking the commit failed when index sync fails', async t => {
+  const { path, git } = fixture(t);
+  git('switch', '-qc', 'feature');
+  writeFileSync(join(path, 'file'), 'feature save\n');
+  const before = await service.getSnapshot(path);
+  const selected = before.changes.map(({ path: p, version }) => ({ path: p, version }));
+  const plan = await service.prepareBranchDelivery(path, { stateId: before.stateId, message: 'save feature', mergeToDefault: true, selection: selected }, 'en');
+
+  const lock = join(path, '.git', 'index.lock');
+  writeFileSync(lock, '');
+  t.after(() => rmSync(lock, { force: true }));
+
+  const result = await service.executePlan(path, plan, 'en');
+  const committedHash = git('rev-parse', 'HEAD');
+  assert.equal(git('branch', '--show-current'), 'feature');
+  assert.deepEqual(result.outcomes.map(step => step.status), ['completed', 'skipped', 'skipped']);
+  assert.equal(result.outcomes[0].commitHash, committedHash);
+  assert.equal(result.postActionIssue?.kind, 'index_sync');
+  const entry = (await service.getActivityHistory(path)).entries[0];
+  assert.deepEqual(entry.steps.map(step => step.status), ['completed', 'skipped', 'skipped']);
+  assert.equal(entry.steps[0].afterHead, committedHash);
+});
+
+for (const mode of ['choices', 'proposal']) {
+  test(`conflict resolution (${mode}) preserves per-file outcomes when final snapshot read fails`, async t => {
+    const { path, git } = fixture(t);
+    writeFileSync(join(path, 'second.txt'), 'base second\n');
+    git('add', 'second.txt');
+    git('commit', '-qm', 'add second');
+    git('switch', '-qc', 'incoming');
+    writeFileSync(join(path, 'file'), 'incoming file\n');
+    writeFileSync(join(path, 'second.txt'), 'incoming second\n');
+    git('commit', '-qam', 'incoming edits');
+    git('switch', '-q', 'main');
+    writeFileSync(join(path, 'file'), 'local file\n');
+    writeFileSync(join(path, 'second.txt'), 'local second\n');
+    git('commit', '-qam', 'local edits');
+    assert.throws(() => git('merge', 'incoming'));
+
+    const before = await service.getSnapshot(path);
+    const guide = mode === 'choices' ? await service.describeConflicts(path, 'en') : undefined;
+    const proposal = mode === 'proposal' ? {
+      repoPath: before.path,
+      summary: 'Resolve both files',
+      resolutions: [
+        { path: 'file', content: 'resolved file\n', explanation: 'merge both' },
+        { path: 'second.txt', content: 'resolved second\n', explanation: 'merge both' }
+      ],
+      skipped: [],
+      binding: {
+        operation: (await service.describeConflicts(path, 'en')).binding.operation,
+        files: Object.fromEntries((await service.describeConflicts(path, 'en')).files.map(file => [
+          file.path,
+          {
+            stages: git('ls-files', '-u', '-z', '--', file.path).split('\0').filter(Boolean).map(r => r.slice(0, r.indexOf('\t'))).sort().join('\n'),
+            content: createHash('sha256').update(readFileSync(join(path, file.path))).digest('hex')
+          }
+        ]))
+      }
+    } : undefined;
+
+    const nativeSpawn = cp.spawn;
+    let stagedCount = 0;
+    t.mock.method(cp, 'spawn', (exe, args, options) => {
+      if (Array.isArray(args) && args[0] === 'add') stagedCount += 1;
+      if (stagedCount >= 2 && Array.isArray(args) && args[0] === 'status') {
+        return nativeSpawn(process.execPath, ['-e', 'process.stderr.write("fatal: simulated snapshot read error\\n"); process.exit(128);'], options);
+      }
+      return nativeSpawn(exe, args, options);
+    });
+    syncBuiltinESMExports();
+    t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+
+    const result = mode === 'choices'
+      ? await service.applyConflictChoices(path, guide, [{ path: 'file', choice: 'theirs' }, { path: 'second.txt', choice: 'ours' }], 'en')
+      : await service.applyConflictResolution(path, proposal, ['file', 'second.txt'], 'en');
+
+    assert.equal(result.complete, true);
+    assert.equal(result.snapshotStale, true);
+    assert.equal(result.snapshot.head, before.head);
+    assert.equal(result.postActionIssue?.kind, 'snapshot_read');
+    assert.match(result.postActionIssue?.detail ?? '', /simulated snapshot read error/);
+    assert.deepEqual(result.outcomes.map(item => [item.path, item.status]), [['file', 'applied'], ['second.txt', 'applied']]);
+
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    assert.equal(git('ls-files', '-u'), '');
+    const entry = (await service.getActivityHistory(path)).entries[0];
+    assert.deepEqual(entry.steps.map(step => step.status), ['completed', 'completed']);
+    assert.equal(entry.after, undefined);
+  });
+}

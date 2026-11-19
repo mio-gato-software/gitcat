@@ -279,6 +279,8 @@ export type ConflictFileOutcome = {
 
 export type ConflictApplyResult = {
   snapshot: RepoSnapshot;
+  /** The final snapshot read failed after writing resolutions; snapshot is the pre-apply fallback. */
+  snapshotStale?: boolean;
   /** True only when every accepted file was written and marked resolved. */
   complete: boolean;
   /**
@@ -288,6 +290,7 @@ export type ConflictApplyResult = {
   stale?: "files" | "operation" | "repository";
   outcomes: ConflictFileOutcome[];
   historyWarning?: true;
+  postActionIssue?: PostActionIssue;
 };
 
 /**
@@ -387,10 +390,13 @@ export type ConflictChoiceOutcome = {
 
 export type ConflictChoiceResult = {
   snapshot: RepoSnapshot;
+  /** The final snapshot read failed after writing choices; snapshot is the pre-apply fallback. */
+  snapshotStale?: boolean;
   complete: boolean;
   stale?: "files" | "operation" | "repository";
   outcomes: ConflictChoiceOutcome[];
   historyWarning?: true;
+  postActionIssue?: PostActionIssue;
 };
 
 export type Operation =
@@ -461,11 +467,23 @@ export type PlanStep = {
   risk: "low" | "medium" | "high";
 };
 
+/**
+ * A problem that happened after Git had already recorded one or more changes: syncing the real
+ * index after a selected save, re-reading the repository afterwards, or persisting activity history.
+ * Keeping it separate from the completed Git result lets callers and recovery preserve what landed.
+ */
+export type PostActionIssue = {
+  kind: "index_sync" | "snapshot_read" | "history_write";
+  detail: string;
+};
+
 export type StepOutcome = {
   command: string;
   summary: string;
   status: "completed" | "failed" | "skipped";
   output: string;
+  /** Full commit hash confirmed by Git when this step created a commit. */
+  commitHash?: string;
 };
 
 export type ActionPlan = {
@@ -777,6 +795,8 @@ export type ExecutionResult = {
   snapshotStale?: boolean;
   output: string;
   error?: string;
+  /** Follow-up failure (index sync, snapshot read, or history persistence) after Git already completed work. */
+  postActionIssue?: PostActionIssue;
   /** What each step of the plan actually did, so a sequence that stops halfway is never reported as a success. */
   outcomes?: StepOutcome[];
   /**

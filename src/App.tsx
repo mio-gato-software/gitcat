@@ -1325,15 +1325,20 @@ export default function App() {
   const applyGuideChoices = async (choices: ConflictChoiceRequest[]) => {
     if (!snapshot || !guide || !choices.length || guideBusy) return;
     const path = snapshot.path;
+    let shouldReopen = true;
     setGuideBusy(true);
     try {
       const result = await window.gitcat.chooseConflictResolutions(path, guide.id, choices, locale);
-      updateSnapshot(path, result.snapshot);
+      if (!result.snapshotStale) updateSnapshot(path, result.snapshot);
+      else shouldReopen = false;
       setGuideResult(result);
       if (result.historyWarning) addActivity({ label: t("activityHistoryWarning"), detail: t("conflictHistoryWarning"), tone: "warning" });
+      if (result.postActionIssue && result.postActionIssue.kind !== "history_write") {
+        addActivity({ label: t("gitNeedsAttention"), detail: result.postActionIssue.detail, tone: "warning" });
+      }
       const applied = result.outcomes.filter((outcome) => outcome.status === "applied");
       // Conflicts left by something other than a merge, rebase, cherry-pick or revert end here, with nothing to continue.
-      if (!result.snapshot.pending && !result.snapshot.conflicts.length) {
+      if (!result.snapshotStale && !result.snapshot.pending && !result.snapshot.conflicts.length) {
         if (applied.length) addActivity({ label: t("conflictsResolved"), detail: counted(t, applied.length, "file", "files"), tone: "success" });
         closeGuide();
         return;
@@ -1344,7 +1349,7 @@ export default function App() {
     } catch (error) {
       notify({ message: cleanError(error, t("fallbackChooseConflicts")), tone: "error" });
     } finally { setGuideBusy(false); }
-    await openGuide(true);
+    if (shouldReopen) await openGuide(true);
   };
 
   const openConflictFile = async (file: string) => {
@@ -1368,10 +1373,13 @@ export default function App() {
     setApplyingResolution(true);
     try {
       const result = await window.gitcat.applyConflictResolution(path, proposal.id, accepted, locale);
-      updateSnapshot(path, result.snapshot);
+      if (!result.snapshotStale) updateSnapshot(path, result.snapshot);
       if (result.historyWarning) addActivity({ label: t("activityHistoryWarning"), detail: t("conflictHistoryWarning"), tone: "warning" });
+      if (result.postActionIssue && result.postActionIssue.kind !== "history_write") {
+        addActivity({ label: t("gitNeedsAttention"), detail: result.postActionIssue.detail, tone: "warning" });
+      }
       const applied = result.outcomes.filter((outcome) => outcome.status === "applied").map((outcome) => outcome.path);
-      if (result.complete) {
+      if (result.complete && !result.snapshotStale) {
         closeProposal();
         addActivity({ label: t("conflictsResolved"), detail: counted(t, applied.length, "acceptedFile", "acceptedFiles"), tone: "success" });
         return;
@@ -1379,7 +1387,7 @@ export default function App() {
       // Applied files are done and leave the review; the rest can be retried or reviewed again.
       setProposal({ ...proposal, resolutions: proposal.resolutions.filter((item) => !applied.includes(item.path)) });
       setProposalResult(result);
-      if (applied.length) addActivity({ label: t("conflictsPartlyResolved"), detail: counted(t, applied.length, "acceptedFile", "acceptedFiles"), tone: "warning" });
+      if (applied.length) addActivity({ label: t(result.complete ? "conflictsResolved" : "conflictsPartlyResolved"), detail: counted(t, applied.length, "acceptedFile", "acceptedFiles"), tone: result.complete ? "success" : "warning" });
     } catch (error) {
       notify({ message: cleanError(error, t("fallbackApplyResolution")), tone: "error" });
       await refreshProject(path, false);

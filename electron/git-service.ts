@@ -56,7 +56,7 @@ import {
 } from "./outbound-content.js";
 import type {
   ActionPlan, ActivityHistoryView, AiSharingFile, AiSharingPreview, AiSharingPurpose, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource,
-  DeliveryRequest, ExecutionResult, FileChange, GitProtocol, SecretFinding, SecretKind, SelectedChange, WithheldFile,
+  DeliveryRequest, ExecutionResult, FileChange, GitProtocol, PostActionIssue, SecretFinding, SecretKind, SelectedChange, WithheldFile,
   ConflictApplyResult, ConflictFileOutcome, ConflictProposal, ConflictChoice, ConflictChoiceOutcome, ConflictChoiceRequest, ConflictChoiceResult,
   ConflictFileVersion, ConflictGuide, ConflictGuideFile, ConflictSideIdentity, ConflictSideId, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput, LlmConnectResult, AiConnectionProblem,
   Locale, Operation, PendingOperation, PlanStep, RepoSnapshot, StepOutcome, AssistantUnavailable, RecoveryReport,
@@ -2285,8 +2285,34 @@ export async function proposeConflictResolution(cwd: string, locale?: Locale): P
  * that were reviewed — before a single file is written, because an edit made while the review was
  * open must never be overwritten by a draft of the older file.
  */
+async function finalizeConflictResult<T extends ConflictFileOutcome | ConflictChoiceOutcome>(
+  repoRoot: string,
+  outcomes: T[],
+  fallbackSnapshot: RepoSnapshot,
+  language: Locale
+) {
+  const complete = outcomes.every((outcome) => outcome.status === "applied");
+  try {
+    return { snapshot: await getSnapshot(repoRoot), complete, outcomes };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      snapshot: fallbackSnapshot,
+      snapshotStale: true,
+      complete,
+      outcomes,
+      postActionIssue: {
+        kind: "snapshot_read" as const,
+        detail: localized(language,
+          `No se pudo volver a leer el estado del repositorio después de aplicar los conflictos. Los archivos ya aplicados se conservan. Actualiza la vista antes de continuar.\n${detail}`,
+          `Could not re-read the repository state after applying conflict resolutions. Files already applied remain in place. Refresh the view before continuing.\n${detail}`)
+      }
+    };
+  }
+}
+
 async function applyConflictResolutionBody(
-  cwd: string, proposal: IssuedConflictProposal, accepted: string[], locale?: Locale
+  cwd: string, proposal: IssuedConflictProposal, accepted: string[], fallbackSnapshot: RepoSnapshot, locale?: Locale
 ): Promise<ConflictApplyResult> {
   const language = normalizeLocale(locale);
   const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
@@ -2356,11 +2382,7 @@ async function applyConflictResolutionBody(
     break;
   }
   for (const resolution of chosen.slice(outcomes.length)) outcomes.push({ path: resolution.path, status: "not_applied" });
-  return {
-    snapshot: await getSnapshot(repoRoot),
-    complete: outcomes.every((outcome) => outcome.status === "applied"),
-    outcomes
-  };
+  return finalizeConflictResult(repoRoot, outcomes, fallbackSnapshot, language);
 }
 
 /**
@@ -2581,7 +2603,7 @@ const conflictChoices = new Set<ConflictChoice>(["ours", "theirs", "delete", "ed
  * back as it was.
  */
 async function applyConflictChoicesBody(
-  cwd: string, guide: IssuedConflictGuide, requested: ConflictChoiceRequest[], locale?: Locale
+  cwd: string, guide: IssuedConflictGuide, requested: ConflictChoiceRequest[], fallbackSnapshot: RepoSnapshot, locale?: Locale
 ): Promise<ConflictChoiceResult> {
   const language = normalizeLocale(locale);
   const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
@@ -2669,11 +2691,7 @@ async function applyConflictChoicesBody(
     break;
   }
   for (const item of requested.slice(outcomes.length)) outcomes.push({ path: item.path, choice: item.choice, status: "not_applied" });
-  return {
-    snapshot: await getSnapshot(repoRoot),
-    complete: outcomes.every((outcome) => outcome.status === "applied"),
-    outcomes
-  };
+  return finalizeConflictResult(repoRoot, outcomes, fallbackSnapshot, language);
 }
 
 /**
@@ -3165,6 +3183,12 @@ export async function prepareBranchDelivery(cwd: string, request: DeliveryReques
   return plan;
 }
 
+type StepRunResult = {
+  output: string;
+  commitHash?: string;
+  postActionIssue?: PostActionIssue;
+};
+
 /**
  * Saves only the selected paths, in a commit built from a private copy of the index. The copy starts
  * from the last saved version, each selected path is recorded whole as it is on disk (so a file with
@@ -3172,7 +3196,7 @@ export async function prepareBranchDelivery(cwd: string, request: DeliveryReques
  * index is only touched afterwards, and only for those paths: whatever was staged in any other file
  * stays staged, and every file that was left out keeps its contents on disk.
  */
-async function commitSelected(repoRoot: string, paths: string[], message: string, locale?: Locale) {
+async function commitSelected(repoRoot: string, paths: string[], message: string, locale?: Locale): Promise<StepRunResult> {
   const language = normalizeLocale(locale);
   const head = await optionalGit(repoRoot, ["rev-parse", "--verify", "--quiet", "HEAD"]);
   const directory = mkdtempSync(join(tmpdir(), "gitcat-save-"));
@@ -3209,14 +3233,24 @@ async function commitSelected(repoRoot: string, paths: string[], message: string
     const committed = await git(["commit", "-m", message], 600_000);
     const output = detail(committed, ["commit"]);
     if (committed.code !== 0) throw new Error(output);
+    // Capture the confirmed commit hash before touching the real index, so a lock cannot hide the save.
+    const commitHash = await optionalGit(repoRoot, ["rev-parse", "--verify", "--quiet", "HEAD"])
+      || (await git(["rev-parse", "--verify", "--quiet", "HEAD"])).stdout.trim();
     const reset = await runGit(repoRoot, ["reset", "-q", "--", ...literalPaths(paths)]);
     if (reset.code !== 0) {
-      const saved = await optionalGit(repoRoot, ["rev-parse", "--short", "HEAD"]);
-      throw new Error(localized(language,
-        `Los archivos marcados se guardaron en el commit ${saved}, pero Git no pudo actualizar su lista de cambios preparados para ellos: ${detail(reset, ["reset"])}. Tus archivos en disco no cambiaron.`,
-        `The ticked files were saved in commit ${saved}, but Git could not update its list of staged changes for them: ${detail(reset, ["reset"])}. Your files on disk did not change.`));
+      const saved = commitHash ? commitHash.slice(0, 7) : await optionalGit(repoRoot, ["rev-parse", "--short", "HEAD"]);
+      return {
+        output,
+        ...(commitHash ? { commitHash } : {}),
+        postActionIssue: {
+          kind: "index_sync",
+          detail: localized(language,
+            `Los archivos marcados se guardaron en el commit ${saved}, pero Git no pudo actualizar su lista de cambios preparados para ellos: ${detail(reset, ["reset"])}. Tus archivos en disco no cambiaron.`,
+            `The ticked files were saved in commit ${saved}, but Git could not update its list of staged changes for them: ${detail(reset, ["reset"])}. Your files on disk did not change.`)
+        }
+      };
     }
-    return output;
+    return { output, ...(commitHash ? { commitHash } : {}) };
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -3665,7 +3699,7 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
   }
 }
 
-async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: RepoSnapshot, validated: ValidatedStep, locale?: Locale): Promise<string> {
+async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: RepoSnapshot, validated: ValidatedStep, locale?: Locale): Promise<string | StepRunResult> {
   const pushTarget = pushRepository(step);
   if (pushTarget !== undefined) {
     const current = await readPushDestination(args => readGit(cwd, args), snapshot, pushTarget).catch(error => {
@@ -3720,10 +3754,13 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     case "continue_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--continue"]);
     case "skip_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--skip"]);
     case "resolve_conflict": return runResolveConflict(cwd, args, snapshot, locale);
-    case "commit":
+    case "commit": {
       if (step.paths) return commitSelected(snapshot.path, step.paths, args.message, locale);
       await reportedGit(cwd, ["add", "-A"]);
-      return reportedGit(cwd, ["commit", "-m", args.message]);
+      const output = await reportedGit(cwd, ["commit", "-m", args.message]);
+      const commitHash = await optionalGit(cwd, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+      return { output, ...(commitHash ? { commitHash } : {}) };
+    }
     case "ignore_path": return ignorePath(snapshot.path, args, locale);
     case "github_create_repo": return executeHostedRepositoryPlan(plan, locale);
     default: throw new Error(localized(locale, "La acción no está permitida.", "The action is not allowed."));
@@ -3828,10 +3865,18 @@ async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutc
         error: localized(language, "Se detuvo antes del siguiente paso. Los cambios completados siguen hechos; no se deshizo nada.", "Stopped before the next step. Completed changes remain; nothing was rolled back."), outcomes };
     }
     operationPhase("executing", index + 1, plan.steps.length);
+    let stepResult: StepRunResult;
     try {
       if (index > 0) snapshot = await getSnapshot(cwd);
       const validated = index === 0 ? firstValidated : validateStep(step, snapshot, plan, language);
-      outcomes[index] = { ...outcomes[index], status: "completed", output: await runStep(cwd, step, plan, snapshot, validated, language) };
+      const rawStepResult = await runStep(cwd, step, plan, snapshot, validated, language);
+      stepResult = typeof rawStepResult === "string" ? { output: rawStepResult } : rawStepResult;
+      outcomes[index] = {
+        ...outcomes[index],
+        status: "completed",
+        output: stepResult.output,
+        ...(stepResult.commitHash ? { commitHash: stepResult.commitHash } : {})
+      };
     } catch (error) {
       if (index === 0 && (step.pushDestination || step.operation === "push") && error instanceof StalePlanError) throw error;
       const detail = error instanceof Error ? error.message : localized(language, "Git no pudo completar la acción.", "Git could not complete the action.");
@@ -3847,8 +3892,40 @@ async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutc
         ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {})
       };
     }
+    if (stepResult.postActionIssue) {
+      operationPhase("inspecting");
+      const after = await inspectOperation(() => getSnapshot(cwd)).catch(() => undefined);
+      let journalError: string | undefined;
+      try {
+        activityHistory().step(activityId, index, outcomes[index], snapshot, after, stepResult.commitHash ?? after?.head);
+      } catch (error) {
+        journalError = error instanceof Error ? error.message : String(error);
+      }
+      const skipped = outcomes.filter((outcome) => outcome.status === "skipped");
+      const tail = skipped.length
+        ? localized(language,
+          ` No se ejecutó: ${skipped.map((outcome) => outcome.summary).join(", ")}.`,
+          ` Not run: ${skipped.map((outcome) => outcome.summary).join(", ")}.`)
+        : "";
+      return {
+        snapshot: after ?? snapshot,
+        ...(!after ? { snapshotStale: true } : {}),
+        output: executionReport(outcomes, language),
+        error: [`${stepResult.postActionIssue.detail}${tail}`, ...(journalError ? [journalError] : [])].join("\n"),
+        postActionIssue: stepResult.postActionIssue,
+        outcomes,
+        ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {})
+      };
+    }
     // Git has settled. Observation or persistence errors must never change its outcome.
-    activityHistory().step(activityId, index, outcomes[index], snapshot, await inspectOperation(() => getSnapshot(cwd)));
+    let after: RepoSnapshot;
+    try {
+      after = await inspectOperation(() => getSnapshot(cwd));
+    } catch (error) {
+      try { activityHistory().step(activityId, index, outcomes[index], snapshot, undefined, stepResult.commitHash); } catch { /* reported by executePlan */ }
+      throw error;
+    }
+    activityHistory().step(activityId, index, outcomes[index], snapshot, after, stepResult.commitHash ?? after.head);
   }
   operationPhase("inspecting");
   return { snapshot: await inspectOperation(() => getSnapshot(cwd)), output: executionReport(outcomes, language), outcomes, ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {}) };
@@ -4118,17 +4195,23 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
       throw error;
     }
     const after = await inspectOperation(() => getSnapshot(cwd)).catch(() => undefined);
+    const detail = bookkeepingError(error);
     result = {
       snapshot: after ?? before,
       ...(!after ? { snapshotStale: true } : {}),
-      output: executionReport(outcomes, language), error: bookkeepingError(error), outcomes,
+      output: executionReport(outcomes, language),
+      error: detail,
+      postActionIssue: { kind: after ? "history_write" : "snapshot_read", detail },
+      outcomes,
       ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {})
     };
   }
   try {
     history.finish(id, result.snapshotStale ? undefined : result.snapshot, outcomes, result.error);
   } catch (error) {
-    result.error = [result.error, bookkeepingError(error)].filter(Boolean).join("\n");
+    const detail = bookkeepingError(error);
+    result.error = [result.error, detail].filter(Boolean).join("\n");
+    result.postActionIssue ??= { kind: "history_write", detail };
   }
   return result;
 }
@@ -4174,7 +4257,7 @@ export async function prepareHistoryRecovery(cwd: string, id: string, mode: Hist
 }
 
 
-async function recordConflictActivity<T extends ConflictApplyResult | ConflictChoiceResult>(cwd: string, count: number, task: () => Promise<T>): Promise<T> {
+async function recordConflictActivity<T extends ConflictApplyResult | ConflictChoiceResult>(cwd: string, count: number, task: (before: RepoSnapshot) => Promise<T>): Promise<T> {
   if (practiceProjects().registered(cwd) && !practiceProjects().owns(cwd)) throw new Error('Practice ownership changed. No conflict files were written.');
   const before = await getSnapshot(cwd);
   const history = activityHistory();
@@ -4182,7 +4265,7 @@ async function recordConflictActivity<T extends ConflictApplyResult | ConflictCh
   const id = history.begin({ steps }, before);
   let result: T;
   try {
-    result = await task();
+    result = await task(before);
   } catch (error) {
     try {
       history.finish(id, await getSnapshot(cwd).catch(() => undefined), [], error instanceof Error ? error.message : String(error));
@@ -4193,18 +4276,25 @@ async function recordConflictActivity<T extends ConflictApplyResult | ConflictCh
     command: '', summary: 'resolve_conflict',
     status: item.status === 'applied' ? 'completed' : item.status === 'not_applied' ? 'skipped' : 'failed', output: ''
   }));
+  const errorMessage = result.postActionIssue?.detail
+    ?? (result.complete ? undefined : 'Conflict resolution did not complete. Review the remaining conflicts.');
   try {
-    history.finish(id, result.snapshot, outcomes, result.complete ? undefined : 'Conflict resolution did not complete. Review the remaining conflicts.');
-  } catch {
-    return { ...result, historyWarning: true };
+    history.finish(id, result.snapshotStale ? undefined : result.snapshot, outcomes, errorMessage);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ...result,
+      historyWarning: true,
+      postActionIssue: result.postActionIssue ?? { kind: "history_write", detail }
+    };
   }
   return result;
 }
 export async function applyConflictResolution(cwd: string, proposal: IssuedConflictProposal, accepted: string[], locale?: Locale): Promise<ConflictApplyResult> {
-  return recordConflictActivity(cwd,Array.isArray(accepted)?accepted.length:0,()=>applyConflictResolutionBody(cwd,proposal,accepted,locale));
+  return recordConflictActivity(cwd, Array.isArray(accepted) ? accepted.length : 0, (before) => applyConflictResolutionBody(cwd, proposal, accepted, before, locale));
 }
 export async function applyConflictChoices(cwd: string, guide: IssuedConflictGuide, requested: ConflictChoiceRequest[], locale?: Locale): Promise<ConflictChoiceResult> {
-  return recordConflictActivity(cwd,Array.isArray(requested)?requested.length:0,()=>applyConflictChoicesBody(cwd,guide,requested,locale));
+  return recordConflictActivity(cwd, Array.isArray(requested) ? requested.length : 0, (before) => applyConflictChoicesBody(cwd, guide, requested, before, locale));
 }
 
 
