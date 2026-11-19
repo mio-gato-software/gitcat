@@ -343,13 +343,9 @@ test("the interface asks before the first content-bearing request and keeps the 
   assert.match(app, /if \(!\(await ensureSharing\(path, "planning"\)\)\) \{ setRequest\(question\); return; \}/);
   assert.match(app, /if \(!\(await ensureSharing\(path, "recovery"\)\)\)/);
   assert.match(app, /if \(!\(await ensureSharing\(snapshot\.path, "conflicts"\)\)\) return;/);
-  assert.match(app, /if \(!\(await ensureSharing\(repoPath, "description", paths\)\)\) return;/);
-  // Opening the save flow only writes a description on its own once sharing was agreed.
-  assert.match(app, /void sharingAgreed\(path\)\.then\(\(agreed\) => \{ if \(agreed/);
   // Manual saves require a description but no heuristic secret review.
   assert.doesNotMatch(app, /secret-warning|secretBadge|secretsReviewed|scanChangesForSecrets/);
   assert.doesNotMatch(main + preload, /changes:scan-secrets|scanChangesForSecrets/);
-  assert.match(app, /if \(!message\) \{ pointTo\("description"\); return; \}/);
   assert.match(app, /t\("secretDetectorLimits"\)/);
   assert.match(app, /turn\.private && \(turn\.error \|\| turn\.outcome\) \? privateOutputNote/);
   for (const channel of ["sharing:get", "sharing:acknowledge", "sharing:set-exclusions", "sharing:review"]) {

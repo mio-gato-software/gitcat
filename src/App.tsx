@@ -1769,7 +1769,7 @@ export default function App() {
           />}
           snapshot={snapshot}
           fetchedAt={active?.fetchedAt}
-          busy={planning || generatingDescription}
+          busy={planning || delivery.generating}
           handlers={{
             onGuide: () => void openGuide(),
             onNewBranch: () => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" }),
