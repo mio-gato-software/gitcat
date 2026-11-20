@@ -1,4 +1,5 @@
 import type { ActionPlan, ConflictResolutionAction, Locale, PlanStep, RepoSnapshot, StepOutcome } from "./types.js";
+import { isUntracked } from "./selected-changes.js";
 import { workOverview, type NextActionId } from "./work-overview.js";
 
 /**
@@ -108,6 +109,7 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
   summary.stale = Boolean(snapshot && snapshot.path === plan.repoPath && (snapshot.head !== plan.head || (!plan.selection && snapshot.stateId !== plan.stateId)));
   summary.noop = plan.steps.every(readsOnly);
   const walked = walkPlanSteps(plan.steps, start);
+  const work = plan.switchWork;
   let edited = snapshot?.changes.length ?? 0;
   let saved = false;
   /** Branches with new commits on this computer, and the branches the plan publishes afterwards. */
@@ -158,7 +160,15 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         break;
       }
       case "checkout":
-        summary.local.push(args.ref ? say(`Creates a local copy of ${args.ref} named ${args.name}, sets it to track that remote copy and switches to it.`, `Crea la copia local de ${args.ref} con el nombre ${args.name}, la vincula con esa copia remota y cambia a ella.`) : say(`Switches to ${args.name}: the files on disk change to match it. Uncommitted changes come along when they do not clash.`, `Cambia a ${args.name}: los archivos del disco pasan a ser los de esa rama. Los cambios sin guardar te acompañan si no chocan.`));
+        if (work) {
+          summary.from = on || undefined;
+          summary.to = args.name;
+          summary.local.push(work.mode === "carry" && edited
+            ? say(`Switches to ${args.name}. Your uncommitted changes come with you, keeping what you staged.`, `Cambia a ${args.name}. Tus cambios sin guardar te acompañan y se conserva lo que preparaste.`)
+            : say(`Switches to ${args.name}.`, `Cambia a ${args.name}.`));
+        } else {
+          summary.local.push(args.ref ? say(`Creates a local copy of ${args.ref} named ${args.name}, sets it to track that remote copy and switches to it.`, `Crea la copia local de ${args.ref} con el nombre ${args.name}, la vincula con esa copia remota y cambia a ella.`) : say(`Switches to ${args.name}: the files on disk change to match it. Uncommitted changes come along when they do not clash.`, `Cambia a ${args.name}: los archivos del disco pasan a ser los de esa rama. Los cambios sin guardar te acompañan si no chocan.`));
+        }
         break;
       case "create_branch":
         summary.local.push(args.from
@@ -272,9 +282,24 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         break;
       }
       case "git_command":
-        summary.local.push(step.risk === "low"
-          ? say("Runs a Git command that only reads.", "Ejecuta un comando Git que solo lee.")
-          : say("Runs a Git command the assistant proposed as is; the exact command is in the technical details.", "Ejecuta tal cual un comando Git que propuso el asistente; el comando exacto está en los detalles técnicos."));
+        if (work?.mode === "set_aside") {
+          const label = work.label?.trim();
+          summary.local.push(work.includeUntracked
+            ? say(`Sets aside tracked edits and new files in “${label}”, keeping staged versions for restoration.`, `Aparta los cambios en archivos seguidos y los archivos nuevos en «${label}» y conserva las versiones preparadas para restaurarlas.`)
+            : say(`Sets aside tracked edits in “${label}”, keeping staged versions for restoration.`, `Aparta los cambios en archivos seguidos en «${label}» y conserva las versiones preparadas para restaurarlas.`));
+          if (!work.includeUntracked && snapshot?.changes.some(isUntracked)) {
+            summary.finalState.push(say("New files stay uncommitted in this folder.", "Los archivos nuevos se quedan sin guardar en esta carpeta."));
+          }
+          summary.partial.push(say("If switching fails after the changes are set aside, the stash entry stays available.", "Si falla el cambio de rama después de apartar los cambios, la entrada de stash sigue disponible."));
+        } else if (work?.mode === "restore") {
+          summary.local.push(say(`Restores the set-aside changes on ${here}, including staged versions.`, `Restaura los cambios apartados en ${here}, incluyendo las versiones preparadas.`));
+          summary.finalState.push(say("The restored changes stay uncommitted and the stash entry stays available.", "Los cambios recuperados siguen sin guardar y la entrada de stash sigue disponible."));
+          summary.partial.push(say("Restoring can leave conflicts in your files. The stash entry stays available if this happens.", "La restauración puede dejar conflictos en tus archivos. Si ocurre, la entrada de stash se conserva."));
+        } else {
+          summary.local.push(step.risk === "low"
+            ? say("Runs a Git command that only reads.", "Ejecuta un comando Git que solo lee.")
+            : say("Runs a Git command; the exact command is in the technical details.", "Ejecuta un comando de Git. El comando exacto está en los detalles técnicos."));
+        }
         break;
       default: break;
     }
@@ -297,7 +322,7 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
   if (saved) summary.finalState.push(edited
     ? say(`${files(say, edited)} stay uncommitted, exactly as they are.`, `${files(say, edited)} siguen sin guardar, tal como están.`)
     : say("No uncommitted changes are left.", "No quedan cambios sin guardar."));
-  else if (!summary.noop && edited && walked.some(({ step }) => step.operation === "checkout" || step.operation === "create_branch")) {
+  else if (!work && !summary.noop && edited && walked.some(({ step }) => step.operation === "checkout" || step.operation === "create_branch")) {
     summary.finalState.push(say(`Your ${files(say, edited)} with uncommitted changes come along, still uncommitted.`, `Tus ${files(say, edited)} con cambios sin guardar te acompañan, todavía sin guardar.`));
   }
   for (const [branch, remote] of published) summary.finalState.push(say(`${branch} matches ${remote}.`, `${branch} queda igual que en ${remote}.`));

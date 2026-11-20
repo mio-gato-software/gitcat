@@ -4679,25 +4679,23 @@ async function validateSwitchWork(cwd: string, request: SwitchWorkRequest) {
   }
 }
 export async function prepareSwitchWork(cwd: string, request: SwitchWorkRequest, locale?: Locale) {
-  await validateSwitchWork(cwd,request);
-  const snapshot=await getSnapshot(cwd),language=normalizeLocale(locale);
-  let steps:PlanStep[], summary:string, effects:string[];
-  if (request.mode==='restore') {
-    steps=[stepFrom('git_command',{},switchWorkCommandArguments(request, snapshot.currentBranch)!,language)!];
-    summary=localized(language,`Restaurar trabajo apartado en ${snapshot.currentBranch}`,`Restore set-aside work on ${snapshot.currentBranch}`);
-    effects=[localized(language,'Restaura los archivos y lo que estaba preparado. Puede detenerse con conflictos; la entrada se conserva, incluso si falla. Revisa los archivos antes de volver a aplicar.','Restores files and their staged state. It may stop with conflicts; the entry is retained even on failure. Review the files before applying it again.')];
-  } else {
-    const target=request.target!;
-    steps=[stepFrom('checkout',{name:target},[],language)!];
-    summary=localized(language,`Cambiar de ${snapshot.currentBranch} a ${target}`,`Switch from ${snapshot.currentBranch} to ${target}`);
-    effects=[localized(language,`La rama activa será ${target}. No se publica nada.`,`The active branch will be ${target}. Nothing is published.`)];
-    if (request.mode==='carry') effects.push(localized(language,`Los ${snapshot.changes.length} archivos sin guardar te acompañan a ${target}, conservando el índice.`,`The ${snapshot.changes.length} unsaved files come with you to ${target}, keeping the index.`));
-    else {
-      steps.unshift(stepFrom('git_command',{},switchWorkCommandArguments(request, snapshot.currentBranch)!,language)!);
-      effects.push(localized(language,`Aparta los cambios seguidos${request.includeUntracked?' y archivos nuevos':''} como “${request.label}”. Conserva el estado preparado para restaurarlo. Los archivos ignorados${request.includeUntracked?'':' y nuevos'} permanecen en la carpeta. Si el cambio de rama falla, la entrada sigue disponible.`,`Sets aside tracked edits${request.includeUntracked?' and new files':''} as “${request.label}”, preserving staged state for restoration. Ignored files${request.includeUntracked?'':' and new files'} remain in the folder. If switching fails, the entry remains available.`));
-    }
+  await validateSwitchWork(cwd, request);
+  const snapshot = await getSnapshot(cwd);
+  const language = normalizeLocale(locale);
+  const steps: PlanStep[] = [];
+  const args = switchWorkCommandArguments(request, snapshot.currentBranch);
+  if (args) {
+    const step = stepFrom("git_command", {}, args, language)!;
+    step.summary = request.mode === "restore"
+      ? localized(language, "Restaurar trabajo apartado", "Restore set-aside work")
+      : localized(language, "Apartar trabajo", "Set work aside");
+    steps.push(step);
   }
-  return bindPlan(snapshot,{...sequenceDraft(steps,summary,effects,language),summary,switchWork:request,requiresConfirmation:true});
+  if (request.mode !== "restore") {
+    steps.push(stepFrom("checkout", { name: request.target! }, [], language)!);
+  }
+  const rationale = localized(language, "Revisa qué pasa con tus cambios antes de confirmar.", "Review what happens to your changes before confirming.");
+  return bindPlan(snapshot, { ...sequenceDraft(steps, rationale, undefined, language), switchWork: request, requiresConfirmation: true });
 }
 
 
