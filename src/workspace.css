@@ -307,7 +307,11 @@
 .commit-form .delivery-option { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; color: var(--secondary); font-size: 11.5px; line-height: 1.5; }
 .delivery-option input { accent-color: var(--coral); }
 .commit-form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
-.commit-form-actions .ghost-button { display: inline-flex; flex: none; align-items: center; gap: 6px; }
+.save-preview { margin-top: 10px; }
+.save-preview > .ghost-button { display: inline-flex; align-items: center; gap: 6px; }
+.save-preview .diff-view { margin-top: 4px; }
+.save-preview .diff-view pre { max-height: 28vh; }
+.save-preview .diff-toolbar strong { overflow-wrap: anywhere; }
 .commit-form-actions .primary-button { flex: 1 1 160px; }
 .file-inclusion-note { margin: 10px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.55; }
 .save-description-required { color: var(--amber); }

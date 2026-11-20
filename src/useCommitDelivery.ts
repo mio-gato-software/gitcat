@@ -2,31 +2,29 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ActionPlan, FileChange, Locale, RepoSnapshot, WithheldFile } from "../shared/types";
 import type { Translate } from "./i18n";
 
-type AttentionTarget = "description" | "selection" | "stale";
+type AttentionTarget = "form" | "description" | "selection" | "stale";
 type DeliveryReview = { turnId: number; plan: ActionPlan };
 type DeliveryOptions = {
   activeId?: string;
   snapshot?: RepoSnapshot;
   locale: Locale;
   t: Translate;
-  configured: boolean;
   busy: boolean;
   openForm: () => void;
-  checkSharing: (path: string) => Promise<boolean>;
   confirmSharing: (path: string, paths: string[]) => Promise<boolean>;
   reportDescriptionError: (path: string, error: unknown) => Promise<void>;
   showPlan: (question: string, load: () => Promise<ActionPlan>, path: string, review: boolean) => Promise<ActionPlan | undefined>;
 };
 
 export function useCommitDelivery({
-  activeId, snapshot, locale, t, configured, busy, openForm, checkSharing, confirmSharing, reportDescriptionError, showPlan
+  activeId, snapshot, locale, t, busy, openForm, confirmSharing, reportDescriptionError, showPlan
 }: DeliveryOptions) {
-  const [message, setMessage] = useState("");
+  const [draft, setDraft] = useState("");
+  const [suggestionKey, setSuggestionKey] = useState<string>();
   const [merge, setMerge] = useState(false);
   const [baseline, setBaseline] = useState<Record<string, string>>();
   const [attention, setAttention] = useState<{ path: string; target: AttentionTarget; sequence: number }>();
   const [excludedByRepo, setExcludedByRepo] = useState<Record<string, string[]>>({});
-  const [diffOpen, setDiffOpen] = useState(false);
   const [review, setReview] = useState<DeliveryReview>();
   const [generating, setGenerating] = useState(false);
   const [withheld, setWithheld] = useState<WithheldFile[]>([]);
@@ -37,8 +35,16 @@ export function useCommitDelivery({
   const path = snapshot?.path;
   const excluded = useMemo(() => new Set(path ? excludedByRepo[path] ?? [] : []), [path, excludedByRepo]);
   const selected = useMemo(() => snapshot?.changes.filter((change) => !excluded.has(change.path)) ?? [], [snapshot, excluded]);
-  const latest = useRef({ selected, message });
-  latest.current = { selected, message };
+  const selectionKey = useMemo(() => JSON.stringify(selected.map(({ path, version }) => [path, version])), [selected]);
+  const suggestionOutdated = suggestionKey !== undefined && suggestionKey !== selectionKey;
+  const message = suggestionOutdated ? "" : draft;
+  const latest = useRef({ selected, selectionKey, message });
+  latest.current = { selected, selectionKey, message };
+  const setMessage = (value: string) => {
+    setDraft(value);
+    setSuggestionKey(undefined);
+    setWithheld([]);
+  };
   // Only the ticked files matter. An edit to a file left out does not invalidate the review.
   const stale = Boolean(baseline && selected.some((change) => baseline[change.path] !== change.version));
 
@@ -49,7 +55,6 @@ export function useCommitDelivery({
     setMerge(false);
     setBaseline(undefined);
     setAttention(undefined);
-    setDiffOpen(false);
     setReview(undefined);
     setGenerating(false);
     setWithheld([]);
@@ -68,19 +73,23 @@ export function useCommitDelivery({
   }, [snapshot]);
 
   async function generateDescription() {
-    const paths = latest.current.selected.map((change) => change.path);
+    const starting = latest.current;
+    const paths = starting.selected.map((change) => change.path);
     if (!path || !paths.length || descriptionRequest.current) return;
     const request = Symbol();
     descriptionRequest.current = request;
     try {
-      if (!(await confirmSharing(path, paths)) || descriptionRequest.current !== request) return;
+      if (!(await confirmSharing(path, paths)) || descriptionRequest.current !== request
+        || latest.current.selectionKey !== starting.selectionKey) return;
       setGenerating(true);
       const result = await window.gitcat.generateCommitDescription(path, locale, paths);
-      if (descriptionRequest.current !== request) return;
+      if (descriptionRequest.current !== request || latest.current.selectionKey !== starting.selectionKey
+        || latest.current.message !== starting.message) return;
       const ticked = new Map(latest.current.selected.map((change) => [change.path, change.version]));
       const described = result.selection ?? [];
       if (ticked.size === described.length && described.every((item) => ticked.get(item.path) === item.version)) {
-        setMessage(result.description);
+        setDraft(result.description);
+        setSuggestionKey(starting.selectionKey);
         setWithheld(result.withheld ?? []);
       }
     } catch (error) {
@@ -93,10 +102,12 @@ export function useCommitDelivery({
     }
   }
 
+  const pointTo = (target: AttentionTarget) => {
+    if (path) setAttention({ path, target, sequence: ++attentionSequence.current });
+  };
+
   function prepareCommit(includeIntegration = merge) {
     if (!snapshot || busy || generating) return;
-    const pointTo = (target: AttentionTarget) =>
-      setAttention({ path: snapshot.path, target, sequence: ++attentionSequence.current });
     if (stale) { pointTo("stale"); return; }
     if (!selected.length) { pointTo("selection"); return; }
     const trimmed = message.trim();
@@ -116,13 +127,7 @@ export function useCommitDelivery({
     if (!continuing) setBaseline(Object.fromEntries(snapshot.changes.map((change) => [change.path, change.version ?? ""])));
     if (snapshot.isDirty) {
       openForm();
-      if (!refreshReview) prepareCommit(includeIntegration);
-      if (configured && !message.trim()) {
-        const startingScope = scope.current;
-        void checkSharing(snapshot.path).then((agreed) => {
-          if (agreed && scope.current === startingScope && !latest.current.message.trim()) void generateDescription();
-        });
-      }
+      pointTo("form");
     } else if (integrate) {
       void showPlan(t("integrateInto", { target: snapshot.defaultBranch ?? "" }),
         () => window.gitcat.prepareBranchDelivery(snapshot.path, { stateId: snapshot.stateId, mergeToDefault: true }, locale),
@@ -155,7 +160,7 @@ export function useCommitDelivery({
 
   return {
     message, setMessage, merge, setMerge, stale, attention, excluded, selected, toggleIncluded, setAllIncluded,
-    diffOpen, setDiffOpen, generating, generateDescription, withheld, review, setReview, prepareCommit, beginDelivery,
+    generating, generateDescription, suggestionOutdated, withheld: suggestionOutdated ? [] : withheld, review, setReview, prepareCommit, beginDelivery,
     clearDraftOnCommit,
     awaitingDecision: Boolean(review || generating || (snapshot?.isDirty && baseline && !stale))
   };
