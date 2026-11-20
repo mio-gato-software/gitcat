@@ -437,7 +437,7 @@ export function jsonCandidates(text: string) {
 
 function hasExactKeys(value: unknown, keys: string[]): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) &&
-    Object.keys(value as object).sort().join("\0") === keys.join("\0");
+    Object.keys(value as object).length === keys.length && keys.every((key) => Object.hasOwn(value as object, key));
 }
 
 function validate(value: unknown): ModelPlan | undefined {

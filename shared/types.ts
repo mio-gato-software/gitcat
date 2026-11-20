@@ -538,7 +538,7 @@ export type ActionPlan = {
   assistantUnavailable?: AssistantUnavailable;
 };
 
-export type AssistantUnavailable = "not_configured" | "timeout" | "unreachable" | "error";
+export type AssistantUnavailable = "not_configured" | "timeout" | "unreachable" | "invalid_response" | "error";
 
 /**
  * Why the AI assistant could not be connected or stopped answering, told apart so the interface can
@@ -1043,11 +1043,15 @@ export type OperationProgress = {
   mutation: boolean; stopping: boolean; step?: number; total?: number;
 };
 
+export type ActivityOperation = Operation | 'pull_request'
+  | 'set_aside_work' | 'restore_set_aside_work'
+  | 'undo_save' | 'revert_save' | 'create_recovery_branch';
+
 export type ActivityRecord = {
   id: string; repoPath: string; startedAt: string; finishedAt?: string;
   state: 'running' | 'completed' | 'failed';
   before: { head: string; branch: string }; after?: { head: string; branch: string };
-  steps: { operation: Operation | 'pull_request'; status: 'pending' | StepOutcome['status']; beforeHead?: string; afterHead?: string; at?: string }[];
+  steps: { operation: ActivityOperation; status: 'pending' | StepOutcome['status']; beforeHead?: string; afterHead?: string; at?: string }[];
   error?: string;
 };
 export type ActivityHistoryView = {

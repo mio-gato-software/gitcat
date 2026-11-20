@@ -85,16 +85,21 @@ app.whenReady().then(async () => {
   const hostingSnapshot = value => hostingScenario ? { ...value, remotes: ['origin'], remoteUrls: { origin: nativeUi[hostingScenario]?.remote??'https://code.company.test/org/team/repo.git' } } : value;
   const reviewRequests = [], reviewLinks = [];
   let reviewPublished = false;
+  const reviewUrl = 'https://code.company.test/org/team/repo/-/merge_requests/1';
+  const reviewCheckedAt = '2026-11-19T23:40:00.000Z';
+  let reviewScenario;
   ipcMain.handle('review:preview', (_, p, request) => {
     reviewRequests.push(request);
     const native=nativeUi[request.provider];
     if(native)return {id:'hosting-ui',repoPath:p,provider:request.provider,host:new URL(native.baseUrl).host,request,repository:native.location.repository,remoteUrl:native.remote,account:native.accountId,hosting:{connectionId:`ui-${request.provider}`,location:native.location,accountId:native.accountId,label:native.label},headHash:snapshot.head,baseHash:'b'.repeat(40),commits:[{hash:snapshot.head,subject:'Saved work for review'}],reviewable:true,checkedAt:new Date().toISOString()};
-    return { id: 'hosting-ui', repoPath: p, provider: request.provider, host: 'code.company.test', request, repository: 'org/team/repo', remoteUrl: 'https://code.company.test/org/team/repo.git', account: 'anna.work', headHash: snapshot.head, baseHash: 'b'.repeat(40), commits: [{ hash: snapshot.head, subject: 'Saved work for review' }], reviewable: true, checkedAt: new Date().toISOString() };
+    const commits = reviewScenario?.noCommits ? [] : [{ hash: snapshot.head, subject: 'Saved work for review' }];
+    const existing = reviewScenario?.open ? { url: reviewUrl, state: 'OPEN', head: request.head, base: request.base } : undefined;
+    return { id: 'hosting-ui', repoPath: p, provider: request.provider, host: 'code.company.test', request, repository: 'org/team/repo', remoteUrl: 'https://code.company.test/org/team/repo.git', account: 'anna.work', headHash: snapshot.head, baseHash: 'b'.repeat(40), commits, existing, reviewable: true, checkedAt: reviewCheckedAt };
   });
   ipcMain.handle('review:publish', async (_, p, id) => {
     assert.equal(id, 'hosting-ui');reviewPublished = true;
     const native=nativeUi[hostingScenario];
-    const pullRequest = { url: native?`${native.location.webUrl}/${native.provider==='azure'?'pullrequest':'pull-requests'}/1`:'https://code.company.test/org/team/repo/-/merge_requests/1', state: 'OPEN' };
+    const pullRequest = { url: native?`${native.location.webUrl}/${native.provider==='azure'?'pullrequest':'pull-requests'}/1`:reviewUrl, state: 'OPEN' };
     return native
       ? { snapshot: hostingSnapshot(await service.getSnapshot(p)), pullRequest, warnings: [] }
       : { pullRequest, warnings: ['history_write', 'snapshot_read'] };
@@ -562,11 +567,27 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.worktree-list').innerText`), /Abierto aquí[\s\S]*sin rama activa|sin rama activa[\s\S]*Abierto aquí/);
   await assertDialog();
   await capture('worktrees');
-  await js(`[...document.querySelectorAll('.worktree-list button')].find(button => button.getAttribute('aria-label').includes('Linked worktree')).click()`);
+  await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+  await waitFor(`!document.querySelector('.worktrees-dialog')`);
+  await js(`(() => { const input = document.querySelector('.branch-section input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'qa/worktree'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  const occupiedBranch = `[...document.querySelectorAll('.branch-row')].find(row => row.querySelector('.branch-main')?.title.startsWith('qa/worktree ·'))`;
+  await waitFor(occupiedBranch);
+  const occupiedButton = `${occupiedBranch}.querySelector('.branch-switch')`;
+  assert.match(await js(`${occupiedButton}.innerText`), /Abrir worktree/);
+  assert.ok((await js(`${occupiedButton}.title`)).includes(linkedWorktree));
+  assert.ok((await js(`${occupiedButton}.getAttribute('aria-label')`)).includes(linkedWorktree));
+  assert.equal(await js(`${occupiedBranch}.querySelector('.branch-worktree-path')?.innerText`), linkedWorktree);
+  await js(`${occupiedBranch}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 200, clientY: 400 }))`);
+  await waitFor(`document.querySelector('.context-menu')`);
+  const openFolderMenuItem = `[...document.querySelectorAll('.context-menu button')].find(button => button.innerText.includes('Abrir worktree'))`;
+  assert.equal(await js(`${openFolderMenuItem}?.title`), linkedWorktree);
+  await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  await js(`${occupiedButton}.click()`);
   await waitFor(`document.querySelector('.window-tab.active')?.innerText.includes('Linked worktree')`);
   assert.equal(git('branch', '--show-current'), 'feature/new-menu');
   assert.equal(fs.readFileSync(path.join(repo, 'app.txt'), 'utf8'), 'updated menu\n');
   assert.equal(fs.readFileSync(path.join(linkedWorktree, 'worktree-only.txt'), 'utf8'), 'separate edits');
+  assert.equal(await js(`Boolean(document.querySelector('.plan-card, .switch-work'))`), false);
   assert.equal(await js(`Boolean(document.querySelector('.window-tab.active svg[aria-label="Worktree vinculado"]'))`), true);
   assert.equal(await js(`document.querySelectorAll('.window-tab:not(.unavailable)').length`), 1, 'Opening a worktree reuses the repository tab');
   await waitFor(`document.querySelector('.commit-row.head .ref-tag.more')`);
@@ -621,7 +642,35 @@ app.whenReady().then(async () => {
   assert.match(reviewStatus, /no pudo guardar toda la operación en Actividad/);
   assert.match(reviewStatus, /Falló una comprobación del repositorio local[\s\S]*Actualiza el proyecto/);
   await js(`document.querySelector('.share-review [role="status"] button').click()`);
-  assert.deepEqual(reviewLinks, ['https://code.company.test/org/team/repo/-/merge_requests/1']);
+  assert.deepEqual(reviewLinks, [reviewUrl]);
+
+  reviewPublished = false;
+  reviewScenario = { open: true, noCommits: true };
+  const checkReview = `document.querySelector('.share-review > .outline-button').click()`;
+  const reviewPrimary = `document.querySelector('.share-review .primary-button')`;
+  await js(checkReview);
+  await waitFor(reviewPrimary);
+  assert.equal(await js(`${reviewPrimary}.innerText.trim()`), 'Abrir revisión');
+  const openReviewText = await js(`document.querySelector('.share-review .activity-record').innerText`);
+  assert.match(openReviewText, /Estado real de la revisión: OPEN/);
+  assert.doesNotMatch(openReviewText, /La confirmación publica/);
+  const checkedTime = await js(`document.querySelector('.share-review time').innerText`);
+  const localCheckedTime = await js(`new Intl.DateTimeFormat('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(${JSON.stringify(reviewCheckedAt)}))`);
+  assert.equal(checkedTime, localCheckedTime);
+  await js(`${reviewPrimary}.click()`);
+  assert.deepEqual(reviewLinks, [reviewUrl, reviewUrl]);
+  assert.equal(reviewPublished, false, 'Opening an already published review never invokes publication');
+
+  reviewScenario = { open: true, noCommits: false };
+  await js(checkReview);
+  await waitFor(reviewPrimary);
+  assert.equal(await js(`${reviewPrimary}.innerText.trim()`), 'Publicar en esta revisión');
+  reviewScenario = { open: false, noCommits: true };
+  await js(checkReview);
+  await waitFor(reviewPrimary);
+  assert.equal(await js(`${reviewPrimary}.innerText.trim()`), 'Publicar y crear una revisión nueva');
+  assert.equal(await js(`${reviewPrimary}.disabled`), false, 'A published branch can still open its first review');
+  reviewScenario = undefined;
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
   await waitFor(`!document.querySelector('.share-review')`);
   hostingScenario = false;
@@ -655,7 +704,7 @@ app.whenReady().then(async () => {
   await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
   await waitFor(`document.querySelector('.remote-status')?.innerText.includes('Sin remoto')`);
 
-  await js(`document.querySelector('.branch-switch').click()`);
+  await js(`document.querySelector('.branch-switch:not(.open-worktree)').click()`);
   await waitFor(`document.querySelector('.switch-work fieldset')`);
   await assertDialog();
   assert.match(await js(`document.querySelector('.switch-work').innerText`), /Trabajo sin terminar[\s\S]*app.txt[\s\S]*new-file.txt[\s\S]*Incluir archivos nuevos/);
@@ -922,13 +971,33 @@ app.whenReady().then(async () => {
   assert.match(await stage('integrated'), /Estás en main/);
   assert.match(await js(`document.querySelector('.work-overview .overview-next').innerText`), /Conecta un sitio donde publicar[\s\S]*git remote add/);
   assert.match(await js(`document.querySelector('.overview-summary').innerText`), /Solo en este equipo/, 'A save is described as local, never as a backup');
+  const journal = path.join(app.getPath('userData'), 'gitcat-activity.json');
+  const { ActivityHistory } = await import(pathToFileURL(path.join(root, 'dist-electron/electron/activity-history.js')));
+  const activity = new ActivityHistory(journal);
+  const activitySnapshot = await service.getSnapshot(repo);
+  for (const metadata of [
+    { switchWork: { mode: 'set_aside' } },
+    { switchWork: { mode: 'restore' } },
+    { recovery: { mode: 'undo', commit: activitySnapshot.head } },
+    { recovery: { mode: 'revert', commit: activitySnapshot.head } },
+    { recovery: { mode: 'restore', commit: activitySnapshot.head } },
+    {}
+  ]) {
+    const id = activity.begin({ steps: [{ operation: 'git_command' }], ...metadata }, activitySnapshot);
+    activity.finish(id, activitySnapshot, [{ status: 'completed' }]);
+  }
   await js(`document.querySelector('[data-action="activity"]').click()`);
   await waitFor(`document.querySelector('.activity-history .activity-record')`);
   await assertDialog();
-  assert.match(await js(`document.querySelector('.activity-history').innerText`), /completado[\s\S]*Revisar una reversión/);
+  const activityText = await js(`document.querySelector('.activity-history').innerText`);
+  assert.match(activityText, /Guardar cambios · completado[\s\S]*Revisar una reversión/);
+  const activitySteps = await js(`[...document.querySelectorAll('.activity-history .activity-record li')].map(step => step.innerText)`);
+  for (const action of ['Apartar trabajo', 'Restaurar trabajo apartado', 'Deshacer guardado y conservar archivos', 'Revertir guardado con un nuevo commit', 'Crear rama de recuperación', 'Operación de Git']) {
+    assert.ok(activitySteps.includes(`${action} · completado`), `Activity should show the confirmed action: ${action}`);
+  }
+  assert.doesNotMatch(activityText, /git_command|git (stash|reset|branch|revert)/);
   await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key:'Escape' }))`);
   await waitFor(`!document.querySelector('.activity-history')`);
-  const journal = path.join(app.getPath('userData'), 'gitcat-activity.json');
   const corruptHistory = '{"retentionDays":';
   const headBeforeRepair = git('rev-parse', 'HEAD');
   fs.writeFileSync(journal, corruptHistory);

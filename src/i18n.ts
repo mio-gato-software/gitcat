@@ -9,6 +9,23 @@ const en = {
   activityRepairConfirm: "Keep a copy and start a new history",
   activityRepairBackup: "The unreadable history was saved to {{path}}.",
   activityHistoryWarning: "Activity history needs attention",
+  activitySyncRemote: "Update the local branch from the remote",
+  activitySetAside: "Set work aside",
+  activityRestoreWork: "Restore set-aside work",
+  activityReadStatus: "Read project status",
+  activitySwitchBranch: "Switch branches",
+  activityDeleteBranch: "Delete branch",
+  activityRenameBranch: "Rename branch",
+  activityReadRemote: "Check for updates on the remote",
+  activityRebase: "Move commits onto another base",
+  activityGitOperation: "Git operation",
+  activityCreateRemote: "Create a remote repository",
+  activityIgnoreFile: "Ignore file",
+  activitySetIdentity: "Set commit author",
+  activityCreateReview: "Create review",
+  activityUndoSave: "Undo save and keep files",
+  activityRevertSave: "Revert save with a new commit",
+  activityRecoveryBranch: "Create recovery branch",
   conflictHistoryWarning: "GitCat could not save the activity record. Check the results shown for each file.",
   switchWorkTitle: "Unfinished work",
   switchWorkStay: "Keep working here",
@@ -68,6 +85,7 @@ const en = {
   shareReviewCommits: "Commits to publish",
   shareReviewLiveStatus: "Live review status",
   shareReviewConfirmation: "Confirmation publishes only these saved commits, then creates or updates an open review. It does not merge, force-push, or bypass branch protections.",
+  shareReviewOpen: "Open review",
   shareReviewPublishExisting: "Publish to this review",
   shareReviewPublishNew: "Publish and create a new review",
   shareReviewHistoryWarning: "The review is open. GitCat could not save all of this operation in Activity.",
@@ -692,6 +710,7 @@ const en = {
   notMerged: "not merged into the default or current branch",
   worktreesOpen: "Show worktrees",
   openWorktreeAction: "Open working folder",
+  openBranchWorktree: "Open worktree",
   worktreeOpenHint: "Double-click to open this working folder",
   worktreeOpenFailed: "Could not open this working folder. Refresh the worktree list and check that its folder is available.",
   worktreePreviewNote: "These edits are in a separate working folder. Open it to review and save them. Your current edits stay in their own folder.",
@@ -1136,6 +1155,7 @@ const en = {
   recoveryAssistant_not_configured: "The assistant is not set up, so GitCat only offers what it can prove from the repository. It will not choose for you.",
   recoveryAssistant_timeout: "The assistant did not answer in time. What GitCat shows here is still accurate; pick the way you want.",
   recoveryAssistant_unreachable: "The assistant could not be reached. What GitCat shows here is still accurate; pick the way you want.",
+  recoveryAssistant_invalid_response: "The provider answered in a format GitCat could not use. The recovery options below are based on the repository.",
   recoveryAssistant_error: "The assistant could not answer this time. What GitCat shows here is still accurate; pick the way you want.",
   recoveryAssistantSuggests: "The assistant's view",
   recoveryDescribeFailed: "GitCat could not read the repository again after the failure. Your work was not touched; refresh to see where things stand.",
@@ -1255,6 +1275,23 @@ const es: { [K in keyof typeof en]: string } = {
   activityRepairConfirm: "Conservar una copia e iniciar un historial nuevo",
   activityRepairBackup: "El historial ilegible se guardó en {{path}}.",
   activityHistoryWarning: "El historial de actividad necesita atención",
+  activitySyncRemote: "Actualizar la rama local desde el remoto",
+  activitySetAside: "Apartar trabajo",
+  activityRestoreWork: "Restaurar trabajo apartado",
+  activityReadStatus: "Leer el estado del proyecto",
+  activitySwitchBranch: "Cambiar de rama",
+  activityDeleteBranch: "Eliminar rama",
+  activityRenameBranch: "Renombrar rama",
+  activityReadRemote: "Buscar cambios en el remoto",
+  activityRebase: "Mover commits a otra base",
+  activityGitOperation: "Operación de Git",
+  activityCreateRemote: "Crear repositorio remoto",
+  activityIgnoreFile: "Ignorar archivo",
+  activitySetIdentity: "Configurar el autor de los commits",
+  activityCreateReview: "Crear revisión",
+  activityUndoSave: "Deshacer guardado y conservar archivos",
+  activityRevertSave: "Revertir guardado con un nuevo commit",
+  activityRecoveryBranch: "Crear rama de recuperación",
   conflictHistoryWarning: "GitCat no pudo guardar el registro de actividad. Consulta el resultado que se muestra para cada archivo.",
   switchWorkTitle: "Trabajo sin terminar",
   switchWorkStay: "Seguir aquí",
@@ -1314,6 +1351,7 @@ const es: { [K in keyof typeof en]: string } = {
   shareReviewCommits: "Commits que se publicarán",
   shareReviewLiveStatus: "Estado real de la revisión",
   shareReviewConfirmation: "La confirmación publica solo estos commits guardados y luego crea o actualiza una revisión abierta. No integra, fuerza la publicación ni evita protecciones de ramas.",
+  shareReviewOpen: "Abrir revisión",
   shareReviewPublishExisting: "Publicar en esta revisión",
   shareReviewPublishNew: "Publicar y crear una revisión nueva",
   shareReviewHistoryWarning: "La revisión está abierta. GitCat no pudo guardar toda la operación en Actividad.",
@@ -1937,6 +1975,7 @@ const es: { [K in keyof typeof en]: string } = {
   notMerged: "sin integrar en la rama por defecto ni en la actual",
   worktreesOpen: "Mostrar worktrees",
   openWorktreeAction: "Abrir carpeta de trabajo",
+  openBranchWorktree: "Abrir worktree",
   worktreeOpenHint: "Doble clic para abrir esta carpeta de trabajo",
   worktreeOpenFailed: "No se pudo abrir esta carpeta de trabajo. Actualiza la lista de worktrees y comprueba que su carpeta esté disponible.",
   worktreePreviewNote: "Estos cambios están en otra carpeta de trabajo. Ábrela para revisarlos y guardarlos. Tus cambios actuales permanecen en su carpeta.",
@@ -2379,6 +2418,7 @@ const es: { [K in keyof typeof en]: string } = {
   recoveryAssistant_not_configured: "El asistente no está configurado, así que GitCat solo ofrece lo que puede demostrar con el repositorio. No va a elegir por ti.",
   recoveryAssistant_timeout: "El asistente no respondió a tiempo. Lo que GitCat muestra aquí sigue siendo exacto; elige cómo quieres seguir.",
   recoveryAssistant_unreachable: "No se pudo contactar con el asistente. Lo que GitCat muestra aquí sigue siendo exacto; elige cómo quieres seguir.",
+  recoveryAssistant_invalid_response: "El proveedor respondió en un formato que GitCat no pudo usar. Las opciones de recuperación se basan en el repositorio.",
   recoveryAssistant_error: "El asistente no pudo responder esta vez. Lo que GitCat muestra aquí sigue siendo exacto; elige cómo quieres seguir.",
   recoveryAssistantSuggests: "La opinión del asistente",
   recoveryDescribeFailed: "GitCat no pudo volver a leer el repositorio después del fallo. Tu trabajo no se tocó; actualiza para ver cómo están las cosas.",
@@ -2508,6 +2548,13 @@ export function writeLocale(locale: Locale) {
 }
 
 export function localeTag(locale: Locale) { return locale === "es" ? "es-ES" : "en-US"; }
+
+export function formatDate(date: string, locale: Locale) {
+  if (!date) return "—";
+  const value = new Date(date);
+  if (Number.isNaN(value.valueOf())) return date;
+  return new Intl.DateTimeFormat(localeTag(locale), { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(value);
+}
 
 export function translate(locale: Locale): Translate {
   const messages = locale === "es" ? es : en;

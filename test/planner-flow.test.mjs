@@ -39,11 +39,15 @@ globalThis.fetch = async (_url, init) => {
   requests.push(JSON.parse(init.body));
   const next = queue.shift();
   if (!next) throw new Error("llamada al proveedor no esperada");
+  if (next.error) throw next.error;
   return {
     ok: next.ok !== false,
     status: next.status ?? 200,
     text: async () => next.raw ?? "",
-    json: async () => next.payload
+    json: async () => {
+      if (next.jsonError) throw next.jsonError;
+      return next.payload;
+    }
   };
 };
 const reply = (value) => queue.push({ payload: { status: "completed", output_text: typeof value === "string" ? value : JSON.stringify(value) } });
@@ -125,6 +129,33 @@ test("una pregunta se responde con el texto del modelo sobre el estado real", as
   assert.match(requests[0].instructions, /"remembered"/, "el modelo ve lo que ya se confirmó antes");
 });
 
+test("las respuestas completas del proveedor aceptan los campos de cuentas del esquema estricto", async t => {
+  const path = mkdtempSync(join(tmpdir(), "gitcat-full-planner-schema-"));
+  t.after(() => rmSync(path, { recursive: true, force: true }));
+  execFileSync("git", ["clone", "-q", repo, path]);
+  const run = (...args) => execFileSync("git", args, { cwd: path, encoding: "utf8" }).trim();
+  const repository = { ...plan().repository, provider: "", connectionId: "" };
+  const respond = (value) => queue.push({ payload: { status: "completed", output: [
+    { type: "reasoning", summary: [] },
+    { type: "message", content: [{ type: "output_text", text: JSON.stringify(value) }] }
+  ] } });
+
+  respond(plan({ intent: "answer", repository, reply: "The active branch is main." }));
+  const answer = await service.planAction(path, "What is the active branch?", [], "en");
+  assert.deepEqual(Object.keys(repository).sort(), [...requests[0].text.format.schema.properties.repository.required].sort());
+  assert.equal(answer.answer, "The active branch is main.");
+  assert.equal(answer.operation, "none");
+
+  respond(plan({ intent: "git_operation", repository, steps: [step("create_branch", { name: "qa/assistant-test" })] }));
+  const prepared = await service.planAction(path, "Create qa/assistant-test from HEAD", [], "en");
+  assert.equal(prepared.requiresConfirmation, true);
+  assert.equal(prepared.steps[0].operation, "create_branch");
+  assert.equal(run("branch", "--list", "qa/assistant-test"), "");
+  const result = await service.executePlan(path, prepared, "en");
+  assert.equal(result.error, undefined);
+  assert.equal(run("branch", "--show-current"), "qa/assistant-test");
+});
+
 test("el imperativo “Guarda este repositorio” llega a la creación de repositorio", async () => {
   reply(plan({
     intent: "create_repository",
@@ -164,7 +195,21 @@ test("un JSON que no cumple el esquema no activa ningún planificador local", as
   reply({ allowed: true, operation: "push" });
   const result = await service.planAction(repo, "sube los cambios");
   assert.equal(result.allowed, false);
+  assert.equal(result.assistantUnavailable, "invalid_response");
   assert.match(result.rationale, /no cumple el esquema del plan/);
+  assert.doesNotMatch(result.rationale, /No pude consultar/);
+});
+
+test("distingue un cuerpo inválido de un fallo de conexión", async () => {
+  queue.push({ jsonError: new SyntaxError("Invalid JSON") });
+  const malformed = await service.planAction(repo, "what branch am I on?", [], "en");
+  assert.equal(malformed.assistantUnavailable, "invalid_response");
+  assert.match(malformed.rationale, /provider returned.*format/i);
+
+  queue.push({ error: new TypeError("Network unavailable") });
+  const disconnected = await service.planAction(repo, "what branch am I on?", [], "en");
+  assert.equal(disconnected.assistantUnavailable, "unreachable");
+  assert.match(disconnected.rationale, /could not query/i);
 });
 
 test("el riesgo y la confirmación deterministas prevalecen sobre los del modelo", async () => {
