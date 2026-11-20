@@ -3,9 +3,10 @@ import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { redactSecrets } from './readiness.js';
 import { redactText } from './outbound-content.js';
-import type { ActivityRecord, RepoSnapshot, StepOutcome } from '../shared/types.js';
+import type { ActionPlan, ActivityOperation, ActivityRecord, RepoSnapshot, StepOutcome } from '../shared/types.js';
 
 type Store = { retentionDays: number; entries: ActivityRecord[] };
+type ActivityPlan = Pick<ActionPlan, 'switchWork' | 'recovery'> & { steps: { operation: ActivityOperation }[] };
 const retentionDays = [0, 7, 30, 90];
 const states = new Set(['running', 'completed', 'failed']);
 const statuses = new Set(['pending', 'completed', 'failed', 'skipped']);
@@ -31,6 +32,19 @@ function validEntry(entry: ActivityRecord) {
     && Array.isArray(entry.steps) && entry.steps.every(step => step && typeof step.operation === 'string'
       && statuses.has(step.status) && (step.afterHead === undefined || typeof step.afterHead === 'string'))
     && (entry.error === undefined || typeof entry.error === 'string');
+}
+
+function recordedOperation(plan: ActivityPlan, operation: ActivityOperation): ActivityOperation {
+  if (operation !== 'git_command') return operation;
+  // The journal keeps the confirmed intent without copying arguments or command text.
+  if (plan.switchWork?.mode === 'set_aside') return 'set_aside_work';
+  if (plan.switchWork?.mode === 'restore') return 'restore_set_aside_work';
+  switch (plan.recovery?.mode) {
+    case 'undo': return 'undo_save';
+    case 'revert': return 'revert_save';
+    case 'restore': return 'create_recovery_branch';
+    default: return operation;
+  }
 }
 
 export class ActivityHistory {
@@ -82,11 +96,11 @@ export class ActivityHistory {
   }
   retention(days: number) { if (!retentionDays.includes(days)) throw new Error('Invalid retention.'); const s=this.read(); s.retentionDays=days; this.write(s); }
   clear(repoPath: string) { const s=this.read(); s.entries=s.entries.filter(e=>e.repoPath!==repoPath); this.write(s); }
-  begin(plan: { steps: { operation: ActivityRecord["steps"][number]["operation"] }[] }, before: RepoSnapshot): string | undefined {
+  begin(plan: ActivityPlan, before: RepoSnapshot): string | undefined {
     const s=this.read(); if (!s.retentionDays) return;
     const id=randomUUID();
     s.entries.push({ id, repoPath:before.path, startedAt:new Date().toISOString(), state:'running', before:{ head:before.head, branch:before.currentBranch },
-      steps:plan.steps.map(step=>({ operation:step.operation, status:'pending' })) });
+      steps:plan.steps.map(step=>({ operation:recordedOperation(plan, step.operation), status:'pending' })) });
     this.write(s); return id;
   }
   step(id: string | undefined, index: number, outcome: StepOutcome, before: RepoSnapshot, after?: RepoSnapshot, afterHead?: string) {

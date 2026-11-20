@@ -1,7 +1,40 @@
 import { useEffect, useState } from 'react';
 import { useDialog } from './useDialog';
-import { translate } from './i18n';
-import type { ActivityRecord, HistoryRecovery, Locale } from '../shared/types';
+import { translate, type MessageKey } from './i18n';
+import type { ActivityOperation, ActivityRecord, HistoryRecovery, Locale } from '../shared/types';
+
+const operationLabels: Record<ActivityOperation, MessageKey> = {
+  sync_remote: 'activitySyncRemote',
+  stash_push: 'activitySetAside',
+  stash_pop: 'activityRestoreWork',
+  status: 'activityReadStatus',
+  checkout: 'activitySwitchBranch',
+  create_branch: 'createBranch',
+  delete_branch: 'activityDeleteBranch',
+  rename_branch: 'activityRenameBranch',
+  fetch: 'activityReadRemote',
+  pull: 'pullLatest',
+  push: 'pushBranch',
+  merge: 'mergeBranch',
+  rebase: 'activityRebase',
+  abort_operation: 'abortHalfFinished',
+  continue_operation: 'continueOperation',
+  skip_operation: 'skipCommit',
+  resolve_conflict: 'resolveConflictsButton',
+  commit: 'saveChanges',
+  git_command: 'activityGitOperation',
+  github_create_repo: 'activityCreateRemote',
+  ignore_path: 'activityIgnoreFile',
+  set_identity: 'activitySetIdentity',
+  add_remote: 'connectRemoteTitle',
+  none: 'activityGitOperation',
+  pull_request: 'activityCreateReview',
+  set_aside_work: 'activitySetAside',
+  restore_set_aside_work: 'activityRestoreWork',
+  undo_save: 'activityUndoSave',
+  revert_save: 'activityRevertSave',
+  create_recovery_branch: 'activityRecoveryBranch'
+};
 
 export function ActivityHistory({ path, locale, onClose, onRecover }: { path: string; locale: Locale; onClose: () => void; onRecover: (id: string, mode: HistoryRecovery['mode']) => void }) {
   const ref = useDialog(onClose);
@@ -53,7 +86,10 @@ export function ActivityHistory({ path, locale, onClose, onRecover }: { path: st
     {entries.map(entry=><article key={entry.id} className="activity-record">
       <strong>{new Date(entry.startedAt).toLocaleString(locale)} · {text(entry.state, entry.state === 'completed' ? 'completada' : entry.state === 'failed' ? 'necesita atención' : 'resultado por comprobar')}</strong>
       <p>{entry.before.branch} · <code>{entry.before.head.slice(0,7) || '—'}</code> → {entry.after?.branch ?? '—'} · <code>{entry.after?.head.slice(0,7) ?? '—'}</code></p>
-      <ol>{entry.steps.map((step,i)=><li key={i}>{step.operation} · {text(step.status, ({pending:'por comprobar',completed:'completado',failed:'fallido',skipped:'omitido'})[step.status])}{step.afterHead && <> · <code>{step.afterHead.slice(0,7)}</code></>}</li>)}</ol>
+      <ol>{entry.steps.map((step, i) => {
+        const label = Object.hasOwn(operationLabels, step.operation) ? operationLabels[step.operation] : 'activityGitOperation';
+        return <li key={i}>{t(label)} · {text(step.status, ({pending:'por comprobar',completed:'completado',failed:'fallido',skipped:'omitido'})[step.status])}{step.afterHead && <> · <code>{step.afterHead.slice(0,7)}</code></>}</li>;
+      })}</ol>
       {entry.error && <p>{entry.error}</p>}
       <div className="modal-actions">
         {entry.steps.some(s=>s.operation==='commit' && s.status==='completed') && <>
