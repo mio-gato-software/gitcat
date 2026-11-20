@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 registerHooks({ resolve(specifier, context, next) { return specifier === 'electron' ? { url: new URL('./helpers/electron-stub.mjs', import.meta.url).href, shortCircuit: true } : next(specifier, context); } });
 const service = await import('../dist-electron/electron/git-service.js');
 const { gitignoreLine, resolveSelection } = await import('../dist-electron/shared/selected-changes.js');
+const { planSummary } = await import('../dist-electron/shared/plan-summary.js');
 const { getSnapshot, prepareBranchDelivery, prepareOperation, executePlan, getSelectionDiff } = service;
 
 function fixture(t, files = { 'a.txt': 'a\n', 'b.txt': 'b\n', 'c.txt': 'c\n' }) {
@@ -30,6 +31,61 @@ const save = async (path, paths, { message = 'save selected', merge = false } = 
   return prepareBranchDelivery(path, { stateId: snapshot.stateId, message, mergeToDefault: merge, selection: pick(snapshot, ...paths) }, 'en');
 };
 const committedFiles = (git) => git('show', '--name-status', '--format=', 'HEAD').split('\n').filter(Boolean).sort();
+const discard = async (path, file) => prepareOperation(path, 'discard_file', pick(await getSnapshot(path), file)[0], 'en');
+
+test('discarding one tracked file restores its staged and unstaged versions by literal path', async (t) => {
+  const name = 'file [1].txt';
+  const { path, git, write } = fixture(t, { [name]: 'original\n', 'file 1.txt': 'neighbor\n', 'staged.txt': 'original\n' });
+  const head = git('rev-parse', 'HEAD');
+  write(name, 'staged\n'); git('--literal-pathspecs', 'add', '--', name);
+  write(name, 'unstaged\n');
+  write('file 1.txt', 'unrelated edit\n');
+  write('staged.txt', 'unrelated staged\n'); git('add', 'staged.txt');
+  write('new.txt', 'new work\n');
+  const before = git('status', '--porcelain');
+
+  const plan = await discard(path, name);
+  assert.equal(plan.requiresConfirmation, true);
+  assert.match(planSummary(plan, await getSnapshot(path), 'en').irreversible.join(' '), /including its staged changes/);
+  assert.equal(git('status', '--porcelain'), before);
+  assert.equal(readFileSync(join(path, name), 'utf8'), 'unstaged\n');
+
+  assert.equal((await executePlan(path, plan, 'en')).error, undefined);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+  assert.equal(git('show', `:${name}`), 'original');
+  assert.equal(readFileSync(join(path, name), 'utf8'), 'original\n');
+  assert.equal(git('status', '--porcelain', '-z'), ' M file 1.txt\0M  staged.txt\0?? new.txt\0');
+  assert.equal(git('show', ':staged.txt'), 'unrelated staged');
+  assert.equal(readFileSync(join(path, 'file 1.txt'), 'utf8'), 'unrelated edit\n');
+});
+
+test('discard refuses to overwrite newer edits or paths without a restorable file', async (t) => {
+  const { path, git, write } = fixture(t);
+  write('a.txt', 'reviewed\n');
+  const plan = await discard(path, 'a.txt');
+  write('a.txt', 'newer edit\n');
+  await assert.rejects(() => prepareOperation(path, 'discard_file', plan.steps[0].args, 'en'), /file changed after you reviewed it/);
+  await assert.rejects(() => executePlan(path, plan, 'en'), /Local changes moved/);
+  assert.equal(readFileSync(join(path, 'a.txt'), 'utf8'), 'newer edit\n');
+
+  write('untracked.txt', 'new\n');
+  write('added.txt', 'staged new\n'); git('add', 'added.txt');
+  git('mv', 'b.txt', 'renamed.txt');
+  for (const file of ['untracked.txt', 'added.txt', 'renamed.txt']) {
+    await assert.rejects(() => discard(path, file), /individual file already saved/);
+  }
+  unlinkSync(join(path, 'c.txt'));
+  const restore = await discard(path, 'c.txt');
+  assert.equal((await executePlan(path, restore, 'en')).error, undefined);
+  assert.equal(readFileSync(join(path, 'c.txt'), 'utf8'), 'c\n');
+
+  unlinkSync(join(path, 'c.txt'));
+  mkdirSync(join(path, 'c.txt'));
+  write('c.txt/private.txt', 'ignored work\n');
+  write('.git/info/exclude', '/c.txt/private.txt\n');
+  await assert.rejects(() => discard(path, 'c.txt'), /cannot safely restore/);
+  assert.equal(readFileSync(join(path, 'c.txt/private.txt'), 'utf8'), 'ignored work\n');
+});
 
 test('mixed staged and unstaged edits: the ticked file is saved whole, other staging decisions survive', async (t) => {
   const { path, git, write } = fixture(t);

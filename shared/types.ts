@@ -422,6 +422,7 @@ export type Operation =
   | "github_create_repo"
   /** Adds one anchored line to .gitignore for an untracked file. Only a direct control prepares it; the model never can. */
   | "ignore_path"
+  | "discard_file"
   /** Sets the name and email commits are signed with, for this repository or globally (`scope`). Direct control only. */
   | "set_identity"
   /** Connects this repository to a remote address the person typed. Direct control only. */

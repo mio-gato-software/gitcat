@@ -312,6 +312,7 @@
 .save-preview .diff-view { margin-top: 4px; }
 .save-preview .diff-view pre { max-height: 28vh; }
 .save-preview .diff-toolbar strong { overflow-wrap: anywhere; }
+.save-preview .discard-file { margin-top: 6px; }
 .commit-form-actions .primary-button { flex: 1 1 160px; }
 .file-inclusion-note { margin: 10px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.55; }
 .save-description-required { color: var(--amber); }

@@ -960,6 +960,18 @@ app.whenReady().then(async () => {
   await capture('selected-diff');
   await js(`document.querySelector('.selection-preview .icon-button').click()`);
   await waitFor(`!document.querySelector('.selection-preview')`);
+  await js(`${rowFor('app.txt')}.querySelector('.change-open').click()`);
+  await waitFor(`document.querySelector('.selection-preview .discard-file')`);
+  await js(`document.querySelector('.selection-preview .discard-file').click()`);
+  await waitFor(`document.querySelector('.delivery-review-modal')`);
+  assert.match(await js(`document.querySelector('.delivery-review-modal').innerText`), /Descartar los cambios de app\.txt[\s\S]*Se perderán/);
+  await js(`document.querySelector('.delivery-review-modal .modal-heading .icon-button').click()`);
+  await waitFor(`!document.querySelector('.delivery-review-modal')`);
+  assert.equal(git('status', '--porcelain'), before, 'Cancelling the review keeps all edits');
+  await js(`${rowFor('new-file.txt')}.querySelector('.change-open').click()`);
+  await waitFor(`document.querySelector('.selection-preview .diff-toolbar strong')?.innerText === 'new-file.txt'`);
+  assert.equal(await js(`Boolean(document.querySelector('.selection-preview .discard-file'))`), false);
+  await js(`document.querySelector('.selection-preview .icon-button').click()`);
   // Ignoring an untracked file previews the exact .gitignore line and writes nothing until confirmed.
   await js(`${rowFor('new-file.txt')}.querySelector('.change-ignore').click()`);
   await waitFor(`document.querySelector('.delivery-review-modal')`);

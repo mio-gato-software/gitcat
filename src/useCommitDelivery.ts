@@ -13,7 +13,7 @@ type DeliveryOptions = {
   openForm: () => void;
   confirmSharing: (path: string, paths: string[]) => Promise<boolean>;
   reportDescriptionError: (path: string, error: unknown) => Promise<void>;
-  showPlan: (question: string, load: () => Promise<ActionPlan>, path: string, review: boolean) => Promise<ActionPlan | undefined>;
+  showPlan: (question: string, load: () => Promise<ActionPlan>, path: string, options: { review: boolean }) => Promise<ActionPlan | undefined>;
 };
 
 export function useCommitDelivery({
@@ -116,7 +116,7 @@ export function useCommitDelivery({
     const selection = selected.map((change) => ({ path: change.path, version: change.version ?? "" }));
     void showPlan(t(includeIntegration ? "saveAndIntegrate" : "saveChanges", { target: snapshot.defaultBranch ?? "" }),
       () => window.gitcat.prepareBranchDelivery(snapshot.path, { stateId: snapshot.stateId, message: trimmed, mergeToDefault: includeIntegration, selection }, locale),
-      snapshot.path, true);
+      snapshot.path, { review: true });
   }
 
   function beginDelivery(integrate: boolean, refreshReview = false) {
@@ -131,7 +131,7 @@ export function useCommitDelivery({
     } else if (integrate) {
       void showPlan(t("integrateInto", { target: snapshot.defaultBranch ?? "" }),
         () => window.gitcat.prepareBranchDelivery(snapshot.path, { stateId: snapshot.stateId, mergeToDefault: true }, locale),
-        snapshot.path, true);
+        snapshot.path, { review: true });
     }
   }
 
