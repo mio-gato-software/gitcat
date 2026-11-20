@@ -139,7 +139,7 @@
 .branch-sync-badge { display: inline-flex; flex: none; align-items: center; color: var(--muted); }
 .branch-sync-badge.diverged, .ref-tag.diverged { color: var(--amber, #e4be81); }
 .ref-tag.diverged { border-color: var(--amber, #e4be81); }
-.ref-tag .ref-cloud { display: inline-flex; flex: none; overflow: visible; }
+.ref-tag .ref-cloud { display: inline-flex; flex: none; overflow: visible; padding: 0; color: inherit; background: transparent; }
 .ref-tag .ref-cloud:hover { color: var(--mint); }
 .ref-tag .ref-worktree { display: inline-flex; flex: none; overflow: visible; }
 .worktree-preview { padding: 16px; display: grid; gap: 12px; }
