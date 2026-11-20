@@ -92,6 +92,9 @@
 /* The name is what the row is for, so badges give way before it does. */
 .branch-main { overflow: hidden; }
 .branch-main > .branch-label { flex: 0 1 auto; min-width: 6ch; }
+.branch-worktree-name { min-width: 0; display: grid; }
+.branch-worktree-path { color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.branch-switch.open-worktree { display: inline-flex; align-items: center; gap: 4px; width: auto; padding: 0 4px; opacity: 1; font-size: 10px; white-space: nowrap; }
 .branch-main > .current-pill { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* The graph */
