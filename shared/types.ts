@@ -1001,8 +1001,8 @@ export type GitlineApi = {
   setPracticeLesson: (path:string,lesson:number)=>Promise<PracticeInfo>;
   editPractice: (path:string)=>Promise<RepoSnapshot>;
   removePractice: (path:string)=>Promise<void>;
-  previewReview: (path:string, request:ShareReviewRequest)=>Promise<ShareReviewPreview>;
-  publishReview: (path: string, id: string) => Promise<ShareReviewResult>;
+  previewReview: (path:string, request:ShareReviewQuery)=>Promise<ShareReviewPreview>;
+  publishReview: (path: string, id: string, draft?: ShareReviewDraft) => Promise<ShareReviewResult>;
   openReview: (url:string)=>Promise<void>;
   getSwitchWork: (path: string, target: string) => Promise<SwitchWorkPreview>;
   prepareSwitchWork: (path: string, request: SwitchWorkRequest, locale?: Locale) => Promise<ActionPlan>;
@@ -1064,7 +1064,9 @@ export type HistoryRecovery = { mode: 'revert' | 'undo' | 'restore'; commit: str
 export type SwitchWorkRequest = { mode: 'carry' | 'set_aside' | 'restore'; target?: string; label?: string; includeUntracked?: boolean; stash?: string; stashRef?: string; removeAfterRestore?: boolean };
 export type SwitchWorkPreview = { snapshot: RepoSnapshot; target: string; occupied?: string; blockers: string[]; entries: { hash: string; ref: string; label: string; branch?: string; date: string }[] };
 
-export type ShareReviewRequest = { remote:string;head:string;base:string;title:string;body:string;provider?:HostingProvider;connectionId?:string };
+export type ShareReviewQuery = { remote:string;head:string;base:string;provider?:HostingProvider;connectionId?:string };
+export type ShareReviewDraft = { title: string; body: string };
+export type ShareReviewRequest = ShareReviewQuery & ShareReviewDraft;
 export type ReviewPullRequest = {url:string;state:'OPEN'|'CLOSED'|'MERGED';head:string;base:string};
 export type ShareReviewResult = {
   pullRequest: ReviewPullRequest;

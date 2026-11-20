@@ -73,13 +73,16 @@ test('GitLab private creation, publishing, account readiness and review creation
  git(path,'config','credential.https://code.company.test.helper','');git(path,'config','--add','credential.https://code.company.test.helper','!glab auth git-credential');
  const scoped=await service.checkReadiness(path,{remote:'origin',provider:'gitlab',access:true});
  assert.equal(scoped.remote.account.verified,'anna.work','A host-specific reset makes the selected helper unambiguous');
- const request={remote:'origin',provider:'gitlab',head:'work',base:'main',title:'Review',body:'@literal.md'};
+ const request={remote:'origin',provider:'gitlab',head:'work',base:'main'};
  const preview=await service.previewShareReview(path,request);assert.equal(preview.commits.length,0);assert.equal(state().reviews.length,0);
- const result=await service.publishShareReview(preview);assert.equal(result.pullRequest.state,'OPEN');assert.equal(state().reviews.length,1);
+ await assert.rejects(service.publishShareReview(preview,{title:'',body:'draft'}),/give the review a title/);
+ assert.equal(state().reviews.length,0);
+ const result=await service.publishShareReview(preview,{title:'Edited review',body:'@literal.md'});assert.equal(result.pullRequest.state,'OPEN');assert.equal(state().reviews.length,1);
  const again=await service.previewShareReview(path,request);await service.publishShareReview(again);assert.equal(state().reviews.length,1);
  assert.equal(readFileSync(join(path,'unsaved.txt'),'utf8'),'keep me');assert.equal(git(path,'status','--porcelain'),'?? unsaved.txt');
  assert.ok(state().calls.some(args=>args.includes('visibility=private')));
  assert.ok(state().calls.some(args=>args.includes('description=@literal.md')));
+ assert.ok(state().calls.some(args=>args.includes('title=Edited review')));
  assert.ok(state().calls.every(args=>!args.includes('switch')&&!args.includes('token')));
 });
 

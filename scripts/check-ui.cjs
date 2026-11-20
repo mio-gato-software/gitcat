@@ -83,7 +83,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('hosting:remove',()=>({secureStorage:true,connections:hostingAccounts}));
   let hostingScenario = false;
   const hostingSnapshot = value => hostingScenario ? { ...value, remotes: ['origin'], remoteUrls: { origin: nativeUi[hostingScenario]?.remote??'https://code.company.test/org/team/repo.git' } } : value;
-  const reviewRequests = [], reviewLinks = [];
+  const reviewRequests = [], reviewLinks = [], reviewDrafts = [];
   let reviewPublished = false;
   const reviewUrl = 'https://code.company.test/org/team/repo/-/merge_requests/1';
   const reviewCheckedAt = '2026-11-19T23:40:00.000Z';
@@ -96,8 +96,9 @@ app.whenReady().then(async () => {
     const existing = reviewScenario?.open ? { url: reviewUrl, state: 'OPEN', head: request.head, base: request.base } : undefined;
     return { id: 'hosting-ui', repoPath: p, provider: request.provider, host: 'code.company.test', request, repository: 'org/team/repo', remoteUrl: 'https://code.company.test/org/team/repo.git', account: 'anna.work', headHash: snapshot.head, baseHash: 'b'.repeat(40), commits, existing, reviewable: true, checkedAt: reviewCheckedAt };
   });
-  ipcMain.handle('review:publish', async (_, p, id) => {
+  ipcMain.handle('review:publish', async (_, p, id, draft) => {
     assert.equal(id, 'hosting-ui');reviewPublished = true;
+    reviewDrafts.push(draft);
     const native=nativeUi[hostingScenario];
     const pullRequest = { url: native?`${native.location.webUrl}/${native.provider==='azure'?'pullrequest':'pull-requests'}/1`:reviewUrl, state: 'OPEN' };
     return native
@@ -651,17 +652,30 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.remote-status')?.innerText.includes('code.company.test')`);
   await js(`document.querySelector('[aria-label="Compartir para revisión"]').click()`);
   await waitFor(`document.querySelector('.share-review')`);
-  await js(`(() => {const select=document.querySelectorAll('.share-review select')[1];select.value='gitlab';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  assert.equal(await js(`Boolean(document.querySelector('.share-review input[name="title"], .share-review textarea[name="body"]'))`), false);
+  assert.equal(await js(`document.querySelector('.share-review-destination').open`), false);
+  await js(`(() => {document.querySelector('.share-review-destination').open = true;const select=document.querySelector('.share-review select[name="provider"]');select.value='gitlab';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
   await js(`document.querySelector('.share-review .outline-button').click()`);
   await waitFor(`document.querySelector('.share-review .activity-record')`);
   assert.equal(reviewRequests.at(-1).provider, 'gitlab');
+  assert.equal(Object.hasOwn(reviewRequests.at(-1), 'title'), false);
+  assert.equal(Object.hasOwn(reviewRequests.at(-1), 'body'), false);
   assert.equal(reviewPublished, false, 'Checking leaves publication behind confirmation');
   assert.match(await js(`document.querySelector('.share-review .activity-record').innerText`), /GitLab[\s\S]*org\/team\/repo[\s\S]*anna.work[\s\S]*Saved work for review/);
   await assertDialog();
   await capture('gitlab-review');
+  await js(`(() => {
+    const title = document.querySelector('.share-review input[name="title"]');
+    const body = document.querySelector('.share-review textarea[name="body"]');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(title, 'Reviewed after checking');
+    title.dispatchEvent(new Event('input', { bubbles: true }));
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(body, 'Draft entered after checking');
+    body.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
   await js(`document.querySelector('.share-review .primary-button').click()`);
   await waitFor(`document.querySelector('.share-review [role="status"]')?.innerText.includes('merge_requests/1')`);
   assert.equal(reviewPublished, true);
+  assert.deepEqual(reviewDrafts.at(-1), { title: 'Reviewed after checking', body: 'Draft entered after checking' });
   const reviewStatus = await js(`document.querySelector('.share-review [role="status"]').innerText`);
   assert.match(reviewStatus, /no pudo guardar toda la operación en Actividad/);
   assert.match(reviewStatus, /Falló una comprobación del repositorio local[\s\S]*Actualiza el proyecto/);
@@ -675,6 +689,7 @@ app.whenReady().then(async () => {
   await js(checkReview);
   await waitFor(reviewPrimary);
   assert.equal(await js(`${reviewPrimary}.innerText.trim()`), 'Abrir revisión');
+  assert.equal(await js(`Boolean(document.querySelector('.share-review input[name="title"], .share-review textarea[name="body"]'))`), false);
   const openReviewText = await js(`document.querySelector('.share-review .activity-record').innerText`);
   assert.match(openReviewText, /Estado real de la revisión: OPEN/);
   assert.doesNotMatch(openReviewText, /La confirmación publica/);
@@ -689,10 +704,12 @@ app.whenReady().then(async () => {
   await js(checkReview);
   await waitFor(reviewPrimary);
   assert.equal(await js(`${reviewPrimary}.innerText.trim()`), 'Publicar en esta revisión');
+  assert.equal(await js(`Boolean(document.querySelector('.share-review input[name="title"]'))`), false);
   reviewScenario = { open: false, noCommits: true };
   await js(checkReview);
   await waitFor(reviewPrimary);
   assert.equal(await js(`${reviewPrimary}.innerText.trim()`), 'Publicar y crear una revisión nueva');
+  assert.equal(await js(`Boolean(document.querySelector('.share-review input[name="title"]'))`), true);
   assert.equal(await js(`${reviewPrimary}.disabled`), false, 'A published branch can still open its first review');
   reviewScenario = undefined;
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
@@ -708,9 +725,9 @@ app.whenReady().then(async () => {
     await waitFor(`document.querySelector('.remote-status')?.innerText.includes(${JSON.stringify(provider==='bitbucket'?'bitbucket.org':provider==='azure'?'ssh.dev.azure.com':'code.company.test')})`);
     await js(`document.querySelector('[aria-label="Compartir para revisión"]').click()`);
     await waitFor(`document.querySelector('.share-review')`);
-    await js(`(() => {const select=document.querySelectorAll('.share-review select')[1];select.value=${JSON.stringify(provider)};select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
-    await waitFor(`document.querySelectorAll('.share-review select')[2]?.querySelector('option[value="ui-${provider}"]')`);
-    await js(`(() => {const select=document.querySelectorAll('.share-review select')[2];select.value='ui-${provider}';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await js(`(() => {document.querySelector('.share-review-destination').open = true;const select=document.querySelector('.share-review select[name="provider"]');select.value=${JSON.stringify(provider)};select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await waitFor(`document.querySelector('.share-review select[name="connection"] option[value="ui-${provider}"]')`);
+    await js(`(() => {const select=document.querySelector('.share-review select[name="connection"]');select.value='ui-${provider}';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
     await js(`document.querySelector('.share-review .outline-button').click()`);
     await waitFor(`document.querySelector('.share-review .activity-record')`);
     assert.equal(reviewRequests.at(-1).connectionId,`ui-${provider}`);assert.equal(reviewPublished,false);

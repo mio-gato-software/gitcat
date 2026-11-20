@@ -6,7 +6,7 @@ import type { ConflictResolutionAction } from "../shared/types.js";
 import { syncDestinations } from "../shared/remote-sync.js";
 import { PracticeProjects } from "./practice-project.js";
 import { previewReview, publishReview, type ReviewTools } from "./share-review.js";
-import type { ShareReviewRequest, ShareReviewPreview } from "../shared/types.js";
+import type { ShareReviewQuery, ShareReviewDraft, ShareReviewPreview } from "../shared/types.js";
 import { hostingProvider, validHostingHost, validHostingRepository, isNativeProvider, hostingLabels } from "../shared/hosting.js";
 import { HostingConnections, nativeGitConfig } from "./hosting-connections.js";
 import { nativeRepositoryFacts, createNativeReview, nativeCreationFacts, createNativeRepository } from "./native-reviews.js";
@@ -4796,9 +4796,9 @@ const reviewTools: ReviewTools = {
     return warning;
   }
 };
-export const previewShareReview=(cwd:string,request:ShareReviewRequest)=>previewReview(reviewTools,cwd,request);
-export const publishShareReview=async(preview:ShareReviewPreview)=>{
-  const result=await publishReview(reviewTools,preview);
+export const previewShareReview=(cwd:string,request:ShareReviewQuery & Partial<ShareReviewDraft>)=>previewReview(reviewTools,cwd,request);
+export const publishShareReview=async(preview:ShareReviewPreview,draft?:ShareReviewDraft)=>{
+  const result=await publishReview(reviewTools,preview,draft);
   saveMemory(rememberRepository(memory,preview.repoPath,{provider:preview.provider,host:preview.host,remote:preview.request.remote,...(preview.hosting?{connectionId:preview.hosting.connectionId}:{})},new Date().toISOString()));
   return result;
 };
