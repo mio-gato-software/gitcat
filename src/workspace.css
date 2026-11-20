@@ -679,3 +679,13 @@
 .worktree-info { min-width: 0; flex: 1; display: grid; gap: 5px; }
 .worktree-info code, .worktree-info span { overflow-wrap: anywhere; font-size: 12px; }
 .worktree-list button { flex-shrink: 0; }
+
+.activity-entry > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; }
+.activity-entry > summary strong { color: var(--text); overflow-wrap: anywhere; }
+.activity-entry > summary svg { flex: none; }
+.activity-entry[open] > summary svg { transform: rotate(180deg); }
+.activity-entry-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 11px; }
+.activity-entry-technical { margin-top: 8px; color: var(--muted); overflow-wrap: anywhere; }
+.activity-entry-recovery { margin-bottom: 8px; }
+.activity-settings { margin-top: 16px; padding-top: 10px; border-top: 1px solid var(--border); }
+.activity-settings summary, .activity-entry-technical summary { cursor: pointer; }

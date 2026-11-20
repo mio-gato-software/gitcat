@@ -39,6 +39,8 @@ test('history survives a new store instance and interrupted steps remain unknown
 test('an unpublished save can be undone while keeping files and index, and restoring a reference does not switch',async t=>{
  const {path,git}=fixture(t), base=git('rev-parse','HEAD'),entry=await save(path);
  assert.equal(entry.steps[0].status,'completed'); assert.equal(entry.steps[0].beforeHead,base);
+ assert.deepEqual(await service.suggestHistoryRecovery(path,entry.id,'en'),{mode:'undo',reason:'local'});
+ assert.equal(git('rev-parse','HEAD'),entry.after.head);
  const index=git('write-tree');
  const plan=await service.prepareHistoryRecovery(path,entry.id,'undo','en');
  assert.equal(plan.requiresConfirmation,true);assert.deepEqual(plan.steps[0].argv,['reset','--soft',`${entry.after.head}^`]);
@@ -92,6 +94,7 @@ test('retrying an undo rechecks that the saved commit is still the tip', async t
 
   git('commit', '-q', '--allow-empty', '-m', 'Newer commit');
   const head = git('rev-parse', 'HEAD');
+  assert.deepEqual(await service.suggestHistoryRecovery(path,entry.id,'en'),{mode:'revert',reason:'older'});
   await assert.rejects(service.prepareRetry(path, { plan, outcomes: failed.outcomes, stale: false }, 'en'), /The branch has moved/);
   assert.equal(git('rev-parse', 'HEAD'), head);
 });
@@ -102,6 +105,8 @@ test('published saves use revert, and publication after preview blocks an undo',
  writeFileSync(join(path,'.git','info','exclude'),'remote.git/\n');
  const entry=await save(path), undo=await service.prepareHistoryRecovery(path,entry.id,'undo','en');
  git('push','-u','origin','main');
+ assert.deepEqual(await service.suggestHistoryRecovery(path,entry.id,'en'),{mode:'revert',reason:'published'});
+ assert.equal(git('rev-parse','HEAD'),entry.after.head);
  await assert.rejects(service.executePlan(path,undo,'en'),/published/);
  await assert.rejects(service.prepareHistoryRecovery(path,entry.id,'undo','en'),/published/);
  const revert=await service.prepareHistoryRecovery(path,entry.id,'revert','en');
@@ -162,6 +167,7 @@ test('undo is unavailable when a configured push endpoint cannot be verified', a
   git('remote', 'set-url', '--push', 'origin', join(path, 'unavailable.git'));
   const entry = await save(path);
   const head = git('rev-parse', 'HEAD');
+  assert.deepEqual(await service.suggestHistoryRecovery(path,entry.id,'en'),{mode:'revert',reason:'unverified'});
   await assert.rejects(service.prepareHistoryRecovery(path, entry.id, 'undo', 'en'), /could not verify.*Revert/i);
   assert.equal(git('rev-parse', 'HEAD'), head);
   assert.equal(git('for-each-ref', 'refs/gitcat/publication-check'), '');
