@@ -9,7 +9,7 @@ import type {
 } from "../shared/types";
 import { hostingLabels, hostingProviders, isNativeProvider, hostingProvider } from "../shared/hosting";
 import { HostingAccounts, hostingError } from "./HostingAccounts";
-import { translate } from "./i18n";
+import { formatDate, translate } from "./i18n";
 import { useDialog } from "./useDialog";
 
 export function ShareReview({
@@ -61,6 +61,8 @@ export function ShareReview({
   }
   const selectedProvider = provider || known;
   const native = selectedProvider ? isNativeProvider(selectedProvider) : false;
+  const existingReview = preview?.existing;
+  const openExisting = existingReview?.state === "OPEN" && preview?.commits.length === 0 ? existingReview : undefined;
 
   const check = async () => {
     setBusy(true);
@@ -98,6 +100,14 @@ export function ShareReview({
     } finally {
       setBusy(false);
       setPreview(undefined);
+    }
+  };
+  const open = async (url: string) => {
+    setError("");
+    try {
+      await window.gitcat.openReview(url);
+    } catch (reason) {
+      setError(hostingError(reason));
     }
   };
   const edit = (setter: (value: string) => void, value: string) => {
@@ -236,7 +246,8 @@ export function ShareReview({
               {preview.hosting && <> · {preview.hosting.location.gitUrl}</>}
             </p>
             <p>
-              {preview.request.head} → {preview.request.base} · {preview.checkedAt}
+              {preview.request.head} → {preview.request.base} ·{" "}
+              <time dateTime={preview.checkedAt}>{formatDate(preview.checkedAt, locale)}</time>
             </p>
             <p>
               {t("shareReviewCommits")}: {preview.commits.length}
@@ -248,25 +259,39 @@ export function ShareReview({
                 </li>
               ))}
             </ul>
-            {preview.existing && (
+            {existingReview && (
               <p>
-                {t("shareReviewLiveStatus")}: {preview.existing.state}{" "}
-                <button className="ghost-button" onClick={() => void window.gitcat.openReview(preview.existing!.url)}>
-                  {preview.existing.url}
-                </button>
+                {t("shareReviewLiveStatus")}: {existingReview.state}{" "}
+                {!openExisting && (
+                  <button className="ghost-button" onClick={() => void open(existingReview.url)}>
+                    {existingReview.url}
+                  </button>
+                )}
               </p>
             )}
-            <p>{t("shareReviewConfirmation")}</p>
-            <button className="primary-button" disabled={busy || !preview.reviewable} onClick={() => void publish()}>
-              {preview.existing?.state === "OPEN" ? t("shareReviewPublishExisting") : t("shareReviewPublishNew")}
-            </button>
+            {openExisting ? (
+              <button className="primary-button" title={openExisting.url} onClick={() => void open(openExisting.url)}>
+                {t("shareReviewOpen")}
+              </button>
+            ) : (
+              <>
+                <p>{t("shareReviewConfirmation")}</p>
+                <button
+                  className="primary-button"
+                  disabled={busy || !preview.reviewable}
+                  onClick={() => void publish()}
+                >
+                  {existingReview?.state === "OPEN" ? t("shareReviewPublishExisting") : t("shareReviewPublishNew")}
+                </button>
+              </>
+            )}
           </div>
         )}
         {result && (
           <div role="status">
             <p>
               {result.pullRequest.state} ·{" "}
-              <button className="outline-button" onClick={() => void window.gitcat.openReview(result.pullRequest.url)}>
+              <button className="outline-button" onClick={() => void open(result.pullRequest.url)}>
                 {result.pullRequest.url}
               </button>
             </p>

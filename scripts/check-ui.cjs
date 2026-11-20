@@ -85,16 +85,21 @@ app.whenReady().then(async () => {
   const hostingSnapshot = value => hostingScenario ? { ...value, remotes: ['origin'], remoteUrls: { origin: nativeUi[hostingScenario]?.remote??'https://code.company.test/org/team/repo.git' } } : value;
   const reviewRequests = [], reviewLinks = [];
   let reviewPublished = false;
+  const reviewUrl = 'https://code.company.test/org/team/repo/-/merge_requests/1';
+  const reviewCheckedAt = '2026-11-19T23:40:00.000Z';
+  let reviewScenario;
   ipcMain.handle('review:preview', (_, p, request) => {
     reviewRequests.push(request);
     const native=nativeUi[request.provider];
     if(native)return {id:'hosting-ui',repoPath:p,provider:request.provider,host:new URL(native.baseUrl).host,request,repository:native.location.repository,remoteUrl:native.remote,account:native.accountId,hosting:{connectionId:`ui-${request.provider}`,location:native.location,accountId:native.accountId,label:native.label},headHash:snapshot.head,baseHash:'b'.repeat(40),commits:[{hash:snapshot.head,subject:'Saved work for review'}],reviewable:true,checkedAt:new Date().toISOString()};
-    return { id: 'hosting-ui', repoPath: p, provider: request.provider, host: 'code.company.test', request, repository: 'org/team/repo', remoteUrl: 'https://code.company.test/org/team/repo.git', account: 'anna.work', headHash: snapshot.head, baseHash: 'b'.repeat(40), commits: [{ hash: snapshot.head, subject: 'Saved work for review' }], reviewable: true, checkedAt: new Date().toISOString() };
+    const commits = reviewScenario?.noCommits ? [] : [{ hash: snapshot.head, subject: 'Saved work for review' }];
+    const existing = reviewScenario?.open ? { url: reviewUrl, state: 'OPEN', head: request.head, base: request.base } : undefined;
+    return { id: 'hosting-ui', repoPath: p, provider: request.provider, host: 'code.company.test', request, repository: 'org/team/repo', remoteUrl: 'https://code.company.test/org/team/repo.git', account: 'anna.work', headHash: snapshot.head, baseHash: 'b'.repeat(40), commits, existing, reviewable: true, checkedAt: reviewCheckedAt };
   });
   ipcMain.handle('review:publish', async (_, p, id) => {
     assert.equal(id, 'hosting-ui');reviewPublished = true;
     const native=nativeUi[hostingScenario];
-    const pullRequest = { url: native?`${native.location.webUrl}/${native.provider==='azure'?'pullrequest':'pull-requests'}/1`:'https://code.company.test/org/team/repo/-/merge_requests/1', state: 'OPEN' };
+    const pullRequest = { url: native?`${native.location.webUrl}/${native.provider==='azure'?'pullrequest':'pull-requests'}/1`:reviewUrl, state: 'OPEN' };
     return native
       ? { snapshot: hostingSnapshot(await service.getSnapshot(p)), pullRequest, warnings: [] }
       : { pullRequest, warnings: ['history_write', 'snapshot_read'] };
@@ -637,7 +642,35 @@ app.whenReady().then(async () => {
   assert.match(reviewStatus, /no pudo guardar toda la operación en Actividad/);
   assert.match(reviewStatus, /Falló una comprobación del repositorio local[\s\S]*Actualiza el proyecto/);
   await js(`document.querySelector('.share-review [role="status"] button').click()`);
-  assert.deepEqual(reviewLinks, ['https://code.company.test/org/team/repo/-/merge_requests/1']);
+  assert.deepEqual(reviewLinks, [reviewUrl]);
+
+  reviewPublished = false;
+  reviewScenario = { open: true, noCommits: true };
+  const checkReview = `document.querySelector('.share-review > .outline-button').click()`;
+  const reviewPrimary = `document.querySelector('.share-review .primary-button')`;
+  await js(checkReview);
+  await waitFor(reviewPrimary);
+  assert.equal(await js(`${reviewPrimary}.innerText.trim()`), 'Abrir revisión');
+  const openReviewText = await js(`document.querySelector('.share-review .activity-record').innerText`);
+  assert.match(openReviewText, /Estado real de la revisión: OPEN/);
+  assert.doesNotMatch(openReviewText, /La confirmación publica/);
+  const checkedTime = await js(`document.querySelector('.share-review time').innerText`);
+  const localCheckedTime = await js(`new Intl.DateTimeFormat('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(${JSON.stringify(reviewCheckedAt)}))`);
+  assert.equal(checkedTime, localCheckedTime);
+  await js(`${reviewPrimary}.click()`);
+  assert.deepEqual(reviewLinks, [reviewUrl, reviewUrl]);
+  assert.equal(reviewPublished, false, 'Opening an already published review never invokes publication');
+
+  reviewScenario = { open: true, noCommits: false };
+  await js(checkReview);
+  await waitFor(reviewPrimary);
+  assert.equal(await js(`${reviewPrimary}.innerText.trim()`), 'Publicar en esta revisión');
+  reviewScenario = { open: false, noCommits: true };
+  await js(checkReview);
+  await waitFor(reviewPrimary);
+  assert.equal(await js(`${reviewPrimary}.innerText.trim()`), 'Publicar y crear una revisión nueva');
+  assert.equal(await js(`${reviewPrimary}.disabled`), false, 'A published branch can still open its first review');
+  reviewScenario = undefined;
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
   await waitFor(`!document.querySelector('.share-review')`);
   hostingScenario = false;

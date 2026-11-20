@@ -51,7 +51,7 @@ import type {
   FileChange, FileStats, FolderPreview, FolderProblem, HistoryScope, LlmConfig, LlmConnectResult, Locale, Operation, PendingOperationKind, ProjectLocateResult, ProjectSelectResult, ProjectUnavailableReason,
   RecoveryAction, RecoveryReport, RepoSnapshot, SecretFinding, UnavailableProject, WithheldFile, AuthorReadiness, HelpPage, IdentityScope, Worktree
 } from "../shared/types";
-import { localeTag, readLocale, translate, writeLocale, type MessageKey, type Translate } from "./i18n";
+import { formatDate, localeTag, readLocale, translate, writeLocale, type MessageKey, type Translate } from "./i18n";
 import { folderNameProblem, parseCloneUrl, suggestedFolderName } from "../shared/clone-source";
 import { ReadinessActionsContext, ReadinessChecklist, authorOrigin, identityText, useReadiness, type ReadinessActions, type ReadinessState } from "./Readiness";
 
@@ -141,13 +141,6 @@ function useI18n() {
 }
 
 const palette = ["#ec806e", "#bda1e8", "#91c99b", "#86b4dc", "#e4be81"];
-
-function formatDate(date: string, locale: Locale) {
-  if (!date) return "—";
-  const value = new Date(date);
-  if (Number.isNaN(value.valueOf())) return date;
-  return new Intl.DateTimeFormat(localeTag(locale), { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(value);
-}
 
 /**
  * A remote URL as something you can read at a glance. Both spellings Git accepts say the same thing —
