@@ -342,7 +342,11 @@ app.whenReady().then(async () => {
   const assertDialog = async () => {
     assert.deepEqual(await js(`(() => {
       const dialog = [...document.querySelectorAll('[aria-modal="true"]')].at(-1);
-      const nodes = [...dialog.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], summary, [tabindex]:not([tabindex="-1"])')].filter(n => n.tabIndex >= 0 && n.getClientRects().length);
+      const focusable = 'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], summary, [tabindex]:not([tabindex="-1"])';
+      const nodes = [...dialog.querySelectorAll(focusable)].filter(n => {
+        const closed = n.closest('details:not([open])');
+        return n.tabIndex >= 0 && n.getClientRects().length && (!closed || closed.querySelector(':scope > summary')?.contains(n));
+      });
       const first = nodes[0], last = nodes.at(-1);
       const initial = dialog.contains(document.activeElement);
       last.focus(); last.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
@@ -727,7 +731,10 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.branch-switch:not(.open-worktree)').click()`);
   await waitFor(`document.querySelector('.switch-work fieldset')`);
   await assertDialog();
-  assert.match(await js(`document.querySelector('.switch-work').innerText`), /Trabajo sin terminar[\s\S]*app.txt[\s\S]*new-file.txt[\s\S]*Incluir archivos nuevos/);
+  assert.match(await js(`document.querySelector('.switch-work').innerText`), /Cambiar a[\s\S]*Llevar los cambios[\s\S]*Guardar primero en esta rama[\s\S]*Revisar apartar y cambiar/);
+  assert.doesNotMatch(await js(`document.querySelector('.switch-work').innerText`), /Restaurar|Trabajo apartado/);
+  await js(`document.querySelector('.switch-work-files').open = true; document.querySelector('.switch-work fieldset details').open = true`);
+  assert.match(await js(`document.querySelector('.switch-work').innerText`), /app.txt[\s\S]*new-file.txt[\s\S]*Incluir archivos nuevos/);
   assert.equal(git('status','--porcelain'),before,'Reviewing a switch does not stash or save work');
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
   await waitFor(`!document.querySelector('.switch-work')`);
@@ -827,11 +834,11 @@ app.whenReady().then(async () => {
   assert.equal(await js(`document.querySelectorAll('.toolbar-tools button').length`), 2);
   assert.match(await js(`document.querySelector('.toolbar-tools').innerText`), /Actualizar estado/);
   await openToolbarMenu();
-  for (const action of ['fetch', 'pull', 'push', 'stash', 'stash-pop', 'branch']) {
+  for (const action of ['fetch', 'pull', 'push', 'stash', 'branch']) {
     assert.ok(await js(`Boolean(${toolbarItem(action)})`), `${action} stays accessible from the menu`);
   }
   assert.equal(await js(`${toolbarItem('stash')}.disabled`), false);
-  assert.equal(await js(`${toolbarItem('stash-pop')}.disabled`), true);
+  assert.equal(await js(`Boolean(${toolbarItem('stash-pop')})`), false);
   await clickToolbarItem('stash');
   await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
   assert.equal(git('status', '--porcelain'), before, 'Stash is reviewed before clearing files');
@@ -842,15 +849,18 @@ app.whenReady().then(async () => {
   fs.writeFileSync(path.join(repo, 'after-stash.txt'), 'keep current work');
   await refreshStatus();
   await waitFor(`document.querySelector('.toolbar-delivery.is-dirty')`);
-  await openToolbarMenu();
-  assert.equal(await js(`${toolbarItem('stash-pop')}.disabled`), false, 'Current new files do not hide stash restoration');
-  await clickToolbarItem('stash-pop');
-  await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
-  await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
-  await waitFor(`!document.querySelector('.plan-card .plan-actions .primary-button') && document.querySelector('.completion-card.status-completed')`);
-  await openToolbarMenu();
-  await waitFor(`${toolbarItem('stash-pop')}?.textContent.includes('Pop (0)')`);
-  await closeToolbarMenu();
+  await js(`document.querySelector('[aria-label="Trabajo apartado"]').click()`);
+  await waitFor(`document.querySelector('.switch-work .activity-record time')`);
+  const savedEntry = await js(`document.querySelector('.switch-work .activity-record').innerText`);
+  assert.match(savedEntry, /feature\/new-menu[\s\S]*Restaurar[\s\S]*Restaurar y quitar de la lista/);
+  await js(`document.querySelector('.switch-work .activity-record .modal-actions button:last-child').click()`);
+  await waitFor(`document.querySelector('.delivery-review-modal .plan-actions .primary-button')`);
+  assert.match(await js(`document.querySelector('.delivery-review-modal').innerText`), /solo si se restaura correctamente/);
+  await js(`document.querySelector('.delivery-review-modal .plan-actions .primary-button').click()`);
+  await waitFor(`!document.querySelector('.delivery-review-modal') && document.querySelector('.overview-summary')?.innerText.includes('3 archivos sin guardar')`);
+  await js(`document.querySelector('[aria-label="Trabajo apartado"]').click()`);
+  await waitFor(`document.querySelector('.switch-work')?.innerText.includes('Todavía no tienes trabajo apartado')`);
+  await js(`document.querySelector('.switch-work .modal-heading button').click()`);
   assert.equal(fs.readFileSync(path.join(repo, 'after-stash.txt'), 'utf8'), 'keep current work');
   fs.unlinkSync(path.join(repo, 'after-stash.txt'));
   assert.equal(git('status', '--porcelain'), before, 'Pop restores the original edits and new file');

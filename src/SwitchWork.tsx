@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Locale, SwitchWorkPreview, SwitchWorkRequest } from "../shared/types";
-import { translate } from "./i18n";
+import { formatDate, translate } from "./i18n";
 import { useDialog } from "./useDialog";
 
 export function SwitchWork({
@@ -22,8 +22,9 @@ export function SwitchWork({
   const ref = useDialog(onClose);
   const [preview, setPreview] = useState<SwitchWorkPreview>();
   const [error, setError] = useState("");
-  const [label, setLabel] = useState("");
-  const [untracked, setUntracked] = useState(false);
+  const [label, setLabel] = useState<string>();
+  const [untracked, setUntracked] = useState(true);
+  const switching = Boolean(target);
 
   useEffect(() => {
     let alive = true;
@@ -39,7 +40,9 @@ export function SwitchWork({
       alive = false;
     };
   }, [path, target]);
-  const switching = preview && preview.snapshot.currentBranch !== target;
+
+  const name = label ?? (preview?.snapshot.currentBranch ?? "").slice(0, 120);
+  const pending = Boolean(preview?.snapshot.pending || preview?.snapshot.conflicts.length);
   return (
     <div className="modal-backdrop">
       <section
@@ -50,99 +53,111 @@ export function SwitchWork({
         aria-labelledby="switch-work-title"
       >
         <div className="modal-heading">
-          <h2 id="switch-work-title">{t("switchWorkTitle")}</h2>
+          <h2 id="switch-work-title">{switching ? t("switchWorkTo", { target }) : t("switchWorkLibrary")}</h2>
           <button className="ghost-button" onClick={onClose}>
-            {t("switchWorkStay")}
+            {t(switching ? "switchWorkStay" : "close")}
           </button>
         </div>
         {error && <p role="alert">{error}</p>}
         {!preview && !error && <p role="status">{t("switchWorkReading")}</p>}
-        {preview && (
-          <>
-            <p>
-              {t("switchWorkActiveBranch")}: <strong>{preview.snapshot.currentBranch}</strong>
-              {switching && (
+        {preview &&
+          (switching ? (
+            <>
+              {preview.occupied ? (
+                <p role="alert">
+                  {t("switchWorkOccupied")} <code>{preview.occupied}</code>
+                </p>
+              ) : (
                 <>
-                  {" "}
-                  → <strong>{target}</strong>
-                </>
-              )}
-            </p>
-            {preview.occupied && (
-              <p role="alert">
-                {t("switchWorkOccupied")} <code>{preview.occupied}</code>
-              </p>
-            )}
-            {preview.snapshot.isDirty && (
-              <>
-                <p>{t("switchWorkUnsaved")}</p>
-                <ul>
-                  {preview.snapshot.changes.map((file) => (
-                    <li key={file.path}>
-                      <code>{file.path}</code> · {file.xy}
-                    </li>
-                  ))}
-                </ul>
-                <button className="outline-button" onClick={onSave}>
-                  {t("switchWorkSaveFirst")}
-                </button>
-                <p className="detail-note">{t("switchWorkSaveHelp")}</p>
-              </>
-            )}
-            {switching && !preview.occupied && (
-              <>
-                {preview.blockers.length > 0 && (
-                  <p>
-                    {t("switchWorkOverlapping")} {preview.blockers.join(", ")}
-                  </p>
-                )}
-                <button
-                  className="outline-button"
-                  disabled={preview.blockers.length > 0}
-                  onClick={() => onPrepare({ mode: "carry", target })}
-                >
-                  {t("switchWorkReviewCarry")} {target}
-                </button>
-                {preview.snapshot.isDirty && (
-                  <fieldset>
-                    <legend>{t("switchWorkSetAside")}</legend>
-                    <p>{t("switchWorkSetAsideHelp")}</p>
-                    <label>
-                      {t("switchWorkEntryName")}{" "}
-                      <input value={label} maxLength={120} onChange={(e) => setLabel(e.target.value)} />
-                    </label>
-                    <label>
-                      <input type="checkbox" checked={untracked} onChange={(e) => setUntracked(e.target.checked)} />
-                      {t("switchWorkIncludeUntracked")}
-                    </label>
+                  {preview.snapshot.isDirty && (
+                    <details className="switch-work-files">
+                      <summary>{t("switchWorkUnsaved")}</summary>
+                      <ul>
+                        {preview.snapshot.changes.map((file) => (
+                          <li key={file.path}>
+                            <code>{file.path}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  {!!preview.blockers.length && (
+                    <p>
+                      {t("switchWorkOverlapping")} {preview.blockers.join(", ")}
+                    </p>
+                  )}
+                  <div className="modal-actions">
                     <button
                       className="outline-button"
-                      disabled={!label.trim()}
-                      onClick={() => onPrepare({ mode: "set_aside", target, label, includeUntracked: untracked })}
+                      disabled={pending || preview.blockers.length > 0}
+                      onClick={() => onPrepare({ mode: "carry", target })}
                     >
-                      {t("switchWorkReviewSetAside")}
+                      {t("switchWorkReviewCarry")}
                     </button>
-                  </fieldset>
-                )}
-              </>
-            )}
-            <h3>{t("switchWorkEntries")}</h3>
-            <p>{t("switchWorkRestoreHelp")}</p>
-            {!preview.entries.length && <p>{t("switchWorkNoEntries")}</p>}
-            {preview.entries.map((entry) => (
-              <div className="activity-record" key={entry.hash}>
-                <p>{entry.label}</p>
-                <button
-                  className="outline-button"
-                  disabled={preview.snapshot.isDirty}
-                  onClick={() => onPrepare({ mode: "restore", stash: entry.hash })}
-                >
-                  {t("switchWorkReviewRestore")} {preview.snapshot.currentBranch}
-                </button>
-              </div>
-            ))}
-          </>
-        )}
+                    {preview.snapshot.isDirty && (
+                      <button className="outline-button" disabled={pending} onClick={onSave}>
+                        {t("switchWorkSaveFirst")}
+                      </button>
+                    )}
+                  </div>
+                  {preview.snapshot.isDirty && (
+                    <fieldset>
+                      <legend>{t("switchWorkSetAside")}</legend>
+                      <button
+                        className="outline-button"
+                        disabled={pending || !name.trim()}
+                        onClick={() =>
+                          onPrepare({ mode: "set_aside", target, label: name, includeUntracked: untracked })
+                        }
+                      >
+                        {t("switchWorkReviewSetAside")}
+                      </button>
+                      <details>
+                        <summary>{t("switchWorkSetAsideOptions")}</summary>
+                        <label>
+                          {t("switchWorkEntryName")}
+                          <input value={name} maxLength={120} onChange={(e) => setLabel(e.target.value)} />
+                        </label>
+                        <label>
+                          <input type="checkbox" checked={untracked} onChange={(e) => setUntracked(e.target.checked)} />
+                          {t("switchWorkIncludeUntracked")}
+                        </label>
+                      </details>
+                    </fieldset>
+                  )}
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              <p>{t("switchWorkRestoringOn", { branch: preview.snapshot.currentBranch })}</p>
+              {pending && <p role="status">{t("switchWorkFinishFirst")}</p>}
+              {!preview.entries.length && <p>{t("switchWorkNoEntries")}</p>}
+              {preview.entries.map((entry) => (
+                <article className="activity-record" key={entry.ref}>
+                  <strong>{entry.label}</strong>
+                  <p>
+                    {entry.branch && <>{entry.branch} · </>}
+                    <time dateTime={entry.date}>{formatDate(entry.date, locale)}</time>
+                  </p>
+                  <div className="modal-actions">
+                    {[false, true].map((removeAfterRestore) => (
+                      <button
+                        key={String(removeAfterRestore)}
+                        className="outline-button"
+                        disabled={pending}
+                        onClick={() =>
+                          onPrepare({ mode: "restore", stash: entry.hash, stashRef: entry.ref, removeAfterRestore })
+                        }
+                      >
+                        {t(removeAfterRestore ? "switchWorkRestoreAndRemove" : "switchWorkRestore")}
+                      </button>
+                    ))}
+                  </div>
+                </article>
+              ))}
+            </>
+          ))}
       </section>
     </div>
   );

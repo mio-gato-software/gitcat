@@ -3,6 +3,13 @@ import { useLayoutEffect, useRef } from "react";
 const layers: HTMLElement[] = [];
 const focusable = 'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], summary, [tabindex]:not([tabindex="-1"])';
 
+function visibleInDisclosure(node: HTMLElement) {
+  for (let closed = node.closest('details:not([open])'); closed; closed = closed.parentElement?.closest('details:not([open])') ?? null) {
+    if (!closed.querySelector(':scope > summary')?.contains(node)) return false;
+  }
+  return true;
+}
+
 /** One focus boundary for every modal, including a file review opened above another dialog. */
 export function useDialog(onClose: () => void) {
   const element = useRef<HTMLElement | null>(null);
@@ -24,7 +31,8 @@ export function useDialog(onClose: () => void) {
       }
     }
     const candidates = () => [...dialog.querySelectorAll<HTMLElement>(focusable)]
-      .filter(node => node.tabIndex >= 0 && !node.closest('[inert]') && node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden');
+      .filter(node => node.tabIndex >= 0 && !node.closest('[inert]') && visibleInDisclosure(node)
+        && node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden');
     const focus = () => (candidates()[0] ?? dialog).focus();
     if (!dialog.contains(document.activeElement)) focus();
     const key = (event: KeyboardEvent) => {

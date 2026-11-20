@@ -517,8 +517,8 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
     assertTrustedSender(event); const path=assertOpenedRepository(cwd);
     if (!input || typeof input!=='object') throw new Error('Invalid switch request');
     const request=input as import('../shared/types.js').SwitchWorkRequest;
-    if (!["carry","set_aside","restore"].includes(request.mode) || ['target','label','stash'].some(k=>request[k as 'target']!==undefined && typeof request[k as 'target']!=='string')) throw new Error('Invalid switch request');
-    return rememberPlan(await tracked(event,path,'planning',()=>prepareSwitchWork(path,{mode:request.mode,target:request.target,label:request.label,stash:request.stash,includeUntracked:request.includeUntracked===true},locale)));
+    if (!["carry","set_aside","restore"].includes(request.mode) || ['target','label','stash','stashRef'].some(k=>request[k as 'target']!==undefined && typeof request[k as 'target']!=='string')) throw new Error('Invalid switch request');
+    return rememberPlan(await tracked(event,path,'planning',()=>prepareSwitchWork(path,{mode:request.mode,target:request.target,label:request.label,stash:request.stash,stashRef:request.stashRef,removeAfterRestore:request.removeAfterRestore===true,includeUntracked:request.includeUntracked===true},locale)));
   });
   ipcMain.handle("activity:list", (event, cwd: string) => { assertTrustedSender(event); return getActivityHistory(assertOpenedRepository(cwd)); });
   ipcMain.handle("activity:repair", (event, cwd: unknown) => {

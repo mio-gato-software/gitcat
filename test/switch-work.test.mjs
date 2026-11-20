@@ -108,6 +108,70 @@ test("setting aside tracked edits alone leaves only new files in the working fol
   assert.equal(git("status", "--porcelain"), "?? new");
 });
 
+test("the list includes ordinary stashes and restores or removes only the reviewed entry", async (t) => {
+  const { path, git } = fixture(t);
+  for (const label of ["older note", "newer note"]) {
+    writeFileSync(join(path, "file"), label);
+    git("stash", "push", "-m", label);
+  }
+  const { entries } = await service.getSwitchWork(path, "");
+  assert.deepEqual(
+    entries.map(({ label, branch, ref }) => [label, branch, ref]),
+    [
+      ["newer note", "main", "stash@{0}"],
+      ["older note", "main", "stash@{1}"]
+    ]
+  );
+  assert.ok(entries.every(({ date }) => Number.isFinite(Date.parse(date))));
+  const [latest, older] = entries;
+  const choice = { mode: "restore", stash: older.hash, stashRef: older.ref };
+  const keep = await service.prepareSwitchWork(path, choice, "en");
+  assert.equal((await service.executePlan(path, keep, "en")).error, undefined);
+  assert.equal(readFileSync(join(path, "file"), "utf8"), "older note");
+  assert.equal(git("stash", "list", "--format=%H"), `${latest.hash}\n${older.hash}`);
+  git("restore", "file");
+
+  const remove = await service.prepareSwitchWork(path, { ...choice, removeAfterRestore: true }, "en");
+  assert.match(
+    planSummary(remove, await service.getSnapshot(path), "en").finalState.join(" "),
+    /removed from the list only after/
+  );
+  assert.equal((await service.executePlan(path, remove, "en")).error, undefined);
+  assert.equal((await service.getActivityHistory(path)).entries[0].steps[0].operation, "restore_and_remove_work");
+  assert.equal(readFileSync(join(path, "file"), "utf8"), "older note");
+  assert.equal(git("stash", "list", "--format=%H"), latest.hash);
+});
+
+test("a moved stash selector cannot restore or drop a different entry", async (t) => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, "file"), "first");
+  git("stash", "push", "-m", "first");
+  const [entry] = (await service.getSwitchWork(path, "")).entries;
+  const request = { mode: "restore", stash: entry.hash, stashRef: entry.ref, removeAfterRestore: true };
+  const plan = await service.prepareSwitchWork(path, request, "en");
+  writeFileSync(join(path, "file"), "second");
+  git("stash", "push", "-m", "second");
+  const before = git("stash", "list");
+  await assert.rejects(service.executePlan(path, plan, "en"), /set-aside list changed/);
+  assert.equal(git("stash", "list"), before);
+  assert.equal(git("status", "--porcelain"), "");
+});
+
+test("a failure removing the entry reports restoration as completed", async (t) => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, "file"), "set aside");
+  git("stash", "push", "-m", "set aside");
+  const [entry] = (await service.getSwitchWork(path, "")).entries;
+  const request = { mode: "restore", stash: entry.hash, stashRef: entry.ref, removeAfterRestore: true };
+  const plan = await service.prepareSwitchWork(path, request, "en");
+  writeFileSync(join(path, ".git", "refs", "stash.lock"), "");
+  const result = await service.executePlan(path, plan, "en");
+  assert.equal(result.postActionIssue?.kind, "stash_drop");
+  assert.equal(result.outcomes[0].status, "completed");
+  assert.equal(readFileSync(join(path, "file"), "utf8"), "set aside");
+  assert.equal(git("rev-parse", "refs/stash"), entry.hash);
+});
+
 test("overlapping tracked edits and new-file collisions guide toward setting work aside", async (t) => {
   const { path, git } = fixture(t);
   git("switch", "other");
@@ -135,9 +199,11 @@ test("overlapping tracked edits and new-file collisions guide toward setting wor
   assert.equal((await service.executePlan(path, plan, "en")).error, undefined);
   assert.equal(readFileSync(join(path, "new"), "utf8"), "theirs");
   const entry = (await service.getSwitchWork(path, "main")).entries[0];
-  const restore = await service.prepareSwitchWork(path, { mode: "restore", stash: entry.hash }, "en");
-  const result = await service.executePlan(path, restore, "en");
-  assert.ok(result.error);
+  await assert.rejects(
+    service.prepareSwitchWork(path, { mode: "restore", stash: entry.hash, removeAfterRestore: true }, "en"),
+    /new.*stash is still available/
+  );
+  assert.equal(readFileSync(join(path, "new"), "utf8"), "theirs");
   assert.equal((await service.getSwitchWork(path, "main")).entries[0].hash, entry.hash);
 });
 test("occupied worktree and stale review do not stash or switch", async (t) => {

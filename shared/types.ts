@@ -477,7 +477,7 @@ export type PlanStep = {
  * Keeping it separate from the completed Git result lets callers and recovery preserve what landed.
  */
 export type PostActionIssue = {
-  kind: "index_sync" | "upstream_setup" | "snapshot_read" | "history_write" | "temporary_cleanup";
+  kind: "index_sync" | "upstream_setup" | "snapshot_read" | "history_write" | "temporary_cleanup" | "stash_drop";
   detail: string;
 };
 
@@ -1044,7 +1044,7 @@ export type OperationProgress = {
 };
 
 export type ActivityOperation = Operation | 'pull_request'
-  | 'set_aside_work' | 'restore_set_aside_work'
+  | 'set_aside_work' | 'restore_set_aside_work' | 'restore_and_remove_work'
   | 'undo_save' | 'revert_save' | 'create_recovery_branch';
 
 export type ActivityRecord = {
@@ -1061,8 +1061,8 @@ export type ActivityHistoryView = {
 };
 export type HistoryRecovery = { mode: 'revert' | 'undo' | 'restore'; commit: string; branch?: string };
 
-export type SwitchWorkRequest = { mode: 'carry' | 'set_aside' | 'restore'; target?: string; label?: string; includeUntracked?: boolean; stash?: string };
-export type SwitchWorkPreview = { snapshot: RepoSnapshot; target: string; occupied?: string; blockers: string[]; entries: { hash: string; label: string }[] };
+export type SwitchWorkRequest = { mode: 'carry' | 'set_aside' | 'restore'; target?: string; label?: string; includeUntracked?: boolean; stash?: string; stashRef?: string; removeAfterRestore?: boolean };
+export type SwitchWorkPreview = { snapshot: RepoSnapshot; target: string; occupied?: string; blockers: string[]; entries: { hash: string; ref: string; label: string; branch?: string; date: string }[] };
 
 export type ShareReviewRequest = { remote:string;head:string;base:string;title:string;body:string;provider?:HostingProvider;connectionId?:string };
 export type ReviewPullRequest = {url:string;state:'OPEN'|'CLOSED'|'MERGED';head:string;base:string};
