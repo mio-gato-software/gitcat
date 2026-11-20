@@ -124,7 +124,7 @@ test("un clic selecciona la rama, un doble clic cambia a ella, y los impedimento
   assert.match(app, /onClick=\{onSelect\} onDoubleClick=\{onSwitchNow\}/);
   assert.doesNotMatch(app, /window\.setTimeout\(onSwitch/, "el clic ya no prepara un checkout con retardo");
   // Cambiar de rama sigue siendo explícito: el doble clic, o el botón de la fila.
-  assert.match(app, /className="branch-switch"/);
+  assert.match(app, /<button className=\{[^\n]*branch-switch[^\n]*onClick=\{onSwitch\}/);
   assert.match(app, /addTurn\(path, t\("branchSwitchQuestion", \{ name \}\), false\)/);
   assert.match(app, /error: message, status: "error"/);
   // Una rama que deja de existir no puede dejar el historial apuntando a un nombre que Git no conoce.

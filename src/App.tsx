@@ -1507,7 +1507,9 @@ export default function App() {
   const activateBranch = (name: string) => {
     if (!snapshot || planning) return;
     const branch = snapshot.branches.find(item => item.name === name);
-    if (branch?.remoteRef && !branch.checkedOutIn) {
+    if (branch?.checkedOutIn && !branch.isCurrent) {
+      void openWorktree(branch.checkedOutIn);
+    } else if (branch?.remoteRef && !branch.checkedOutIn) {
       openSync(branch.remoteRef, branch.presence === "remote" ? undefined : name);
     } else {
       void switchBranch(name);
@@ -1627,7 +1629,12 @@ export default function App() {
       entries.push({ key: "branch-heading", heading: name });
       const syncRef = remoteRef ?? branch.remoteRef;
       if (syncRef) entries.push({ key: "sync-remote", icon: CloudDownload, label: t("syncRemote", { ref: syncRef }), onSelect: () => openSync(syncRef, local ? name : undefined) });
-      if (!branch.isCurrent && !remoteRef) entries.push({ key: "switch", icon: branch.checkedOutIn ? TreePine : ArrowLeftRight, label: branch.checkedOutIn ? t("openWorktreeAction") : t("switchBranch", { name }), onSelect: () => void switchBranch(branch.presence === "remote" ? `refs/remotes/${branch.remoteRef}` : name), hint: t("doubleClickHint") });
+      if (!branch.isCurrent && !remoteRef) {
+        const folder = branch.checkedOutIn;
+        entries.push(folder
+          ? { key: "open-worktree", icon: TreePine, label: t("openBranchWorktree"), hint: folder, onSelect: () => void openWorktree(folder) }
+          : { key: "switch", icon: ArrowLeftRight, label: t("switchBranch", { name }), hint: t("doubleClickHint"), onSelect: () => void switchBranch(branch.presence === "remote" ? `refs/remotes/${branch.remoteRef}` : name) });
+      }
       if (branch.isCurrent && !remoteRef && branch.upstream) entries.push({ key: "pull", icon: ArrowDownToLine, label: t("pullLatest"), onSelect: () => void prepare("pull") });
       if (branch.isCurrent && !remoteRef) entries.push({ key: "push", icon: ArrowUpFromLine, label: t(branch.upstream ? "pushBranch" : "publishBranch"), onSelect: () => void prepare("push") });
       // An already-contained branch would merge nothing. Rebase is always reviewed before rewriting history.
@@ -1803,7 +1810,7 @@ export default function App() {
               selected={selection}
               onSelect={selectBranch}
               onCreate={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
-              onSwitch={(name) => snapshot.branches.find(branch => branch.name === name)?.checkedOutIn ? void switchBranch(name) : void prepare("checkout", { name })}
+              onSwitch={(branch) => branch.checkedOutIn ? void openWorktree(branch.checkedOutIn) : void prepare("checkout", { name: branch.name })}
               onSwitchNow={activateBranch}
               onDelete={(name) => void prepare("delete_branch", { name })}
               onRename={(name, to) => void prepare("rename_branch", { name, to })}
@@ -2251,7 +2258,7 @@ function PaneDivider({ edge, width, onPointerDown, onNudge, onReset }: {
  */
 function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, onSwitchNow, onDelete, onRename, onMenu, onCollapse }: {
   snapshot: RepoSnapshot; busy: boolean; selected: string; onSelect: (name: string) => void; onCreate: () => void;
-  onSwitch: (name: string) => void; onSwitchNow: (name: string) => void; onDelete: (name: string) => void;
+  onSwitch: (branch: Branch) => void; onSwitchNow: (name: string) => void; onDelete: (name: string) => void;
   onRename: (from: string, to: string) => void; onMenu: (branch: Branch, x: number, y: number) => void; onCollapse: () => void;
 }) {
   const { t } = useI18n();
@@ -2353,7 +2360,7 @@ function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, o
     depth={depth}
     busy={busy}
     register={register(branch.name)}
-    onSwitch={() => onSwitch(branch.name)}
+    onSwitch={() => onSwitch(branch)}
     onSwitchNow={() => onSwitchNow(branch.name)}
     onDelete={() => onDelete(branch.name)}
     onContextMenu={(event) => openContextMenu(branch, event)}
@@ -2512,12 +2519,38 @@ function BranchRow({ branch, label, variant, merged, selected, defaultBranch, co
   const protectedByPrefix = isProtectedBranch(branch.name);
   // Read once per render rather than per row: the panel redraws on every snapshot anyway.
   const stale = staleDays(branch, Date.now());
+  const folder = !branch.isCurrent ? branch.checkedOutIn : undefined;
+  const switchLabel = folder ? t("openBranchWorktree") : t("switchBranch", { name: branch.name });
+  const switchTitle = folder ? `${switchLabel} · ${folder}` : t("switchBranchTitle", { name: branch.name });
+  const clickHint = folder ? t("worktreeOpenHint") : t(branch.remoteRef && !branch.checkedOutIn ? "doubleClickRemoteHint" : "branchClickHint");
   return <div onContextMenu={onContextMenu} onKeyDown={(event) => {
     if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
       event.preventDefault(); const box = event.currentTarget.getBoundingClientRect();
       event.currentTarget.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: box.left + 20, clientY: box.bottom }));
     }
-  }} className={`branch-row ${branch.isCurrent ? "current" : ""} ${selected ? "selected" : ""} ${merged ? "merged" : ""} ${branch.stackedOn ? "stacked" : ""} ${branch.presence}`}><button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onSwitchNow} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch, t)}\n${t(branch.remoteRef && !branch.checkedOutIn ? "doubleClickRemoteHint" : "branchClickHint")}`}><span className="branch-color" style={{ background: colour }} />{branch.stackedOn ? <GitFork size={14} className="branch-stack-icon" /> : <GitBranch size={14} />}<span className="branch-label">{label}</span>{variant && <span className="branch-variant" title={t("variantPrefix", { name: branch.name })}>{t("variant")}</span>}{merged && <span className="branch-merged" role="img" aria-label={t("mergedBadge", { branch: defaultBranch ?? "" })} title={t("mergedTitle", { branch: defaultBranch ?? "" })}><GitMerge size={12} /></span>}{branch.checkedOutIn && <span className="branch-worktree" role="img" aria-label={t("worktreeBadge", { path: branch.checkedOutIn })} title={t("worktreeBadge", { path: branch.checkedOutIn })}><TreePine size={12} /></span>}{protectedByPrefix && <span className="branch-protected" role="img" aria-label={t("protectedBadge")} title={t("protectedTitle")}><ShieldCheck size={12} /></span>}{stale > 0 && <span className="branch-stale" role="img" aria-label={t("staleBadge", { days: stale })} title={t("staleTitle", { days: stale })}><Clock3 size={12} /></span>}<PresenceBadge branch={branch} />{branch.isCurrent && <span className="current-pill">{t("current")}</span>}{isDefault && <span className="current-pill">{t("primary")}</span>}{(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}</button>{!branch.isCurrent && <button className="branch-switch" onClick={onSwitch} disabled={busy} aria-label={t("switchBranch", { name: branch.name })} title={t("switchBranchTitle", { name: branch.name })}><ArrowLeftRight size={12} /></button>}{!branch.isCurrent && !isDefault && !protectedByPrefix && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={t("deleteBranch", { name: branch.name })} title={branch.mergedInto.length ? t("deleteMergedBranch", { name: branch.name, branches: branch.mergedInto.join(t("and")) }) : t("deleteUnmergedBranch", { name: branch.name })}><Trash2 size={12} /></button>}</div>;
+  }} className={`branch-row ${branch.isCurrent ? "current" : ""} ${selected ? "selected" : ""} ${merged ? "merged" : ""} ${branch.stackedOn ? "stacked" : ""} ${branch.presence}`}>
+    <button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onSwitchNow} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch, t)}\n${clickHint}`}>
+      <span className="branch-color" style={{ background: colour }} />
+      {branch.stackedOn ? <GitFork size={14} className="branch-stack-icon" /> : <GitBranch size={14} />}
+      {folder ? <span className="branch-worktree-name">
+        <span className="branch-label">{label}</span>
+        <span className="branch-worktree-path">{folder}</span>
+      </span> : <span className="branch-label">{label}</span>}
+      {variant && <span className="branch-variant" title={t("variantPrefix", { name: branch.name })}>{t("variant")}</span>}
+      {merged && <span className="branch-merged" role="img" aria-label={t("mergedBadge", { branch: defaultBranch ?? "" })} title={t("mergedTitle", { branch: defaultBranch ?? "" })}><GitMerge size={12} /></span>}
+      {branch.checkedOutIn && !folder && <span className="branch-worktree" role="img" aria-label={t("worktreeBadge", { path: branch.checkedOutIn })} title={t("worktreeBadge", { path: branch.checkedOutIn })}><TreePine size={12} /></span>}
+      {protectedByPrefix && <span className="branch-protected" role="img" aria-label={t("protectedBadge")} title={t("protectedTitle")}><ShieldCheck size={12} /></span>}
+      {stale > 0 && <span className="branch-stale" role="img" aria-label={t("staleBadge", { days: stale })} title={t("staleTitle", { days: stale })}><Clock3 size={12} /></span>}
+      <PresenceBadge branch={branch} />
+      {branch.isCurrent && <span className="current-pill">{t("current")}</span>}
+      {isDefault && <span className="current-pill">{t("primary")}</span>}
+      {(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}
+    </button>
+    {!branch.isCurrent && <button className={`branch-switch${folder ? " open-worktree" : ""}`} onClick={onSwitch} disabled={busy} aria-label={folder ? switchTitle : switchLabel} title={switchTitle}>
+      {folder ? <><TreePine size={12} /> <span>{switchLabel}</span></> : <ArrowLeftRight size={12} />}
+    </button>}
+    {!branch.isCurrent && !isDefault && !protectedByPrefix && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={t("deleteBranch", { name: branch.name })} title={branch.mergedInto.length ? t("deleteMergedBranch", { name: branch.name, branches: branch.mergedInto.join(t("and")) }) : t("deleteUnmergedBranch", { name: branch.name })}><Trash2 size={12} /></button>}
+  </div>;
 }
 
 /**

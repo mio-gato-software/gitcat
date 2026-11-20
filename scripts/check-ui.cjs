@@ -562,11 +562,27 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.worktree-list').innerText`), /Abierto aquí[\s\S]*sin rama activa|sin rama activa[\s\S]*Abierto aquí/);
   await assertDialog();
   await capture('worktrees');
-  await js(`[...document.querySelectorAll('.worktree-list button')].find(button => button.getAttribute('aria-label').includes('Linked worktree')).click()`);
+  await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+  await waitFor(`!document.querySelector('.worktrees-dialog')`);
+  await js(`(() => { const input = document.querySelector('.branch-section input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'qa/worktree'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  const occupiedBranch = `[...document.querySelectorAll('.branch-row')].find(row => row.querySelector('.branch-main')?.title.startsWith('qa/worktree ·'))`;
+  await waitFor(occupiedBranch);
+  const occupiedButton = `${occupiedBranch}.querySelector('.branch-switch')`;
+  assert.match(await js(`${occupiedButton}.innerText`), /Abrir worktree/);
+  assert.ok((await js(`${occupiedButton}.title`)).includes(linkedWorktree));
+  assert.ok((await js(`${occupiedButton}.getAttribute('aria-label')`)).includes(linkedWorktree));
+  assert.equal(await js(`${occupiedBranch}.querySelector('.branch-worktree-path')?.innerText`), linkedWorktree);
+  await js(`${occupiedBranch}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 200, clientY: 400 }))`);
+  await waitFor(`document.querySelector('.context-menu')`);
+  const openFolderMenuItem = `[...document.querySelectorAll('.context-menu button')].find(button => button.innerText.includes('Abrir worktree'))`;
+  assert.equal(await js(`${openFolderMenuItem}?.title`), linkedWorktree);
+  await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  await js(`${occupiedButton}.click()`);
   await waitFor(`document.querySelector('.window-tab.active')?.innerText.includes('Linked worktree')`);
   assert.equal(git('branch', '--show-current'), 'feature/new-menu');
   assert.equal(fs.readFileSync(path.join(repo, 'app.txt'), 'utf8'), 'updated menu\n');
   assert.equal(fs.readFileSync(path.join(linkedWorktree, 'worktree-only.txt'), 'utf8'), 'separate edits');
+  assert.equal(await js(`Boolean(document.querySelector('.plan-card, .switch-work'))`), false);
   assert.equal(await js(`Boolean(document.querySelector('.window-tab.active svg[aria-label="Worktree vinculado"]'))`), true);
   assert.equal(await js(`document.querySelectorAll('.window-tab:not(.unavailable)').length`), 1, 'Opening a worktree reuses the repository tab');
   await waitFor(`document.querySelector('.commit-row.head .ref-tag.more')`);
@@ -655,7 +671,7 @@ app.whenReady().then(async () => {
   await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
   await waitFor(`document.querySelector('.remote-status')?.innerText.includes('Sin remoto')`);
 
-  await js(`document.querySelector('.branch-switch').click()`);
+  await js(`document.querySelector('.branch-switch:not(.open-worktree)').click()`);
   await waitFor(`document.querySelector('.switch-work fieldset')`);
   await assertDialog();
   assert.match(await js(`document.querySelector('.switch-work').innerText`), /Trabajo sin terminar[\s\S]*app.txt[\s\S]*new-file.txt[\s\S]*Incluir archivos nuevos/);
