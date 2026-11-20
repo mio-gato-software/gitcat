@@ -1067,16 +1067,6 @@ export default function App() {
     }
   };
 
-  /** The same answer without asking: used where a request would otherwise start on its own. */
-  const sharingAgreed = async (path: string) => {
-    if (sharingAcknowledged.current.has(path)) return true;
-    try {
-      const preview = await window.gitcat.getAiSharing(path, "planning", undefined, locale);
-      if (preview.acknowledged) sharingAcknowledged.current.add(path);
-      return preview.acknowledged;
-    } catch { return false; }
-  };
-
   const openSharingReview = async () => {
     if (!snapshot) return;
     try {
@@ -1522,12 +1512,11 @@ export default function App() {
   };
 
   const delivery = useCommitDelivery({
-    activeId, snapshot, locale, t, configured: config.configured, busy: planning, showPlan,
+    activeId, snapshot, locale, t, busy: planning, showPlan,
     openForm: () => {
       setFocus({ kind: "wip" });
       setInspectorTab("details");
     },
-    checkSharing: sharingAgreed,
     confirmSharing: (path, paths) => ensureSharing(path, "description", paths),
     reportDescriptionError: async (path, error) => {
       notify({ message: cleanError(error, t("fallbackGenerateDescription")), tone: "error" });
@@ -1850,8 +1839,8 @@ export default function App() {
             </div>
             {inspectorTab === "details" ? <div className="inspector-body">
               {activeFocus?.kind === "wip"
-                ? <ChangesView readiness={readiness} snapshot={snapshot} delivery={delivery} configured={config.configured}
-                    busy={planning} onOpenFile={setSelectedFile} onIgnore={ignoreFile} />
+                ? <ChangesView key={snapshot.path} readiness={readiness} snapshot={snapshot} delivery={delivery} configured={config.configured}
+                    busy={planning} onIgnore={ignoreFile} />
                 : activeFocus?.kind === "worktree"
                   ? <WorktreeInspector worktree={snapshot.worktrees!.find(worktree => worktree.path === activeFocus.path)!} onOpen={() => void openWorktree(activeFocus.path)} />
                 : activeFocus
@@ -1904,7 +1893,6 @@ export default function App() {
         onShowFile={(file) => { const change = snapshot?.changes.find((item) => item.path === file || item.from === file); if (change) setSelectedFile(change); }} />}
       {modalCommit && snapshot && <CommitModal commit={modalCommit.commit} initialFile={modalCommit.file} repoPath={snapshot.path} onClose={() => setModalCommit(undefined)} />}
       {selectedFile && snapshot && <FileDiffModal file={selectedFile} repoPath={snapshot.path} onClose={() => setSelectedFile(undefined)} />}
-      {delivery.diffOpen && snapshot && <SelectionDiffModal files={delivery.selected} repoPath={snapshot.path} onClose={() => delivery.setDiffOpen(false)} />}
       {proposal && snapshot?.path === proposal.repoPath && <ConflictProposalModal key={proposal.id} proposal={proposal} result={proposalResult} busy={planning || applyingResolution || resolving} onApply={(accepted) => void applyResolutions(accepted)} onReviewAgain={() => void resolveConflicts()} onClose={closeProposal} />}
       {guide && snapshot?.path === guide.repoPath && !proposal && <ConflictResolverModal guide={guide} result={guideResult} snapshot={snapshot} busy={guideBusy || planning || resolving} configured={config.configured}
         onApply={(choices) => void applyGuideChoices(choices)} onReadAgain={() => void openGuide()} onOpenFile={(file) => void openConflictFile(file)}
@@ -3426,21 +3414,22 @@ function FileList({ files, stats, onOpen, selection }: { files: FileChange[]; st
  * the ticked files into a saved version. Unticked files are listed too, so leaving one out is a
  * visible decision rather than something that happens to it.
  */
-function ChangesView({ readiness, snapshot, delivery, busy, configured, onOpenFile, onIgnore }: {
+function ChangesView({ readiness, snapshot, delivery, busy, configured, onIgnore }: {
   readiness: ReadinessState;
   snapshot: RepoSnapshot;
   delivery: ReturnType<typeof useCommitDelivery>;
   busy: boolean;
   configured: boolean;
-  onOpenFile: (file: FileChange) => void;
   onIgnore: (file: FileChange) => void;
 }) {
-  const { attention, excluded, generating, merge, message, selected, stale, withheld } = delivery;
+  const { attention, excluded, generating, merge, message, selected, stale, suggestionOutdated, withheld } = delivery;
+  const [preview, setPreview] = useState<"selected" | { path: string }>();
+  const file = typeof preview === "object" ? snapshot.changes.find((change) => change.path === preview.path) : undefined;
   const { t } = useI18n();
   const viewRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!attention || attention.path !== snapshot.path) return;
-    const selector = attention.target === "description" ? "#commit-description"
+    const selector = attention.target === "description" || attention.target === "form" ? "#commit-description"
       : attention.target === "selection" ? ".select-all input"
       : ".delivery-stale button";
     viewRef.current?.querySelector<HTMLElement>(selector)?.focus();
@@ -3460,21 +3449,30 @@ function ChangesView({ readiness, snapshot, delivery, busy, configured, onOpenFi
     {hasChanges ? <>
       {!snapshot.head && <p className="file-inclusion-note first-save-note" role="note">{t("firstSaveNote")}</p>}
       <ChangeSummary files={selected} />
-      <FileList files={snapshot.changes} onOpen={onOpenFile} selection={{ excluded, disabled: busy || generating, onToggle: delivery.toggleIncluded, onToggleAll: delivery.setAllIncluded, onIgnore }} />
+      <FileList files={snapshot.changes} onOpen={({ path }) => setPreview({ path })} selection={{ excluded, disabled: busy || generating, onToggle: delivery.toggleIncluded, onToggleAll: delivery.setAllIncluded, onIgnore }} />
       {partly > 0 && <p className="file-inclusion-note partly-staged">{t("partlyStagedNote", { count: partly })}</p>}
+      <section className="save-preview">
+        <button className="ghost-button small" onClick={() => setPreview(preview === "selected" ? undefined : "selected")} disabled={!selected.length} aria-expanded={preview === "selected" && selected.length > 0}>
+          <FileDiff size={14} /> {t("showSelectedDiff")}
+        </button>
+        {(file || (preview === "selected" && selected.length > 0)) && <div className="selection-preview">
+          <div className="diff-toolbar"><strong>{file?.path ?? t("selectedDiffTitle")}</strong><button className="icon-button" onClick={() => setPreview(undefined)} aria-label={t("closeDiffs")}><X size={14} /></button></div>
+          <SaveDiff repoPath={snapshot.path} files={file ? [file] : selected} individual={Boolean(file)} />
+        </div>}
+      </section>
       <div className="commit-form">
         <div className="commit-form-heading"><h3>{t("saveDescription")}</h3><button className="outline-button small" onClick={() => void delivery.generateDescription()} disabled={!configured || generating || busy || !selected.length}>{generating ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{t(generating ? "generatingSaveDescription" : "generateDescription")}</button></div>
         <label htmlFor="commit-description" className="visually-hidden">{t("commitMessage")}</label><textarea id="commit-description" value={message} onChange={(event) => delivery.setMessage(event.target.value)} maxLength={120} rows={3} placeholder={t("commitPlaceholder")} aria-describedby={attention?.target === "description" && !message.trim() ? "save-description-required" : undefined} disabled={generating || busy} />
         {attention?.target === "description" && !message.trim() && <p id="save-description-required" className="file-inclusion-note save-description-required" role="status">{t(configured ? "saveDescriptionOrGenerate" : "saveDescriptionRequired")}</p>}
         <div className="commit-form-meta"><span>{t(configured ? "editableDescription" : "manualSaveDescription")}</span><span>{message.length}/120</span></div>
         {author && !needsSetup && <p className="commit-author-note"><UserRound size={11} />{t("readinessCommitAuthor", { identity: identityText({ name: author.name?.value, email: author.email?.value }), origin: authorOrigin(author, t) })}</p>}
+        {suggestionOutdated && <p role="status" className="file-inclusion-note">{t("saveSuggestionOutdated")}</p>}
         {withheld.length > 0 && <p className="file-inclusion-note withheld-note">{t("descriptionWithheld", { files: withheldText(withheld, t) })}</p>}
         {canMerge && <label className="delivery-option"><input type="checkbox" checked={merge} disabled={busy} onChange={(event) => delivery.setMerge(event.target.checked)} /><span>{t("integrateAfterSave", { target: snapshot.defaultBranch! })}</span></label>}
         {merge && canMerge && leftOut > 0 && <p className="file-inclusion-note">{t("excludedStayForIntegration", { count: leftOut, target: snapshot.defaultBranch! })}</p>}
         {stale && <div className="delivery-stale" role="alert">{t("filesChangedReview")} <button className="outline-button small" onClick={() => delivery.beginDelivery(merge, true)}>{t("reviewUpdatedFiles")}</button></div>}
         {!selected.length && <p className="file-inclusion-note selection-empty" role="status">{t("tickFilesToSave")}</p>}
         <div className="commit-form-actions">
-          <button className="ghost-button" onClick={() => delivery.setDiffOpen(true)} disabled={!selected.length}><FileDiff size={14} />{t("showSelectedDiff")}</button>
           <button className="primary-button" onClick={() => delivery.prepareCommit()} disabled={generating || busy}><ShieldCheck size={14} />{t(merge && canMerge ? "reviewSaveAndMerge" : "reviewSave")}</button>
         </div>
         <p className="file-inclusion-note">{t("selectedFilesNote")}</p>
@@ -3551,9 +3549,14 @@ function DeliveryReviewModal({ review, snapshot, busy, onClose, onApply }: {
 }) {
   const { t } = useI18n();
   const dialogRef = useDialog(onClose);
+  const save = review.plan.steps.find((step) => step.operation === "commit");
+  const target = review.plan.selection?.target;
+  const confirmLabel = save?.paths && snapshot ? t(target ? "confirmSelectedSaveAndMerge" : "confirmSelectedSave", {
+    files: counted(t, save.paths.length, "file", "files"), branch: snapshot.currentBranch, target: target ?? ""
+  }) : undefined;
   return <div className="modal-backdrop"><section className="modal delivery-review-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("reviewDeliveryTitle")}>
     <div className="modal-heading"><h2>{t("reviewDeliveryTitle")}</h2><button className="icon-button" onClick={onClose} aria-label={t("cancel")}><X size={18} /></button></div>
-    <PlanCard plan={review.plan} snapshot={snapshot} busy={busy} onApply={onApply} onDismiss={onClose} />
+    <PlanCard plan={review.plan} snapshot={snapshot} busy={busy} onApply={onApply} onDismiss={onClose} confirmLabel={confirmLabel} />
   </section></div>;
 }
 
@@ -3683,7 +3686,7 @@ function PlanGoal({ plan, snapshot }: { plan: ActionPlan; snapshot?: RepoSnapsho
   </div>;
 }
 
-function PlanCard({ plan, snapshot, onApply, onDismiss, busy }: { plan: ActionPlan; snapshot?: RepoSnapshot; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean }) {
+function PlanCard({ plan, snapshot, onApply, onDismiss, busy, confirmLabel }: { plan: ActionPlan; snapshot?: RepoSnapshot; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean; confirmLabel?: string }) {
   const { t } = useI18n();
   const asking = plan.kind === "question";
   const push = plan.allowed && plan.requiresConfirmation ? plan.steps.find((step) => step.operation === "push") : undefined;
@@ -3701,7 +3704,7 @@ function PlanCard({ plan, snapshot, onApply, onDismiss, busy }: { plan: ActionPl
     {/* A plan with nothing to confirm is already running, so it offers no button that could decide otherwise. */}
     {plan.allowed && !plan.requiresConfirmation
       ? <p className="plan-running"><LoaderCircle className="spin" size={12} /> {t("runningWithoutConfirmation")}</p>
-      : plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>{t("cancel")}</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {t("confirmAction")}</button></div>
+      : plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>{t("cancel")}</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {confirmLabel ?? t("confirmAction")}</button></div>
       : asking ? <p className="plan-hint">{t("answerBelow")}</p>
       : <button className="ghost-button plan-close" onClick={onDismiss}>{t("understood")}</button>}</div>;
 }
@@ -4357,34 +4360,25 @@ function FileDiffModal({ file, repoPath, onClose }: { file: FileChange; repoPath
   </div>;
 }
 
-/** Every ticked file as one diff, read the same way the save will record it. */
-function SelectionDiffModal({ files, repoPath, onClose }: { files: FileChange[]; repoPath: string; onClose: () => void }) {
+/** Inspect a file or exactly the files the form will save, without leaving the editor. */
+function SaveDiff({ files, repoPath, individual }: { files: FileChange[]; repoPath: string; individual: boolean }) {
   const { t, locale } = useI18n();
-  const [detail, setDetail] = useState<CommitDetail>();
-  const [error, setError] = useState<string>();
   const paths = files.map((file) => file.path);
-  const key = paths.join("\0");
-  const dialogRef = useDialog(onClose);
+  const key = JSON.stringify([repoPath, individual, locale, files.map(({ path, version }) => [path, version])]);
+  const [loaded, setLoaded] = useState<{ key: string; detail: CommitDetail } | { key: string; error: string }>();
   useEffect(() => {
     let live = true;
-    setDetail(undefined); setError(undefined);
-    window.gitcat.getSelectionDiff(repoPath, paths, locale)
-      .then((next) => { if (live) setDetail(next); })
-      .catch((reason) => { if (live) setError(cleanError(reason, t("fallbackReadFile"))); });
+    const read = individual
+      ? window.gitcat.getWorkingFileDiff(repoPath, paths[0])
+      : window.gitcat.getSelectionDiff(repoPath, paths, locale);
+    void read.then((detail) => { if (live) setLoaded({ key, detail }); })
+      .catch((reason) => { if (live) setLoaded({ key, error: cleanError(reason, t("fallbackReadFile")) }); });
     return () => { live = false; };
-  }, [repoPath, key]);
-
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="commit-modal wide selection-diff-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="selection-modal-title">
-      <div className="modal-heading">
-        <div><div className="eyebrow">{t("selectedDiffEyebrow", { count: files.length })}</div><h2 id="selection-modal-title">{t("selectedDiffTitle")}</h2></div>
-        <button className="icon-button soft" onClick={onClose} aria-label={t("closeDiffs")}><X size={17} /></button>
-      </div>
-      {error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}
-      {!detail && !error && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> {t("readingFile")}</div>}
-      {detail && (detail.diff.trim() ? <DiffView diff={detail.diff} truncated={detail.truncated} /> : <p className="detail-note">{t("selectedDiffEmpty")}</p>)}
-    </div>
-  </div>;
+  }, [key]);
+  if (loaded?.key !== key) return <div className="graph-loading" role="status"><LoaderCircle className="spin" size={15} /> {t("readingFile")}</div>;
+  if ("error" in loaded) return <div className="modal-error" role="alert"><AlertTriangle size={14} />{loaded.error}</div>;
+  return !individual && !loaded.detail.diff.trim() ? <p className="detail-note">{t("selectedDiffEmpty")}</p>
+    : <DiffView diff={loaded.detail.diff} truncated={loaded.detail.truncated} />;
 }
 
 /**

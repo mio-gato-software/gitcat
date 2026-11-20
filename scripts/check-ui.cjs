@@ -919,14 +919,14 @@ app.whenReady().then(async () => {
   assert.match(await js(`${rowFor('new-file.txt')}.title`), /^Nuevo · fuera/);
   assert.equal(await js(`${rowFor('new-file.txt')}.classList.contains('excluded')`), true);
   // What will be saved is shown as one diff of the ticked files only.
-  await js(`[...document.querySelectorAll('.commit-form-actions button')].find((node) => node.innerText.includes('Ver lo que se guardará')).click()`);
-  await waitFor(`document.querySelector('.selection-diff-modal .diff-view')`);
-  const selectedDiff = await js(`document.querySelector('.selection-diff-modal .diff-view').innerText`);
+  await js(`document.querySelector('.save-preview > button').click()`);
+  await waitFor(`document.querySelector('.selection-preview .diff-view')`);
+  const selectedDiff = await js(`document.querySelector('.selection-preview .diff-view').innerText`);
   assert.match(selectedDiff, /updated menu/); assert.doesNotMatch(selectedDiff, /new-file/);
+  assert.ok(await js(`Boolean(document.querySelector('.changes-view #commit-description') && !document.querySelector('[aria-modal="true"]'))`));
   await capture('selected-diff');
-  await assertDialog();
-  await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
-  await waitFor(`!document.querySelector('.selection-diff-modal')`);
+  await js(`document.querySelector('.selection-preview .icon-button').click()`);
+  await waitFor(`!document.querySelector('.selection-preview')`);
   // Ignoring an untracked file previews the exact .gitignore line and writes nothing until confirmed.
   await js(`${rowFor('new-file.txt')}.querySelector('.change-ignore').click()`);
   await waitFor(`document.querySelector('.delivery-review-modal')`);
@@ -946,10 +946,10 @@ app.whenReady().then(async () => {
   assert.equal(git('status', '--porcelain'), before, 'Opening save never changes Git');
   await js(`document.querySelector('.repo-toolbar .primary-button').click()`);
   await waitFor(`document.activeElement?.id === 'commit-description'`);
-  assert.match(await js(`document.querySelector('.save-description-required').innerText`), /descripción breve|genera una/);
   assert.equal(await js(`document.querySelector('.commit-form-actions .primary-button').disabled`), false, 'Review save explains missing input instead of becoming a dead button');
   await js(`document.querySelector('.commit-form-actions .primary-button').click()`);
   await waitFor(`document.activeElement?.id === 'commit-description'`);
+  assert.match(await js(`document.querySelector('.save-description-required').innerText`), /descripción breve|genera una/);
   assert.equal(git('status', '--porcelain'), before, 'A missing description never saves work');
   await js(`document.querySelector('.toolbar-more').click()`);
   await waitFor(`document.querySelector('.context-menu [role="menuitem"]')`);
@@ -970,14 +970,25 @@ app.whenReady().then(async () => {
   assert.deepEqual(described.at(-1), ['app.txt'], 'The description reads only the ticked files');
   await js(`${rowFor('new-file.txt')}.querySelector('.change-include').click()`);
   await waitFor(`document.querySelector('.inspector .select-all')?.innerText.includes('Se guardarán 2 de 2 archivos')`);
+  assert.equal(await js(`document.querySelector('#commit-description').value`), '', 'Changing the selection clears the suggestion for the old file set');
+  await js(`document.querySelector('.repo-toolbar .primary-button').click()`);
+  await js(`new Promise(resolve => setTimeout(resolve, 200))`);
+  assert.equal(described.length, 1, 'An already authorized repo stays manual when the save form opens');
+  assert.equal(await js(`document.querySelector('#commit-description').value`), '');
+  await js(`(() => {
+    const field = document.querySelector('#commit-description');
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, 'Update menu and add a new file');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
   assert.equal(await js(`document.querySelector('.delivery-option input').checked`), true);
   assert.match(await js(`document.querySelector('.inspector .change-row[title^="Nuevo · incluido"]').innerText`), /new-file\.txt/);
   // Who the save will be signed as is said beside the form, with where that comes from.
   assert.match(await js(`document.querySelector('.commit-author-note').innerText`), /Se guarda como GitCat QA <qa@example\.test>, configurado solo para este repositorio/);
   assert.equal(await js(`Boolean(document.querySelector('.changes-view .readiness-checklist'))`), false, 'Nothing to set up, so no checklist in the way');
   await capture('changes');
-  await js(`document.querySelector('.repo-toolbar .primary-button').click()`);
+  await js(`document.querySelector('.commit-form-actions .primary-button').click()`);
   await waitFor(`document.querySelector('.delivery-review-modal')`);
+  assert.match(await js(`document.querySelector('.delivery-review-modal .plan-actions .primary-button').innerText`), /Guardar 2 archivos en feature\/new-menu e integrar en main/);
   await capture('review');
   assert.equal(git('branch', '--show-current'), 'feature/new-menu');
   assert.equal(git('status', '--porcelain'), before, 'Review must precede all Git changes');
