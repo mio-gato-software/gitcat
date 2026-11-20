@@ -14,6 +14,7 @@ registerHooks({
   }
 });
 const service = await import("../dist-electron/electron/git-service.js");
+const { planSummary } = await import("../dist-electron/shared/plan-summary.js");
 
 function fixture(t) {
   const path = mkdtempSync(join(tmpdir(), "gitcat-switch-"));
@@ -36,6 +37,7 @@ test("compatible edits carry only after review and remain unsaved", async (t) =>
   const preview = await service.getSwitchWork(path, "other");
   assert.deepEqual(preview.blockers, []);
   const plan = await service.prepareSwitchWork(path, { mode: "carry", target: "other" }, "en");
+  assert.match(planSummary(plan, preview.snapshot, "en").local.join(" "), /come with you.*keeping what you staged/);
   assert.equal(git("branch", "--show-current"), "main");
   assert.equal(plan.requiresConfirmation, true);
 
@@ -60,11 +62,22 @@ test("set aside keeps staged and unstaged versions and new files across reopenin
     { mode: "set_aside", target: "other", label: "Pause feature", includeUntracked: true },
     "en"
   );
+  const summary = planSummary(plan, await service.getSnapshot(path), "es");
+  assert.match(summary.local.join(" "), /cambios en archivos seguidos y los archivos nuevos/);
+  assert.doesNotMatch([...summary.local, ...summary.finalState].join(" "), /acompañan|asistente/);
+  assert.match(summary.partial.join(" "), /la entrada de stash sigue disponible/);
+  assert.doesNotMatch(plan.steps[0].summary, /git stash/);
   await service.executePlan(path, plan, "en");
   assert.equal(git("status", "--porcelain"), "");
   const preview = await service.getSwitchWork(path, "main");
   assert.equal(preview.entries.length, 1);
   const restore = await service.prepareSwitchWork(path, { mode: "restore", stash: preview.entries[0].hash }, "en");
+  const restoreSummary = planSummary(restore, preview.snapshot, "en");
+  assert.match(restoreSummary.local.join(" "), /staged versions/);
+  assert.match(restoreSummary.finalState.join(" "), /stash entry stays available/);
+  assert.match(restoreSummary.partial.join(" "), /conflict/);
+  assert.doesNotMatch(restoreSummary.local.join(" "), /assistant/);
+  assert.doesNotMatch(restore.steps[0].summary, /git stash/);
   const result = await service.executePlan(path, restore, "en");
 
   assert.equal(result.error, undefined);
@@ -72,6 +85,20 @@ test("set aside keeps staged and unstaged versions and new files across reopenin
   assert.equal(readFileSync(join(path, "file"), "utf8"), "unstaged");
   assert.equal(readFileSync(join(path, "new"), "utf8"), "new");
   assert.equal((await service.getSwitchWork(path, "main")).entries.length, 1);
+});
+
+test("setting aside tracked edits alone leaves only new files in the working folder", async (t) => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, "file"), "mine");
+  writeFileSync(join(path, "new"), "new");
+  const request = { mode: "set_aside", target: "other", label: "Pause feature", includeUntracked: false };
+  const prepared = await service.prepareSwitchWork(path, request, "en");
+  const summary = planSummary(prepared, await service.getSnapshot(path), "en");
+  assert.match(summary.local.join(" "), /sets aside tracked edits/i);
+  assert.match(summary.finalState.join(" "), /New files stay uncommitted in this folder/);
+  assert.doesNotMatch(summary.finalState.join(" "), /2 files with uncommitted changes come along/);
+  assert.equal((await service.executePlan(path, prepared, "en")).error, undefined);
+  assert.equal(git("status", "--porcelain"), "?? new");
 });
 
 test("overlapping tracked edits and new-file collisions guide toward setting work aside", async (t) => {
