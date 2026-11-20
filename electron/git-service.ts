@@ -14,7 +14,7 @@ import type { HostingConnectionInput, NativeHostingContext } from "../shared/typ
 import { createReviewArgs } from "./review-provider.js";
 import { assertGitlabProjectAvailable, createGitlabProjectArgs, gitlabCreationFacts } from "./gitlab-repository.js";
 import { ActivityHistory, InvalidActivityHistoryError } from "./activity-history.js";
-import type { HistoryRecovery, SwitchWorkRequest, SwitchWorkPreview } from "../shared/types.js";
+import type { HistoryRecovery, HistoryRecoverySuggestion, SwitchWorkRequest, SwitchWorkPreview } from "../shared/types.js";
 import { operationContext, operationCheckpoint, operationPhase, inspectOperation, OperationCancelled } from "./operation-progress.js";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -4583,13 +4583,38 @@ async function validateHistoryRecovery(cwd: string, recovery: HistoryRecovery, l
   return snapshot;
 }
 
-export async function prepareHistoryRecovery(cwd: string, id: string, mode: HistoryRecovery['mode'], locale?: Locale) {
-  if (!["revert","undo","restore"].includes(mode)) throw new Error("Invalid recovery action.");
-  const snapshot=await getSnapshot(cwd);
-  const entry=activityHistory().list(snapshot.path).entries.find(e=>e.id===id);
+function historyRecoveryReference(path: string, id: string, mode: HistoryRecovery["mode"]) {
+  const entry = activityHistory().list(path).entries.find((item) => item.id === id);
   if (!entry) throw new Error("This activity entry is no longer retained. Inspect the Git history for a saved reference.");
-  const commit = mode === "restore" ? entry.before.head : [...entry.steps].reverse().find(step=>step.status==='completed' && step.operation==='commit')?.afterHead;
+  const commit = mode === "restore" ? entry.before.head : [...entry.steps].reverse().find((step) => step.status === "completed" && step.operation === "commit")?.afterHead;
   if (!commit) throw new Error("This entry has no confirmed saved version for that recovery. Never-saved files cannot be recovered from this history.");
+  return commit;
+}
+
+export async function suggestHistoryRecovery(cwd: string, id: string, locale?: Locale): Promise<HistoryRecoverySuggestion> {
+  const path = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
+  const commit = historyRecoveryReference(path, id, "revert");
+  const snapshot = await validateHistoryRecovery(path, { mode: "revert", commit }, locale);
+  if (snapshot.currentBranch === "HEAD") throw new Error(localized(locale,
+    "Abre una rama para revisar este guardado o crea una rama de recuperación.",
+    "Open a branch to review this save, or create a recovery branch."));
+  if (snapshot.head !== commit) return { mode: "revert", reason: "older" };
+
+  let published: boolean | undefined;
+  try { published = await historyIsPublished(path, snapshot, commit, locale); }
+  catch (error) { if (error instanceof OperationCancelled) throw error; }
+  const after = await getSnapshot(path);
+  if (after.head !== commit || after.currentBranch !== snapshot.currentBranch || after.isDirty || after.pending) {
+    throw new Error(localized(locale, "El proyecto cambió. Comprueba de nuevo cómo recuperar el guardado.", "The project changed. Check recovery options again."));
+  }
+  if (published === false) return { mode: "undo", reason: "local" };
+  return { mode: "revert", reason: published ? "published" : "unverified" };
+}
+
+export async function prepareHistoryRecovery(cwd: string, id: string, mode: HistoryRecovery["mode"], locale?: Locale) {
+  if (!["revert","undo","restore"].includes(mode)) throw new Error("Invalid recovery action.");
+  const snapshot = await getSnapshot(cwd);
+  const commit = historyRecoveryReference(snapshot.path, id, mode);
   const recovery: HistoryRecovery={mode,commit,...(mode==='restore'?{branch:`recovered/${id.slice(0,8)}`}:{})};
   return buildHistoryRecoveryPlan(snapshot.path, recovery, normalizeLocale(locale));
 }

@@ -12,7 +12,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   getHostingConnections, connectHosting, removeHostingConnection,
-  createPractice, getPracticeInfo, setPracticeLesson, editPractice, removePractice, previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, repairActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
+  createPractice, getPracticeInfo, setPracticeLesson, editPractice, removePractice, previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, repairActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, suggestHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
   getLlmConfig, getSnapshot, openWorktree, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
   prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
   setAiSharingExclusions, setAiSharingReview, type IssuedConflictGuide, type IssuedConflictProposal
@@ -534,6 +534,12 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
   });
   ipcMain.handle("activity:retention", (event, days: unknown) => { assertTrustedSender(event); if (typeof days !== 'number') throw new Error('Invalid retention'); setActivityRetention(days); });
   ipcMain.handle("activity:clear", (event, cwd: string) => { assertTrustedSender(event); return clearActivityHistory(assertOpenedRepository(cwd)); });
+  ipcMain.handle("activity:suggest-recovery", async (event, cwd: unknown, id: unknown, locale?: Locale) => {
+    assertTrustedSender(event);
+    const path = assertOpenedRepository(cwd);
+    if (typeof id !== "string") throw new Error("Invalid activity entry.");
+    return tracked(event, path, "planning", () => suggestHistoryRecovery(path, id, locale));
+  });
   ipcMain.handle("activity:recover", async (event, cwd: string, id: unknown, mode: unknown, locale?: Locale) => {
     assertTrustedSender(event); const path=assertOpenedRepository(cwd);
     if (typeof id !== 'string' || !['revert','undo','restore'].includes(String(mode))) throw new Error('Invalid recovery request');

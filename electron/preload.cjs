@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("gitcat", {
   setActivityRetention: (days) => ipcRenderer.invoke("activity:retention", days),
   clearActivityHistory: (path) => ipcRenderer.invoke("activity:clear", path),
   prepareHistoryRecovery: (path, id, mode, locale) => ipcRenderer.invoke("activity:recover", path, id, mode, locale),
+  suggestHistoryRecovery: (path, id, locale) => ipcRenderer.invoke("activity:suggest-recovery", path, id, locale),
   onOperationProgress: (listener) => {
     const receive = (_event, progress) => listener(progress);
     ipcRenderer.on("operation:progress", receive);

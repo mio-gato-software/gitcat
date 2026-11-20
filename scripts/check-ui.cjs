@@ -112,6 +112,12 @@ app.whenReady().then(async () => {
   ipcMain.handle('switch-work:read', (_, p, target) => service.getSwitchWork(p,target));
   ipcMain.handle('switch-work:prepare', async (_, p, request, locale) => planHandlers.rememberPlan(await service.prepareSwitchWork(p, request, locale)));
   ipcMain.handle('activity:list', (_, p) => service.getActivityHistory(p));
+  const recoveryChecks = [];
+  ipcMain.handle('activity:suggest-recovery', (_, p, id, locale) => {
+    recoveryChecks.push(id);
+    return service.suggestHistoryRecovery(p, id, locale);
+  });
+  ipcMain.handle('activity:recover', async (_, p, id, mode, locale) => planHandlers.rememberPlan(await service.prepareHistoryRecovery(p, id, mode, locale)));
   ipcMain.handle('activity:repair', () => service.repairActivityHistory());
   ipcMain.handle('activity:retention', (_, days) => service.setActivityRetention(days));
   ipcMain.handle('activity:clear', (_, p) => service.clearActivityHistory(p));
@@ -1056,13 +1062,34 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.activity-history .activity-record')`);
   await assertDialog();
   const activityText = await js(`document.querySelector('.activity-history').innerText`);
-  assert.match(activityText, /Guardar cambios · completado[\s\S]*Revisar una reversión/);
-  const activitySteps = await js(`[...document.querySelectorAll('.activity-history .activity-record li')].map(step => step.innerText)`);
+  assert.match(activityText, /Guardar cambios en feature\/new-menu[\s\S]*Completada/);
+  assert.doesNotMatch(activityText, /Revisar rama de recuperación|Borrar actividad de este proyecto|\b[a-f0-9]{40}\b/);
+  assert.equal(await js(`document.querySelector('.activity-settings').open`), false);
+  const activityTitles = await js(`[...document.querySelectorAll('.activity-entry > summary strong')].map(entry => entry.innerText)`);
   for (const action of ['Apartar trabajo', 'Restaurar trabajo apartado', 'Deshacer guardado y conservar archivos', 'Revertir guardado con un nuevo commit', 'Crear rama de recuperación', 'Operación de Git']) {
-    assert.ok(activitySteps.includes(`${action} · completado`), `Activity should show the confirmed action: ${action}`);
+    assert.ok(activityTitles.includes(`${action} en main`), `Activity should show the confirmed action: ${action}`);
   }
   assert.doesNotMatch(activityText, /git_command|git (stash|reset|branch|revert)/);
-  await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key:'Escape' }))`);
+  const recoveryEntry = `document.querySelector('.activity-entry[data-has-save="true"]')`;
+  await js(`${recoveryEntry}.querySelector('summary').click()`);
+  assert.equal(recoveryChecks.length, 0, 'Browsing Activity does not query publishing destinations');
+  assert.match(await js(`${recoveryEntry}.innerText`), /Guardar cambios · completado/);
+  assert.equal(await js(`${recoveryEntry}.querySelector('.activity-entry-technical').open`), false);
+  await assertDialog();
+  const savedRecord = activity.list(repo).entries.find(entry => entry.steps.some(step => step.operation === 'commit' && step.status === 'completed'));
+  const savedCommit = savedRecord.steps.find(step => step.operation === 'commit').afterHead;
+  const tipBeforeRecoveryReview = git('rev-parse', 'HEAD');
+  const canUndoTip = savedCommit === tipBeforeRecoveryReview;
+  await js(`${recoveryEntry}.querySelector('.activity-entry-recovery button').click()`);
+  await waitFor(`${recoveryEntry}.querySelector('.primary-button, [role="alert"]')`);
+  assert.match(await js(`${recoveryEntry}.innerText`), canUndoTip ? /Revisar deshacer y conservar archivos/ : /Revisar reversión con un commit nuevo/);
+  assert.equal(recoveryChecks.length, 1);
+  await js(`${recoveryEntry}.querySelector('.primary-button').click()`);
+  await waitFor(`document.querySelector('.delivery-review-modal')`);
+  assert.match(await js(`document.querySelector('.delivery-review-modal').innerText`), canUndoTip
+    ? /Deshacer el último guardado conservando los archivos/ : /Revertir el guardado con un nuevo commit/);
+  assert.equal(git('rev-parse', 'HEAD'), tipBeforeRecoveryReview, 'Recommendations and their review leave history alone');
+  await js(`document.querySelector('.delivery-review-modal .plan-actions .ghost-button').click()`);
   await waitFor(`!document.querySelector('.activity-history')`);
   const corruptHistory = '{"retentionDays":';
   const headBeforeRepair = git('rev-parse', 'HEAD');
