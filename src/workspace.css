@@ -23,17 +23,12 @@
 .toolbar-sync { flex: none; display: inline-flex; gap: 8px; margin-top: 12px; padding: 3px 7px; color: var(--secondary); background: var(--raised); border: 1px solid var(--border); border-radius: 5px; font: 10.5px var(--mono); }
 .toolbar-sync span { display: inline-flex; align-items: center; gap: 3px; }
 .toolbar-tools { display: flex; align-items: center; gap: 2px; }
-.tool-button { display: grid; justify-items: center; gap: 4px; min-width: 56px; padding: 7px 8px 6px; color: var(--secondary); background: transparent; border-radius: 7px; font-size: 10.5px; }
+.tool-button { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 6px 8px; color: var(--secondary); background: transparent; border-radius: 7px; font-size: 10.5px; }
 .tool-button:hover:not(:disabled) { color: var(--text); background: var(--raised); }
 .tool-button svg { color: var(--text); }
-.tool-divider { width: 1px; height: 30px; margin: 0 6px; background: var(--border); }
-.toolbar-delivery { display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; }
+.toolbar-delivery { font-size: 12px; display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; }
 .delivery-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .delivery-actions button { min-height: 32px; font-size: 12px; }
-.overview-more { padding: 7px; }
-.overview-actions:has(.overview-more) { gap: 2px; }
-.overview-actions:has(.overview-more) > :first-child { border-top-right-radius: 3px; border-bottom-right-radius: 3px; }
-.overview-more { border-top-left-radius: 3px; border-bottom-left-radius: 3px; }
 
 /* Facts stay visible in one row; explanations and Git terminology wait behind Details. */
 .work-overview { flex: none; min-width: 0; background: var(--surface); border-bottom: 1px solid var(--border); }
@@ -67,7 +62,6 @@
 .more-suggestions span { flex: 1; }
 @media (max-width: 1100px) {
   .repo-toolbar { gap: 10px; }
-  .tool-button { min-width: 44px; padding-inline: 6px; }
   .overview-details { grid-template-columns: minmax(0, 1fr); gap: 12px; }
   .overview-next { border-left: 0; border-top: 1px solid var(--border); padding: 10px 0 0; }
 }
@@ -145,7 +139,7 @@
 .branch-sync-badge { display: inline-flex; flex: none; align-items: center; color: var(--muted); }
 .branch-sync-badge.diverged, .ref-tag.diverged { color: var(--amber, #e4be81); }
 .ref-tag.diverged { border-color: var(--amber, #e4be81); }
-.ref-tag .ref-cloud { display: inline-flex; flex: none; overflow: visible; }
+.ref-tag .ref-cloud { display: inline-flex; flex: none; overflow: visible; padding: 0; color: inherit; background: transparent; }
 .ref-tag .ref-cloud:hover { color: var(--mint); }
 .ref-tag .ref-worktree { display: inline-flex; flex: none; overflow: visible; }
 .worktree-preview { padding: 16px; display: grid; gap: 12px; }
@@ -313,7 +307,11 @@
 .commit-form .delivery-option { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; color: var(--secondary); font-size: 11.5px; line-height: 1.5; }
 .delivery-option input { accent-color: var(--coral); }
 .commit-form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
-.commit-form-actions .ghost-button { display: inline-flex; flex: none; align-items: center; gap: 6px; }
+.save-preview { margin-top: 10px; }
+.save-preview > .ghost-button { display: inline-flex; align-items: center; gap: 6px; }
+.save-preview .diff-view { margin-top: 4px; }
+.save-preview .diff-view pre { max-height: 28vh; }
+.save-preview .diff-toolbar strong { overflow-wrap: anywhere; }
 .commit-form-actions .primary-button { flex: 1 1 160px; }
 .file-inclusion-note { margin: 10px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.55; }
 .save-description-required { color: var(--amber); }
@@ -322,10 +320,6 @@
 .diff-toolbar .ghost-button { flex: none; }
 
 @media (max-width: 1360px) { .delivery-status { display: none; } }
-@media (max-width: 1200px) {
-  .tool-button { min-width: 38px; padding: 8px; }
-  .tool-button span { display: none; }
-}
 
 /* The new-project button sits on the same baseline as the tabs beside it. */
 /* Keep empty space and the strip above the tabs available for moving the window.
@@ -685,3 +679,13 @@
 .worktree-info { min-width: 0; flex: 1; display: grid; gap: 5px; }
 .worktree-info code, .worktree-info span { overflow-wrap: anywhere; font-size: 12px; }
 .worktree-list button { flex-shrink: 0; }
+
+.activity-entry > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; }
+.activity-entry > summary strong { color: var(--text); overflow-wrap: anywhere; }
+.activity-entry > summary svg { flex: none; }
+.activity-entry[open] > summary svg { transform: rotate(180deg); }
+.activity-entry-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 11px; }
+.activity-entry-technical { margin-top: 8px; color: var(--muted); overflow-wrap: anywhere; }
+.activity-entry-recovery { margin-bottom: 8px; }
+.activity-settings { margin-top: 16px; padding-top: 10px; border-top: 1px solid var(--border); }
+.activity-settings summary, .activity-entry-technical summary { cursor: pointer; }

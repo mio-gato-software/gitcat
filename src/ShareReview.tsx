@@ -62,6 +62,7 @@ export function ShareReview({
   const selectedProvider = provider || known;
   const native = selectedProvider ? isNativeProvider(selectedProvider) : false;
   const existingReview = preview?.existing;
+  const createsReview = Boolean(preview && preview.reviewable && existingReview?.state !== "OPEN");
   const openExisting = existingReview?.state === "OPEN" && preview?.commits.length === 0 ? existingReview : undefined;
 
   const check = async () => {
@@ -75,8 +76,6 @@ export function ShareReview({
           remote,
           head: branch,
           base,
-          title,
-          body,
           ...(provider ? { provider } : {}),
           ...(connectionId ? { connectionId } : {})
         })
@@ -88,11 +87,16 @@ export function ShareReview({
     }
   };
   const publish = async () => {
-    if (!preview || busy) return;
+    if (!preview || busy || (createsReview && !title.trim())) return;
     setBusy(true);
     setError("");
     try {
-      const { pullRequest, warnings, snapshot: updated } = await window.gitcat.publishReview(snapshot.path, preview.id);
+      const draft = createsReview ? { title, body } : undefined;
+      const {
+        pullRequest,
+        warnings,
+        snapshot: updated
+      } = await window.gitcat.publishReview(snapshot.path, preview.id, draft);
       setResult({ pullRequest, warnings });
       if (updated) onUpdated(updated);
     } catch (e) {
@@ -133,52 +137,16 @@ export function ShareReview({
         <p>{t("shareReviewIntro")}</p>
         <fieldset disabled={busy}>
           <label>
-            {t("shareReviewRemote")}
-            <select value={remote} onChange={(e) => edit(setRemote, e.target.value)}>
-              {snapshot.remotes.map((r) => (
-                <option key={r}>{r}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            {t("readinessHostingService")}
+            {t("shareReviewBranch")}
             <select
-              value={provider}
+              name="head"
+              value={branch}
               onChange={(e) => {
-                setProvider(e.target.value as HostingProvider | "");
-                setConnectionId("");
-                setPreview(undefined);
-                setResult(undefined);
-                setError("");
+                edit(setBranch, e.target.value);
+                setTitle(e.target.value);
+                setBody("");
               }}
             >
-              <option value="">{t("shareReviewUseRepositoryService")}</option>
-              {hostingProviders.map((p) => (
-                <option key={p} value={p}>
-                  {hostingLabels[p]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <p className="readiness-note">{t("shareReviewCustomHost")}</p>
-          {(native || (!selectedProvider && connections.length > 0)) && (
-            <label>
-              {t("shareReviewSavedAccount")}
-              <select value={connectionId} onChange={(event) => edit(setConnectionId, event.target.value)}>
-                <option value="">{t("shareReviewUseMatchedAccount")}</option>
-                {connections
-                  .filter((c) => !selectedProvider || c.provider === selectedProvider)
-                  .map((c) => (
-                    <option value={c.id} key={c.id}>
-                      {hostingLabels[c.provider]} · {c.label} · {c.username || c.accountId} · {c.baseUrl}
-                    </option>
-                  ))}
-              </select>
-            </label>
-          )}
-          <label>
-            {t("shareReviewBranch")}
-            <select value={branch} onChange={(e) => edit(setBranch, e.target.value)}>
               {snapshot.branches
                 .filter((b) => b.presence !== "remote")
                 .map((b) => (
@@ -188,49 +156,101 @@ export function ShareReview({
           </label>
           <label>
             {t("shareReviewBaseBranch")}
-            <input value={base} onChange={(e) => edit(setBase, e.target.value)} />
+            <input name="base" value={base} onChange={(e) => edit(setBase, e.target.value)} />
           </label>
-          <label>
-            {t("shareReviewTitleLabel")}
-            <input value={title} maxLength={250} onChange={(e) => edit(setTitle, e.target.value)} />
-          </label>
-          <label>
-            {t("shareReviewDescription")}
-            <textarea value={body} maxLength={8000} onChange={(e) => edit(setBody, e.target.value)} />
-          </label>
+          {snapshot.remotes.length > 1 && (
+            <label>
+              {t("shareReviewRemote")}
+              <select
+                name="remote"
+                value={remote}
+                onChange={(e) => {
+                  edit(setRemote, e.target.value);
+                  setProvider("");
+                  setConnectionId("");
+                }}
+              >
+                {snapshot.remotes.map((r) => (
+                  <option key={r}>{r}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          {remote && (
+            <details className="share-review-destination">
+              <summary>{t("shareReviewDestinationOptions")}</summary>
+              <label>
+                {t("readinessHostingService")}
+                <select
+                  name="provider"
+                  value={provider}
+                  onChange={(e) => {
+                    setProvider(e.target.value as HostingProvider | "");
+                    setConnectionId("");
+                    setPreview(undefined);
+                    setResult(undefined);
+                    setError("");
+                  }}
+                >
+                  <option value="">{t("shareReviewUseRepositoryService")}</option>
+                  {hostingProviders.map((p) => (
+                    <option key={p} value={p}>
+                      {hostingLabels[p]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {!known && <p className="readiness-note">{t("shareReviewCustomHost")}</p>}
+              {(native || (!selectedProvider && connections.length > 0)) && (
+                <label>
+                  {t("shareReviewSavedAccount")}
+                  <select
+                    name="connection"
+                    value={connectionId}
+                    onChange={(event) => edit(setConnectionId, event.target.value)}
+                  >
+                    <option value="">{t("shareReviewUseMatchedAccount")}</option>
+                    {connections
+                      .filter((c) => !selectedProvider || c.provider === selectedProvider)
+                      .map((c) => (
+                        <option value={c.id} key={c.id}>
+                          {hostingLabels[c.provider]} · {c.label} · {c.username || c.accountId} · {c.baseUrl}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              )}
+              {(native || manageAccounts) && (
+                <>
+                  <p>{t("shareReviewAccountPublication")}</p>
+                  <button
+                    type="button"
+                    className="ghost-button small"
+                    disabled={busy}
+                    onClick={() => setManageAccounts(!manageAccounts)}
+                  >
+                    {t("shareReviewManageAccounts")}
+                  </button>
+                </>
+              )}
+              {manageAccounts && (
+                <HostingAccounts
+                  locale={locale}
+                  expanded
+                  onChanged={() => {
+                    void loadAccounts();
+                    setPreview(undefined);
+                    setResult(undefined);
+                  }}
+                />
+              )}
+            </details>
+          )}
         </fieldset>
-        {(native || manageAccounts) && (
-          <>
-            <p>{t("shareReviewAccountPublication")}</p>
-            <button
-              type="button"
-              className="ghost-button small"
-              disabled={busy}
-              onClick={() => setManageAccounts(!manageAccounts)}
-            >
-              {t("shareReviewManageAccounts")}
-            </button>
-          </>
-        )}
-        {manageAccounts && (
-          <HostingAccounts
-            locale={locale}
-            expanded
-            onChanged={() => {
-              void loadAccounts();
-              setPreview(undefined);
-              setResult(undefined);
-            }}
-          />
-        )}
         {!snapshot.remotes.length && <p>{t("shareReviewNeedsRemote")}</p>}
         {error && <p role="alert">{error}</p>}
         {busy && <p role="status">{t("shareReviewChecking")}</p>}
-        <button
-          className="outline-button"
-          disabled={busy || !remote || !title.trim() || !base}
-          onClick={() => void check()}
-        >
+        <button className="outline-button" disabled={busy || !remote || !branch || !base} onClick={() => void check()}>
           {t("shareReviewCheck")}
         </button>
         {preview && (
@@ -275,10 +295,22 @@ export function ShareReview({
               </button>
             ) : (
               <>
+                {createsReview && (
+                  <fieldset disabled={busy}>
+                    <label>
+                      {t("shareReviewTitleLabel")}
+                      <input name="title" value={title} maxLength={250} onChange={(e) => setTitle(e.target.value)} />
+                    </label>
+                    <label>
+                      {t("shareReviewDescription")}
+                      <textarea name="body" value={body} maxLength={8000} onChange={(e) => setBody(e.target.value)} />
+                    </label>
+                  </fieldset>
+                )}
                 <p>{t("shareReviewConfirmation")}</p>
                 <button
                   className="primary-button"
-                  disabled={busy || !preview.reviewable}
+                  disabled={busy || !preview.reviewable || (createsReview && !title.trim())}
                   onClick={() => void publish()}
                 >
                   {existingReview?.state === "OPEN" ? t("shareReviewPublishExisting") : t("shareReviewPublishNew")}

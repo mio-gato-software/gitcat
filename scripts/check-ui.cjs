@@ -83,7 +83,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('hosting:remove',()=>({secureStorage:true,connections:hostingAccounts}));
   let hostingScenario = false;
   const hostingSnapshot = value => hostingScenario ? { ...value, remotes: ['origin'], remoteUrls: { origin: nativeUi[hostingScenario]?.remote??'https://code.company.test/org/team/repo.git' } } : value;
-  const reviewRequests = [], reviewLinks = [];
+  const reviewRequests = [], reviewLinks = [], reviewDrafts = [];
   let reviewPublished = false;
   const reviewUrl = 'https://code.company.test/org/team/repo/-/merge_requests/1';
   const reviewCheckedAt = '2026-11-19T23:40:00.000Z';
@@ -96,8 +96,9 @@ app.whenReady().then(async () => {
     const existing = reviewScenario?.open ? { url: reviewUrl, state: 'OPEN', head: request.head, base: request.base } : undefined;
     return { id: 'hosting-ui', repoPath: p, provider: request.provider, host: 'code.company.test', request, repository: 'org/team/repo', remoteUrl: 'https://code.company.test/org/team/repo.git', account: 'anna.work', headHash: snapshot.head, baseHash: 'b'.repeat(40), commits, existing, reviewable: true, checkedAt: reviewCheckedAt };
   });
-  ipcMain.handle('review:publish', async (_, p, id) => {
+  ipcMain.handle('review:publish', async (_, p, id, draft) => {
     assert.equal(id, 'hosting-ui');reviewPublished = true;
+    reviewDrafts.push(draft);
     const native=nativeUi[hostingScenario];
     const pullRequest = { url: native?`${native.location.webUrl}/${native.provider==='azure'?'pullrequest':'pull-requests'}/1`:reviewUrl, state: 'OPEN' };
     return native
@@ -111,6 +112,12 @@ app.whenReady().then(async () => {
   ipcMain.handle('switch-work:read', (_, p, target) => service.getSwitchWork(p,target));
   ipcMain.handle('switch-work:prepare', async (_, p, request, locale) => planHandlers.rememberPlan(await service.prepareSwitchWork(p, request, locale)));
   ipcMain.handle('activity:list', (_, p) => service.getActivityHistory(p));
+  const recoveryChecks = [];
+  ipcMain.handle('activity:suggest-recovery', (_, p, id, locale) => {
+    recoveryChecks.push(id);
+    return service.suggestHistoryRecovery(p, id, locale);
+  });
+  ipcMain.handle('activity:recover', async (_, p, id, mode, locale) => planHandlers.rememberPlan(await service.prepareHistoryRecovery(p, id, mode, locale)));
   ipcMain.handle('activity:repair', () => service.repairActivityHistory());
   ipcMain.handle('activity:retention', (_, days) => service.setActivityRetention(days));
   ipcMain.handle('activity:clear', (_, p) => service.clearActivityHistory(p));
@@ -266,6 +273,26 @@ app.whenReady().then(async () => {
     }
     throw new Error(`UI did not become ready: ${expression}`);
   };
+  const refreshStatus = () => js(`document.querySelector('.repo-toolbar [data-action="refresh"]').click()`);
+  const toolbarMenu = '.repo-toolbar .context-menu';
+  const toolbarItem = action => `document.querySelector('${toolbarMenu} [data-action="${action}"]')`;
+  const openToolbarMenu = async () => {
+    await js(`if (!document.querySelector('${toolbarMenu}')) document.querySelector('.toolbar-more').click()`);
+    await waitFor(`document.querySelector('${toolbarMenu}')`);
+  };
+  const clickToolbarItem = async action => {
+    await openToolbarMenu();
+    await js(`${toolbarItem(action)}.click()`);
+  };
+  const closeToolbarMenu = () => js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  const clickPull = async () => {
+    const next = await js(`document.querySelector('.work-overview').dataset.next`);
+    if (next === 'get_latest' || next === 'combine_diverged') {
+      await js(`document.querySelector('.repo-toolbar .primary-button').click()`);
+    } else {
+      await clickToolbarItem('pull');
+    }
+  };
   // Native frame sizes and zoom updates are asynchronous on Windows. Verify the
   // content viewport before asserting a layout, just like the welcome checks.
   const resizeContent = async (width, height, zoom = 1) => {
@@ -288,7 +315,7 @@ app.whenReady().then(async () => {
     fs.writeFileSync(path.join(screenshots, `${name}.png`), (await win.webContents.capturePage()).toPNG());
   };
   const assertFits = async () => assert.deepEqual(await js(`(() => {
-    const nodes = [...document.querySelectorAll('.tool-button, .delivery-actions button, .overview-toggle, .inspector-tabs button, .commit-search, .notification-bell, .chat-compose textarea, .send-button')];
+    const nodes = [...document.querySelectorAll('.tool-button, .toolbar-delivery button, .delivery-actions button, .overview-toggle, .inspector-tabs button, .commit-search, .notification-bell, .chat-compose textarea, .send-button')];
     return nodes.filter(node => { const r = node.getBoundingClientRect(); return r.left < 0 || r.right > innerWidth || r.width < 20 || r.bottom > innerHeight; }).map(node => node.textContent || node.getAttribute('aria-label'));
   })()`), [], 'Primary controls fit the window');
 
@@ -322,7 +349,11 @@ app.whenReady().then(async () => {
   const assertDialog = async () => {
     assert.deepEqual(await js(`(() => {
       const dialog = [...document.querySelectorAll('[aria-modal="true"]')].at(-1);
-      const nodes = [...dialog.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], summary, [tabindex]:not([tabindex="-1"])')].filter(n => n.tabIndex >= 0 && n.getClientRects().length);
+      const focusable = 'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], summary, [tabindex]:not([tabindex="-1"])';
+      const nodes = [...dialog.querySelectorAll(focusable)].filter(n => {
+        const closed = n.closest('details:not([open])');
+        return n.tabIndex >= 0 && n.getClientRects().length && (!closed || closed.querySelector(':scope > summary')?.contains(n));
+      });
       const first = nodes[0], last = nodes.at(-1);
       const initial = dialog.contains(document.activeElement);
       last.focus(); last.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
@@ -623,21 +654,34 @@ app.whenReady().then(async () => {
 
   // The renderer uses scripted hosting replies; publication is exercised against real Git separately.
   hostingScenario = true;
-  await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+  await refreshStatus();
   await waitFor(`document.querySelector('.remote-status')?.innerText.includes('code.company.test')`);
   await js(`document.querySelector('[aria-label="Compartir para revisión"]').click()`);
   await waitFor(`document.querySelector('.share-review')`);
-  await js(`(() => {const select=document.querySelectorAll('.share-review select')[1];select.value='gitlab';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  assert.equal(await js(`Boolean(document.querySelector('.share-review input[name="title"], .share-review textarea[name="body"]'))`), false);
+  assert.equal(await js(`document.querySelector('.share-review-destination').open`), false);
+  await js(`(() => {document.querySelector('.share-review-destination').open = true;const select=document.querySelector('.share-review select[name="provider"]');select.value='gitlab';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
   await js(`document.querySelector('.share-review .outline-button').click()`);
   await waitFor(`document.querySelector('.share-review .activity-record')`);
   assert.equal(reviewRequests.at(-1).provider, 'gitlab');
+  assert.equal(Object.hasOwn(reviewRequests.at(-1), 'title'), false);
+  assert.equal(Object.hasOwn(reviewRequests.at(-1), 'body'), false);
   assert.equal(reviewPublished, false, 'Checking leaves publication behind confirmation');
   assert.match(await js(`document.querySelector('.share-review .activity-record').innerText`), /GitLab[\s\S]*org\/team\/repo[\s\S]*anna.work[\s\S]*Saved work for review/);
   await assertDialog();
   await capture('gitlab-review');
+  await js(`(() => {
+    const title = document.querySelector('.share-review input[name="title"]');
+    const body = document.querySelector('.share-review textarea[name="body"]');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(title, 'Reviewed after checking');
+    title.dispatchEvent(new Event('input', { bubbles: true }));
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(body, 'Draft entered after checking');
+    body.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
   await js(`document.querySelector('.share-review .primary-button').click()`);
   await waitFor(`document.querySelector('.share-review [role="status"]')?.innerText.includes('merge_requests/1')`);
   assert.equal(reviewPublished, true);
+  assert.deepEqual(reviewDrafts.at(-1), { title: 'Reviewed after checking', body: 'Draft entered after checking' });
   const reviewStatus = await js(`document.querySelector('.share-review [role="status"]').innerText`);
   assert.match(reviewStatus, /no pudo guardar toda la operación en Actividad/);
   assert.match(reviewStatus, /Falló una comprobación del repositorio local[\s\S]*Actualiza el proyecto/);
@@ -651,6 +695,7 @@ app.whenReady().then(async () => {
   await js(checkReview);
   await waitFor(reviewPrimary);
   assert.equal(await js(`${reviewPrimary}.innerText.trim()`), 'Abrir revisión');
+  assert.equal(await js(`Boolean(document.querySelector('.share-review input[name="title"], .share-review textarea[name="body"]'))`), false);
   const openReviewText = await js(`document.querySelector('.share-review .activity-record').innerText`);
   assert.match(openReviewText, /Estado real de la revisión: OPEN/);
   assert.doesNotMatch(openReviewText, /La confirmación publica/);
@@ -665,28 +710,30 @@ app.whenReady().then(async () => {
   await js(checkReview);
   await waitFor(reviewPrimary);
   assert.equal(await js(`${reviewPrimary}.innerText.trim()`), 'Publicar en esta revisión');
+  assert.equal(await js(`Boolean(document.querySelector('.share-review input[name="title"]'))`), false);
   reviewScenario = { open: false, noCommits: true };
   await js(checkReview);
   await waitFor(reviewPrimary);
   assert.equal(await js(`${reviewPrimary}.innerText.trim()`), 'Publicar y crear una revisión nueva');
+  assert.equal(await js(`Boolean(document.querySelector('.share-review input[name="title"]'))`), true);
   assert.equal(await js(`${reviewPrimary}.disabled`), false, 'A published branch can still open its first review');
   reviewScenario = undefined;
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
   await waitFor(`!document.querySelector('.share-review')`);
   hostingScenario = false;
-  await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+  await refreshStatus();
   await waitFor(`document.querySelector('.remote-status')?.innerText.includes('Sin remoto')`);
   assert.equal(git('status','--porcelain'),before,'Sharing for review never saves unsaved files');
 
   for(const provider of ['bitbucket','bitbucket_dc','azure']){
     hostingScenario=provider;reviewPublished=false;
-    await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+    await refreshStatus();
     await waitFor(`document.querySelector('.remote-status')?.innerText.includes(${JSON.stringify(provider==='bitbucket'?'bitbucket.org':provider==='azure'?'ssh.dev.azure.com':'code.company.test')})`);
     await js(`document.querySelector('[aria-label="Compartir para revisión"]').click()`);
     await waitFor(`document.querySelector('.share-review')`);
-    await js(`(() => {const select=document.querySelectorAll('.share-review select')[1];select.value=${JSON.stringify(provider)};select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
-    await waitFor(`document.querySelectorAll('.share-review select')[2]?.querySelector('option[value="ui-${provider}"]')`);
-    await js(`(() => {const select=document.querySelectorAll('.share-review select')[2];select.value='ui-${provider}';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await js(`(() => {document.querySelector('.share-review-destination').open = true;const select=document.querySelector('.share-review select[name="provider"]');select.value=${JSON.stringify(provider)};select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await waitFor(`document.querySelector('.share-review select[name="connection"] option[value="ui-${provider}"]')`);
+    await js(`(() => {const select=document.querySelector('.share-review select[name="connection"]');select.value='ui-${provider}';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
     await js(`document.querySelector('.share-review .outline-button').click()`);
     await waitFor(`document.querySelector('.share-review .activity-record')`);
     assert.equal(reviewRequests.at(-1).connectionId,`ui-${provider}`);assert.equal(reviewPublished,false);
@@ -701,13 +748,16 @@ app.whenReady().then(async () => {
     await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);await waitFor(`!document.querySelector('.share-review')`);
   }
   hostingScenario=false;
-  await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+  await refreshStatus();
   await waitFor(`document.querySelector('.remote-status')?.innerText.includes('Sin remoto')`);
 
   await js(`document.querySelector('.branch-switch:not(.open-worktree)').click()`);
   await waitFor(`document.querySelector('.switch-work fieldset')`);
   await assertDialog();
-  assert.match(await js(`document.querySelector('.switch-work').innerText`), /Trabajo sin terminar[\s\S]*app.txt[\s\S]*new-file.txt[\s\S]*Incluir archivos nuevos/);
+  assert.match(await js(`document.querySelector('.switch-work').innerText`), /Cambiar a[\s\S]*Llevar los cambios[\s\S]*Guardar primero en esta rama[\s\S]*Revisar apartar y cambiar/);
+  assert.doesNotMatch(await js(`document.querySelector('.switch-work').innerText`), /Restaurar|Trabajo apartado/);
+  await js(`document.querySelector('.switch-work-files').open = true; document.querySelector('.switch-work fieldset details').open = true`);
+  assert.match(await js(`document.querySelector('.switch-work').innerText`), /app.txt[\s\S]*new-file.txt[\s\S]*Incluir archivos nuevos/);
   assert.equal(git('status','--porcelain'),before,'Reviewing a switch does not stash or save work');
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
   await waitFor(`!document.querySelector('.switch-work')`);
@@ -725,16 +775,16 @@ app.whenReady().then(async () => {
   assert.equal(await js(`document.querySelector('.overview-details') === null`), true, 'Details take no room by default');
   assert.ok(await js(`document.querySelector('.work-overview').getBoundingClientRect().height <= 40`), 'Default status is a single compact row');
   assert.equal(await js(`document.querySelectorAll('.repo-toolbar .primary-button').length`), 1, 'One primary work action');
-  assert.match(await js(`document.querySelector('.repo-toolbar .primary-button').innerText`), /Revisar y guardar/);
+  assert.match(await js(`document.querySelector('.repo-toolbar .primary-button').innerText`), /Guardar cambios/);
   assert.match(await js(`document.querySelector('.overview-summary').innerText`), /2 archivos sin guardar[\s\S]*Solo en este equipo[\s\S]*Falta integrar en main/);
   await capture('status-strip');
   // The alternate action is keyboard accessible and Escape returns focus to its trigger.
-  await js(`document.querySelector('.overview-more').click()`);
+  await js(`window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyG', altKey: true }))`);
   await waitFor(`document.querySelector('.context-menu [role="menuitem"]')`);
   assert.match(await js(`document.activeElement.textContent`), /Guardar e integrar en main/);
   await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
   await waitFor(`!document.querySelector('.context-menu')`);
-  assert.equal(await js(`document.activeElement === document.querySelector('.overview-more')`), true);
+  assert.equal(await js(`document.activeElement === document.querySelector('.toolbar-more')`), true);
   await js(`document.querySelector('.overview-toggle').click()`);
   await waitFor(`document.querySelector('.overview-details')`);
   assert.equal(await js(`localStorage.getItem('gitcat-work-overview-details')`), 'open');
@@ -803,26 +853,37 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('[aria-label="Mostrar el panel de ramas"]').click()`);
   await waitFor(`document.querySelector('.sidebar')`);
   assert.equal(git('status', '--porcelain'), before, 'Reading the graph and its details never mutates Git');
-  // Refresh answers "am I up to date?" on its own; Fetch stays beside it because people look for it by name.
-  assert.deepEqual(JSON.parse(await js(`JSON.stringify([...document.querySelectorAll('.toolbar-tools .tool-button')].map((node) => node.innerText.trim()))`)), ['Actualizar', 'Fetch', 'Pull', 'Push', 'Stash', 'Pop (0)', 'Rama']);
-  assert.equal(await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Stash').disabled`), false);
-  assert.equal(await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Pop (0)').disabled`), true);
-  await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Stash').click()`);
+  // Git shortcuts are reachable in the same menu and are absent from the main bar.
+  assert.equal(await js(`document.querySelectorAll('.toolbar-tools button').length`), 2);
+  assert.match(await js(`document.querySelector('.toolbar-tools').innerText`), /Actualizar estado/);
+  await openToolbarMenu();
+  for (const action of ['fetch', 'pull', 'push', 'stash', 'branch']) {
+    assert.ok(await js(`Boolean(${toolbarItem(action)})`), `${action} stays accessible from the menu`);
+  }
+  assert.equal(await js(`${toolbarItem('stash')}.disabled`), false);
+  assert.equal(await js(`Boolean(${toolbarItem('stash-pop')})`), false);
+  await clickToolbarItem('stash');
   await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
   assert.equal(git('status', '--porcelain'), before, 'Stash is reviewed before clearing files');
   await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
-  await waitFor(`[...document.querySelectorAll('.tool-button')].some(node => node.innerText.trim() === 'Pop (1)' && !node.disabled)`);
+  await waitFor(`document.querySelector('.toolbar-delivery.is-saved')`);
   assert.equal(git('status', '--porcelain'), '');
   assert.equal(git('branch', '--show-current'), 'feature/new-menu');
   fs.writeFileSync(path.join(repo, 'after-stash.txt'), 'keep current work');
-  await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Actualizar').click()`);
+  await refreshStatus();
   await waitFor(`document.querySelector('.toolbar-delivery.is-dirty')`);
-  assert.equal(await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Pop (1)').disabled`), false, 'Current new files do not hide stash restoration');
-  await js(`[...document.querySelectorAll('.tool-button')].find(node => node.innerText.trim() === 'Pop (1)').click()`);
-  await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
-  await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
-  await waitFor(`[...document.querySelectorAll('.tool-button')].some(node => node.innerText.trim() === 'Stash' && !node.disabled)`);
-  await waitFor(`[...document.querySelectorAll('.tool-button')].some(node => node.innerText.trim() === 'Pop (0)')`);
+  await js(`document.querySelector('[aria-label="Trabajo apartado"]').click()`);
+  await waitFor(`document.querySelector('.switch-work .activity-record time')`);
+  const savedEntry = await js(`document.querySelector('.switch-work .activity-record').innerText`);
+  assert.match(savedEntry, /feature\/new-menu[\s\S]*Restaurar[\s\S]*Restaurar y quitar de la lista/);
+  await js(`document.querySelector('.switch-work .activity-record .modal-actions button:last-child').click()`);
+  await waitFor(`document.querySelector('.delivery-review-modal .plan-actions .primary-button')`);
+  assert.match(await js(`document.querySelector('.delivery-review-modal').innerText`), /solo si se restaura correctamente/);
+  await js(`document.querySelector('.delivery-review-modal .plan-actions .primary-button').click()`);
+  await waitFor(`!document.querySelector('.delivery-review-modal') && document.querySelector('.overview-summary')?.innerText.includes('3 archivos sin guardar')`);
+  await js(`document.querySelector('[aria-label="Trabajo apartado"]').click()`);
+  await waitFor(`document.querySelector('.switch-work')?.innerText.includes('Todavía no tienes trabajo apartado')`);
+  await js(`document.querySelector('.switch-work .modal-heading button').click()`);
   assert.equal(fs.readFileSync(path.join(repo, 'after-stash.txt'), 'utf8'), 'keep current work');
   fs.unlinkSync(path.join(repo, 'after-stash.txt'));
   assert.equal(git('status', '--porcelain'), before, 'Pop restores the original edits and new file');
@@ -855,7 +916,7 @@ app.whenReady().then(async () => {
   const box = () => js(`JSON.stringify(document.querySelector('.repo-toolbar').getBoundingClientRect())`);
   const beforeNotification = await box();
   refreshError = true;
-  await js(`document.querySelector('.tool-button').click()`);
+  await refreshStatus();
   await waitFor(`document.querySelector('.notification-preview.warning')`);
   assert.equal(await box(), beforeNotification);
   await js(`document.querySelector('.notification-bell').click()`);
@@ -880,7 +941,7 @@ app.whenReady().then(async () => {
   await js(`localStorage.removeItem('gitcat-pane-widths')`);
   win.setSize(1480, 940);
   await win.loadFile(path.join(root, 'dist/index.html'));
-  await waitFor(`document.querySelector('.delivery-actions .primary-button')`);
+  await waitFor(`document.querySelector('.repo-toolbar .primary-button')`);
 
   // Each listed file has its own tick; leaving one out is visible and the count follows.
   const rowFor = (name) => `[...document.querySelectorAll('.inspector .change-row')].find((node) => node.innerText.includes('${name}'))`;
@@ -891,14 +952,14 @@ app.whenReady().then(async () => {
   assert.match(await js(`${rowFor('new-file.txt')}.title`), /^Nuevo · fuera/);
   assert.equal(await js(`${rowFor('new-file.txt')}.classList.contains('excluded')`), true);
   // What will be saved is shown as one diff of the ticked files only.
-  await js(`[...document.querySelectorAll('.commit-form-actions button')].find((node) => node.innerText.includes('Ver lo que se guardará')).click()`);
-  await waitFor(`document.querySelector('.selection-diff-modal .diff-view')`);
-  const selectedDiff = await js(`document.querySelector('.selection-diff-modal .diff-view').innerText`);
+  await js(`document.querySelector('.save-preview > button').click()`);
+  await waitFor(`document.querySelector('.selection-preview .diff-view')`);
+  const selectedDiff = await js(`document.querySelector('.selection-preview .diff-view').innerText`);
   assert.match(selectedDiff, /updated menu/); assert.doesNotMatch(selectedDiff, /new-file/);
+  assert.ok(await js(`Boolean(document.querySelector('.changes-view #commit-description') && !document.querySelector('[aria-modal="true"]'))`));
   await capture('selected-diff');
-  await assertDialog();
-  await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
-  await waitFor(`!document.querySelector('.selection-diff-modal')`);
+  await js(`document.querySelector('.selection-preview .icon-button').click()`);
+  await waitFor(`!document.querySelector('.selection-preview')`);
   // Ignoring an untracked file previews the exact .gitignore line and writes nothing until confirmed.
   await js(`${rowFor('new-file.txt')}.querySelector('.change-ignore').click()`);
   await waitFor(`document.querySelector('.delivery-review-modal')`);
@@ -909,21 +970,21 @@ app.whenReady().then(async () => {
   assert.equal(fs.existsSync(path.join(repo, '.gitignore')), false, 'Closing the preview writes nothing');
 
   // Opening the save sends nothing before sharing is agreed: the form stays manual until asked.
-  await js(`document.querySelector('.delivery-actions .primary-button').click()`);
+  await js(`document.querySelector('.repo-toolbar .primary-button').click()`);
   await waitFor(`document.querySelector('#commit-description')`);
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal(described.length, 0, 'No description is requested before the disclosure');
   assert.equal(await js(`document.querySelector('#commit-description').value`), '');
   assert.equal(await js(`document.querySelector('.delivery-option input').checked`), false, 'Primary save does not also integrate');
   assert.equal(git('status', '--porcelain'), before, 'Opening save never changes Git');
-  await js(`document.querySelector('.delivery-actions .primary-button').click()`);
+  await js(`document.querySelector('.repo-toolbar .primary-button').click()`);
   await waitFor(`document.activeElement?.id === 'commit-description'`);
-  assert.match(await js(`document.querySelector('.save-description-required').innerText`), /descripción breve|genera una/);
   assert.equal(await js(`document.querySelector('.commit-form-actions .primary-button').disabled`), false, 'Review save explains missing input instead of becoming a dead button');
   await js(`document.querySelector('.commit-form-actions .primary-button').click()`);
   await waitFor(`document.activeElement?.id === 'commit-description'`);
+  assert.match(await js(`document.querySelector('.save-description-required').innerText`), /descripción breve|genera una/);
   assert.equal(git('status', '--porcelain'), before, 'A missing description never saves work');
-  await js(`document.querySelector('.overview-more').click()`);
+  await js(`document.querySelector('.toolbar-more').click()`);
   await waitFor(`document.querySelector('.context-menu [role="menuitem"]')`);
   await js(`document.querySelector('.context-menu [role="menuitem"]').click()`);
   await waitFor(`document.querySelector('.delivery-option input').checked`);
@@ -942,14 +1003,25 @@ app.whenReady().then(async () => {
   assert.deepEqual(described.at(-1), ['app.txt'], 'The description reads only the ticked files');
   await js(`${rowFor('new-file.txt')}.querySelector('.change-include').click()`);
   await waitFor(`document.querySelector('.inspector .select-all')?.innerText.includes('Se guardarán 2 de 2 archivos')`);
+  assert.equal(await js(`document.querySelector('#commit-description').value`), '', 'Changing the selection clears the suggestion for the old file set');
+  await js(`document.querySelector('.repo-toolbar .primary-button').click()`);
+  await js(`new Promise(resolve => setTimeout(resolve, 200))`);
+  assert.equal(described.length, 1, 'An already authorized repo stays manual when the save form opens');
+  assert.equal(await js(`document.querySelector('#commit-description').value`), '');
+  await js(`(() => {
+    const field = document.querySelector('#commit-description');
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, 'Update menu and add a new file');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
   assert.equal(await js(`document.querySelector('.delivery-option input').checked`), true);
   assert.match(await js(`document.querySelector('.inspector .change-row[title^="Nuevo · incluido"]').innerText`), /new-file\.txt/);
   // Who the save will be signed as is said beside the form, with where that comes from.
   assert.match(await js(`document.querySelector('.commit-author-note').innerText`), /Se guarda como GitCat QA <qa@example\.test>, configurado solo para este repositorio/);
   assert.equal(await js(`Boolean(document.querySelector('.changes-view .readiness-checklist'))`), false, 'Nothing to set up, so no checklist in the way');
   await capture('changes');
-  await js(`document.querySelector('.delivery-actions .primary-button').click()`);
+  await js(`document.querySelector('.commit-form-actions .primary-button').click()`);
   await waitFor(`document.querySelector('.delivery-review-modal')`);
+  assert.match(await js(`document.querySelector('.delivery-review-modal .plan-actions .primary-button').innerText`), /Guardar 2 archivos en feature\/new-menu e integrar en main/);
   await capture('review');
   assert.equal(git('branch', '--show-current'), 'feature/new-menu');
   assert.equal(git('status', '--porcelain'), before, 'Review must precede all Git changes');
@@ -959,7 +1031,7 @@ app.whenReady().then(async () => {
   assert.equal(git('status', '--porcelain'), '');
   assert.equal(git('show', 'main:new-file.txt'), 'new file');
   // Rebase must also be available when the current branch is the repository default.
-  await waitFor(`document.querySelectorAll('.toolbar-tools .tool-button')[2]?.disabled === false`, 60_000);
+  await waitFor(`document.querySelector('.repo-toolbar [data-action="refresh"]')?.disabled === false`, 60_000);
   await waitFor(`[...document.querySelectorAll('.ref-tag')].some(node => node.textContent === 'feature/search')`);
   await js(`[...document.querySelectorAll('.ref-tag')].find(node => node.textContent === 'feature/search').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 450, clientY: 300 }))`);
   await waitFor(`document.querySelector('.context-menu')`);
@@ -990,13 +1062,34 @@ app.whenReady().then(async () => {
   await waitFor(`document.querySelector('.activity-history .activity-record')`);
   await assertDialog();
   const activityText = await js(`document.querySelector('.activity-history').innerText`);
-  assert.match(activityText, /Guardar cambios · completado[\s\S]*Revisar una reversión/);
-  const activitySteps = await js(`[...document.querySelectorAll('.activity-history .activity-record li')].map(step => step.innerText)`);
+  assert.match(activityText, /Guardar cambios en feature\/new-menu[\s\S]*Completada/);
+  assert.doesNotMatch(activityText, /Revisar rama de recuperación|Borrar actividad de este proyecto|\b[a-f0-9]{40}\b/);
+  assert.equal(await js(`document.querySelector('.activity-settings').open`), false);
+  const activityTitles = await js(`[...document.querySelectorAll('.activity-entry > summary strong')].map(entry => entry.innerText)`);
   for (const action of ['Apartar trabajo', 'Restaurar trabajo apartado', 'Deshacer guardado y conservar archivos', 'Revertir guardado con un nuevo commit', 'Crear rama de recuperación', 'Operación de Git']) {
-    assert.ok(activitySteps.includes(`${action} · completado`), `Activity should show the confirmed action: ${action}`);
+    assert.ok(activityTitles.includes(`${action} en main`), `Activity should show the confirmed action: ${action}`);
   }
   assert.doesNotMatch(activityText, /git_command|git (stash|reset|branch|revert)/);
-  await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key:'Escape' }))`);
+  const recoveryEntry = `document.querySelector('.activity-entry[data-has-save="true"]')`;
+  await js(`${recoveryEntry}.querySelector('summary').click()`);
+  assert.equal(recoveryChecks.length, 0, 'Browsing Activity does not query publishing destinations');
+  assert.match(await js(`${recoveryEntry}.innerText`), /Guardar cambios · completado/);
+  assert.equal(await js(`${recoveryEntry}.querySelector('.activity-entry-technical').open`), false);
+  await assertDialog();
+  const savedRecord = activity.list(repo).entries.find(entry => entry.steps.some(step => step.operation === 'commit' && step.status === 'completed'));
+  const savedCommit = savedRecord.steps.find(step => step.operation === 'commit').afterHead;
+  const tipBeforeRecoveryReview = git('rev-parse', 'HEAD');
+  const canUndoTip = savedCommit === tipBeforeRecoveryReview;
+  await js(`${recoveryEntry}.querySelector('.activity-entry-recovery button').click()`);
+  await waitFor(`${recoveryEntry}.querySelector('.primary-button, [role="alert"]')`);
+  assert.match(await js(`${recoveryEntry}.innerText`), canUndoTip ? /Revisar deshacer y conservar archivos/ : /Revisar reversión con un commit nuevo/);
+  assert.equal(recoveryChecks.length, 1);
+  await js(`${recoveryEntry}.querySelector('.primary-button').click()`);
+  await waitFor(`document.querySelector('.delivery-review-modal')`);
+  assert.match(await js(`document.querySelector('.delivery-review-modal').innerText`), canUndoTip
+    ? /Deshacer el último guardado conservando los archivos/ : /Revertir el guardado con un nuevo commit/);
+  assert.equal(git('rev-parse', 'HEAD'), tipBeforeRecoveryReview, 'Recommendations and their review leave history alone');
+  await js(`document.querySelector('.delivery-review-modal .plan-actions .ghost-button').click()`);
   await waitFor(`!document.querySelector('.activity-history')`);
   const corruptHistory = '{"retentionDays":';
   const headBeforeRepair = git('rev-parse', 'HEAD');
@@ -1016,7 +1109,7 @@ app.whenReady().then(async () => {
   // A push with nowhere to go is explained from the repository itself, with the way on, and the
   // assistant is not needed for it: no provider request is made.
   const headBeforePush = git('rev-parse', 'HEAD');
-  await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find((node) => node.innerText.trim() === 'Push').click()`);
+  await clickToolbarItem('push');
   await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
   // Before confirming, the plan says where the work would go; here there is nowhere yet, and the way on is offered.
   await waitFor(`document.querySelector('.plan-card .readiness-row[data-item="remote"]')`);
@@ -1052,7 +1145,7 @@ app.whenReady().then(async () => {
   git('config', 'branch.main.pushRemote', directRemote);
   git('config', 'push.default', 'current');
   const accessChecks = readinessRequests.filter(entry => entry.access).length;
-  await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Push').click()`);
+  await clickToolbarItem('push');
   const directPlan = '.plan-card:has(.plan-actions .primary-button)';
   await waitFor(`document.querySelector(${JSON.stringify(directPlan)} + ' .plan-goal')?.innerText.includes(${JSON.stringify(directRemote)})`);
   assert.equal(await js(`Boolean(document.querySelector(${JSON.stringify(directPlan)} + ' .readiness-checklist'))`), false);
@@ -1062,15 +1155,18 @@ app.whenReady().then(async () => {
   git('config', '--unset', 'branch.main.pushRemote');
   git('config', '--unset', 'push.default');
   git('remote', 'remove', 'origin');
-  // Double-clicking a branch label in the graph checks that branch out.
+  // Double-clicking a local branch label in the graph opens the same review.
   await waitFor(`[...document.querySelectorAll('.ref-tag')].some((node) => node.textContent === 'feature/search')`);
   await js(`[...document.querySelectorAll('.ref-tag')].find((node) => node.textContent === 'feature/search').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
+  assert.equal(git('branch', '--show-current'), 'main');
+  await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
   for (let attempt = 0; attempt < 100 && git('branch', '--show-current') !== 'feature/search'; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(git('branch', '--show-current'), 'feature/search');
   await waitFor(`document.querySelector('.toolbar-field.branch strong')?.textContent === 'feature/search'`);
   // A background read can show the new branch while checkout is still collecting
   // its final result. Finish that action before simulating work in another tool.
-  await waitFor(`document.querySelectorAll('.toolbar-tools .tool-button')[2]?.disabled === false`, 60_000);
+  await waitFor(`document.querySelector('.repo-toolbar [data-action="refresh"]')?.disabled === false`, 60_000);
   // Work done outside GitCat appears on its own when the window comes back, without pressing Refresh.
   assert.equal(await js(`Boolean(document.querySelector('.activity-strip'))`), false, 'No branch review strip');
   git('branch', 'outside/terminal');
@@ -1117,7 +1213,7 @@ app.whenReady().then(async () => {
   // A half-finished merge outranks every other step, and the overview's button opens the same guide.
   await waitFor(`document.querySelector('.work-overview')?.dataset.next === 'finish_pending'`);
   assert.match(await js(`document.querySelector('.work-overview .overview-next').innerText`), /Termina la operación en curso[\s\S]*Fusión en curso[\s\S]*git merge --continue/);
-  await js(`document.querySelector('.repo-toolbar .overview-actions .primary-button').click()`);
+  await js(`document.querySelector('.repo-toolbar .primary-button').click()`);
   await waitFor(`document.querySelector('.conflict-guide .guide-file')`);
   const guideText = await js(`document.querySelector('.conflict-guide').innerText`);
   for (const entry of [/Fusionando otra en main/, /La rama en la que estás/, /La rama que se está fusionando/, /Cambios en otra/, /Git: «theirs»/,
@@ -1459,6 +1555,7 @@ app.whenReady().then(async () => {
   fs.writeFileSync(path.join(copies, 'base.txt'), 'base'); at(copies, 'add', '.'); at(copies, 'commit', '-qm', 'base');
   at(scratch, 'clone', '-q', '--bare', copies, copiesRemote);
   at(copies, 'remote', 'add', 'origin', copiesRemote); at(copies, 'fetch', '-q');
+  at(copies, 'branch', '--set-upstream-to=origin/main', 'main');
   restored = { projects: [await service.getSnapshot(copies)], unavailable: [], order: [copies], activePath: copies };
   await win.loadFile(path.join(root, 'dist/index.html'));
   await waitFor(`document.querySelector('.ref-tag.head .ref-cloud')`);
@@ -1466,13 +1563,55 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.ref-tag.head').title`), /Las copias local y remota coinciden/);
   assert.equal(await js(`document.querySelectorAll('.branch-presence .branch-sync-badge .lucide-check').length`), 1, 'Sidebar still shows matching copies');
   await capture('copies-synced');
+  await js(`document.querySelector('.ref-tag.head button.ref-cloud').click()`);
+  await waitFor(`document.querySelector('.sync-modal')`);
+  assert.match(await js(`document.querySelector('.sync-modal').innerText`), /origin\/main/);
+  await js(`document.querySelector('.sync-modal .ghost-button').click()`);
+  at(copies, 'branch', '--track', 'ui/tracked', 'origin/main');
+  restored = { projects: [await service.getSnapshot(copies)], unavailable: [], order: [copies], activePath: copies };
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await waitFor(`document.querySelector('.branch-section input')`);
+  await js(`(() => {
+    const input = document.querySelector('.branch-section input');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'ui/tracked');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  const trackedRow = `document.querySelector('.branch-list .branch-row')`;
+  await waitFor(`${trackedRow}?.querySelector('.branch-main')?.title.includes('ui/tracked')`);
+  assert.match(await js(`${trackedRow}.querySelector('.branch-main').title`), /doble clic para cambiar/i);
+  await js(`${trackedRow}.querySelector('.branch-main').click()`);
+  assert.equal(at(copies, 'branch', '--show-current'), 'main');
+  assert.equal(await js(`Boolean(document.querySelector('.plan-card .plan-actions, .sync-modal'))`), false);
+  for (const gesture of [
+    `${trackedRow}.querySelector('.branch-main').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`,
+    `${trackedRow}.querySelector('.branch-switch').click()`
+  ]) {
+    await js(gesture);
+    await waitFor(`document.querySelector('.plan-card:has(.plan-actions)')?.innerText.includes('ui/tracked')`);
+    assert.equal(await js(`Boolean(document.querySelector('.sync-modal'))`), false);
+    assert.equal(at(copies, 'branch', '--show-current'), 'main');
+    await js(`document.querySelector('.plan-card .plan-actions .ghost-button').click()`);
+    await waitFor(`!document.querySelector('.plan-card .plan-actions')`);
+  }
+  at(copies, 'branch', '-d', 'ui/tracked');
   at(scratch, 'clone', '-q', copiesRemote, copiesWriter);
   at(copiesWriter, 'config', 'user.name', 'QA'); at(copiesWriter, 'config', 'user.email', 'qa@example.test');
   fs.writeFileSync(path.join(copies, 'local.txt'), 'local'); at(copies, 'add', '.'); at(copies, 'commit', '-qm', 'local');
   const localTip = at(copies, 'rev-parse', 'HEAD');
+  const publishedTip = at(copies, 'rev-parse', 'origin/main');
+  restored = { projects: [await service.getSnapshot(copies)], unavailable: [], order: [copies], activePath: copies };
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await waitFor(`document.querySelector('.work-overview')?.dataset.next === 'publish_saved'`);
+  assert.equal(await js(`document.querySelector('.toolbar-delivery button').innerText.trim()`), 'Publicar 1 commit');
+  await openToolbarMenu();
+  assert.equal(await js(`Boolean(${toolbarItem('push')})`), false, 'Push is represented by the visible work action');
+  await closeToolbarMenu();
+  await js(`document.querySelector('.toolbar-delivery button').click()`);
+  await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
+  assert.equal(at(copies, '--git-dir', copiesRemote, 'rev-parse', 'main'), publishedTip);
+  await js(`document.querySelector('.plan-card .plan-actions .ghost-button').click()`);
   fs.writeFileSync(path.join(copiesWriter, 'remote.txt'), 'remote'); at(copiesWriter, 'add', '.'); at(copiesWriter, 'commit', '-qm', 'remote'); at(copiesWriter, 'push', '-q');
   const remoteTip = at(copiesWriter, 'rev-parse', 'HEAD'); at(copies, 'fetch', '-q');
-  at(copies, 'branch', '--set-upstream-to=origin/main', 'main');
   restored = { projects: [await service.getSnapshot(copies)], unavailable: [], order: [copies], activePath: copies };
   await win.loadFile(path.join(root, 'dist/index.html'));
   await waitFor(`document.querySelector('.ref-tag.remote')?.textContent === 'origin/main'`);
@@ -1481,7 +1620,7 @@ app.whenReady().then(async () => {
   assert.equal(await js(`document.querySelectorAll('.commit-row .ref-tag.head .lucide-check').length`), 1);
   assert.equal(await js(`Boolean(document.querySelector('.ref-tag.head .branch-sync-badge.diverged .lucide-git-fork'))`), true, 'Divergence stays visible on the current branch');
   await capture('copies-diverged');
-  await js(`[...document.querySelectorAll('.toolbar-tools button')].find(node => node.textContent === 'Pull').click()`);
+  await clickPull();
   await waitFor(`document.querySelector('#sync-title')`);
   assert.match(await js(`document.querySelector('.sync-modal').innerText`), /main tiene 1 commit.*origin\/main tiene 1 commit/);
   assert.equal(at(copies, 'rev-parse', 'HEAD'), localTip);
@@ -1491,6 +1630,10 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.sync-modal .recovery-option').innerText`), /Actualizar main dando prioridad a origin\/main/);
   await js(`document.querySelector('.input-modal .ghost-button').click()`);
   await js(`document.querySelector('.ref-tag.head').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  assert.equal(await js(`Boolean(document.querySelector('.sync-modal'))`), false, 'Double click on the current local branch does not sync');
+  await js(`document.querySelector('.ref-tag.head').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 600, clientY: 350 }))`);
+  await waitFor(`document.querySelector('.context-menu [data-action="sync-remote"]')`);
+  await js(`document.querySelector('.context-menu [data-action="sync-remote"]').click()`);
   await waitFor(`document.querySelector('#sync-title')`);
   assert.equal(await js(`document.querySelectorAll('.sync-modal select').length`), 0, 'The clicked copies are already known');
   await js(`document.querySelector('.sync-modal .recovery-option').click()`);
@@ -1514,7 +1657,7 @@ app.whenReady().then(async () => {
   at(copiesWriter, 'add', 'local.txt');
   at(copiesWriter, 'commit', '-qm', 'edit the same file remotely');
   at(copiesWriter, 'push', '-q');
-  await js(`[...document.querySelectorAll('.toolbar-tools button')].find(node => node.textContent === 'Pull').click()`);
+  await clickPull();
   const confirmPlan = '.plan-card .plan-actions .primary-button';
   const divergenceCard = '.recovery-card[data-kind="divergent"]';
   await waitFor(`document.querySelector('${confirmPlan}, ${divergenceCard}')`);

@@ -292,8 +292,10 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
           }
           summary.partial.push(say("If switching fails after the changes are set aside, the stash entry stays available.", "Si falla el cambio de rama después de apartar los cambios, la entrada de stash sigue disponible."));
         } else if (work?.mode === "restore") {
-          summary.local.push(say(`Restores the set-aside changes on ${here}, including staged versions.`, `Restaura los cambios apartados en ${here}, incluyendo las versiones preparadas.`));
-          summary.finalState.push(say("The restored changes stay uncommitted and the stash entry stays available.", "Los cambios recuperados siguen sin guardar y la entrada de stash sigue disponible."));
+          summary.local.push(say(`Restores “${work.label}” on ${here}, including staged versions.`, `Restaura «${work.label}» en ${here}, incluyendo las versiones preparadas.`));
+          summary.finalState.push(work.removeAfterRestore
+            ? say("The changes stay uncommitted. The entry is removed from the list only after restoration succeeds.", "Los cambios siguen sin guardar. La entrada se quita de la lista solo si se restaura correctamente.")
+            : say("The restored changes stay uncommitted and the stash entry stays available.", "Los cambios recuperados siguen sin guardar y la entrada de stash sigue disponible."));
           summary.partial.push(say("Restoring can leave conflicts in your files. The stash entry stays available if this happens.", "La restauración puede dejar conflictos en tus archivos. Si ocurre, la entrada de stash se conserva."));
         } else {
           summary.local.push(step.risk === "low"

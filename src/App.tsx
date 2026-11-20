@@ -15,8 +15,8 @@ import { addNotification, type Notification } from "../shared/notifications";
 import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
-  AlertTriangle, Archive, ArchiveRestore, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDot,
-  Clock3, Cloud, CloudDownload, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
+  AlertTriangle, Archive, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDot,
+  Clock3, Cloud, CloudDownload, Copy, Ellipsis, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
   FolderOpen, FolderPlus, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
   ListTree, LoaderCircle, Maximize2, MessageCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen, Palette, Pencil, PencilLine, Plus,
   RefreshCcw, Search, Send, Settings2, ShieldCheck, Undo2,
@@ -32,7 +32,7 @@ import { buildCommitGraph, familyColour, maxLanes } from "../shared/commit-graph
 import { graphWorktrees, withWorktreeWork, worktreeWipHash } from "../shared/worktree-graph";
 import { pullRequestReference } from "../shared/repository-activity";
 import { syncDestinations } from "../shared/remote-sync";
-import { workOverview } from "../shared/work-overview";
+import { workOverview, type NextActionId } from "../shared/work-overview";
 import { completionSummary, planSummary, type CompletionSummary } from "../shared/plan-summary";
 import { refChips } from "../shared/ref-chips";
 import { isPartlyStaged, isUntracked } from "../shared/selected-changes";
@@ -1067,16 +1067,6 @@ export default function App() {
     }
   };
 
-  /** The same answer without asking: used where a request would otherwise start on its own. */
-  const sharingAgreed = async (path: string) => {
-    if (sharingAcknowledged.current.has(path)) return true;
-    try {
-      const preview = await window.gitcat.getAiSharing(path, "planning", undefined, locale);
-      if (preview.acknowledged) sharingAcknowledged.current.add(path);
-      return preview.acknowledged;
-    } catch { return false; }
-  };
-
   const openSharingReview = async () => {
     if (!snapshot) return;
     try {
@@ -1123,12 +1113,19 @@ export default function App() {
         return;
       }
     }
-    if (operation === 'checkout') {
+    if (operation === "checkout") {
       try {
-        const current=await window.gitcat.getSnapshot(snapshot.path);
-        if (current.isDirty || current.branches.find(b=>b.name===args.name)?.checkedOutIn) { setSwitchWork({path:current.path,target:args.name}); return; }
+        const current = await window.gitcat.getSnapshot(snapshot.path);
+        if (current.currentBranch === args.name) return;
+        const folder = current.branches.find((branch) => branch.name === args.name)?.checkedOutIn;
+        if (folder) { await openWorktree(folder); return; }
+        if (current.isDirty) { setSwitchWork({ path: current.path, target: args.name }); return; }
       } catch (error) {
-        await recoverFrom(snapshot.path,{command:`git switch ${args.name}`,summary:t("switchBranch",{name:args.name}),error:cleanError(error,t("branchSwitchFailed")),skipped:[],stage:'prepare'});return;
+        await recoverFrom(snapshot.path, {
+          command: `git switch ${args.name}`, summary: t("switchBranch", { name: args.name }),
+          error: cleanError(error, t("branchSwitchFailed")), skipped: [], stage: "prepare"
+        });
+        return;
       }
     }
     const labels: Partial<Record<Operation, string>> = {
@@ -1445,67 +1442,20 @@ export default function App() {
     }
   };
 
-  /**
-   * A double click on a branch is the whole intent, so it prepares the switch and runs it. Anything
-   * that gets in the way — a dirty tree, a branch that vanished — is reported in the assistant column
-   * instead of being swallowed.
-   */
-  const switchBranch = async (name: string) => {
+  const activateBranch = (name: string) => {
     if (!snapshot || planning) return;
     if (name.startsWith("refs/remotes/")) {
       openSync(name.slice("refs/remotes/".length));
       return;
     }
-    const remoteOnly = snapshot.branches.find(branch => branch.name === name && branch.presence === "remote");
-    if (remoteOnly?.remoteRef) {
-      openSync(remoteOnly.remoteRef);
-      return;
-    }
-    const path = snapshot.path;
-    const turnId = addTurn(path, t("branchSwitchQuestion", { name }), false);
-    try {
-      const current=await window.gitcat.getSnapshot(path);
-      const occupied = current.branches.find(b=>b.name===name)?.checkedOutIn;
-      if (occupied) {
-        updateTurn(path, turnId, turn => ({ ...turn, status: 'completed', outcome: t("openWorktreeAction") }));
-        await openWorktree(occupied); return;
-      }
-      if (current.isDirty) {
-        updateTurn(path,turnId,turn=>({...turn,status:'cancelled',outcome:locale==='es'?'Elige qué hacer con el trabajo sin terminar.':'Choose what happens to unfinished work.'}));
-        setSwitchWork({path:current.path,target:name}); return;
-      }
-      const plan = await window.gitcat.prepareOperation(path, "checkout", { name }, locale);
-      if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
-      if (!plan.allowed) {
-        updateTurn(path, turnId, (turn) => ({ ...turn, plan, status: "completed" }));
-        addActivity({ label: t("branchSwitchFailed"), detail: plan.summary, tone: "warning" });
-        return;
-      }
-      updateTurn(path, turnId, (turn) => ({ ...turn, plan }));
-      await runPlan(turnId, plan);
-    } catch (error) {
-      const message = cleanError(error, t("branchSwitchFailed"));
-      updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
-      addActivity({ label: t("branchSwitchFailed"), detail: message, tone: "warning" });
-      await recoverFrom(path, {
-        command: `git switch ${name}`,
-        summary: t("switchBranch", { name }),
-        error: message,
-        skipped: [],
-        stage: "prepare"
-      });
-    }
-  };
-
-  const activateBranch = (name: string) => {
-    if (!snapshot || planning) return;
-    const branch = snapshot.branches.find(item => item.name === name);
-    if (branch?.checkedOutIn && !branch.isCurrent) {
+    const branch = snapshot.branches.find((item) => item.name === name);
+    if (branch?.isCurrent) return;
+    if (branch?.presence === "remote") {
+      if (branch.remoteRef) openSync(branch.remoteRef);
+    } else if (branch?.checkedOutIn) {
       void openWorktree(branch.checkedOutIn);
-    } else if (branch?.remoteRef && !branch.checkedOutIn) {
-      openSync(branch.remoteRef, branch.presence === "remote" ? undefined : name);
     } else {
-      void switchBranch(name);
+      void prepare("checkout", { name });
     }
   };
 
@@ -1522,12 +1472,11 @@ export default function App() {
   };
 
   const delivery = useCommitDelivery({
-    activeId, snapshot, locale, t, configured: config.configured, busy: planning, showPlan,
+    activeId, snapshot, locale, t, busy: planning, showPlan,
     openForm: () => {
       setFocus({ kind: "wip" });
       setInspectorTab("details");
     },
-    checkSharing: sharingAgreed,
     confirmSharing: (path, paths) => ensureSharing(path, "description", paths),
     reportDescriptionError: async (path, error) => {
       notify({ message: cleanError(error, t("fallbackGenerateDescription")), tone: "error" });
@@ -1621,12 +1570,12 @@ export default function App() {
       const local = branch.presence !== "remote" && !remoteRef;
       entries.push({ key: "branch-heading", heading: name });
       const syncRef = remoteRef ?? branch.remoteRef;
-      if (syncRef) entries.push({ key: "sync-remote", icon: CloudDownload, label: t("syncRemote", { ref: syncRef }), onSelect: () => openSync(syncRef, local ? name : undefined) });
-      if (!branch.isCurrent && !remoteRef) {
+      if (syncRef) entries.push({ key: "sync-remote", icon: CloudDownload, label: t("receiveBranchChanges", { ref: syncRef }), onSelect: () => openSync(syncRef, local ? name : undefined) });
+      if (!branch.isCurrent && local) {
         const folder = branch.checkedOutIn;
         entries.push(folder
           ? { key: "open-worktree", icon: TreePine, label: t("openBranchWorktree"), hint: folder, onSelect: () => void openWorktree(folder) }
-          : { key: "switch", icon: ArrowLeftRight, label: t("switchBranch", { name }), hint: t("doubleClickHint"), onSelect: () => void switchBranch(branch.presence === "remote" ? `refs/remotes/${branch.remoteRef}` : name) });
+          : { key: "switch", icon: ArrowLeftRight, label: t("switchBranch", { name }), hint: t("doubleClickHint"), onSelect: () => activateBranch(name) });
       }
       if (branch.isCurrent && !remoteRef && branch.upstream) entries.push({ key: "pull", icon: ArrowDownToLine, label: t("pullLatest"), onSelect: () => void prepare("pull") });
       if (branch.isCurrent && !remoteRef) entries.push({ key: "push", icon: ArrowUpFromLine, label: t(branch.upstream ? "pushBranch" : "publishBranch"), onSelect: () => void prepare("push") });
@@ -1743,7 +1692,7 @@ export default function App() {
           </div>
           <button className="icon-button tab-add" onClick={() => setSetup({ kind: "choose" })} aria-label={t("addProjectTitle")} title={t("addProjectTitle")}><Plus size={16} /></button>
         </div>
-        <div className="top-actions">{snapshot && <button className="worktrees-button" onClick={() => setWorktreesPath(snapshot.path)} aria-label={t("worktreesOpen")} title={t("worktreesOpen")}><TreePine size={17} /><span>{snapshot.worktrees?.length ?? 1}</span></button>}<button className="icon-button" disabled={practiceBusy} onClick={()=>void startPractice()} aria-label={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'} title={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'}><Lightbulb size={17} /></button>{snapshot && <button className="icon-button" onClick={()=>setShareReview({path:snapshot.path,head:selection})} aria-label={locale==='es'?'Compartir para revisión':'Share for review'} title={locale==='es'?'Compartir para revisión':'Share for review'}><Send size={17} /></button>}{snapshot && <button className="icon-button" onClick={()=>setSwitchWork({path:snapshot.path,target:snapshot.currentBranch})} aria-label={locale==='es'?'Trabajo apartado':'Set-aside work'}><ArrowLeftRight size={17} /></button>}{snapshot && <button className="icon-button" onClick={() => setHistoryPath(snapshot.path)} data-action="activity" aria-label={locale === "es" ? "Actividad y recuperación" : "Activity and recovery"}><Clock3 size={17} /></button>}<button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
+        <div className="top-actions">{snapshot && <button className="worktrees-button" onClick={() => setWorktreesPath(snapshot.path)} aria-label={t("worktreesOpen")} title={t("worktreesOpen")}><TreePine size={17} /><span>{snapshot.worktrees?.length ?? 1}</span></button>}<button className="icon-button" disabled={practiceBusy} onClick={()=>void startPractice()} aria-label={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'} title={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'}><Lightbulb size={17} /></button>{snapshot && <button className="icon-button" onClick={()=>setShareReview({path:snapshot.path,head:selection})} aria-label={locale==='es'?'Compartir para revisión':'Share for review'} title={locale==='es'?'Compartir para revisión':'Share for review'}><Send size={17} /></button>}{snapshot && <button className="icon-button" onClick={() => setSwitchWork({ path: snapshot.path, target: "" })} aria-label={t("switchWorkLibrary")} title={t("switchWorkLibrary")}><Archive size={17} /></button>}{snapshot && <button className="icon-button" onClick={() => setHistoryPath(snapshot.path)} data-action="activity" aria-label={locale === "es" ? "Actividad y recuperación" : "Activity and recovery"}><Clock3 size={17} /></button>}<button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
       </header>
       <NotificationCenter items={activity} onDismiss={dismissActivity} onClear={dismissAllActivity} t={t} />
 
@@ -1762,7 +1711,7 @@ export default function App() {
 
         <WorkOverviewStrip
           key={`overview:${snapshot.path}`}
-          toolbar={(actions) => <RepoToolbar
+          toolbar={(action, moreActions, next) => <RepoToolbar
             snapshot={snapshot}
             busy={planning}
             refreshing={refreshingPath === snapshot.path && refreshKind === "refresh"}
@@ -1773,9 +1722,10 @@ export default function App() {
             onPull={() => void prepare("pull")}
             onPush={() => void prepare("push")}
             onStash={() => void prepare("stash_push")}
-            onStashPop={() => void prepare("stash_pop")}
             onBranch={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
-            actions={actions}
+            action={action}
+            moreActions={moreActions}
+            next={next}
           />}
           snapshot={snapshot}
           fetchedAt={active?.fetchedAt}
@@ -1786,7 +1736,6 @@ export default function App() {
             onSave: () => beginDelivery(false),
             onIntegrate: () => beginDelivery(true),
             onPull: () => void prepare("pull"),
-            onFetch: () => void refreshEverything("fetch"),
             onConnectRemote: () => setInputDialog({ operation: "add_remote", title: t("connectRemoteTitle"), label: t("remoteAddress"), value: "" }),
             onPrepare: (operation, args) => void prepare(operation, args)
           }}
@@ -1803,8 +1752,7 @@ export default function App() {
               selected={selection}
               onSelect={selectBranch}
               onCreate={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
-              onSwitch={(branch) => branch.checkedOutIn ? void openWorktree(branch.checkedOutIn) : void prepare("checkout", { name: branch.name })}
-              onSwitchNow={activateBranch}
+              onActivate={activateBranch}
               onDelete={(name) => void prepare("delete_branch", { name })}
               onRename={(name, to) => void prepare("rename_branch", { name, to })}
               onMenu={(branch, x, y) => setMenu({ x, y, branch: branch.name })}
@@ -1849,8 +1797,8 @@ export default function App() {
             </div>
             {inspectorTab === "details" ? <div className="inspector-body">
               {activeFocus?.kind === "wip"
-                ? <ChangesView readiness={readiness} snapshot={snapshot} delivery={delivery} configured={config.configured}
-                    busy={planning} onOpenFile={setSelectedFile} onIgnore={ignoreFile} />
+                ? <ChangesView key={snapshot.path} readiness={readiness} snapshot={snapshot} delivery={delivery} configured={config.configured}
+                    busy={planning} onIgnore={ignoreFile} />
                 : activeFocus?.kind === "worktree"
                   ? <WorktreeInspector worktree={snapshot.worktrees!.find(worktree => worktree.path === activeFocus.path)!} onOpen={() => void openWorktree(activeFocus.path)} />
                 : activeFocus
@@ -1864,7 +1812,7 @@ export default function App() {
       </>}
       <OperationStatus path={snapshot?.path} t={t} />
       {shareReview && snapshot?.path===shareReview.path && <ShareReview snapshot={snapshot} head={shareReview.head} locale={locale} onClose={()=>setShareReview(undefined)} onUpdated={value=>updateSnapshot(value.path,value)} />}
-      {switchWork && <SwitchWork {...switchWork} locale={locale} onClose={()=>setSwitchWork(undefined)} onSave={()=>{setSwitchWork(undefined);beginDelivery(false);}} onPrepare={request=>{
+      {switchWork && <SwitchWork key={`${switchWork.path}\0${switchWork.target}`} {...switchWork} locale={locale} onClose={()=>setSwitchWork(undefined)} onSave={()=>{setSwitchWork(undefined);beginDelivery(false);}} onPrepare={request=>{
         const path=switchWork.path;setSwitchWork(undefined);
         void showPlan(locale==='es'?'Revisar trabajo sin terminar':'Review unfinished work',()=>window.gitcat.prepareSwitchWork(path,request,locale),path,true);
       }} />}
@@ -1903,7 +1851,6 @@ export default function App() {
         onShowFile={(file) => { const change = snapshot?.changes.find((item) => item.path === file || item.from === file); if (change) setSelectedFile(change); }} />}
       {modalCommit && snapshot && <CommitModal commit={modalCommit.commit} initialFile={modalCommit.file} repoPath={snapshot.path} onClose={() => setModalCommit(undefined)} />}
       {selectedFile && snapshot && <FileDiffModal file={selectedFile} repoPath={snapshot.path} onClose={() => setSelectedFile(undefined)} />}
-      {delivery.diffOpen && snapshot && <SelectionDiffModal files={delivery.selected} repoPath={snapshot.path} onClose={() => delivery.setDiffOpen(false)} />}
       {proposal && snapshot?.path === proposal.repoPath && <ConflictProposalModal key={proposal.id} proposal={proposal} result={proposalResult} busy={planning || applyingResolution || resolving} onApply={(accepted) => void applyResolutions(accepted)} onReviewAgain={() => void resolveConflicts()} onClose={closeProposal} />}
       {guide && snapshot?.path === guide.repoPath && !proposal && <ConflictResolverModal guide={guide} result={guideResult} snapshot={snapshot} busy={guideBusy || planning || resolving} configured={config.configured}
         onApply={(choices) => void applyGuideChoices(choices)} onReadAgain={() => void openGuide()} onOpenFile={(file) => void openConflictFile(file)}
@@ -2249,9 +2196,9 @@ function PaneDivider({ edge, width, onPointerDown, onNudge, onReset }: {
  * view: nothing is renamed, every group opens with one click, and the flat list with its filter is
  * still one click away for whoever already knows the name they are looking for.
  */
-function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, onSwitchNow, onDelete, onRename, onMenu, onCollapse }: {
+function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onActivate, onDelete, onRename, onMenu, onCollapse }: {
   snapshot: RepoSnapshot; busy: boolean; selected: string; onSelect: (name: string) => void; onCreate: () => void;
-  onSwitch: (branch: Branch) => void; onSwitchNow: (name: string) => void; onDelete: (name: string) => void;
+  onActivate: (name: string) => void; onDelete: (name: string) => void;
   onRename: (from: string, to: string) => void; onMenu: (branch: Branch, x: number, y: number) => void; onCollapse: () => void;
 }) {
   const { t } = useI18n();
@@ -2353,8 +2300,7 @@ function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, o
     depth={depth}
     busy={busy}
     register={register(branch.name)}
-    onSwitch={() => onSwitch(branch)}
-    onSwitchNow={() => onSwitchNow(branch.name)}
+    onActivate={() => onActivate(branch.presence === "remote" && branch.remoteRef ? `refs/remotes/${branch.remoteRef}` : branch.name)}
     onDelete={() => onDelete(branch.name)}
     onContextMenu={(event) => openContextMenu(branch, event)}
   />;
@@ -2506,23 +2452,24 @@ function branchTooltip(branch: Branch, defaultBranch: string | undefined, t: Tra
  * branch the rest of the window is talking about, which is the thing you want far more often than a
  * checkout. Changing branch stays an explicit gesture — the double click, or the button on the row.
  */
-function BranchRow({ branch, label, variant, merged, selected, defaultBranch, colour, depth, busy, register, onSelect, onSwitch, onSwitchNow, onDelete, onContextMenu }: { branch: Branch; label: string; variant: boolean; merged: boolean; selected: boolean; defaultBranch?: string; colour: string; depth: number; busy: boolean; register: (node: HTMLButtonElement | null) => void; onSelect: () => void; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void; onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void }) {
+function BranchRow({ branch, label, variant, merged, selected, defaultBranch, colour, depth, busy, register, onSelect, onActivate, onDelete, onContextMenu }: { branch: Branch; label: string; variant: boolean; merged: boolean; selected: boolean; defaultBranch?: string; colour: string; depth: number; busy: boolean; register: (node: HTMLButtonElement | null) => void; onSelect: () => void; onActivate: () => void; onDelete: () => void; onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void }) {
   const { t } = useI18n();
   const isDefault = branch.name === defaultBranch;
   const protectedByPrefix = isProtectedBranch(branch.name);
   // Read once per render rather than per row: the panel redraws on every snapshot anyway.
   const stale = staleDays(branch, Date.now());
   const folder = !branch.isCurrent ? branch.checkedOutIn : undefined;
-  const switchLabel = folder ? t("openBranchWorktree") : t("switchBranch", { name: branch.name });
-  const switchTitle = folder ? `${switchLabel} · ${folder}` : t("switchBranchTitle", { name: branch.name });
-  const clickHint = folder ? t("worktreeOpenHint") : t(branch.remoteRef && !branch.checkedOutIn ? "doubleClickRemoteHint" : "branchClickHint");
+  const remoteOnly = branch.presence === "remote" ? branch.remoteRef : undefined;
+  const switchLabel = folder ? t("openBranchWorktree") : remoteOnly ? t("receiveBranchChanges", { ref: remoteOnly }) : t("switchBranch", { name: branch.name });
+  const switchTitle = folder ? `${switchLabel} · ${folder}` : remoteOnly ? switchLabel : t("switchBranchTitle", { name: branch.name });
+  const clickHint = t(branch.isCurrent ? "currentBranchHint" : folder ? "worktreeOpenHint" : remoteOnly ? "doubleClickRemoteHint" : "branchClickHint");
   return <div onContextMenu={onContextMenu} onKeyDown={(event) => {
     if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
       event.preventDefault(); const box = event.currentTarget.getBoundingClientRect();
       event.currentTarget.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: box.left + 20, clientY: box.bottom }));
     }
   }} className={`branch-row ${branch.isCurrent ? "current" : ""} ${selected ? "selected" : ""} ${merged ? "merged" : ""} ${branch.stackedOn ? "stacked" : ""} ${branch.presence}`}>
-    <button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onSwitchNow} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch, t)}\n${clickHint}`}>
+    <button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onActivate} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch, t)}\n${clickHint}`}>
       <span className="branch-color" style={{ background: colour }} />
       {branch.stackedOn ? <GitFork size={14} className="branch-stack-icon" /> : <GitBranch size={14} />}
       {folder ? <span className="branch-worktree-name">
@@ -2539,8 +2486,8 @@ function BranchRow({ branch, label, variant, merged, selected, defaultBranch, co
       {isDefault && <span className="current-pill">{t("primary")}</span>}
       {(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}
     </button>
-    {!branch.isCurrent && <button className={`branch-switch${folder ? " open-worktree" : ""}`} onClick={onSwitch} disabled={busy} aria-label={folder ? switchTitle : switchLabel} title={switchTitle}>
-      {folder ? <><TreePine size={12} /> <span>{switchLabel}</span></> : <ArrowLeftRight size={12} />}
+    {!branch.isCurrent && <button className={`branch-switch${folder ? " open-worktree" : ""}`} onClick={onActivate} disabled={busy} aria-label={folder ? switchTitle : switchLabel} title={switchTitle}>
+      {folder ? <><TreePine size={12} /> <span>{switchLabel}</span></> : remoteOnly ? <CloudDownload size={12} /> : <ArrowLeftRight size={12} />}
     </button>}
     {!branch.isCurrent && !isDefault && !protectedByPrefix && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={t("deleteBranch", { name: branch.name })} title={branch.mergedInto.length ? t("deleteMergedBranch", { name: branch.name, branches: branch.mergedInto.join(t("and")) }) : t("deleteUnmergedBranch", { name: branch.name })}><Trash2 size={12} /></button>}
   </div>;
@@ -2980,14 +2927,14 @@ function CommitRow({ commit, row, lanes, remotes, branches, worktrees, colour, b
   // A branch label is the branch: a double click moves there, a right click is about that branch.
   const branchOf = (chip?: RefChip) => chip && chip.kind !== "tag" ? chip.ref ? `refs/remotes/${chip.ref}` : chip.label : undefined;
   const chipEvents = (chip: RefChip) => chip.kind === "tag" ? {} : {
-    onDoubleClick: (event: ReactMouseEvent) => { event.stopPropagation(); if (chip.kind !== "head" || chipBranch(chip)?.remoteRef) onCheckout(branchOf(chip)!); },
+    onDoubleClick: (event: ReactMouseEvent) => { event.stopPropagation(); if (chip.kind !== "head") onCheckout(branchOf(chip)!); },
     onContextMenu: (event: ReactMouseEvent) => { event.preventDefault(); event.stopPropagation(); onMenu(branchOf(chip), event.clientX, event.clientY); }
   };
   const size = node === "merge" ? 10 : 20;
   const chipTag = (chip: RefChip) => {
     const branch = chipBranch(chip);
     const folder = chipWorktree(chip);
-    const hint = t(chip.kind === "remote" || (branch?.remoteRef && !branch.checkedOutIn) ? "doubleClickRemoteHint" : chip.kind === "head"
+    const hint = t(chip.kind === "remote" ? "doubleClickRemoteHint" : chip.kind === "head"
       ? "currentBranchHint" : folder ? "worktreeOpenHint" : "doubleClickSwitchHint");
     return <span className={`ref-tag ${chip.kind} ${branch?.remoteAhead && branch.remoteBehind ? "diverged" : ""}`}
       key={`${chip.kind}:${chip.ref ?? chip.label}`} title={`${chip.kind === "tag" ? chip.label : chipTitle(chip)}${chip.kind === "tag" ? "" : `\n${hint}`}`} {...chipEvents(chip)}>
@@ -2996,9 +2943,10 @@ function CommitRow({ commit, row, lanes, remotes, branches, worktrees, colour, b
         ? <span className="ref-worktree" data-worktree-path={folder.path} role="img" aria-label={t("worktreeBadge", { path: folder.path })} title={`${folder.path}\n${hint}`}>
             {folder.isMain ? <Laptop size={11} /> : <TreePine size={11} />}
           </span> : <Laptop size={11} />}
-      {chip.remoteRefs?.map(ref => <span className="ref-cloud" key={ref} title={`${ref} · ${t("doubleClickRemoteHint")}`}
-        onDoubleClick={event => { event.stopPropagation(); onCheckout(`refs/remotes/${ref}`); }}
-        onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onMenu(`refs/remotes/${ref}`, event.clientX, event.clientY); }}><Cloud size={11} /></span>)}
+      {chip.remoteRefs?.map(ref => <button type="button" className="ref-cloud" key={ref} title={t("receiveBranchChanges", { ref })} aria-label={t("receiveBranchChanges", { ref })}
+        onClick={event => { event.stopPropagation(); onCheckout(`refs/remotes/${ref}`); }}
+        onDoubleClick={event => event.stopPropagation()}
+        onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onMenu(`refs/remotes/${ref}`, event.clientX, event.clientY); }}><Cloud size={11} /></button>)}
       <span>{chip.kind === "remote" ? chip.ref : chip.label}</span>
       {branch?.remoteRef && <BranchSyncBadge branch={branch} hideSynced={chip.kind === "head"} />}
     </span>;
@@ -3082,15 +3030,42 @@ function changeStatus(code: string, t: Translate) {
  * The repository bar: where you are, the everyday Git verbs, and the next step for this branch. The
  * verbs still go through a plan, so a click here explains itself before anything changes.
  */
-function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, onRefresh, onFetch, onPull, onPush, onStash, onStashPop, onBranch, actions }: {
+function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, onRefresh, onFetch, onPull, onPush, onStash, onBranch, action, moreActions, next }: {
   snapshot: RepoSnapshot; busy: boolean; refreshing: boolean; fetching: boolean; refreshDisabled: boolean;
-  onRefresh: () => void; onFetch: () => void; onPull: () => void; onPush: () => void; onStash: () => void; onStashPop: () => void; onBranch: () => void;
-  actions: ReactNode;
+  onRefresh: () => void; onFetch: () => void; onPull: () => void; onPush: () => void; onStash: () => void; onBranch: () => void;
+  action: ReactNode; moreActions: MenuEntry[]; next: NextActionId;
 }) {
   const { t } = useI18n();
   const source = snapshot.branches.find((branch) => branch.isCurrent);
-  const tool = (Icon: LucideIcon, label: string, onClick: () => void, disabled: boolean, title?: string, spinning = false) =>
-    <button className="tool-button" onClick={onClick} disabled={disabled} title={title ?? label}>{spinning ? <LoaderCircle className="spin" size={17} /> : <Icon size={17} />}<span>{label}</span></button>;
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number }>();
+  const closeMenu = () => { setMenu(undefined); moreButton.current?.focus(); };
+  const openMenu = () => {
+    const box = moreButton.current?.getBoundingClientRect();
+    if (box) setMenu({ x: box.right, y: box.bottom + 5 });
+  };
+  useEffect(() => setMenu(undefined), [snapshot.path, snapshot.stateId, busy, next]);
+  useEffect(() => {
+    const listen = (event: KeyboardEvent) => {
+      if (event.code !== "KeyG" || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat || event.defaultPrevented) return;
+      if (document.querySelector('[aria-modal="true"], [role="menu"]')) return;
+      if (event.target instanceof HTMLElement && event.target.closest("input, textarea, select, [contenteditable]")) return;
+      event.preventDefault();
+      openMenu();
+    };
+    window.addEventListener("keydown", listen);
+    return () => window.removeEventListener("keydown", listen);
+  }, []);
+  const remote = snapshot.remotes.length > 0;
+  const pending = Boolean(snapshot.pending || snapshot.conflicts.length);
+  const entries: MenuEntry[] = [
+    ...moreActions,
+    { key: "fetch", icon: fetching ? LoaderCircle : CloudDownload, label: t("fetch"), hint: t(remote ? "fetchTitle" : "noRemoteFetchTitle"), onSelect: onFetch, disabled: refreshDisabled || !remote },
+    ...(next === "get_latest" || next === "combine_diverged" ? [] : [{ key: "pull", icon: ArrowDownToLine, label: t("pull"), hint: t("pullTitle"), onSelect: onPull, disabled: busy }]),
+    ...(next === "publish_saved" || next === "publish_branch" ? [] : [{ key: "push", icon: ArrowUpFromLine, label: t("push"), hint: t("pushTitle"), onSelect: onPush, disabled: busy }]),
+    { key: "stash", icon: Archive, label: t("stash"), hint: t("stashTitle"), onSelect: onStash, disabled: busy || pending || !snapshot.isDirty || !snapshot.head },
+    ...(next === "return_to_branch" ? [] : [{ key: "branch", icon: GitBranchPlus, label: t("newBranch"), onSelect: onBranch, disabled: busy }])
+  ];
   return <div className="repo-toolbar">
     <div className="toolbar-context">
       <div className="toolbar-field"><span className="toolbar-caption">{t("toolbarRepository")}</span><strong title={snapshot.path}>{snapshot.name}</strong></div>
@@ -3102,24 +3077,25 @@ function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, on
       </span>}
     </div>
     <div className="toolbar-tools">
-      {tool(RefreshCcw, t("refresh"), onRefresh, refreshDisabled, t("refreshTitle"), refreshing)}
-      {tool(CloudDownload, t("fetch"), onFetch, refreshDisabled || !snapshot.remotes.length, snapshot.remotes.length ? t("fetchTitle") : t("noRemoteFetchTitle"), fetching)}
-      {tool(ArrowDownToLine, t("pull"), onPull, busy, t("pullTitle"))}
-      {tool(ArrowUpFromLine, t("push"), onPush, busy, t("pushTitle"))}
-      {tool(Archive, t("stash"), onStash, busy || !snapshot.isDirty || !snapshot.head || Boolean(snapshot.pending) || Boolean(snapshot.conflicts.length), t("stashTitle"))}
-      {tool(ArchiveRestore, t("stashPop", { count: snapshot.stashCount ?? 0 }), onStashPop, busy || !snapshot.stashCount || Boolean(snapshot.pending) || Boolean(snapshot.conflicts.length), t("stashPopTitle"))}
-      <span className="tool-divider" aria-hidden="true" />
-      {tool(GitBranchPlus, t("branchTool"), onBranch, busy, t("newBranch"))}
+      <button className="tool-button" data-action="refresh" onClick={onRefresh} disabled={refreshDisabled} title={t("refreshTitle")}>
+        {refreshing || fetching ? <LoaderCircle className="spin" size={16} /> : <RefreshCcw size={16} />}<span>{t("refreshStatus")}</span>
+      </button>
+      <button ref={moreButton} className="tool-button toolbar-more" aria-keyshortcuts="Alt+G"
+        aria-label={t("toolbarMoreActions")} title={`${t("toolbarMoreActions")} (Alt+G)`}
+        aria-haspopup="menu" aria-expanded={Boolean(menu)} onClick={() => menu ? closeMenu() : openMenu()}>
+        <Ellipsis size={16} />
+      </button>
     </div>
     <div className={`toolbar-delivery ${snapshot.isDirty ? "is-dirty" : "is-saved"}`}>
-      {actions}
+      {action}
     </div>
+    {menu && <ContextMenu {...menu} items={entries} label={t("toolbarMoreActions")} onClose={closeMenu} />}
   </div>;
 }
 
 type OverviewHandlers = {
   onGuide: () => void; onNewBranch: () => void; onSave: () => void; onIntegrate: () => void;
-  onPull: () => void; onFetch: () => void; onConnectRemote: () => void;
+  onPull: () => void; onConnectRemote: () => void;
   onPrepare: (operation: Operation, args?: Record<string, string>) => void;
 };
 
@@ -3137,15 +3113,11 @@ function readOverviewCollapsed() {
  */
 function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
   snapshot: RepoSnapshot; fetchedAt?: string; busy: boolean; handlers: OverviewHandlers;
-  toolbar: (actions: ReactNode) => ReactNode;
+  toolbar: (action: ReactNode, moreActions: MenuEntry[], next: NextActionId) => ReactNode;
 }) {
   const { t, locale } = useI18n();
   const [collapsed, setCollapsed] = useState(readOverviewCollapsed);
   const detailsId = useId();
-  const moreButton = useRef<HTMLButtonElement>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number }>();
-  // A refreshed snapshot invalidates an open menu just as it invalidates an old action plan.
-  useEffect(() => setMenu(undefined), [snapshot.stateId, busy]);
   const toggle = () => setCollapsed((value) => {
     try { localStorage.setItem(overviewStorageKey, value ? "open" : "collapsed"); } catch { /* only a preference */ }
     return !value;
@@ -3201,27 +3173,28 @@ function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
     ahead: commits(published.ahead), behind: commits(published.behind)
   };
   const key = (suffix: string) => `next_${next.action}${suffix}` as MessageKey;
-  const button = (label: string, onClick: () => void, primary = true) =>
-    <button key={label} className={primary ? "primary-button" : "outline-button"} disabled={busy} onClick={onClick}>{label}</button>;
-  const actions: ReactNode[] = [];
+  const button = (label: string, onClick: () => void) =>
+    <button className="primary-button" disabled={busy} onClick={onClick}>{label}</button>;
+  let action: ReactNode;
+  const moreActions: MenuEntry[] = [];
   switch (next.action) {
-    case "finish_pending": actions.push(button(t(key("_button")), handlers.onGuide)); break;
-    case "return_to_branch": actions.push(button(t(key("_button")), handlers.onNewBranch)); break;
-    case "save_changes": case "first_save": actions.push(button(t("next_save_changes_button"), handlers.onSave)); break;
+    case "finish_pending": action = button(t(key("_button")), handlers.onGuide); break;
+    case "return_to_branch": action = button(t(key("_button")), handlers.onNewBranch); break;
+    case "save_changes": case "first_save": action = button(t("next_save_changes_button"), handlers.onSave); break;
     case "combine_diverged":
       if (next.upstream) {
-        actions.push(button(t("next_combine_merge_button"), handlers.onPull));
-        actions.push(button(t("next_combine_rebase_button"), () => handlers.onPrepare("rebase", { onto: next.upstream! }), false));
+        const onto = next.upstream;
+        action = button(t("next_combine_merge_button"), handlers.onPull);
+        moreActions.push({ key: "rebase", icon: GitFork, label: t("next_combine_rebase_button"),
+          onSelect: () => handlers.onPrepare("rebase", { onto }), disabled: busy });
       }
       break;
-    case "get_latest": actions.push(button(t(key("_button")), handlers.onPull)); break;
-    case "connect_remote": actions.push(button(t(key("_button")), handlers.onConnectRemote)); break;
-    case "publish_branch": actions.push(button(t("next_publish_button"), () => handlers.onPrepare("push", next.remote ? { setUpstream: next.remote } : {}))); break;
-    case "publish_saved": actions.push(button(t("next_publish_button"), () => handlers.onPrepare("push"))); break;
-    case "integrate": actions.push(button(t(key("_button")), handlers.onIntegrate)); break;
-    case "publish_target": actions.push(button(t(key("_button"), values), () => handlers.onPrepare("checkout", { name: next.target! }))); break;
-    case "check_remote": actions.push(button(t(key("_button")), handlers.onFetch, false)); break;
-    default: break;
+    case "get_latest": action = button(t(key("_button")), handlers.onPull); break;
+    case "connect_remote": action = button(t(key("_button")), handlers.onConnectRemote); break;
+    case "publish_branch": action = button(t("next_publish_button"), () => handlers.onPrepare("push", next.remote ? { setUpstream: next.remote } : {})); break;
+    case "publish_saved": action = button(t("next_publish_count_button", values), () => handlers.onPrepare("push")); break;
+    case "integrate": action = button(t(key("_button")), handlers.onIntegrate); break;
+    case "publish_target": action = button(t(key("_button"), values), () => handlers.onPrepare("checkout", { name: next.target! })); break;
   }
   const detail = t(key("_detail"), values);
   const title = t(`next_${next.action}` as MessageKey, values);
@@ -3229,21 +3202,11 @@ function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
   const canIntegrate = Boolean(source && target && target !== snapshot.currentBranch
     && (snapshot.isDirty || integration.state === "not_integrated")
     && !overview.pending && !overview.conflicts && !overview.detached);
-  const moreActions: MenuEntry[] = canIntegrate && next.action !== "integrate" ? [{
+  if (canIntegrate && next.action !== "integrate") moreActions.push({
     key: "integrate", icon: GitMerge,
     label: t(snapshot.isDirty ? "saveAndIntegrate" : "integrateInto", { target: target! }),
     onSelect: handlers.onIntegrate, disabled: busy
-  }] : [];
-  const closeMenu = () => { setMenu(undefined); moreButton.current?.focus(); };
-  const toolbarActions = <div className="delivery-actions overview-actions">
-    {actions}
-    {moreActions.length > 0 && <button ref={moreButton} className="outline-button overview-more" disabled={busy}
-      aria-label={t("overviewMoreActions")} aria-haspopup="menu" aria-expanded={Boolean(menu)}
-      onClick={() => {
-        const box = moreButton.current?.getBoundingClientRect();
-        if (box) setMenu(menu ? undefined : { x: box.right, y: box.bottom + 5 });
-      }}><ChevronDown size={14} /></button>}
-  </div>;
+  });
   const summary = [
     { key: "edited", icon: overview.pending || overview.conflicts || overview.detached ? AlertTriangle : edited.count ? CircleDot : Check,
       value: overview.pending ? pendingLabel(overview.pending, t) : overview.detached ? savedCell.value : edited.count || overview.conflicts ? editedCell.value : overview.saved.hasCommits ? t("overviewEditedNone") : savedCell.value,
@@ -3254,7 +3217,7 @@ function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
     { key: "integrated", icon: GitMerge, value: integration.state === "integrated" ? t("overviewSavedIn", { target: target! }) : integrationCell.value, tone: integrationCell.tone }
   ];
   return <>
-    {toolbar(toolbarActions)}
+    {toolbar(action, moreActions, next.action)}
     <section className={`work-overview ${collapsed ? "collapsed" : ""}`} aria-label={t("overviewLabel")} data-next={next.action}>
       <div className="overview-summary">
         <ul className="overview-statuses">
@@ -3281,7 +3244,6 @@ function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
         </div>
       </div>}
     </section>
-    {menu && moreActions.length > 0 && <ContextMenu {...menu} items={moreActions} label={t("overviewMoreActions")} onClose={closeMenu} />}
   </>;
 }
 
@@ -3410,21 +3372,22 @@ function FileList({ files, stats, onOpen, selection }: { files: FileChange[]; st
  * the ticked files into a saved version. Unticked files are listed too, so leaving one out is a
  * visible decision rather than something that happens to it.
  */
-function ChangesView({ readiness, snapshot, delivery, busy, configured, onOpenFile, onIgnore }: {
+function ChangesView({ readiness, snapshot, delivery, busy, configured, onIgnore }: {
   readiness: ReadinessState;
   snapshot: RepoSnapshot;
   delivery: ReturnType<typeof useCommitDelivery>;
   busy: boolean;
   configured: boolean;
-  onOpenFile: (file: FileChange) => void;
   onIgnore: (file: FileChange) => void;
 }) {
-  const { attention, excluded, generating, merge, message, selected, stale, withheld } = delivery;
+  const { attention, excluded, generating, merge, message, selected, stale, suggestionOutdated, withheld } = delivery;
+  const [preview, setPreview] = useState<"selected" | { path: string }>();
+  const file = typeof preview === "object" ? snapshot.changes.find((change) => change.path === preview.path) : undefined;
   const { t } = useI18n();
   const viewRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!attention || attention.path !== snapshot.path) return;
-    const selector = attention.target === "description" ? "#commit-description"
+    const selector = attention.target === "description" || attention.target === "form" ? "#commit-description"
       : attention.target === "selection" ? ".select-all input"
       : ".delivery-stale button";
     viewRef.current?.querySelector<HTMLElement>(selector)?.focus();
@@ -3444,21 +3407,30 @@ function ChangesView({ readiness, snapshot, delivery, busy, configured, onOpenFi
     {hasChanges ? <>
       {!snapshot.head && <p className="file-inclusion-note first-save-note" role="note">{t("firstSaveNote")}</p>}
       <ChangeSummary files={selected} />
-      <FileList files={snapshot.changes} onOpen={onOpenFile} selection={{ excluded, disabled: busy || generating, onToggle: delivery.toggleIncluded, onToggleAll: delivery.setAllIncluded, onIgnore }} />
+      <FileList files={snapshot.changes} onOpen={({ path }) => setPreview({ path })} selection={{ excluded, disabled: busy || generating, onToggle: delivery.toggleIncluded, onToggleAll: delivery.setAllIncluded, onIgnore }} />
       {partly > 0 && <p className="file-inclusion-note partly-staged">{t("partlyStagedNote", { count: partly })}</p>}
+      <section className="save-preview">
+        <button className="ghost-button small" onClick={() => setPreview(preview === "selected" ? undefined : "selected")} disabled={!selected.length} aria-expanded={preview === "selected" && selected.length > 0}>
+          <FileDiff size={14} /> {t("showSelectedDiff")}
+        </button>
+        {(file || (preview === "selected" && selected.length > 0)) && <div className="selection-preview">
+          <div className="diff-toolbar"><strong>{file?.path ?? t("selectedDiffTitle")}</strong><button className="icon-button" onClick={() => setPreview(undefined)} aria-label={t("closeDiffs")}><X size={14} /></button></div>
+          <SaveDiff repoPath={snapshot.path} files={file ? [file] : selected} individual={Boolean(file)} />
+        </div>}
+      </section>
       <div className="commit-form">
         <div className="commit-form-heading"><h3>{t("saveDescription")}</h3><button className="outline-button small" onClick={() => void delivery.generateDescription()} disabled={!configured || generating || busy || !selected.length}>{generating ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{t(generating ? "generatingSaveDescription" : "generateDescription")}</button></div>
         <label htmlFor="commit-description" className="visually-hidden">{t("commitMessage")}</label><textarea id="commit-description" value={message} onChange={(event) => delivery.setMessage(event.target.value)} maxLength={120} rows={3} placeholder={t("commitPlaceholder")} aria-describedby={attention?.target === "description" && !message.trim() ? "save-description-required" : undefined} disabled={generating || busy} />
         {attention?.target === "description" && !message.trim() && <p id="save-description-required" className="file-inclusion-note save-description-required" role="status">{t(configured ? "saveDescriptionOrGenerate" : "saveDescriptionRequired")}</p>}
         <div className="commit-form-meta"><span>{t(configured ? "editableDescription" : "manualSaveDescription")}</span><span>{message.length}/120</span></div>
         {author && !needsSetup && <p className="commit-author-note"><UserRound size={11} />{t("readinessCommitAuthor", { identity: identityText({ name: author.name?.value, email: author.email?.value }), origin: authorOrigin(author, t) })}</p>}
+        {suggestionOutdated && <p role="status" className="file-inclusion-note">{t("saveSuggestionOutdated")}</p>}
         {withheld.length > 0 && <p className="file-inclusion-note withheld-note">{t("descriptionWithheld", { files: withheldText(withheld, t) })}</p>}
         {canMerge && <label className="delivery-option"><input type="checkbox" checked={merge} disabled={busy} onChange={(event) => delivery.setMerge(event.target.checked)} /><span>{t("integrateAfterSave", { target: snapshot.defaultBranch! })}</span></label>}
         {merge && canMerge && leftOut > 0 && <p className="file-inclusion-note">{t("excludedStayForIntegration", { count: leftOut, target: snapshot.defaultBranch! })}</p>}
         {stale && <div className="delivery-stale" role="alert">{t("filesChangedReview")} <button className="outline-button small" onClick={() => delivery.beginDelivery(merge, true)}>{t("reviewUpdatedFiles")}</button></div>}
         {!selected.length && <p className="file-inclusion-note selection-empty" role="status">{t("tickFilesToSave")}</p>}
         <div className="commit-form-actions">
-          <button className="ghost-button" onClick={() => delivery.setDiffOpen(true)} disabled={!selected.length}><FileDiff size={14} />{t("showSelectedDiff")}</button>
           <button className="primary-button" onClick={() => delivery.prepareCommit()} disabled={generating || busy}><ShieldCheck size={14} />{t(merge && canMerge ? "reviewSaveAndMerge" : "reviewSave")}</button>
         </div>
         <p className="file-inclusion-note">{t("selectedFilesNote")}</p>
@@ -3535,9 +3507,14 @@ function DeliveryReviewModal({ review, snapshot, busy, onClose, onApply }: {
 }) {
   const { t } = useI18n();
   const dialogRef = useDialog(onClose);
+  const save = review.plan.steps.find((step) => step.operation === "commit");
+  const target = review.plan.selection?.target;
+  const confirmLabel = save?.paths && snapshot ? t(target ? "confirmSelectedSaveAndMerge" : "confirmSelectedSave", {
+    files: counted(t, save.paths.length, "file", "files"), branch: snapshot.currentBranch, target: target ?? ""
+  }) : undefined;
   return <div className="modal-backdrop"><section className="modal delivery-review-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("reviewDeliveryTitle")}>
     <div className="modal-heading"><h2>{t("reviewDeliveryTitle")}</h2><button className="icon-button" onClick={onClose} aria-label={t("cancel")}><X size={18} /></button></div>
-    <PlanCard plan={review.plan} snapshot={snapshot} busy={busy} onApply={onApply} onDismiss={onClose} />
+    <PlanCard plan={review.plan} snapshot={snapshot} busy={busy} onApply={onApply} onDismiss={onClose} confirmLabel={confirmLabel} />
   </section></div>;
 }
 
@@ -3667,7 +3644,7 @@ function PlanGoal({ plan, snapshot }: { plan: ActionPlan; snapshot?: RepoSnapsho
   </div>;
 }
 
-function PlanCard({ plan, snapshot, onApply, onDismiss, busy }: { plan: ActionPlan; snapshot?: RepoSnapshot; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean }) {
+function PlanCard({ plan, snapshot, onApply, onDismiss, busy, confirmLabel }: { plan: ActionPlan; snapshot?: RepoSnapshot; onApply: () => Promise<void>; onDismiss: () => void; busy: boolean; confirmLabel?: string }) {
   const { t } = useI18n();
   const asking = plan.kind === "question";
   const push = plan.allowed && plan.requiresConfirmation ? plan.steps.find((step) => step.operation === "push") : undefined;
@@ -3685,7 +3662,7 @@ function PlanCard({ plan, snapshot, onApply, onDismiss, busy }: { plan: ActionPl
     {/* A plan with nothing to confirm is already running, so it offers no button that could decide otherwise. */}
     {plan.allowed && !plan.requiresConfirmation
       ? <p className="plan-running"><LoaderCircle className="spin" size={12} /> {t("runningWithoutConfirmation")}</p>
-      : plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>{t("cancel")}</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {t("confirmAction")}</button></div>
+      : plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>{t("cancel")}</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {confirmLabel ?? t("confirmAction")}</button></div>
       : asking ? <p className="plan-hint">{t("answerBelow")}</p>
       : <button className="ghost-button plan-close" onClick={onDismiss}>{t("understood")}</button>}</div>;
 }
@@ -4341,34 +4318,25 @@ function FileDiffModal({ file, repoPath, onClose }: { file: FileChange; repoPath
   </div>;
 }
 
-/** Every ticked file as one diff, read the same way the save will record it. */
-function SelectionDiffModal({ files, repoPath, onClose }: { files: FileChange[]; repoPath: string; onClose: () => void }) {
+/** Inspect a file or exactly the files the form will save, without leaving the editor. */
+function SaveDiff({ files, repoPath, individual }: { files: FileChange[]; repoPath: string; individual: boolean }) {
   const { t, locale } = useI18n();
-  const [detail, setDetail] = useState<CommitDetail>();
-  const [error, setError] = useState<string>();
   const paths = files.map((file) => file.path);
-  const key = paths.join("\0");
-  const dialogRef = useDialog(onClose);
+  const key = JSON.stringify([repoPath, individual, locale, files.map(({ path, version }) => [path, version])]);
+  const [loaded, setLoaded] = useState<{ key: string; detail: CommitDetail } | { key: string; error: string }>();
   useEffect(() => {
     let live = true;
-    setDetail(undefined); setError(undefined);
-    window.gitcat.getSelectionDiff(repoPath, paths, locale)
-      .then((next) => { if (live) setDetail(next); })
-      .catch((reason) => { if (live) setError(cleanError(reason, t("fallbackReadFile"))); });
+    const read = individual
+      ? window.gitcat.getWorkingFileDiff(repoPath, paths[0])
+      : window.gitcat.getSelectionDiff(repoPath, paths, locale);
+    void read.then((detail) => { if (live) setLoaded({ key, detail }); })
+      .catch((reason) => { if (live) setLoaded({ key, error: cleanError(reason, t("fallbackReadFile")) }); });
     return () => { live = false; };
-  }, [repoPath, key]);
-
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="commit-modal wide selection-diff-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="selection-modal-title">
-      <div className="modal-heading">
-        <div><div className="eyebrow">{t("selectedDiffEyebrow", { count: files.length })}</div><h2 id="selection-modal-title">{t("selectedDiffTitle")}</h2></div>
-        <button className="icon-button soft" onClick={onClose} aria-label={t("closeDiffs")}><X size={17} /></button>
-      </div>
-      {error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}
-      {!detail && !error && <div className="graph-loading"><LoaderCircle className="spin" size={15} /> {t("readingFile")}</div>}
-      {detail && (detail.diff.trim() ? <DiffView diff={detail.diff} truncated={detail.truncated} /> : <p className="detail-note">{t("selectedDiffEmpty")}</p>)}
-    </div>
-  </div>;
+  }, [key]);
+  if (loaded?.key !== key) return <div className="graph-loading" role="status"><LoaderCircle className="spin" size={15} /> {t("readingFile")}</div>;
+  if ("error" in loaded) return <div className="modal-error" role="alert"><AlertTriangle size={14} />{loaded.error}</div>;
+  return !individual && !loaded.detail.diff.trim() ? <p className="detail-note">{t("selectedDiffEmpty")}</p>
+    : <DiffView diff={loaded.detail.diff} truncated={loaded.detail.truncated} />;
 }
 
 /**
@@ -4495,7 +4463,7 @@ function ContextMenu({ x, y, items, label, onClose }: { x: number; y: number; it
   return <div ref={menu} className="context-menu" role="menu" aria-label={label} style={position} onKeyDown={walk} onContextMenu={(event) => event.preventDefault()}>
     {items.map((item) => "separator" in item ? <div key={item.key} className="menu-separator" role="separator" />
       : "heading" in item ? <div key={item.key} className="menu-heading" title={item.heading}>{item.heading}</div>
-      : <button key={item.key} role="menuitem" title={item.hint} className={item.danger ? "danger" : ""} disabled={item.disabled} onClick={() => { onClose(); item.onSelect(); }}>
+      : <button key={item.key} role="menuitem" data-action={item.key} title={item.hint} className={item.danger ? "danger" : ""} disabled={item.disabled} onClick={() => { onClose(); item.onSelect(); }}>
         <item.icon size={14} /><span>{item.label}</span>
       </button>)}
   </div>;

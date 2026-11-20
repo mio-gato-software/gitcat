@@ -117,16 +117,12 @@ test("las columnas se redimensionan con el ratón y el ancho sobrevive al reinic
   assert.match(styles, /\.pane-divider \{[^}]*cursor: col-resize/);
 });
 
-test("un clic selecciona la rama, un doble clic cambia a ella, y los impedimentos se explican", async () => {
+test("la fila selecciona con un clic y comparte la acción explícita con el doble clic", async () => {
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
-  assert.match(app, /const switchBranch = async \(name: string\)/);
+  assert.match(app, /onActivate=\{activateBranch\}/);
   // Seleccionar no es una operación de Git: decide de qué rama habla la ventana y nada más.
-  assert.match(app, /onClick=\{onSelect\} onDoubleClick=\{onSwitchNow\}/);
-  assert.doesNotMatch(app, /window\.setTimeout\(onSwitch/, "el clic ya no prepara un checkout con retardo");
-  // Cambiar de rama sigue siendo explícito: el doble clic, o el botón de la fila.
-  assert.match(app, /<button className=\{[^\n]*branch-switch[^\n]*onClick=\{onSwitch\}/);
-  assert.match(app, /addTurn\(path, t\("branchSwitchQuestion", \{ name \}\), false\)/);
-  assert.match(app, /error: message, status: "error"/);
+  assert.match(app, /onClick=\{onSelect\} onDoubleClick=\{onActivate\}/);
+  assert.match(app, /<button className=\{[^\n]*branch-switch[^\n]*onClick=\{onActivate\}/);
   // Una rama que deja de existir no puede dejar el historial apuntando a un nombre que Git no conoce.
   assert.match(app, /snapshot\.branches\.some\(\(branch\) => branch\.name === selectedBranch\) \? selectedBranch : snapshot\.currentBranch/);
 });

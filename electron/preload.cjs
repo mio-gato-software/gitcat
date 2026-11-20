@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld("gitcat", {
   editPractice:path=>ipcRenderer.invoke("practice:edit",path),
   removePractice:path=>ipcRenderer.invoke("practice:remove",path),
   previewReview:(path,request)=>ipcRenderer.invoke("review:preview",path,request),
-  publishReview:(path,id)=>ipcRenderer.invoke("review:publish",path,id),
+  publishReview:(path,id,draft)=>ipcRenderer.invoke("review:publish",path,id,draft),
   openReview:(url)=>ipcRenderer.invoke("review:open",url),
   getSwitchWork: (path, target) => ipcRenderer.invoke("switch-work:read", path, target),
   prepareSwitchWork: (path, request, locale) => ipcRenderer.invoke("switch-work:prepare", path, request, locale),
@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("gitcat", {
   setActivityRetention: (days) => ipcRenderer.invoke("activity:retention", days),
   clearActivityHistory: (path) => ipcRenderer.invoke("activity:clear", path),
   prepareHistoryRecovery: (path, id, mode, locale) => ipcRenderer.invoke("activity:recover", path, id, mode, locale),
+  suggestHistoryRecovery: (path, id, locale) => ipcRenderer.invoke("activity:suggest-recovery", path, id, locale),
   onOperationProgress: (listener) => {
     const receive = (_event, progress) => listener(progress);
     ipcRenderer.on("operation:progress", receive);
