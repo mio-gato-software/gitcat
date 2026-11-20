@@ -23,17 +23,12 @@
 .toolbar-sync { flex: none; display: inline-flex; gap: 8px; margin-top: 12px; padding: 3px 7px; color: var(--secondary); background: var(--raised); border: 1px solid var(--border); border-radius: 5px; font: 10.5px var(--mono); }
 .toolbar-sync span { display: inline-flex; align-items: center; gap: 3px; }
 .toolbar-tools { display: flex; align-items: center; gap: 2px; }
-.tool-button { display: grid; justify-items: center; gap: 4px; min-width: 56px; padding: 7px 8px 6px; color: var(--secondary); background: transparent; border-radius: 7px; font-size: 10.5px; }
+.tool-button { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 6px 8px; color: var(--secondary); background: transparent; border-radius: 7px; font-size: 10.5px; }
 .tool-button:hover:not(:disabled) { color: var(--text); background: var(--raised); }
 .tool-button svg { color: var(--text); }
-.tool-divider { width: 1px; height: 30px; margin: 0 6px; background: var(--border); }
-.toolbar-delivery { display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; }
+.toolbar-delivery { font-size: 12px; display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; }
 .delivery-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .delivery-actions button { min-height: 32px; font-size: 12px; }
-.overview-more { padding: 7px; }
-.overview-actions:has(.overview-more) { gap: 2px; }
-.overview-actions:has(.overview-more) > :first-child { border-top-right-radius: 3px; border-bottom-right-radius: 3px; }
-.overview-more { border-top-left-radius: 3px; border-bottom-left-radius: 3px; }
 
 /* Facts stay visible in one row; explanations and Git terminology wait behind Details. */
 .work-overview { flex: none; min-width: 0; background: var(--surface); border-bottom: 1px solid var(--border); }
@@ -67,7 +62,6 @@
 .more-suggestions span { flex: 1; }
 @media (max-width: 1100px) {
   .repo-toolbar { gap: 10px; }
-  .tool-button { min-width: 44px; padding-inline: 6px; }
   .overview-details { grid-template-columns: minmax(0, 1fr); gap: 12px; }
   .overview-next { border-left: 0; border-top: 1px solid var(--border); padding: 10px 0 0; }
 }
@@ -322,10 +316,6 @@
 .diff-toolbar .ghost-button { flex: none; }
 
 @media (max-width: 1360px) { .delivery-status { display: none; } }
-@media (max-width: 1200px) {
-  .tool-button { min-width: 38px; padding: 8px; }
-  .tool-button span { display: none; }
-}
 
 /* The new-project button sits on the same baseline as the tabs beside it. */
 /* Keep empty space and the strip above the tabs available for moving the window.

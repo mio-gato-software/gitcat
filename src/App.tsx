@@ -16,7 +16,7 @@ import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, 
 import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
   AlertTriangle, Archive, ArchiveRestore, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDot,
-  Clock3, Cloud, CloudDownload, Copy, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
+  Clock3, Cloud, CloudDownload, Copy, Ellipsis, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
   FolderOpen, FolderPlus, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
   ListTree, LoaderCircle, Maximize2, MessageCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen, Palette, Pencil, PencilLine, Plus,
   RefreshCcw, Search, Send, Settings2, ShieldCheck, Undo2,
@@ -32,7 +32,7 @@ import { buildCommitGraph, familyColour, maxLanes } from "../shared/commit-graph
 import { graphWorktrees, withWorktreeWork, worktreeWipHash } from "../shared/worktree-graph";
 import { pullRequestReference } from "../shared/repository-activity";
 import { syncDestinations } from "../shared/remote-sync";
-import { workOverview } from "../shared/work-overview";
+import { workOverview, type NextActionId } from "../shared/work-overview";
 import { completionSummary, planSummary, type CompletionSummary } from "../shared/plan-summary";
 import { refChips } from "../shared/ref-chips";
 import { isPartlyStaged, isUntracked } from "../shared/selected-changes";
@@ -1762,7 +1762,7 @@ export default function App() {
 
         <WorkOverviewStrip
           key={`overview:${snapshot.path}`}
-          toolbar={(actions) => <RepoToolbar
+          toolbar={(action, moreActions, next) => <RepoToolbar
             snapshot={snapshot}
             busy={planning}
             refreshing={refreshingPath === snapshot.path && refreshKind === "refresh"}
@@ -1775,7 +1775,9 @@ export default function App() {
             onStash={() => void prepare("stash_push")}
             onStashPop={() => void prepare("stash_pop")}
             onBranch={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
-            actions={actions}
+            action={action}
+            moreActions={moreActions}
+            next={next}
           />}
           snapshot={snapshot}
           fetchedAt={active?.fetchedAt}
@@ -1786,7 +1788,6 @@ export default function App() {
             onSave: () => beginDelivery(false),
             onIntegrate: () => beginDelivery(true),
             onPull: () => void prepare("pull"),
-            onFetch: () => void refreshEverything("fetch"),
             onConnectRemote: () => setInputDialog({ operation: "add_remote", title: t("connectRemoteTitle"), label: t("remoteAddress"), value: "" }),
             onPrepare: (operation, args) => void prepare(operation, args)
           }}
@@ -3082,15 +3083,43 @@ function changeStatus(code: string, t: Translate) {
  * The repository bar: where you are, the everyday Git verbs, and the next step for this branch. The
  * verbs still go through a plan, so a click here explains itself before anything changes.
  */
-function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, onRefresh, onFetch, onPull, onPush, onStash, onStashPop, onBranch, actions }: {
+function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, onRefresh, onFetch, onPull, onPush, onStash, onStashPop, onBranch, action, moreActions, next }: {
   snapshot: RepoSnapshot; busy: boolean; refreshing: boolean; fetching: boolean; refreshDisabled: boolean;
   onRefresh: () => void; onFetch: () => void; onPull: () => void; onPush: () => void; onStash: () => void; onStashPop: () => void; onBranch: () => void;
-  actions: ReactNode;
+  action: ReactNode; moreActions: MenuEntry[]; next: NextActionId;
 }) {
   const { t } = useI18n();
   const source = snapshot.branches.find((branch) => branch.isCurrent);
-  const tool = (Icon: LucideIcon, label: string, onClick: () => void, disabled: boolean, title?: string, spinning = false) =>
-    <button className="tool-button" onClick={onClick} disabled={disabled} title={title ?? label}>{spinning ? <LoaderCircle className="spin" size={17} /> : <Icon size={17} />}<span>{label}</span></button>;
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number }>();
+  const closeMenu = () => { setMenu(undefined); moreButton.current?.focus(); };
+  const openMenu = () => {
+    const box = moreButton.current?.getBoundingClientRect();
+    if (box) setMenu({ x: box.right, y: box.bottom + 5 });
+  };
+  useEffect(() => setMenu(undefined), [snapshot.path, snapshot.stateId, busy, next]);
+  useEffect(() => {
+    const listen = (event: KeyboardEvent) => {
+      if (event.code !== "KeyG" || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat || event.defaultPrevented) return;
+      if (document.querySelector('[aria-modal="true"], [role="menu"]')) return;
+      if (event.target instanceof HTMLElement && event.target.closest("input, textarea, select, [contenteditable]")) return;
+      event.preventDefault();
+      openMenu();
+    };
+    window.addEventListener("keydown", listen);
+    return () => window.removeEventListener("keydown", listen);
+  }, []);
+  const remote = snapshot.remotes.length > 0;
+  const pending = Boolean(snapshot.pending || snapshot.conflicts.length);
+  const entries: MenuEntry[] = [
+    ...moreActions,
+    { key: "fetch", icon: fetching ? LoaderCircle : CloudDownload, label: t("fetch"), hint: t(remote ? "fetchTitle" : "noRemoteFetchTitle"), onSelect: onFetch, disabled: refreshDisabled || !remote },
+    ...(next === "get_latest" || next === "combine_diverged" ? [] : [{ key: "pull", icon: ArrowDownToLine, label: t("pull"), hint: t("pullTitle"), onSelect: onPull, disabled: busy }]),
+    ...(next === "publish_saved" || next === "publish_branch" ? [] : [{ key: "push", icon: ArrowUpFromLine, label: t("push"), hint: t("pushTitle"), onSelect: onPush, disabled: busy }]),
+    { key: "stash", icon: Archive, label: t("stash"), hint: t("stashTitle"), onSelect: onStash, disabled: busy || pending || !snapshot.isDirty || !snapshot.head },
+    { key: "stash-pop", icon: ArchiveRestore, label: t("stashPop", { count: snapshot.stashCount ?? 0 }), hint: t("stashPopTitle"), onSelect: onStashPop, disabled: busy || pending || !snapshot.stashCount },
+    ...(next === "return_to_branch" ? [] : [{ key: "branch", icon: GitBranchPlus, label: t("newBranch"), onSelect: onBranch, disabled: busy }])
+  ];
   return <div className="repo-toolbar">
     <div className="toolbar-context">
       <div className="toolbar-field"><span className="toolbar-caption">{t("toolbarRepository")}</span><strong title={snapshot.path}>{snapshot.name}</strong></div>
@@ -3102,24 +3131,25 @@ function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, on
       </span>}
     </div>
     <div className="toolbar-tools">
-      {tool(RefreshCcw, t("refresh"), onRefresh, refreshDisabled, t("refreshTitle"), refreshing)}
-      {tool(CloudDownload, t("fetch"), onFetch, refreshDisabled || !snapshot.remotes.length, snapshot.remotes.length ? t("fetchTitle") : t("noRemoteFetchTitle"), fetching)}
-      {tool(ArrowDownToLine, t("pull"), onPull, busy, t("pullTitle"))}
-      {tool(ArrowUpFromLine, t("push"), onPush, busy, t("pushTitle"))}
-      {tool(Archive, t("stash"), onStash, busy || !snapshot.isDirty || !snapshot.head || Boolean(snapshot.pending) || Boolean(snapshot.conflicts.length), t("stashTitle"))}
-      {tool(ArchiveRestore, t("stashPop", { count: snapshot.stashCount ?? 0 }), onStashPop, busy || !snapshot.stashCount || Boolean(snapshot.pending) || Boolean(snapshot.conflicts.length), t("stashPopTitle"))}
-      <span className="tool-divider" aria-hidden="true" />
-      {tool(GitBranchPlus, t("branchTool"), onBranch, busy, t("newBranch"))}
+      <button className="tool-button" data-action="refresh" onClick={onRefresh} disabled={refreshDisabled} title={t("refreshTitle")}>
+        {refreshing || fetching ? <LoaderCircle className="spin" size={16} /> : <RefreshCcw size={16} />}<span>{t("refreshStatus")}</span>
+      </button>
+      <button ref={moreButton} className="tool-button toolbar-more" aria-keyshortcuts="Alt+G"
+        aria-label={t("toolbarMoreActions")} title={`${t("toolbarMoreActions")} (Alt+G)`}
+        aria-haspopup="menu" aria-expanded={Boolean(menu)} onClick={() => menu ? closeMenu() : openMenu()}>
+        <Ellipsis size={16} />
+      </button>
     </div>
     <div className={`toolbar-delivery ${snapshot.isDirty ? "is-dirty" : "is-saved"}`}>
-      {actions}
+      {action}
     </div>
+    {menu && <ContextMenu {...menu} items={entries} label={t("toolbarMoreActions")} onClose={closeMenu} />}
   </div>;
 }
 
 type OverviewHandlers = {
   onGuide: () => void; onNewBranch: () => void; onSave: () => void; onIntegrate: () => void;
-  onPull: () => void; onFetch: () => void; onConnectRemote: () => void;
+  onPull: () => void; onConnectRemote: () => void;
   onPrepare: (operation: Operation, args?: Record<string, string>) => void;
 };
 
@@ -3137,15 +3167,11 @@ function readOverviewCollapsed() {
  */
 function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
   snapshot: RepoSnapshot; fetchedAt?: string; busy: boolean; handlers: OverviewHandlers;
-  toolbar: (actions: ReactNode) => ReactNode;
+  toolbar: (action: ReactNode, moreActions: MenuEntry[], next: NextActionId) => ReactNode;
 }) {
   const { t, locale } = useI18n();
   const [collapsed, setCollapsed] = useState(readOverviewCollapsed);
   const detailsId = useId();
-  const moreButton = useRef<HTMLButtonElement>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number }>();
-  // A refreshed snapshot invalidates an open menu just as it invalidates an old action plan.
-  useEffect(() => setMenu(undefined), [snapshot.stateId, busy]);
   const toggle = () => setCollapsed((value) => {
     try { localStorage.setItem(overviewStorageKey, value ? "open" : "collapsed"); } catch { /* only a preference */ }
     return !value;
@@ -3201,27 +3227,28 @@ function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
     ahead: commits(published.ahead), behind: commits(published.behind)
   };
   const key = (suffix: string) => `next_${next.action}${suffix}` as MessageKey;
-  const button = (label: string, onClick: () => void, primary = true) =>
-    <button key={label} className={primary ? "primary-button" : "outline-button"} disabled={busy} onClick={onClick}>{label}</button>;
-  const actions: ReactNode[] = [];
+  const button = (label: string, onClick: () => void) =>
+    <button className="primary-button" disabled={busy} onClick={onClick}>{label}</button>;
+  let action: ReactNode;
+  const moreActions: MenuEntry[] = [];
   switch (next.action) {
-    case "finish_pending": actions.push(button(t(key("_button")), handlers.onGuide)); break;
-    case "return_to_branch": actions.push(button(t(key("_button")), handlers.onNewBranch)); break;
-    case "save_changes": case "first_save": actions.push(button(t("next_save_changes_button"), handlers.onSave)); break;
+    case "finish_pending": action = button(t(key("_button")), handlers.onGuide); break;
+    case "return_to_branch": action = button(t(key("_button")), handlers.onNewBranch); break;
+    case "save_changes": case "first_save": action = button(t("next_save_changes_button"), handlers.onSave); break;
     case "combine_diverged":
       if (next.upstream) {
-        actions.push(button(t("next_combine_merge_button"), handlers.onPull));
-        actions.push(button(t("next_combine_rebase_button"), () => handlers.onPrepare("rebase", { onto: next.upstream! }), false));
+        const onto = next.upstream;
+        action = button(t("next_combine_merge_button"), handlers.onPull);
+        moreActions.push({ key: "rebase", icon: GitFork, label: t("next_combine_rebase_button"),
+          onSelect: () => handlers.onPrepare("rebase", { onto }), disabled: busy });
       }
       break;
-    case "get_latest": actions.push(button(t(key("_button")), handlers.onPull)); break;
-    case "connect_remote": actions.push(button(t(key("_button")), handlers.onConnectRemote)); break;
-    case "publish_branch": actions.push(button(t("next_publish_button"), () => handlers.onPrepare("push", next.remote ? { setUpstream: next.remote } : {}))); break;
-    case "publish_saved": actions.push(button(t("next_publish_button"), () => handlers.onPrepare("push"))); break;
-    case "integrate": actions.push(button(t(key("_button")), handlers.onIntegrate)); break;
-    case "publish_target": actions.push(button(t(key("_button"), values), () => handlers.onPrepare("checkout", { name: next.target! }))); break;
-    case "check_remote": actions.push(button(t(key("_button")), handlers.onFetch, false)); break;
-    default: break;
+    case "get_latest": action = button(t(key("_button")), handlers.onPull); break;
+    case "connect_remote": action = button(t(key("_button")), handlers.onConnectRemote); break;
+    case "publish_branch": action = button(t("next_publish_button"), () => handlers.onPrepare("push", next.remote ? { setUpstream: next.remote } : {})); break;
+    case "publish_saved": action = button(t("next_publish_count_button", values), () => handlers.onPrepare("push")); break;
+    case "integrate": action = button(t(key("_button")), handlers.onIntegrate); break;
+    case "publish_target": action = button(t(key("_button"), values), () => handlers.onPrepare("checkout", { name: next.target! })); break;
   }
   const detail = t(key("_detail"), values);
   const title = t(`next_${next.action}` as MessageKey, values);
@@ -3229,21 +3256,11 @@ function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
   const canIntegrate = Boolean(source && target && target !== snapshot.currentBranch
     && (snapshot.isDirty || integration.state === "not_integrated")
     && !overview.pending && !overview.conflicts && !overview.detached);
-  const moreActions: MenuEntry[] = canIntegrate && next.action !== "integrate" ? [{
+  if (canIntegrate && next.action !== "integrate") moreActions.push({
     key: "integrate", icon: GitMerge,
     label: t(snapshot.isDirty ? "saveAndIntegrate" : "integrateInto", { target: target! }),
     onSelect: handlers.onIntegrate, disabled: busy
-  }] : [];
-  const closeMenu = () => { setMenu(undefined); moreButton.current?.focus(); };
-  const toolbarActions = <div className="delivery-actions overview-actions">
-    {actions}
-    {moreActions.length > 0 && <button ref={moreButton} className="outline-button overview-more" disabled={busy}
-      aria-label={t("overviewMoreActions")} aria-haspopup="menu" aria-expanded={Boolean(menu)}
-      onClick={() => {
-        const box = moreButton.current?.getBoundingClientRect();
-        if (box) setMenu(menu ? undefined : { x: box.right, y: box.bottom + 5 });
-      }}><ChevronDown size={14} /></button>}
-  </div>;
+  });
   const summary = [
     { key: "edited", icon: overview.pending || overview.conflicts || overview.detached ? AlertTriangle : edited.count ? CircleDot : Check,
       value: overview.pending ? pendingLabel(overview.pending, t) : overview.detached ? savedCell.value : edited.count || overview.conflicts ? editedCell.value : overview.saved.hasCommits ? t("overviewEditedNone") : savedCell.value,
@@ -3254,7 +3271,7 @@ function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
     { key: "integrated", icon: GitMerge, value: integration.state === "integrated" ? t("overviewSavedIn", { target: target! }) : integrationCell.value, tone: integrationCell.tone }
   ];
   return <>
-    {toolbar(toolbarActions)}
+    {toolbar(action, moreActions, next.action)}
     <section className={`work-overview ${collapsed ? "collapsed" : ""}`} aria-label={t("overviewLabel")} data-next={next.action}>
       <div className="overview-summary">
         <ul className="overview-statuses">
@@ -3281,7 +3298,6 @@ function WorkOverviewStrip({ snapshot, fetchedAt, busy, handlers, toolbar }: {
         </div>
       </div>}
     </section>
-    {menu && moreActions.length > 0 && <ContextMenu {...menu} items={moreActions} label={t("overviewMoreActions")} onClose={closeMenu} />}
   </>;
 }
 
@@ -4495,7 +4511,7 @@ function ContextMenu({ x, y, items, label, onClose }: { x: number; y: number; it
   return <div ref={menu} className="context-menu" role="menu" aria-label={label} style={position} onKeyDown={walk} onContextMenu={(event) => event.preventDefault()}>
     {items.map((item) => "separator" in item ? <div key={item.key} className="menu-separator" role="separator" />
       : "heading" in item ? <div key={item.key} className="menu-heading" title={item.heading}>{item.heading}</div>
-      : <button key={item.key} role="menuitem" title={item.hint} className={item.danger ? "danger" : ""} disabled={item.disabled} onClick={() => { onClose(); item.onSelect(); }}>
+      : <button key={item.key} role="menuitem" data-action={item.key} title={item.hint} className={item.danger ? "danger" : ""} disabled={item.disabled} onClick={() => { onClose(); item.onSelect(); }}>
         <item.icon size={14} /><span>{item.label}</span>
       </button>)}
   </div>;
