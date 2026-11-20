@@ -31,6 +31,7 @@ const operationLabels: Record<ActivityOperation, MessageKey> = {
   pull_request: 'activityCreateReview',
   set_aside_work: 'activitySetAside',
   restore_set_aside_work: 'activityRestoreWork',
+  restore_and_remove_work: 'switchWorkRestoreAndRemove',
   undo_save: 'activityUndoSave',
   revert_save: 'activityRevertSave',
   create_recovery_branch: 'activityRecoveryBranch'

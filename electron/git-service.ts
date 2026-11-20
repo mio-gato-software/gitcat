@@ -3122,8 +3122,8 @@ async function writeCommitMessages(steps: PlanStep[], snapshot: RepoSnapshot, lo
 async function validateStashPop(snapshot: RepoSnapshot, stash: string, language: Locale) {
   const staged = snapshot.changes.filter(change => change.xy && ![" ", "?"].includes(change.xy[0]));
   if (staged.length) throw new Error(localized(language,
-    `Hay cambios preparados en ${staged.map(c => c.path).join(", ")}. Usa Revisar y guardar antes de Pop para conservar lo preparado. El stash sigue disponible; no se cambió ningún archivo.`,
-    `There are staged changes in ${staged.map(c => c.path).join(", ")}. Use Review and save before Pop to preserve staged work. The stash is still available; no files were changed.`));
+    `Hay cambios preparados en ${staged.map(c => c.path).join(", ")}. Usa Revisar y guardar antes de restaurar para conservar lo preparado. El stash sigue disponible; no se cambió ningún archivo.`,
+    `There are staged changes in ${staged.map(c => c.path).join(", ")}. Use Review and save before restoring to preserve staged work. The stash is still available; no files were changed.`));
   const paths = (raw: string) => raw.split("\0").filter(Boolean);
   const tracked = paths(await checkedGit(snapshot.path, ["diff", "--name-only", "--no-renames", "-z", `${stash}^1`, stash, "--"], true));
   tracked.push(...paths(await checkedGit(snapshot.path, ["diff", "--name-only", "--no-renames", "-z", `${stash}^1`, `${stash}^2`, "--"], true)));
@@ -3146,8 +3146,8 @@ async function validateStashPop(snapshot: RepoSnapshot, stash: string, language:
     }
   }
   if (blockers.size) throw new Error(localized(language,
-    `El stash necesita archivos que ya tienen trabajo local: ${[...blockers].join(", ")}. Revisa y guarda ese trabajo primero, o mueve los archivos nuevos a un lugar seguro, y vuelve a Pop. El stash sigue disponible; no se cambió ningún archivo.`,
-    `The stash needs files that already have local work: ${[...blockers].join(", ")}. Review and save that work first, or move new files somewhere safe, then return to Pop. The stash is still available; no files were changed.`));
+    `El stash necesita archivos que ya tienen trabajo local: ${[...blockers].join(", ")}. Revisa y guarda ese trabajo primero, o mueve los archivos nuevos a un lugar seguro, y vuelve a abrir Trabajo apartado. El stash sigue disponible; no se cambió ningún archivo.`,
+    `The stash needs files that already have local work: ${[...blockers].join(", ")}. Review and save that work first, or move new files somewhere safe, then reopen Set-aside work. The stash is still available; no files were changed.`));
 }
 
 /** Direct controls in the interface: the operation is already known, so no interpretation is needed. */
@@ -4000,7 +4000,12 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     }
     return reportedGit(cwd, pushArgs);
   }
-  if (validated?.kind === "git_command") return reportedGit(cwd, validated.argv);
+  if (validated?.kind === "git_command") {
+    if (plan.switchWork?.mode === "restore" && plan.switchWork.removeAfterRestore) {
+      return restoreAndRemoveStash(cwd, plan.switchWork, validated.argv, normalizeLocale(locale));
+    }
+    return reportedGit(cwd, validated.argv);
+  }
   if (validated?.kind === "resolve_conflict") return runResolveConflict(cwd, step.args, validated.action, locale);
   const { args } = step;
   switch (step.operation) {
@@ -4471,7 +4476,7 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
     if ((await getSnapshot(cwd)).remotes.length || plan.steps.some(step=>['push','fetch','pull','add_remote','github_create_repo'].includes(step.operation) || (step.operation==='set_identity'&&step.args.scope==='global') || (step.operation==='git_command'&&!safeLocal.has(step.argv?.[0]??'')))) throw new Error('Practice stays local. Publishing, remote access and global settings are disabled here. Use a real project for collaboration.');
   }
   if (plan.recovery) await validateHistoryRecovery(cwd, plan.recovery, locale);
-  if (plan.switchWork) await validateSwitchWork(cwd, plan.switchWork);
+  if (plan.switchWork) await validateSwitchWork(cwd, plan.switchWork, normalizeLocale(locale));
   const before = await getSnapshot(cwd);
   const history = activityHistory(), id = history.begin(plan, before);
   // Keep the ledger outside the body: even a failed snapshot or journal write cannot erase it.
@@ -4642,28 +4647,63 @@ export async function applyConflictChoices(cwd: string, guide: IssuedConflictGui
 }
 
 
-async function setAsideEntries(cwd: string) {
-  const raw=await checkedGit(cwd,['stash','list','--format=%H%x00%gs']);
-  return raw.split('\n').flatMap(line=>{const [hash,label]=line.split('\0');return /^[a-f0-9]{40,64}$/.test(hash) && label?.includes('GitCat set aside:')?[{hash,label}]:[];});
+async function setAsideEntries(cwd: string): Promise<SwitchWorkPreview["entries"]> {
+  const raw = await checkedGit(cwd, ["stash", "list", "--format=%H%x00%gd%x00%cI%x00%gs"]);
+  return raw.split("\n").flatMap((line) => {
+    const [hash, ref, date, subject] = line.split("\0");
+    if (!/^[a-f0-9]{40,64}$/.test(hash) || !/^stash@\{\d+\}$/.test(ref ?? "") || !subject) return [];
+    const match = /^(?:On|WIP on) ([^:]+): (.*)$/.exec(subject);
+    const branch = match?.[1];
+    const label = (match?.[2] ?? subject).replace(/^GitCat set aside: /, "");
+    const branchSuffix = branch ? ` [${branch}]` : "";
+    return [{ hash, ref, date, branch, label: branchSuffix && label.endsWith(branchSuffix) ? label.slice(0, -branchSuffix.length) : label }];
+  });
 }
-export async function getSwitchWork(cwd: string, target: string): Promise<SwitchWorkPreview> {
-  const snapshot=await getSnapshot(cwd);
-  if (!isBranchNameSafe(target)) throw new Error('Invalid branch name.');
-  const branch=snapshot.branches.find(b=>b.name===target);
-  if (!branch) throw new Error('That branch no longer exists. Refresh the branch list.');
-  const blockers=branch.presence==='remote'?snapshot.changes:await integrationBlockers(snapshot,snapshot.changes,target);
-  return {snapshot,target,occupied:branch.checkedOutIn,blockers:blockers.map(c=>c.path),entries:await setAsideEntries(cwd)};
+
+async function checkedStashEntry(cwd: string, request: SwitchWorkRequest, language: Locale) {
+  const entry = (await setAsideEntries(cwd)).find((item) => item.hash === request.stash && (!request.stashRef || item.ref === request.stashRef));
+  if (!entry) throw new StalePlanError(localized(language,
+    "La lista de trabajo apartado cambió. Ábrela de nuevo para revisar la entrada.",
+    "The set-aside list changed. Open it again to review the entry."));
+  return entry;
 }
-async function validateSwitchWork(cwd: string, request: SwitchWorkRequest) {
-  if (!['carry','set_aside','restore'].includes(request.mode)) throw new Error('Invalid unfinished-work choice.');
-  const snapshot=await getSnapshot(cwd);
-  if (snapshot.pending || snapshot.conflicts.length) throw new Error('Finish or abort the current Git operation before moving unfinished work.');
-  if (request.mode==='restore') {
-    if (snapshot.isDirty) throw new Error('Review or save current edits first. Restoring will not mix them with the set-aside work.');
-    if (!(await setAsideEntries(cwd)).some(e=>e.hash===request.stash)) throw new Error('That set-aside entry is no longer available. Read the list again.');
-    return;
+
+async function restoreAndRemoveStash(cwd: string, request: SwitchWorkRequest, argv: string[], language: Locale): Promise<StepRunResult> {
+  const entry = await checkedStashEntry(cwd, request, language);
+  const output = await reportedGit(cwd, argv);
+  try {
+    await checkedStashEntry(cwd, { ...request, stashRef: entry.ref }, language);
+    const removed = await reportedGit(cwd, ["stash", "drop", entry.ref]);
+    return { output: [output, removed].filter(Boolean).join("\n") };
+  } catch {
+    const detail = localized(language,
+      "Se restauraron los archivos. No se pudo confirmar que la entrada se quitara de la lista. Revisa Trabajo apartado antes de continuar.",
+      "The files were restored. Removal from the list could not be confirmed. Review Set-aside work before continuing.");
+    return { output, postActionIssue: { kind: "stash_drop", detail } };
   }
-  const preview=await getSwitchWork(cwd,request.target??'');
+}
+
+export async function getSwitchWork(cwd: string, target: string): Promise<SwitchWorkPreview> {
+  const snapshot = await getSnapshot(cwd);
+  if (!target) return { snapshot, target, blockers: [], entries: await setAsideEntries(cwd) };
+  if (!isBranchNameSafe(target)) throw new Error('Invalid branch name.');
+  const branch = snapshot.branches.find(b => b.name === target);
+  if (!branch) throw new Error('That branch no longer exists. Refresh the branch list.');
+  const blockers = branch.presence === 'remote' ? snapshot.changes : await integrationBlockers(snapshot, snapshot.changes, target);
+  return { snapshot, target, occupied: branch.checkedOutIn, blockers: blockers.map(c => c.path), entries: await setAsideEntries(cwd) };
+}
+
+async function validateSwitchWork(cwd: string, request: SwitchWorkRequest, language: Locale) {
+  if (!['carry','set_aside','restore'].includes(request.mode)) throw new Error('Invalid unfinished-work choice.');
+  const snapshot = await getSnapshot(cwd);
+  if (snapshot.pending || snapshot.conflicts.length) throw new Error('Finish or abort the current Git operation before moving unfinished work.');
+  if (request.mode === 'restore') {
+    const entry = await checkedStashEntry(cwd, request, language);
+    await validateStashPop(snapshot, entry.hash, language);
+    return entry;
+  }
+  if (!request.target) throw new Error('Choose the branch to switch to.');
+  const preview=await getSwitchWork(cwd,request.target);
   if (preview.occupied) throw new Error(`That branch is open in ${preview.occupied}. Open that folder as a project, or keep working here. No files were moved.`);
   if (snapshot.currentBranch===request.target) throw new Error('You are already on that branch.');
   if (request.mode==='carry' && preview.blockers.length) throw new Error(`These edits overlap the destination: ${preview.blockers.join(', ')}. Save or set them aside first.`);
@@ -4679,23 +4719,27 @@ async function validateSwitchWork(cwd: string, request: SwitchWorkRequest) {
   }
 }
 export async function prepareSwitchWork(cwd: string, request: SwitchWorkRequest, locale?: Locale) {
-  await validateSwitchWork(cwd, request);
-  const snapshot = await getSnapshot(cwd);
   const language = normalizeLocale(locale);
+  const entry = await validateSwitchWork(cwd, request, language);
+  const snapshot = await getSnapshot(cwd);
+  const work = entry ? { ...request, label: entry.label, stashRef: entry.ref } : request;
   const steps: PlanStep[] = [];
   const args = switchWorkCommandArguments(request, snapshot.currentBranch);
   if (args) {
     const step = stepFrom("git_command", {}, args, language)!;
-    step.summary = request.mode === "restore"
-      ? localized(language, "Restaurar trabajo apartado", "Restore set-aside work")
+    step.summary = entry
+      ? work.removeAfterRestore
+        ? localized(language, "Restaurar y quitar de la lista", "Restore and remove from list")
+        : localized(language, "Restaurar trabajo apartado", "Restore set-aside work")
       : localized(language, "Apartar trabajo", "Set work aside");
+    if (entry && work.removeAfterRestore) step.command += ` && git stash drop ${entry.ref}`;
     steps.push(step);
   }
   if (request.mode !== "restore") {
     steps.push(stepFrom("checkout", { name: request.target! }, [], language)!);
   }
   const rationale = localized(language, "Revisa qué pasa con tus cambios antes de confirmar.", "Review what happens to your changes before confirming.");
-  return bindPlan(snapshot, { ...sequenceDraft(steps, rationale, undefined, language), switchWork: request, requiresConfirmation: true });
+  return bindPlan(snapshot, { ...sequenceDraft(steps, rationale, undefined, language), switchWork: work, requiresConfirmation: true });
 }
 
 

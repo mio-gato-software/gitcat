@@ -38,7 +38,7 @@ function recordedOperation(plan: ActivityPlan, operation: ActivityOperation): Ac
   if (operation !== 'git_command') return operation;
   // The journal keeps the confirmed intent without copying arguments or command text.
   if (plan.switchWork?.mode === 'set_aside') return 'set_aside_work';
-  if (plan.switchWork?.mode === 'restore') return 'restore_set_aside_work';
+  if (plan.switchWork?.mode === 'restore') return plan.switchWork.removeAfterRestore ? 'restore_and_remove_work' : 'restore_set_aside_work';
   switch (plan.recovery?.mode) {
     case 'undo': return 'undo_save';
     case 'revert': return 'revert_save';

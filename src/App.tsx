@@ -15,7 +15,7 @@ import { addNotification, type Notification } from "../shared/notifications";
 import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from "react";
 import {
-  AlertTriangle, Archive, ArchiveRestore, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDot,
+  AlertTriangle, Archive, ArrowDownToLine, ArrowDownWideNarrow, ArrowUpFromLine, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDot,
   Clock3, Cloud, CloudDownload, Copy, Ellipsis, Eye, EyeOff, FileDiff, FileMinus, FilePen, FilePlus, FileSymlink, Folder, FolderGit2,
   FolderOpen, FolderPlus, GitBranch, GitBranchPlus, GitCommitHorizontal, GitFork, ArrowLeftRight, GitMerge, Info, Laptop, Lightbulb, List,
   ListTree, LoaderCircle, Maximize2, MessageCircle, MessageSquareText, PanelLeftClose, PanelLeftOpen, Palette, Pencil, PencilLine, Plus,
@@ -1732,7 +1732,7 @@ export default function App() {
           </div>
           <button className="icon-button tab-add" onClick={() => setSetup({ kind: "choose" })} aria-label={t("addProjectTitle")} title={t("addProjectTitle")}><Plus size={16} /></button>
         </div>
-        <div className="top-actions">{snapshot && <button className="worktrees-button" onClick={() => setWorktreesPath(snapshot.path)} aria-label={t("worktreesOpen")} title={t("worktreesOpen")}><TreePine size={17} /><span>{snapshot.worktrees?.length ?? 1}</span></button>}<button className="icon-button" disabled={practiceBusy} onClick={()=>void startPractice()} aria-label={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'} title={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'}><Lightbulb size={17} /></button>{snapshot && <button className="icon-button" onClick={()=>setShareReview({path:snapshot.path,head:selection})} aria-label={locale==='es'?'Compartir para revisión':'Share for review'} title={locale==='es'?'Compartir para revisión':'Share for review'}><Send size={17} /></button>}{snapshot && <button className="icon-button" onClick={()=>setSwitchWork({path:snapshot.path,target:snapshot.currentBranch})} aria-label={locale==='es'?'Trabajo apartado':'Set-aside work'}><ArrowLeftRight size={17} /></button>}{snapshot && <button className="icon-button" onClick={() => setHistoryPath(snapshot.path)} data-action="activity" aria-label={locale === "es" ? "Actividad y recuperación" : "Activity and recovery"}><Clock3 size={17} /></button>}<button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
+        <div className="top-actions">{snapshot && <button className="worktrees-button" onClick={() => setWorktreesPath(snapshot.path)} aria-label={t("worktreesOpen")} title={t("worktreesOpen")}><TreePine size={17} /><span>{snapshot.worktrees?.length ?? 1}</span></button>}<button className="icon-button" disabled={practiceBusy} onClick={()=>void startPractice()} aria-label={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'} title={locale==='es'?'Crear proyecto de práctica desechable':'Create a disposable practice project'}><Lightbulb size={17} /></button>{snapshot && <button className="icon-button" onClick={()=>setShareReview({path:snapshot.path,head:selection})} aria-label={locale==='es'?'Compartir para revisión':'Share for review'} title={locale==='es'?'Compartir para revisión':'Share for review'}><Send size={17} /></button>}{snapshot && <button className="icon-button" onClick={() => setSwitchWork({ path: snapshot.path, target: "" })} aria-label={t("switchWorkLibrary")} title={t("switchWorkLibrary")}><Archive size={17} /></button>}{snapshot && <button className="icon-button" onClick={() => setHistoryPath(snapshot.path)} data-action="activity" aria-label={locale === "es" ? "Actividad y recuperación" : "Activity and recovery"}><Clock3 size={17} /></button>}<button className="icon-button" onClick={openSettings} aria-label={t("settings")}><Settings2 size={17} /></button></div>
       </header>
       <NotificationCenter items={activity} onDismiss={dismissActivity} onClear={dismissAllActivity} t={t} />
 
@@ -1762,7 +1762,6 @@ export default function App() {
             onPull={() => void prepare("pull")}
             onPush={() => void prepare("push")}
             onStash={() => void prepare("stash_push")}
-            onStashPop={() => void prepare("stash_pop")}
             onBranch={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
             action={action}
             moreActions={moreActions}
@@ -1854,7 +1853,7 @@ export default function App() {
       </>}
       <OperationStatus path={snapshot?.path} t={t} />
       {shareReview && snapshot?.path===shareReview.path && <ShareReview snapshot={snapshot} head={shareReview.head} locale={locale} onClose={()=>setShareReview(undefined)} onUpdated={value=>updateSnapshot(value.path,value)} />}
-      {switchWork && <SwitchWork {...switchWork} locale={locale} onClose={()=>setSwitchWork(undefined)} onSave={()=>{setSwitchWork(undefined);beginDelivery(false);}} onPrepare={request=>{
+      {switchWork && <SwitchWork key={`${switchWork.path}\0${switchWork.target}`} {...switchWork} locale={locale} onClose={()=>setSwitchWork(undefined)} onSave={()=>{setSwitchWork(undefined);beginDelivery(false);}} onPrepare={request=>{
         const path=switchWork.path;setSwitchWork(undefined);
         void showPlan(locale==='es'?'Revisar trabajo sin terminar':'Review unfinished work',()=>window.gitcat.prepareSwitchWork(path,request,locale),path,true);
       }} />}
@@ -3071,9 +3070,9 @@ function changeStatus(code: string, t: Translate) {
  * The repository bar: where you are, the everyday Git verbs, and the next step for this branch. The
  * verbs still go through a plan, so a click here explains itself before anything changes.
  */
-function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, onRefresh, onFetch, onPull, onPush, onStash, onStashPop, onBranch, action, moreActions, next }: {
+function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, onRefresh, onFetch, onPull, onPush, onStash, onBranch, action, moreActions, next }: {
   snapshot: RepoSnapshot; busy: boolean; refreshing: boolean; fetching: boolean; refreshDisabled: boolean;
-  onRefresh: () => void; onFetch: () => void; onPull: () => void; onPush: () => void; onStash: () => void; onStashPop: () => void; onBranch: () => void;
+  onRefresh: () => void; onFetch: () => void; onPull: () => void; onPush: () => void; onStash: () => void; onBranch: () => void;
   action: ReactNode; moreActions: MenuEntry[]; next: NextActionId;
 }) {
   const { t } = useI18n();
@@ -3105,7 +3104,6 @@ function RepoToolbar({ snapshot, busy, refreshing, fetching, refreshDisabled, on
     ...(next === "get_latest" || next === "combine_diverged" ? [] : [{ key: "pull", icon: ArrowDownToLine, label: t("pull"), hint: t("pullTitle"), onSelect: onPull, disabled: busy }]),
     ...(next === "publish_saved" || next === "publish_branch" ? [] : [{ key: "push", icon: ArrowUpFromLine, label: t("push"), hint: t("pushTitle"), onSelect: onPush, disabled: busy }]),
     { key: "stash", icon: Archive, label: t("stash"), hint: t("stashTitle"), onSelect: onStash, disabled: busy || pending || !snapshot.isDirty || !snapshot.head },
-    { key: "stash-pop", icon: ArchiveRestore, label: t("stashPop", { count: snapshot.stashCount ?? 0 }), hint: t("stashPopTitle"), onSelect: onStashPop, disabled: busy || pending || !snapshot.stashCount },
     ...(next === "return_to_branch" ? [] : [{ key: "branch", icon: GitBranchPlus, label: t("newBranch"), onSelect: onBranch, disabled: busy }])
   ];
   return <div className="repo-toolbar">
