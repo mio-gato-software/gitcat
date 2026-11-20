@@ -31,6 +31,9 @@ test('history survives a new store instance and interrupted steps remain unknown
  assert.doesNotMatch(readFileSync(file,'utf8'),/secret command|private content/);
  history.finish(id,before,[], 'https://user:password@example.test failed');
  assert.doesNotMatch(readFileSync(file,'utf8'),/password/);
+ const legacy = history.begin({ steps: [{ operation: 'git_command' }] }, before);
+ const reopened = new ActivityHistory(file).list(path).entries;
+ assert.equal(reopened.find(entry => entry.id === legacy).steps[0].operation, 'git_command');
  history.retention(0);assert.equal(history.list(path).entries.length,0);
 });
 test('an unpublished save can be undone while keeping files and index, and restoring a reference does not switch',async t=>{
@@ -41,9 +44,12 @@ test('an unpublished save can be undone while keeping files and index, and resto
  assert.equal(plan.requiresConfirmation,true);assert.deepEqual(plan.steps[0].argv,['reset','--soft',`${entry.after.head}^`]);
  await service.executePlan(path,plan,'en');
  assert.equal(git('rev-parse','HEAD'),base);assert.equal(git('write-tree'),index);assert.equal(readFileSync(join(path,'file'),'utf8'),'saved');
+ assert.equal((await service.getActivityHistory(path)).entries[0].steps[0].operation, 'undo_save');
  const restore=await service.prepareHistoryRecovery(path,entry.id,'restore','en');
  await service.executePlan(path,restore,'en');assert.equal(git('branch','--show-current'),'main');assert.equal(git('write-tree'),index);
  assert.equal(git('rev-parse',restore.recovery.branch),base);
+ assert.equal((await service.getActivityHistory(path)).entries[0].steps[0].operation, 'create_recovery_branch');
+ assert.doesNotMatch(readFileSync(join(app.getPath('userData'), 'gitcat-activity.json'), 'utf8'), /git reset|git branch|--soft/);
 });
 
 test('retry rebuilds and confirms a history recovery after a transient branch lock', async t => {
@@ -100,6 +106,7 @@ test('published saves use revert, and publication after preview blocks an undo',
  await assert.rejects(service.prepareHistoryRecovery(path,entry.id,'undo','en'),/published/);
  const revert=await service.prepareHistoryRecovery(path,entry.id,'revert','en');
  await service.executePlan(path,revert,'en');assert.equal(readFileSync(join(path,'file'),'utf8'),'base');assert.equal(git('rev-list','--count','HEAD'),'3');
+ assert.equal((await service.getActivityHistory(path)).entries[0].steps[0].operation, 'revert_save');
 });
 
 test('undo checks every push endpoint for commits reachable from a branch tip', async t => {

@@ -69,6 +69,12 @@ test("set aside keeps staged and unstaged versions and new files across reopenin
   assert.doesNotMatch(plan.steps[0].summary, /git stash/);
   await service.executePlan(path, plan, "en");
   assert.equal(git("status", "--porcelain"), "");
+  const activity = (await service.getActivityHistory(path)).entries[0];
+  assert.deepEqual(
+    activity.steps.map((step) => step.operation),
+    ["set_aside_work", "checkout"]
+  );
+  assert.doesNotMatch(JSON.stringify(activity), /Pause feature|git stash|--include-untracked/);
   const preview = await service.getSwitchWork(path, "main");
   assert.equal(preview.entries.length, 1);
   const restore = await service.prepareSwitchWork(path, { mode: "restore", stash: preview.entries[0].hash }, "en");
@@ -85,6 +91,7 @@ test("set aside keeps staged and unstaged versions and new files across reopenin
   assert.equal(readFileSync(join(path, "file"), "utf8"), "unstaged");
   assert.equal(readFileSync(join(path, "new"), "utf8"), "new");
   assert.equal((await service.getSwitchWork(path, "main")).entries.length, 1);
+  assert.equal((await service.getActivityHistory(path)).entries[0].steps[0].operation, "restore_set_aside_work");
 });
 
 test("setting aside tracked edits alone leaves only new files in the working folder", async (t) => {

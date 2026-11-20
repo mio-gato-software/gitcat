@@ -971,13 +971,33 @@ app.whenReady().then(async () => {
   assert.match(await stage('integrated'), /Estás en main/);
   assert.match(await js(`document.querySelector('.work-overview .overview-next').innerText`), /Conecta un sitio donde publicar[\s\S]*git remote add/);
   assert.match(await js(`document.querySelector('.overview-summary').innerText`), /Solo en este equipo/, 'A save is described as local, never as a backup');
+  const journal = path.join(app.getPath('userData'), 'gitcat-activity.json');
+  const { ActivityHistory } = await import(pathToFileURL(path.join(root, 'dist-electron/electron/activity-history.js')));
+  const activity = new ActivityHistory(journal);
+  const activitySnapshot = await service.getSnapshot(repo);
+  for (const metadata of [
+    { switchWork: { mode: 'set_aside' } },
+    { switchWork: { mode: 'restore' } },
+    { recovery: { mode: 'undo', commit: activitySnapshot.head } },
+    { recovery: { mode: 'revert', commit: activitySnapshot.head } },
+    { recovery: { mode: 'restore', commit: activitySnapshot.head } },
+    {}
+  ]) {
+    const id = activity.begin({ steps: [{ operation: 'git_command' }], ...metadata }, activitySnapshot);
+    activity.finish(id, activitySnapshot, [{ status: 'completed' }]);
+  }
   await js(`document.querySelector('[data-action="activity"]').click()`);
   await waitFor(`document.querySelector('.activity-history .activity-record')`);
   await assertDialog();
-  assert.match(await js(`document.querySelector('.activity-history').innerText`), /completado[\s\S]*Revisar una reversión/);
+  const activityText = await js(`document.querySelector('.activity-history').innerText`);
+  assert.match(activityText, /Guardar cambios · completado[\s\S]*Revisar una reversión/);
+  const activitySteps = await js(`[...document.querySelectorAll('.activity-history .activity-record li')].map(step => step.innerText)`);
+  for (const action of ['Apartar trabajo', 'Restaurar trabajo apartado', 'Deshacer guardado y conservar archivos', 'Revertir guardado con un nuevo commit', 'Crear rama de recuperación', 'Operación de Git']) {
+    assert.ok(activitySteps.includes(`${action} · completado`), `Activity should show the confirmed action: ${action}`);
+  }
+  assert.doesNotMatch(activityText, /git_command|git (stash|reset|branch|revert)/);
   await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key:'Escape' }))`);
   await waitFor(`!document.querySelector('.activity-history')`);
-  const journal = path.join(app.getPath('userData'), 'gitcat-activity.json');
   const corruptHistory = '{"retentionDays":';
   const headBeforeRepair = git('rev-parse', 'HEAD');
   fs.writeFileSync(journal, corruptHistory);
