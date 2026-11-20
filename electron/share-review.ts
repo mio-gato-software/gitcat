@@ -1,7 +1,7 @@
 import { operationCheckpoint, operationPhase } from "./operation-progress.js";
 import { parseRemoteAddress } from './readiness.js';
 import { randomUUID } from 'node:crypto';
-import type { HostingProvider, NativeHostingContext, RemoteReadiness, RepoSnapshot, ShareReviewRequest, ShareReviewPreview, ShareReviewResult } from '../shared/types.js';
+import type { HostingProvider, NativeHostingContext, RemoteReadiness, RepoSnapshot, ShareReviewDraft, ShareReviewQuery, ShareReviewRequest, ShareReviewPreview, ShareReviewResult } from '../shared/types.js';
 import { hostingProvider, validHostingHost, validHostingRepository, isNativeProvider } from '../shared/hosting.js';
 import { nativeRepository } from '../shared/native-hosting.js';
 import { findNativeReview, nativeRepositoryFacts } from './native-reviews.js';
@@ -23,10 +23,16 @@ export function checkedPullRequest(value: unknown, repository: string, head: str
  return checkedReview(value,{provider:'github',host:'github.com',repository},head,base);
 }
 const commandFor=(tools:ReviewTools,path:string):ReviewCommand=>(provider,host,args)=>(provider==='github'?tools.gh:tools.glab)(path,args,host);
-export async function previewReview(tools:ReviewTools,path:string,input:ShareReviewRequest):Promise<ShareReviewPreview> {
- for (const field of ['remote','head','base','title','body'] as const) if (typeof input[field]!=='string' || input[field].length>(field==='body'?8000:250) || input[field].includes('\0')) throw new Error('Invalid review details.');
+export async function previewReview(tools: ReviewTools, path: string, input: ShareReviewQuery & Partial<ShareReviewDraft>): Promise<ShareReviewPreview> {
+ for (const field of ['remote', 'head', 'base'] as const) {
+  if (typeof input[field] !== 'string' || input[field].length > 250 || input[field].includes('\0')) throw new Error('Invalid review details.');
+ }
+ const title = input.title === undefined ? input.head : input.title;
+ const body = input.body === undefined ? '' : input.body;
+ if (typeof title !== 'string' || title.length > 250 || title.includes('\0')
+   || typeof body !== 'string' || body.length > 8000 || body.includes('\0')) throw new Error('Invalid review details.');
  if(input.connectionId!==undefined&&(typeof input.connectionId!=='string'||! /^[A-Za-z0-9-]{1,80}$/.test(input.connectionId)))throw new Error('Choose a saved hosting account.');
- const request={...input,title:input.title.trim()};
+ const request: ShareReviewRequest = { ...input, title: title.trim(), body };
  if (!request.title || !request.remote || request.head===request.base) throw new Error('Choose a topic branch and a different base branch, and give the review a title.');
  const snapshot=await tools.snapshot(path);
  if (!snapshot.remotes.includes(request.remote)) throw new Error('Choose a configured remote.');
@@ -77,8 +83,9 @@ export async function previewReview(tools:ReviewTools,path:string,input:ShareRev
  if(!reviewable&&!existing)throw new Error('There are no commits to review against that base. Choose the correct base or save work first.');
  return {id:randomUUID(),repoPath:snapshot.path,request,provider,host,...(hosting?{hosting}:{}),headHash,baseHash,publishedHash,repository:hosting?.location.repository??remote.path,remoteUrl:remote.url,account,commits,existing,reviewable,checkedAt:new Date().toISOString()};
 }
-export async function publishReview(tools:ReviewTools,preview:ShareReviewPreview): Promise<ShareReviewResult> {
- const fresh=await previewReview(tools,preview.repoPath,preview.request);
+export async function publishReview(tools: ReviewTools, preview: ShareReviewPreview, draft?: ShareReviewDraft): Promise<ShareReviewResult> {
+ const request = draft ? { ...preview.request, title: draft.title, body: draft.body } : preview.request;
+ const fresh = await previewReview(tools, preview.repoPath, request);
  if(!fresh.reviewable)throw new Error("There are no remaining commits to review against this base. The live review state is available without publishing again.");
  for(const key of ['provider','host','headHash','baseHash','publishedHash','repository','remoteUrl','account'] as const)if(fresh[key]!==preview[key])throw new Error('The branch, remote or account changed. Review sharing again; nothing was published.');
  if(JSON.stringify(fresh.hosting)!==JSON.stringify(preview.hosting))throw new Error('The hosting account or remote repository identity changed. Review sharing again; nothing was published.');

@@ -491,18 +491,24 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
   ipcMain.handle("practice:lesson",(event,cwd:string,lesson:unknown)=>{assertTrustedSender(event);if(typeof lesson!=='number')throw new Error('Invalid lesson');return setPracticeLesson(assertOpenedRepository(cwd),lesson);});
   ipcMain.handle("practice:edit",(event,cwd:string)=>{assertTrustedSender(event);const path=assertOpenedRepository(cwd);return exclusive(path,()=>editPractice(path));});
   ipcMain.handle("practice:remove",(event,cwd:string)=>{assertTrustedSender(event);const path=assertOpenedRepository(cwd);return exclusive(path,async()=>removePractice(path));});
-  ipcMain.handle("review:preview",async(event,cwd:string,request:import('../shared/types.js').ShareReviewRequest)=>{
+  ipcMain.handle("review:preview",async(event,cwd:string,request:import('../shared/types.js').ShareReviewQuery)=>{
     assertTrustedSender(event);const path=assertOpenedRepository(cwd);
     if(!request || typeof request!=='object')throw new Error('Invalid review request');
     const preview=await tracked(event,path,'planning',()=>previewShareReview(path,request));
     if(issuedReviews.size>=50)issuedReviews.delete(issuedReviews.keys().next().value??'');
     issuedReviews.set(preview.id,preview);rememberReviewUrl(preview.existing?.url);return preview;
   });
-  ipcMain.handle("review:publish",async(event,cwd:string,id:unknown)=>{
+  ipcMain.handle("review:publish",async(event,cwd:string,id:unknown,input:unknown)=>{
     assertTrustedSender(event);const path=assertOpenedRepository(cwd),preview=typeof id==='string'?issuedReviews.get(id):undefined;
     if(!preview || preview.repoPath!==path)throw new Error('Review expired. Check again before publishing.');
+    let draft: import('../shared/types.js').ShareReviewDraft | undefined;
+    if (input !== undefined) {
+      const data = input as Partial<import('../shared/types.js').ShareReviewDraft> | null;
+      if (!data || typeof data.title !== 'string' || typeof data.body !== 'string') throw new Error('Invalid review details.');
+      draft = { title: data.title, body: data.body };
+    }
     issuedReviews.delete(preview.id);
-    const result=await tracked(event,path,'executing',()=>publishShareReview(preview),true);
+    const result=await tracked(event,path,'executing',()=>publishShareReview(preview,draft),true);
     rememberReviewUrl(result.pullRequest.url);return result;
   });
   ipcMain.handle("review:open",async(event,url:unknown)=>{

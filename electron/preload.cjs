@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld("gitcat", {
   editPractice:path=>ipcRenderer.invoke("practice:edit",path),
   removePractice:path=>ipcRenderer.invoke("practice:remove",path),
   previewReview:(path,request)=>ipcRenderer.invoke("review:preview",path,request),
-  publishReview:(path,id)=>ipcRenderer.invoke("review:publish",path,id),
+  publishReview:(path,id,draft)=>ipcRenderer.invoke("review:publish",path,id,draft),
   openReview:(url)=>ipcRenderer.invoke("review:open",url),
   getSwitchWork: (path, target) => ipcRenderer.invoke("switch-work:read", path, target),
   prepareSwitchWork: (path, request, locale) => ipcRenderer.invoke("switch-work:prepare", path, request, locale),
