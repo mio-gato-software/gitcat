@@ -237,6 +237,12 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
       case "ignore_path":
         summary.local.push(say(`Adds ${args.path} to .gitignore. The file stays on your disk.`, `Añade ${args.path} a .gitignore. El archivo se queda en tu disco.`));
         break;
+      case "discard_file":
+        summary.local.push(say(`Restores ${args.path} to its version in the latest commit.`, `Recupera la versión de ${args.path} guardada en el último commit.`));
+        summary.irreversible.push(args.staged === "true"
+          ? say("All unsaved changes to this file will be lost, including its staged changes.", "Se perderán todos los cambios sin guardar de este archivo, incluidos los cambios preparados.")
+          : say("The unsaved changes to this file will be lost.", "Se perderán los cambios sin guardar de este archivo."));
+        break;
       case "set_identity":
         summary.local.push(args.scope === "global"
           ? say(`Signs future commits in every repository on this computer as ${args.user} <${args.email}>.`, `Firma los próximos commits de todos los repositorios de este equipo como ${args.user} <${args.email}>.`)

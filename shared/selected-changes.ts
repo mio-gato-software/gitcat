@@ -70,6 +70,10 @@ export function isUntracked(change: FileChange) {
   return change.code === "??" || change.xy === "??";
 }
 
+export function canDiscardFileChange(change: FileChange) {
+  return Boolean(change.version && !change.from && /^[ MDT]{2}$/.test(change.xy ?? "") && change.xy !== "  ");
+}
+
 /**
  * The one .gitignore line that matches exactly this path and nothing else. It is anchored to the
  * repository root, and every character a pattern would read specially is escaped, so a name such as

@@ -32,6 +32,7 @@ const operationLabels: Record<ActivityOperation, MessageKey> = {
   git_command: "activityGitOperation",
   github_create_repo: "activityCreateRemote",
   ignore_path: "activityIgnoreFile",
+  discard_file: "discardFileChanges",
   set_identity: "activitySetIdentity",
   add_remote: "connectRemoteTitle",
   none: "activityGitOperation",

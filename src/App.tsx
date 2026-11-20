@@ -35,7 +35,7 @@ import { syncDestinations } from "../shared/remote-sync";
 import { workOverview, type NextActionId } from "../shared/work-overview";
 import { completionSummary, planSummary, type CompletionSummary } from "../shared/plan-summary";
 import { refChips } from "../shared/ref-chips";
-import { isPartlyStaged, isUntracked } from "../shared/selected-changes";
+import { canDiscardFileChange, isPartlyStaged, isUntracked } from "../shared/selected-changes";
 import { isSupportedModel, recommendedModel } from "../shared/ai-connection";
 import type { RefChip } from "../shared/ref-chips";
 import { authorAvatarUrl, avatarKey } from "../shared/avatar";
@@ -1004,9 +1004,10 @@ export default function App() {
     return response ? [{ role: "user" as const, content: turn.question }, { role: "assistant" as const, content: response }] : [];
   });
 
-  const showPlan = async (question: string, loader: () => Promise<ActionPlan>, path = snapshot?.path, review = false): Promise<ActionPlan | undefined> => {
+  const showPlan = async (question: string, loader: () => Promise<ActionPlan>, path = snapshot?.path,
+    { review = false, reveal = true } = {}): Promise<ActionPlan | undefined> => {
     if (!path || planning) return undefined;
-    const turnId = addTurn(path, question);
+    const turnId = addTurn(path, question, reveal);
     try {
       const plan = await loader();
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
@@ -1491,7 +1492,14 @@ export default function App() {
   const ignoreFile = (file: FileChange) => {
     if (!snapshot || planning) return;
     const path = snapshot.path;
-    void showPlan(t("ignoreFutureChanges", { path: file.path }), () => window.gitcat.prepareOperation(path, "ignore_path", { path: file.path }, locale), path, true);
+    void showPlan(t("ignoreFutureChanges", { path: file.path }), () => window.gitcat.prepareOperation(path, "ignore_path", { path: file.path }, locale), path, { review: true });
+  };
+
+  const discardFile = (file: FileChange) => {
+    if (!snapshot || planning || !file.version) return;
+    const path = snapshot.path;
+    const args = { path: file.path, version: file.version };
+    void showPlan(t("discardFileChangesReview", { path: file.path }), () => window.gitcat.prepareOperation(path, "discard_file", args, locale), path, { review: true, reveal: false });
   };
 
   /** Suggestions are ordinary questions: the model answers them, in whatever language they arrive. */
@@ -1798,7 +1806,7 @@ export default function App() {
             {inspectorTab === "details" ? <div className="inspector-body">
               {activeFocus?.kind === "wip"
                 ? <ChangesView key={snapshot.path} readiness={readiness} snapshot={snapshot} delivery={delivery} configured={config.configured}
-                    busy={planning} onIgnore={ignoreFile} />
+                    busy={planning} onIgnore={ignoreFile} onDiscard={discardFile} />
                 : activeFocus?.kind === "worktree"
                   ? <WorktreeInspector worktree={snapshot.worktrees!.find(worktree => worktree.path === activeFocus.path)!} onOpen={() => void openWorktree(activeFocus.path)} />
                 : activeFocus
@@ -1814,14 +1822,14 @@ export default function App() {
       {shareReview && snapshot?.path===shareReview.path && <ShareReview snapshot={snapshot} head={shareReview.head} locale={locale} onClose={()=>setShareReview(undefined)} onUpdated={value=>updateSnapshot(value.path,value)} />}
       {switchWork && <SwitchWork key={`${switchWork.path}\0${switchWork.target}`} {...switchWork} locale={locale} onClose={()=>setSwitchWork(undefined)} onSave={()=>{setSwitchWork(undefined);beginDelivery(false);}} onPrepare={request=>{
         const path=switchWork.path;setSwitchWork(undefined);
-        void showPlan(locale==='es'?'Revisar trabajo sin terminar':'Review unfinished work',()=>window.gitcat.prepareSwitchWork(path,request,locale),path,true);
+        void showPlan(locale==='es'?'Revisar trabajo sin terminar':'Review unfinished work',()=>window.gitcat.prepareSwitchWork(path,request,locale),path,{ review: true });
       }} />}
       {worktreesPath && projects.find(project => project.snapshot.path === worktreesPath) && <Worktrees
         snapshot={projects.find(project => project.snapshot.path === worktreesPath)!.snapshot} locale={locale}
         onClose={() => setWorktreesPath(undefined)} onOpen={(next) => showWorktree(next, worktreesPath)} />}
       {historyPath && <ActivityHistory key={historyPath} path={historyPath} locale={locale} onClose={() => setHistoryPath(undefined)} onRecover={(id, mode) => {
         const path=historyPath; setHistoryPath(undefined);
-        void showPlan(locale === 'es' ? 'Revisar recuperación' : 'Review recovery', () => window.gitcat.prepareHistoryRecovery(path,id,mode,locale),path,true);
+        void showPlan(locale === 'es' ? 'Revisar recuperación' : 'Review recovery', () => window.gitcat.prepareHistoryRecovery(path,id,mode,locale),path,{ review: true });
       }} />}
       {deliveryReview && <DeliveryReviewModal review={deliveryReview} snapshot={projects.find((item) => item.snapshot.path === deliveryReview.plan.repoPath)?.snapshot} busy={planning}
         onClose={() => { updateTurn(deliveryReview.plan.repoPath, deliveryReview.turnId, (turn) => ({ ...turn, status: "cancelled", outcome: t("planDiscarded") })); delivery.setReview(undefined); }}
@@ -3372,13 +3380,14 @@ function FileList({ files, stats, onOpen, selection }: { files: FileChange[]; st
  * the ticked files into a saved version. Unticked files are listed too, so leaving one out is a
  * visible decision rather than something that happens to it.
  */
-function ChangesView({ readiness, snapshot, delivery, busy, configured, onIgnore }: {
+function ChangesView({ readiness, snapshot, delivery, busy, configured, onIgnore, onDiscard }: {
   readiness: ReadinessState;
   snapshot: RepoSnapshot;
   delivery: ReturnType<typeof useCommitDelivery>;
   busy: boolean;
   configured: boolean;
   onIgnore: (file: FileChange) => void;
+  onDiscard: (file: FileChange) => void;
 }) {
   const { attention, excluded, generating, merge, message, selected, stale, suggestionOutdated, withheld } = delivery;
   const [preview, setPreview] = useState<"selected" | { path: string }>();
@@ -3416,6 +3425,8 @@ function ChangesView({ readiness, snapshot, delivery, busy, configured, onIgnore
         {(file || (preview === "selected" && selected.length > 0)) && <div className="selection-preview">
           <div className="diff-toolbar"><strong>{file?.path ?? t("selectedDiffTitle")}</strong><button className="icon-button" onClick={() => setPreview(undefined)} aria-label={t("closeDiffs")}><X size={14} /></button></div>
           <SaveDiff repoPath={snapshot.path} files={file ? [file] : selected} individual={Boolean(file)} />
+          {file && snapshot.head && !snapshot.pending && !snapshot.conflicts.length && canDiscardFileChange(file) &&
+            <button className="outline-button small discard-file" disabled={busy || generating} onClick={() => onDiscard(file)}>{t("discardFileChanges")}…</button>}
         </div>}
       </section>
       <div className="commit-form">
@@ -3511,7 +3522,7 @@ function DeliveryReviewModal({ review, snapshot, busy, onClose, onApply }: {
   const target = review.plan.selection?.target;
   const confirmLabel = save?.paths && snapshot ? t(target ? "confirmSelectedSaveAndMerge" : "confirmSelectedSave", {
     files: counted(t, save.paths.length, "file", "files"), branch: snapshot.currentBranch, target: target ?? ""
-  }) : undefined;
+  }) : review.plan.steps[0]?.operation === "discard_file" ? t("discardFileChanges") : undefined;
   return <div className="modal-backdrop"><section className="modal delivery-review-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("reviewDeliveryTitle")}>
     <div className="modal-heading"><h2>{t("reviewDeliveryTitle")}</h2><button className="icon-button" onClick={onClose} aria-label={t("cancel")}><X size={18} /></button></div>
     <PlanCard plan={review.plan} snapshot={snapshot} busy={busy} onApply={onApply} onDismiss={onClose} confirmLabel={confirmLabel} />

@@ -32,7 +32,7 @@ import {
   accountReadiness, authorReadiness, classifyAccess, credentialHelperKind, displayUrl, gitToolState, parseIdentityConfig, parseRemoteAddress,
   redactSecrets, selectRemote
 } from "./readiness.js";
-import { changePaths, gitignoreLine, isPartlyStaged, isUntracked, resolveSelection, type SelectionProblem } from "../shared/selected-changes.js";
+import { canDiscardFileChange, changePaths, gitignoreLine, isPartlyStaged, isUntracked, resolveSelection, type SelectionProblem } from "../shared/selected-changes.js";
 import {
   canSkip, conflictLabels, conflictsFrom, parseRebaseProgress, pendingCommands, resolutionFor
 } from "./pending-operation.js";
@@ -87,7 +87,7 @@ const LLM_REQUIRED_EN =
   "To understand what you write, GitCat needs a connected AI provider: only the model interprets requests, never local rules. Connect one in Settings; meanwhile every Git action works from the buttons.";
 
 function llmRequired(locale?: Locale) { return localized(locale, LLM_REQUIRED, LLM_REQUIRED_EN); }
-const allowedOperations = new Set<Operation>([...executableOperations, "stash_push", "stash_pop", "github_create_repo", "ignore_path", "set_identity", "add_remote", "none"]);
+const allowedOperations = new Set<Operation>([...executableOperations, "stash_push", "stash_pop", "github_create_repo", "ignore_path", "discard_file", "set_identity", "add_remote", "none"]);
 /**
  * Operations that run without asking. The bar is deliberately high: they must leave the working tree,
  * the branch history and everything already published untouched, and running one again must be
@@ -961,6 +961,10 @@ function quoteToken(token: string) {
   return /^[A-Za-z0-9._/@:=+~-]+$/.test(token) ? token : JSON.stringify(token);
 }
 
+function discardFileArguments(head: string, path: string) {
+  return ["--literal-pathspecs", "restore", `--source=${head}`, "--staged", "--worktree", "--", path];
+}
+
 function buildCommand(operation: Operation, args: Record<string, string>, argv: string[] = []) {
   switch (operation) {
     case "sync_remote": return `git ${remoteMergeArgs(args).join(" ")}`;
@@ -979,6 +983,7 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
     case "skip_operation": return `git ${args.pending ?? "rebase"} --skip`;
     case "commit": return `git add -A && git commit -m "${args.message ?? ""}"`;
     case "ignore_path": return `echo ${JSON.stringify(args.line ?? "")} >> .gitignore`;
+    case "discard_file": return ["git", ...discardFileArguments(args.head, args.path)].map(quoteToken).join(" ");
     case "git_command": return ["git", ...argv].map(quoteToken).join(" ");
     case "github_create_repo": {
       const steps = [];
@@ -3035,6 +3040,8 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
       : [localized(locale, `Firmar los commits de este repositorio como ${args.user} <${args.email}>`, `Sign commits in this repository as ${args.user} <${args.email}>`), localized(locale, "Guarda el nombre y el correo que Git anota en cada commit, solo para este repositorio. Tus archivos y tu historial no cambian.", "Saves the name and email Git records with each commit, for this repository only. Your files and history do not change."), "medium"],
     add_remote: [localized(locale, `Conectar este repositorio con ${args.url} como ${args.name}`, `Connect this repository to ${args.url} as ${args.name}`), localized(locale, "Añade la dirección donde se puede publicar este repositorio. Todavía no se envía nada: publicar es otro paso que confirmas aparte.", "Adds the address where this repository can be published. Nothing is sent yet: publishing is a separate step you confirm."), "medium"],
     ignore_path: [localized(locale, `Ignorar los cambios futuros de ${args.path}`, `Ignore future changes to ${args.path}`), localized(locale, "Añade una línea a .gitignore para que Git deje de listar este archivo nuevo. El archivo se queda en tu disco tal como está.", "Adds one line to .gitignore so Git stops listing this new file. The file stays on your disk exactly as it is."), "medium"],
+    discard_file: [localized(locale, `Descartar los cambios de ${args.path}`, `Discard changes to ${args.path}`), localized(locale,
+      "Recupera la versión de este archivo guardada en el último commit.", "Restores this file to the version saved in the latest commit."), "high"],
     git_command: [
       localized(locale, `Ejecutar ${buildCommand("git_command", {}, displayArgs)}`, `Run ${buildCommand("git_command", {}, displayArgs)}`),
       localized(locale, "Comando Git propuesto por el asistente: se ejecuta tal cual, sin shell, y solo tras tu confirmación.", "Git command proposed by the assistant: it runs as-is, without a shell, only after your confirmation."),
@@ -3174,6 +3181,13 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
     return bindPlan(snapshot, preparation.draft);
   }
   if (operation === "ignore_path") return prepareIgnore(snapshot, typeof args.path === "string" ? args.path : "", language);
+  if (operation === "discard_file") {
+    const file = validateDiscardFile(snapshot, args, language);
+    await assertRestorableFile(snapshot, file.path, language);
+    return bindPlan(snapshot, operationDraft(operation, {
+      path: file.path, version: file.version!, head: snapshot.head, staged: String(file.xy![0] !== " ")
+    }, snapshot, [], language));
+  }
   // Only what each direct control needs reaches the step: a publish names the active branch as Git
   // reads it now, and an identity or a remote address is trimmed of stray spaces.
   const normalized = operation === "push" && args.setUpstream ? { setUpstream: args.setUpstream, branch: snapshot.currentBranch, ...(args.noVerify === "true" ? { noVerify: "true" } : {}) }
@@ -3497,6 +3511,36 @@ function isSymlink(path: string) {
   try { return lstatSync(path).isSymbolicLink(); } catch { return false; }
 }
 
+function validateDiscardFile(snapshot: RepoSnapshot, args: Record<string, string>, locale?: Locale) {
+  if (snapshot.pending || snapshot.conflicts.length) throw new Error(localized(locale,
+    "Termina la operación en curso antes de descartar cambios de un archivo.",
+    "Finish the operation in progress before discarding file changes."));
+  const file = snapshot.changes.find((change) => change.path === args.path);
+  if (!file?.version || file.version !== args.version) throw new StalePlanError(localized(locale,
+    "El archivo cambió desde que lo revisaste. Abre sus cambios de nuevo.",
+    "The file changed after you reviewed it. Open its changes again."));
+  if (!snapshot.head || !canDiscardFileChange(file) || snapshot.changes.some((change) => change !== file &&
+    changePaths(change).some((path) => path === file.path || path.startsWith(file.path + "/")))) {
+    throw new Error(localized(locale,
+      "Solo se pueden descartar cambios de un archivo individual que ya estaba guardado en el último commit.",
+      "You can only discard changes to an individual file already saved in the latest commit."));
+  }
+  return file;
+}
+
+async function assertRestorableFile(snapshot: RepoSnapshot, path: string, locale?: Locale) {
+  const tree = await checkedGit(snapshot.path, ["--literal-pathspecs", "ls-tree", "-z", snapshot.head, "--", path], true);
+  const tab = tree.indexOf("\t");
+  const savedFile = /^(100644|100755|120000) blob [0-9a-f]+$/.test(tree.slice(0, tab)) && tree.slice(tab + 1) === path + "\0";
+  const root = realpathSync(snapshot.path);
+  const current = inspectWorktreePath(root, resolve(root, path));
+  if (!savedFile || current.kind === "blocked" || (current.kind === "present" && !current.stat.isFile() && !current.stat.isSymbolicLink())) {
+    throw new Error(localized(locale,
+      "GitCat no puede restaurar ese archivo individual de forma segura en su ubicación actual.",
+      "GitCat cannot safely restore that individual file at its current location."));
+  }
+}
+
 /**
  * The .gitignore rule for one untracked file, prepared for review. Only a file Git does not track yet
  * can be ignored this way: a rule never stops Git from seeing changes to a file it already tracks, so
@@ -3761,6 +3805,7 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, plan: ActionPlan, 
     if (!change || !isUntracked(change)) throw new Error(ignoreTrackedText(args.path ?? "", Boolean(change), language));
     if (!args.line || gitignoreLine(args.path) !== args.line) throw new Error(localized(language, "La regla de .gitignore no es válida.", "The .gitignore rule is invalid."));
   }
+  if (operation === "discard_file") validateDiscardFile(snapshot, args, language);
   if (operation === "resolve_conflict") {
     if (!["ours", "theirs", "resolved"].includes(args.side)) throw new Error(localized(language, "Hay que decir con qué lado quedarse.", "The side to keep must be specified."));
     const action = conflictResolutionFor(args, snapshot);
@@ -4046,6 +4091,9 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
       return { output, ...(commitHash ? { commitHash } : {}) };
     }
     case "ignore_path": return ignorePath(snapshot.path, args, locale);
+    case "discard_file":
+      await assertRestorableFile(snapshot, args.path, locale);
+      return reportedGit(cwd, discardFileArguments(snapshot.head, args.path));
     case "github_create_repo": return executeHostedRepositoryPlan(plan, locale);
     default: throw new Error(localized(locale, "La acción no está permitida.", "The action is not allowed."));
   }
@@ -4264,7 +4312,8 @@ function retryableRecord(record: FailedPlanRecord | undefined) {
   if (!record) return false;
   const remaining = record.outcomes.some((outcome) => outcome.status !== "completed");
   // A save of selected files is bound to the reviewed versions; it is reviewed again, not replayed.
-  return remaining && !record.plan.selection && !record.plan.repositoryPlan && record.plan.steps.every((step) => step.operation !== "github_create_repo");
+  return remaining && !record.plan.selection && !record.plan.repositoryPlan && record.plan.steps.every((step) =>
+    step.operation !== "github_create_repo" && step.operation !== "discard_file");
 }
 
 /**
