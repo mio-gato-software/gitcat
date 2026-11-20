@@ -37,9 +37,9 @@ test('the renderer may load author photos only from the two photo hosts', async 
   assert.match(html, /connect-src 'self' ws:\/\/127\.0\.0\.1:5173;/);
 });
 
-test('Fetch sits beside Refresh and fetches directly, without a plan to confirm', async () => {
+test('Fetch in the Git actions menu checks the remote directly', async () => {
   const app = await readFile(join(root, 'src/App.tsx'), 'utf8');
-  assert.match(app, /tool\(CloudDownload, t\("fetch"\), onFetch/);
+  assert.match(app, /key: "fetch".*label: t\("fetch"\).*onSelect: onFetch/);
   assert.match(app, /onFetch=\{\(\) => void refreshEverything\("fetch"\)\}/);
   assert.doesNotMatch(app, /prepare\("fetch"\)/);
 });
