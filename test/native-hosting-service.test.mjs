@@ -12,6 +12,10 @@ const root=fileURLToPath(new URL('../',import.meta.url)),scratch=realpathSync(mk
 let current;
 const git=(cwd,...args)=>cp.execFileSync('git',args,{cwd,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
 mock.method(cp,'spawn',(executable,args,options)=>{
+ if(current?.failPostPushSnapshot && current.gitCalls.includes('push') && /^git(?:\.exe)?$/i.test(basename(executable)) && args.includes('status')){
+  current.failPostPushSnapshot=false;
+  return originalSpawn(process.execPath,['-e',"process.stderr.write('Snapshot unavailable after push');process.exit(1)"],options);
+ }
  if(/^git(?:\.exe)?$/i.test(basename(executable))&&args.some(a=>['ls-remote','fetch','push'].includes(a))){
   const operation=args.find(a=>['ls-remote','fetch','push'].includes(a));
   if(options.env.GITCAT_HOST_AUTH){
@@ -19,7 +23,12 @@ mock.method(cp,'spawn',(executable,args,options)=>{
    assert.ok(!args.join(' ').includes(current.token));current.gitCalls.push(operation);
   }
   if(current.failPush&&operation==='push')return originalSpawn(process.execPath,['-e',"process.stderr.write('protected branch');process.exit(1)"],options);
+  if(current.failUpstream==='fetch'&&operation==='fetch'&&current.gitCalls.includes('push'))return originalSpawn(process.execPath,['-e',"process.stderr.write('Could not fetch the published branch');process.exit(1)"],options);
+  if(current.localPushOnly&&operation==='push')return originalSpawn(executable,args,{...options,env:{...options.env,GIT_ALLOW_PROTOCOL:'file'}});
   return originalSpawn(executable,['-c',`url.${current.bare}.insteadOf=${current.location.gitUrl}`,...args],options);
+ }
+ if(current?.failUpstream==='branch'&&/^git(?:\.exe)?$/i.test(basename(executable))&&args[0]==='branch'&&args.some(arg=>arg.startsWith('--set-upstream-to='))){
+  return originalSpawn(process.execPath,['-e',"process.stderr.write('Could not configure upstream');process.exit(1)"],options);
  }
  return originalSpawn(executable,args,options);
 });
@@ -27,6 +36,7 @@ syncBuiltinESMExports();
 globalThis.fetch=(...args)=>current.transport(...args);
 registerHooks({resolve(specifier,context,next){return specifier==='electron'?{url:pathToFileURL(join(root,'test/helpers/electron-stub.mjs')).href,shortCircuit:true}:next(specifier,context);}});
 const service=await import('../dist-electron/electron/git-service.js');
+const {ActivityHistory}=await import('../dist-electron/electron/activity-history.js');
 after(()=>{mock.restoreAll();syncBuiltinESMExports();globalThis.fetch=originalFetch;rmSync(scratch,{recursive:true,force:true});});
 
 async function fixture(provider,{connect=true}={}){
@@ -58,11 +68,131 @@ for(const provider of ['bitbucket','bitbucket_dc','azure']){
  });
 }
 
+test('sharing with a saved account rejects a rewrite of its effective HTTPS push destination',async()=>{
+ const state=await fixture('bitbucket'),request={provider:'bitbucket',connectionId:state.connectionId,remote:'origin',head:'work',base:'main',title:'Review',body:''};
+ const alternate=state.path+'-unexpected.git';
+ git(state.path,'init','--bare','-q',alternate);
+ const preview=await service.previewShareReview(state.path,request);
+ state.localPushOnly=true;
+ git(state.path,'config',`url.${alternate}.pushInsteadOf`,state.location.gitUrl);
+ await assert.rejects(service.publishShareReview(preview),/effective push destination/);
+ assert.equal(git(alternate,'branch','--list','work'),'');
+ assert.equal(state.reviews.length,0);
+});
+
+for (const command of ['fetch', 'branch']) {
+ test(`initial publication stays completed if upstream setup fails at ${command}`, async()=>{
+  const state=await fixture('bitbucket_dc');
+  state.exists=false;
+  git(state.path,'remote','remove','origin');
+  const args={provider:'bitbucket_dc',connectionId:state.connectionId,host:new URL(state.baseUrl).host,owner:state.location.owner,name:'repo',source:state.path,protocol:'https'};
+  const plan=await service.prepareOperation(state.path,'github_create_repo',args,'en');
+  state.failUpstream=command;
+
+  const result=await service.executePlan(state.path,plan,'en');
+  assert.deepEqual(result.outcomes.map(outcome=>outcome.status),['completed']);
+  assert.equal(result.postActionIssue?.kind,'upstream_setup');
+  assert.match(result.error,/published.*tracking/i);
+  assert.equal(state.exists,true);
+  assert.equal(git(state.path,'remote','get-url','origin'),state.location.gitUrl);
+  assert.equal(git(state.path,'rev-parse','HEAD'),git(state.path,'--git-dir',state.bare,'rev-parse','work'));
+  assert.throws(()=>git(state.path,'rev-parse','@{upstream}'));
+  assert.equal(state.gitCalls.filter(call=>call==='push').length,1);
+  assert.equal(readFileSync(join(state.path,'unsaved.txt'),'utf8'),'keep local');
+ });
+}
+
+for (const push of ['false', 'true']) {
+ test(`private creation rejects multiple remote URLs before calling the provider (push=${push})`, async()=>{
+  const state=await fixture('bitbucket_dc');
+  state.exists=false;
+  const args={provider:'bitbucket_dc',connectionId:state.connectionId,host:new URL(state.baseUrl).host,owner:state.location.owner,name:'repo',source:state.path,protocol:'https',replaceRemote:'true',push};
+  const plan=await service.prepareOperation(state.path,'github_create_repo',args,'en');
+  git(state.path,'remote','set-url','--add','origin','https://old.example.test/scm/TEAM/other.git');
+  const config=readFileSync(join(state.path,'.git/config'),'utf8');
+
+  await assert.rejects(service.prepareOperation(state.path,'github_create_repo',args,'en'),/multiple URLs/);
+  const result=await service.executePlan(state.path,plan,'en');
+  assert.match(result.error,/multiple URLs/);
+  assert.equal(state.exists,false);
+  assert.equal(state.gitCalls.includes('push'),false);
+  assert.equal(readFileSync(join(state.path,'.git/config'),'utf8'),config);
+ });
+}
+
+for (const [key,value,problem] of [
+ ['remote.origin.pushurl','https://old.example.test/scm/TEAM/other.git',/separate push destination/],
+ ['remote.origin.mirror','true',/mirrors references/]
+]) {
+ test(`private creation rejects ${key} even without an existing fetch URL`, async()=>{
+  const state=await fixture('bitbucket_dc');
+  state.exists=false;
+  git(state.path,'remote','remove','origin');
+  const args={provider:'bitbucket_dc',connectionId:state.connectionId,host:new URL(state.baseUrl).host,owner:state.location.owner,name:'repo',source:state.path,protocol:'https',push:'false'};
+  const plan=await service.prepareOperation(state.path,'github_create_repo',args,'en');
+  git(state.path,'config',key,value);
+  const config=readFileSync(join(state.path,'.git/config'),'utf8');
+  await assert.rejects(service.prepareOperation(state.path,'github_create_repo',args,'en'),problem);
+  const result=await service.executePlan(state.path,plan,'en');
+  assert.match(result.error,problem);
+  assert.equal(state.exists,false);
+  assert.equal(readFileSync(join(state.path,'.git/config'),'utf8'),config);
+ });
+}
+
 test('a partial review-creation failure keeps publication visible and retry creates only the missing review',async()=>{
  const state=await fixture('bitbucket'),request={provider:'bitbucket',connectionId:state.connectionId,remote:'origin',head:'work',base:'main',title:'Review',body:''};
  const preview=await service.previewShareReview(state.path,request);state.failReview=true;await assert.rejects(service.publishShareReview(preview),/already be published/);assert.equal(state.gitCalls.filter(c=>c==='push').length,1);
  state.failReview=false;await service.publishShareReview(await service.previewShareReview(state.path,request));assert.equal(state.reviews.length,1);assert.equal(state.gitCalls.filter(c=>c==='push').length,1);
 });
+
+test('a confirmed open review survives failure to write its local activity entry',async t=>{
+ const state=await fixture('bitbucket'),request={provider:'bitbucket',connectionId:state.connectionId,remote:'origin',head:'work',base:'main',title:'Review',body:''};
+ const finish=ActivityHistory.prototype.finish;
+ const attempted=[];
+ t.mock.method(ActivityHistory.prototype,'finish',function(id,snapshot,outcomes,error){
+  if(outcomes[0]?.summary==='pull_request'){
+   attempted.push(outcomes[0].status);
+   throw new Error('Activity is read-only');
+  }
+  return finish.call(this,id,snapshot,outcomes,error);
+ });
+ const preview=await service.previewShareReview(state.path,request);
+ const result=await service.publishShareReview(preview);
+ assert.equal(result.pullRequest.state,'OPEN');
+ assert.deepEqual(result.warnings,['history_write']);
+ assert.equal(state.reviews.length,1);
+ assert.deepEqual(attempted,['completed']);
+});
+
+for (const failure of ['history_write', 'snapshot_read']) {
+ test(`a published branch still gets its review after ${failure} fails following the push`, async t=>{
+  const state=await fixture('bitbucket');
+  const request={provider:'bitbucket',connectionId:state.connectionId,remote:'origin',head:'work',base:'main',title:'Review',body:''};
+  const preview=await service.previewShareReview(state.path,request);
+  if(failure==='history_write'){
+   const begin=ActivityHistory.prototype.begin;
+   t.mock.method(ActivityHistory.prototype,'begin',function(plan,snapshot){
+    if(state.gitCalls.includes('push')) throw new Error('Activity is read-only');
+    return begin.call(this,plan,snapshot);
+   });
+   for(const method of ['step','finish']){
+    const record=ActivityHistory.prototype[method];
+    t.mock.method(ActivityHistory.prototype,method,function(...args){
+     if(state.gitCalls.includes('push')) throw new Error('Activity is read-only');
+     return record.apply(this,args);
+    });
+   }
+  } else state.failPostPushSnapshot=true;
+
+  const result=await service.publishShareReview(preview);
+  assert.equal(result.pullRequest.state,'OPEN');
+  assert.deepEqual(result.warnings,[failure]);
+  assert.equal(git(state.path,'rev-parse','HEAD'),git(state.path,'--git-dir',state.bare,'rev-parse','work'));
+  assert.equal(state.reviews.length,1);
+  assert.equal(state.gitCalls.filter(call=>call==='push').length,1);
+ });
+}
 
 test('stale accounts and repository identities stop before publishing, while failed private publication preserves prior remote settings',async()=>{
  let state=await fixture('azure'),request={provider:'azure',connectionId:state.connectionId,remote:'origin',head:'work',base:'main',title:'Review',body:''};

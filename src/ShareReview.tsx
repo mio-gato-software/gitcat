@@ -5,7 +5,7 @@ import type {
   Locale,
   RepoSnapshot,
   ShareReviewPreview,
-  ReviewPullRequest
+  ShareReviewResult
 } from "../shared/types";
 import { hostingLabels, hostingProviders, isNativeProvider, hostingProvider } from "../shared/hosting";
 import { HostingAccounts, hostingError } from "./HostingAccounts";
@@ -33,7 +33,7 @@ export function ShareReview({
   const [title, setTitle] = useState(head);
   const [body, setBody] = useState("");
   const [preview, setPreview] = useState<ShareReviewPreview>();
-  const [result, setResult] = useState<ReviewPullRequest>();
+  const [result, setResult] = useState<Pick<ShareReviewResult, "pullRequest" | "warnings">>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [provider, setProvider] = useState<HostingProvider | "">("");
@@ -90,9 +90,9 @@ export function ShareReview({
     setBusy(true);
     setError("");
     try {
-      const answer = await window.gitcat.publishReview(snapshot.path, preview.id);
-      setResult(answer.pullRequest);
-      onUpdated(answer.snapshot);
+      const { pullRequest, warnings, snapshot: updated } = await window.gitcat.publishReview(snapshot.path, preview.id);
+      setResult({ pullRequest, warnings });
+      if (updated) onUpdated(updated);
     } catch (e) {
       setError(hostingError(e));
     } finally {
@@ -263,12 +263,19 @@ export function ShareReview({
           </div>
         )}
         {result && (
-          <p role="status">
-            {result.state} ·{" "}
-            <button className="outline-button" onClick={() => void window.gitcat.openReview(result.url)}>
-              {result.url}
-            </button>
-          </p>
+          <div role="status">
+            <p>
+              {result.pullRequest.state} ·{" "}
+              <button className="outline-button" onClick={() => void window.gitcat.openReview(result.pullRequest.url)}>
+                {result.pullRequest.url}
+              </button>
+            </p>
+            {result.warnings.map((warning) => (
+              <p key={warning}>
+                {t(warning === "history_write" ? "shareReviewHistoryWarning" : "shareReviewSnapshotWarning")}
+              </p>
+            ))}
+          </div>
         )}
       </section>
     </div>

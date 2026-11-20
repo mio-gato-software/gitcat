@@ -88,6 +88,24 @@ test("a multi-step delivery names both branches, ends on the destination and war
   assert.equal(completionSummary({ plan: delivery, outcomes: done(delivery.steps, ["completed", "completed"]), before, after }, "es").headline, "Se completaron los 2 pasos.");
 });
 
+test("a completed initial push stays published in the summary when tracking fails", () => {
+  const branches = [branch("feature/menu", { isCurrent: true, presence: "local", lastCommit: commit("aaa1111", "Menu") })];
+  const before = snapshot({ branches, remotes: [] });
+  const after = snapshot({ branches, remotes: ["origin"] });
+  const publish = plan([step("github_create_repo", { push: "true", remote: "origin" }, "Create and publish")]);
+  const result = completionSummary({
+    plan: publish, before, after, outcomes: done(publish.steps, ["completed"]), error: "Tracking setup failed"
+  }, "en");
+  assert.equal(result.status, "partial");
+  has(result.changed, /feature\/menu is now published on origin/);
+  has(result.remaining, /Tracking is still missing for feature\/menu/);
+  assert.ok(!result.remaining.some(line => /not published yet/.test(line)));
+
+  const create = plan([step("github_create_repo", { push: "false", remote: "origin" }, "Create without publishing")]);
+  const createResult = completionSummary({ plan: create, before, after, outcomes: done(create.steps, ["completed"]) }, "en");
+  assert.ok(!createResult.changed.some(line => /published/.test(line)));
+});
+
 test("a publication says what goes to the remote and that it cannot simply be taken back", () => {
   const before = snapshot({ branches: [branch("main", { upstream: "origin/main" }), branch("feature/menu", { isCurrent: true, presence: "local", lastCommit: commit("aaa1111", "Menu") })] });
   const publish = plan([step("push", { setUpstream: "origin", branch: "feature/menu" }, "Publish feature/menu to origin")]);

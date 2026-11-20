@@ -20,6 +20,7 @@ mock.method(cp, 'spawn', (executable, args, options) => {
  if (/^glab(?:\.exe)?$/i.test(basename(executable))) return nativeSpawn(process.execPath, [join(root,'test/helpers/hosting-cli.mjs'),current.stateFile,...args],options);
  if (/^git(?:\.exe)?$/i.test(basename(executable)) && args.some(arg => ['ls-remote','fetch','push'].includes(arg))) {
   if (current.failPush && args.includes('push')) return nativeSpawn(process.execPath,['-e',"process.stderr.write('protected branch');process.exit(1)"],options);
+  if (current.useLocalConfig) return nativeSpawn(executable,args,{...options,env:{...options.env,GIT_ALLOW_PROTOCOL:'file'}});
   return nativeSpawn(executable,['-c',`url.${current.bare}.insteadOf=https://code.company.test/org/team/repo.git`,...args],options);
  }
  return nativeSpawn(executable,args,options);
@@ -42,6 +43,20 @@ function fixture() {
 }
 const state = () => JSON.parse(readFileSync(current.stateFile,'utf8'));
 const changeState = value => writeFileSync(current.stateFile,JSON.stringify({...state(),...value}));
+
+test('a rewritten private publication destination is blocked before repository creation', async()=>{
+ const {path,bare}=fixture();
+ current.useLocalConfig=true;
+ const args={provider:'gitlab',owner:'org/team',host:'code.company.test',name:'repo',source:path,protocol:'https'};
+ const plan=await service.prepareOperation(path,'github_create_repo',args,'en');
+ git(path,'config',`url.${bare}.pushInsteadOf`,plan.args.remoteUrl);
+ const result=await service.executePlan(path,plan,'en');
+ assert.match(result.error,/effective push destination/);
+ assert.equal(state().created,false);
+ assert.equal(git(path,'remote'),'');
+ assert.equal(git(bare,'branch','--list','work'),'');
+ await assert.rejects(service.prepareOperation(path,'github_create_repo',args,'en'),/effective push destination/);
+});
 
 test('GitLab private creation, publishing, account readiness and review creation run through the actual service',async()=>{
  const {path,bare}=fixture();
@@ -69,7 +84,7 @@ test('GitLab private creation, publishing, account readiness and review creation
 });
 
 test('a changed GitLab account prevents creation and an execution failure preserves the previous remote configuration',async()=>{
- const {path}=fixture();git(path,'remote','add','origin','https://old.company.test/org/repo.git');git(path,'config','remote.origin.tagOpt','--no-tags');
+ const {path}=fixture();git(path,'remote','add','origin','company:org/repo.git');git(path,'config','url.https://old.company.test/.insteadOf','company:');git(path,'config','remote.origin.tagOpt','--no-tags');
  const config=readFileSync(join(path,'.git/config'),'utf8');
  const args={provider:'gitlab',owner:'org/team',host:'code.company.test',name:'repo',source:path,protocol:'https',replaceRemote:'true'};
  let plan=await service.prepareOperation(path,'github_create_repo',args,'en');changeState({account:'other'});

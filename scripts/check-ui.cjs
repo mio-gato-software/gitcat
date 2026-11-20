@@ -94,7 +94,10 @@ app.whenReady().then(async () => {
   ipcMain.handle('review:publish', async (_, p, id) => {
     assert.equal(id, 'hosting-ui');reviewPublished = true;
     const native=nativeUi[hostingScenario];
-    return { snapshot: hostingSnapshot(await service.getSnapshot(p)), pullRequest: { url: native?`${native.location.webUrl}/${native.provider==='azure'?'pullrequest':'pull-requests'}/1`:'https://code.company.test/org/team/repo/-/merge_requests/1', state: 'OPEN' } };
+    const pullRequest = { url: native?`${native.location.webUrl}/${native.provider==='azure'?'pullrequest':'pull-requests'}/1`:'https://code.company.test/org/team/repo/-/merge_requests/1', state: 'OPEN' };
+    return native
+      ? { snapshot: hostingSnapshot(await service.getSnapshot(p)), pullRequest, warnings: [] }
+      : { pullRequest, warnings: ['history_write', 'snapshot_read'] };
   });
   ipcMain.handle('review:open', (_, url) => { reviewLinks.push(url); });
   ipcMain.handle('operation:list', () => []);
@@ -614,6 +617,9 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.share-review .primary-button').click()`);
   await waitFor(`document.querySelector('.share-review [role="status"]')?.innerText.includes('merge_requests/1')`);
   assert.equal(reviewPublished, true);
+  const reviewStatus = await js(`document.querySelector('.share-review [role="status"]').innerText`);
+  assert.match(reviewStatus, /no pudo guardar toda la operación en Actividad/);
+  assert.match(reviewStatus, /Falló una comprobación del repositorio local[\s\S]*Actualiza el proyecto/);
   await js(`document.querySelector('.share-review [role="status"] button').click()`);
   assert.deepEqual(reviewLinks, ['https://code.company.test/org/team/repo/-/merge_requests/1']);
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
@@ -968,6 +974,25 @@ app.whenReady().then(async () => {
   await waitFor(`!document.querySelector('.input-modal')`);
   assert.equal(git('remote'), '', 'Offering a way on changes nothing');
   assert.equal(git('rev-parse', 'HEAD'), headBeforePush);
+  // A direct push address must not display the access or credentials of a different named remote.
+  const namedRemote = path.join(scratch, 'named-publish.git');
+  const directRemote = path.join(scratch, 'direct-publish.git');
+  git('init', '--bare', namedRemote);
+  git('init', '--bare', directRemote);
+  git('remote', 'add', 'origin', namedRemote);
+  git('config', 'branch.main.pushRemote', directRemote);
+  git('config', 'push.default', 'current');
+  const accessChecks = readinessRequests.filter(entry => entry.access).length;
+  await js(`[...document.querySelectorAll('.toolbar-tools .tool-button')].find(node => node.innerText.trim() === 'Push').click()`);
+  const directPlan = '.plan-card:has(.plan-actions .primary-button)';
+  await waitFor(`document.querySelector(${JSON.stringify(directPlan)} + ' .plan-goal')?.innerText.includes(${JSON.stringify(directRemote)})`);
+  assert.equal(await js(`Boolean(document.querySelector(${JSON.stringify(directPlan)} + ' .readiness-checklist'))`), false);
+  assert.equal(readinessRequests.filter(entry => entry.access).length, accessChecks);
+  await js(`document.querySelector(${JSON.stringify(directPlan)} + ' .plan-header .mini-icon').click()`);
+  await waitFor(`!document.querySelector(${JSON.stringify(directPlan)})`);
+  git('config', '--unset', 'branch.main.pushRemote');
+  git('config', '--unset', 'push.default');
+  git('remote', 'remove', 'origin');
   // Double-clicking a branch label in the graph checks that branch out.
   await waitFor(`[...document.querySelectorAll('.ref-tag')].some((node) => node.textContent === 'feature/search')`);
   await js(`[...document.querySelectorAll('.ref-tag')].find((node) => node.textContent === 'feature/search').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);

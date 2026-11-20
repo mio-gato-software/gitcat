@@ -279,6 +279,8 @@ export type ConflictFileOutcome = {
 
 export type ConflictApplyResult = {
   snapshot: RepoSnapshot;
+  /** The final snapshot read failed after writing resolutions; snapshot is the pre-apply fallback. */
+  snapshotStale?: boolean;
   /** True only when every accepted file was written and marked resolved. */
   complete: boolean;
   /**
@@ -288,6 +290,7 @@ export type ConflictApplyResult = {
   stale?: "files" | "operation" | "repository";
   outcomes: ConflictFileOutcome[];
   historyWarning?: true;
+  postActionIssue?: PostActionIssue;
 };
 
 /**
@@ -346,7 +349,7 @@ export type ConflictGuideFile = {
   /** The common ancestor's copy, when there is one. */
   base: { present: boolean };
   /** What the file on disk holds right now. */
-  working: { present: boolean; binary: boolean; markers: boolean };
+  working: { present: boolean; binary: boolean; markers: boolean; blocked?: true };
   /** The only choices this file's shape supports, in the order they are offered. */
   choices: ConflictChoice[];
 };
@@ -374,23 +377,26 @@ export type ConflictChoiceRequest = { path: string; choice: ConflictChoice };
 
 /**
  * What happened to one chosen file. "refused" means the choice itself cannot be applied to the file
- * as it is — conflict markers are still in it, or it is not on disk — and nothing was written.
+ * as it is — conflict markers remain or the file is unavailable — and nothing was written.
  */
 export type ConflictChoiceOutcome = {
   path: string;
   choice: ConflictChoice;
   status: "applied" | "changed" | "not_applied" | "failed" | "refused";
-  reason?: "markers" | "missing";
+  reason?: "markers" | "missing" | "path";
   restored?: boolean;
   detail?: string;
 };
 
 export type ConflictChoiceResult = {
   snapshot: RepoSnapshot;
+  /** The final snapshot read failed after writing choices; snapshot is the pre-apply fallback. */
+  snapshotStale?: boolean;
   complete: boolean;
   stale?: "files" | "operation" | "repository";
   outcomes: ConflictChoiceOutcome[];
   historyWarning?: true;
+  postActionIssue?: PostActionIssue;
 };
 
 export type Operation =
@@ -441,7 +447,8 @@ export type RepositoryPlan = {
 };
 
 /** One Git operation inside a plan. The model orders the steps; this shape is what the code validates and runs. */
-export type PushDestination = { binding: string; remote?: string; urls: string[] };
+export type PushDestination = { binding: string; remote?: string; urls: string[]; targetRef?: string };
+export type ConflictResolutionAction = "checkout" | "add" | "remove";
 
 export type PlanStep = {
   operation: Operation;
@@ -456,9 +463,22 @@ export type PlanStep = {
   paths?: string[];
   /** Effective push endpoints approved with the plan. Addresses are safe to show. */
   pushDestination?: PushDestination;
+  /** The effect on the conflicted file approved in the plan. */
+  conflictResolution?: ConflictResolutionAction;
   command: string;
   summary: string;
   risk: "low" | "medium" | "high";
+};
+
+/**
+ * A problem that happened after Git had already recorded one or more changes: syncing the real
+ * index after a selected save, setting up tracking after publication, re-reading the repository
+ * afterwards, or persisting activity history.
+ * Keeping it separate from the completed Git result lets callers and recovery preserve what landed.
+ */
+export type PostActionIssue = {
+  kind: "index_sync" | "upstream_setup" | "snapshot_read" | "history_write" | "temporary_cleanup";
+  detail: string;
 };
 
 export type StepOutcome = {
@@ -466,6 +486,8 @@ export type StepOutcome = {
   summary: string;
   status: "completed" | "failed" | "skipped";
   output: string;
+  /** Full commit hash confirmed by Git when this step created a commit. */
+  commitHash?: string;
 };
 
 export type ActionPlan = {
@@ -777,6 +799,8 @@ export type ExecutionResult = {
   snapshotStale?: boolean;
   output: string;
   error?: string;
+  /** Follow-up failure (index sync, snapshot read, or history persistence) after Git already completed work. */
+  postActionIssue?: PostActionIssue;
   /** What each step of the plan actually did, so a sequence that stops halfway is never reported as a success. */
   outcomes?: StepOutcome[];
   /**
@@ -978,7 +1002,7 @@ export type GitlineApi = {
   editPractice: (path:string)=>Promise<RepoSnapshot>;
   removePractice: (path:string)=>Promise<void>;
   previewReview: (path:string, request:ShareReviewRequest)=>Promise<ShareReviewPreview>;
-  publishReview: (path:string,id:string)=>Promise<{snapshot:RepoSnapshot;pullRequest:ReviewPullRequest}>;
+  publishReview: (path: string, id: string) => Promise<ShareReviewResult>;
   openReview: (url:string)=>Promise<void>;
   getSwitchWork: (path: string, target: string) => Promise<SwitchWorkPreview>;
   prepareSwitchWork: (path: string, request: SwitchWorkRequest, locale?: Locale) => Promise<ActionPlan>;
@@ -1038,6 +1062,11 @@ export type SwitchWorkPreview = { snapshot: RepoSnapshot; target: string; occupi
 
 export type ShareReviewRequest = { remote:string;head:string;base:string;title:string;body:string;provider?:HostingProvider;connectionId?:string };
 export type ReviewPullRequest = {url:string;state:'OPEN'|'CLOSED'|'MERGED';head:string;base:string};
+export type ShareReviewResult = {
+  pullRequest: ReviewPullRequest;
+  snapshot?: RepoSnapshot;
+  warnings: ("history_write" | "snapshot_read")[];
+};
 export type ShareReviewPreview = {id:string;repoPath:string;request:ShareReviewRequest;provider:HostingProvider;host:string;hosting?:NativeHostingContext;headHash:string;baseHash:string;publishedHash?:string;repository:string;remoteUrl:string;account:string;commits:{hash:string;subject:string}[];existing?:ReviewPullRequest;reviewable:boolean;checkedAt:string};
 
 export type PracticeInfo={id:string;path:string;lesson:number};

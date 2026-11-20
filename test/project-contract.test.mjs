@@ -605,7 +605,7 @@ test("la creación GitHub hace todas las comprobaciones sin leer tokens", async 
   assert.match(service, /\["auth", "status", "--hostname", host, "--json", "hosts"\]/);
   assert.match(service, /\["api", `repos\/\$\{owner\}\/\$\{name\}`/);
   assert.match(service, /viewerCanCreateRepositories/);
-  assert.match(service, /\["remote", "get-url", remote\]/);
+  assert.match(service, /readRemoteUrls\(read, remote, "fetch"\)/);
   assert.match(service, /the local repository has no commits, so there is nothing to push/);
   assert.match(service, /gh has no per-command account flag/);
   assert.match(service, /\["auth", "switch", "--hostname", plan\.args\.host, "--user", plan\.args\.activeAccount\]/);
@@ -629,7 +629,6 @@ test("la ejecución gh no usa shell y revierte cambios locales ante fallo", asyn
   assert.match(service, /runCommand\("gh", args/);
   assert.match(service, /GH_PROMPT_DISABLED: "1"/);
   assert.match(service, /\["remote", "remove", plan\.args\.remote\]/);
-  assert.match(service, /\["remote", "set-url", plan\.args\.remote, previousRemoteUrl\]/);
   assert.match(service, /existingRemoteHash/);
   assert.doesNotMatch(service, /existingRemoteUrl/);
   assert.doesNotMatch(service, /spawn\([^\n]+shell:\s*true/);

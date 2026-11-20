@@ -1,4 +1,4 @@
-import type { ActionPlan, Locale, PlanStep, RepoSnapshot, StepOutcome } from "./types.js";
+import type { ActionPlan, ConflictResolutionAction, Locale, PlanStep, RepoSnapshot, StepOutcome } from "./types.js";
 import { workOverview, type NextActionId } from "./work-overview.js";
 
 /**
@@ -48,12 +48,28 @@ export type CompletionSummary = {
 type Say = (en: string, es: string) => string;
 const speaker = (locale: Locale | undefined): Say => (en, es) => locale === "en" ? en : es;
 
+export function conflictResolutionEffect(action: ConflictResolutionAction, path: string, side: string, locale?: Locale) {
+  const say = speaker(locale);
+  switch (action) {
+    case "checkout": {
+      const version = side === "theirs" ? say("the other side's version", "la versión del otro lado") : say("our version", "nuestra versión");
+      return say(`Replaces ${path} with ${version} and stages it as resolved.`, `Reemplaza ${path} con ${version} y lo prepara como resuelto.`);
+    }
+    case "remove": return say(`Removes ${path} from the working tree and stages its removal as the resolution.`, `Elimina ${path} de los archivos de trabajo y prepara ese borrado como resolución.`);
+    case "add": return say(`Stages ${path} as it is and marks it resolved.`, `Prepara ${path} tal como está y lo marca como resuelto.`);
+  }
+}
+
 const files = (say: Say, count: number) => count === 1 ? say("1 file", "1 archivo") : say(`${count} files`, `${count} archivos`);
 const commits = (say: Say, count: number) => count === 1 ? say("1 commit", "1 commit") : say(`${count} commits`, `${count} commits`);
 
 function remoteOf(upstream: string | undefined, remotes: string[]) {
   if (!upstream) return undefined;
   return [...remotes].sort((a, b) => b.length - a.length).find((remote) => upstream.startsWith(`${remote}/`));
+}
+
+function directPushAddress(step: PlanStep) {
+  return step.operation === "push" && !step.pushDestination?.remote ? step.pushDestination?.urls[0] : undefined;
 }
 
 /** Steps that only read. A plan made only of these leaves files, commits and branches as they are. */
@@ -191,7 +207,12 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         summary.irreversible.push(say("The changes of the skipped commit are left out of the result.", "Los cambios del commit saltado quedan fuera del resultado."));
         break;
       case "resolve_conflict":
-        summary.local.push(say(`Marks ${args.path} as resolved.`, `Marca ${args.path} como resuelto.`));
+        if (step.conflictResolution) {
+          summary.local.push(conflictResolutionEffect(step.conflictResolution, args.path, args.side, locale));
+          if (step.conflictResolution !== "add") summary.irreversible.push(say(
+            `Unsaved edits in ${args.path} will be discarded.`, `Se descartarán las ediciones sin guardar en ${args.path}.`
+          ));
+        }
         break;
       case "commit": {
         const all = snapshot?.changes.map((change) => change.path) ?? [];
@@ -216,9 +237,10 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         break;
       case "push": {
         const branch = args.branch ?? on;
-        const remote = step.pushDestination?.remote ?? args.setUpstream ?? upstreamRemote;
-        const ahead = !walked.some((item) => item.step !== step && writesHistory.has(item.step.operation) && item.on === branch) ? branchNamed(branch)?.ahead : undefined;
-        if (!remote) {
+        const remote = step.pushDestination ? step.pushDestination.remote : args.setUpstream ?? args.remote ?? upstreamRemote;
+        const destination = remote ?? directPushAddress(step);
+        const ahead = remote && !walked.some((item) => item.step !== step && writesHistory.has(item.step.operation) && item.on === branch) ? branchNamed(branch)?.ahead : undefined;
+        if (!destination) {
           // Nowhere to send it: saying the branch would match a remote would promise something Git cannot do.
           summary.remote.effects.push(remotes.length
             ? say(`${branch} has no destination on a remote yet, so Git has nowhere to send it.`, `${branch} todavía no tiene destino en un remoto, así que Git no tiene adónde enviarla.`)
@@ -227,13 +249,13 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         }
         summary.remote.name ??= remote;
         summary.remote.effects.push(args.setUpstream
-          ? say(`Publishes ${branch} to ${remote} for the first time and remembers it as its destination.`, `Publica ${branch} en ${remote} por primera vez y la recuerda como su destino.`)
+          ? say(`Publishes ${branch} to ${destination} for the first time and remembers it as its destination.`, `Publica ${branch} en ${destination} por primera vez y la recuerda como su destino.`)
           : ahead
-            ? say(`Sends ${commits(say, ahead)} of ${branch} to ${remote}.`, `Envía ${commits(say, ahead)} de ${branch} a ${remote}.`)
-            : say(`Sends the saved commits of ${branch} to ${remote}.`, `Envía los commits guardados de ${branch} a ${remote}.`));
-        summary.irreversible.push(say(`Once on ${remote}, anyone with access can fetch these commits; taking them back means rewriting the remote.`, `Una vez en ${remote}, cualquiera con acceso puede descargar estos commits; retirarlos obliga a reescribir el remoto.`));
+            ? say(`Sends ${commits(say, ahead)} of ${branch} to ${destination}.`, `Envía ${commits(say, ahead)} de ${branch} a ${destination}.`)
+            : say(`Sends the saved commits of ${branch} to ${destination}.`, `Envía los commits guardados de ${branch} a ${destination}.`));
+        summary.irreversible.push(say(`Once on ${destination}, anyone with access can fetch these commits; taking them back means rewriting the remote.`, `Una vez en ${destination}, cualquiera con acceso puede descargar estos commits; retirarlos obliga a reescribir el remoto.`));
         if (args.noVerify === "true") summary.irreversible.push(say("The checks this project runs before publishing (pre-push hooks) are skipped.", "Se saltan las comprobaciones que este proyecto ejecuta antes de publicar (hooks pre-push)."));
-        published.set(branch, remote);
+        published.set(branch, destination);
         unpublished.delete(branch);
         break;
       }
@@ -259,7 +281,10 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
     if (step.pushDestination?.urls.length) {
       summary.remote.name ??= step.pushDestination.remote;
       for (const url of step.pushDestination.urls) {
-        summary.remote.effects.push(say(`Publishing destination: ${url}.`, `Destino de publicación: ${url}.`));
+        const ref = step.pushDestination?.targetRef;
+        summary.remote.effects.push(ref
+          ? say(`Publishing destination: ${url} (${ref}).`, `Destino de publicación: ${url} (${ref}).`)
+          : say(`Publishing destination: ${url}.`, `Destino de publicación: ${url}.`));
       }
     }
     if (writesHistory.has(step.operation) && on) unpublished.add(on);
@@ -318,11 +343,19 @@ export function completionSummary(input: CompletionInput, locale?: Locale): Comp
   const steps = outcomes.map(({ summary, status }) => ({ summary, status }));
   const failed = outcomes.find((outcome) => outcome.status === "failed");
   const done = outcomes.filter((outcome) => outcome.status === "completed").length;
+  const ran = before ? walkPlanSteps(plan.steps, before.currentBranch)
+    .map((item, index) => ({ ...item, index }))
+    .filter(({ index }) => outcomes[index]?.status === "completed") : [];
+  const confirmedPublications = ran.flatMap(({ step, on, index }) => {
+    const direct = directPushAddress(step);
+    const destination = direct ?? (step.operation === "github_create_repo" && step.args.push === "true" ? step.args.remote : undefined);
+    return destination ? [{ branch: step.args.branch ?? on, destination, direct: Boolean(direct), index }] : [];
+  });
   const moved = before && after ? fingerprint(before) !== fingerprint(after) : true;
   const status: CompletionStatus = failed ? (done ? "partial" : "failed")
     : input.error ? (done ? "partial" : "not_run")
     : !done ? "not_run"
-    : !moved && plan.steps.every((step) => observable.has(step.operation)) ? "no_change"
+    : !moved && !confirmedPublications.length && plan.steps.every((step) => observable.has(step.operation)) ? "no_change"
     : "completed";
 
   const headline = status === "completed" ? (outcomes.length === 1 ? say(`Done: ${outcomes[0].summary}.`, `Hecho: ${outcomes[0].summary}.`) : say(`All ${outcomes.length} steps completed.`, `Se completaron los ${outcomes.length} pasos.`))
@@ -336,11 +369,18 @@ export function completionSummary(input: CompletionInput, locale?: Locale): Comp
     : say("Nothing ran: GitCat stopped before the first step, so the project is as it was.", "No se ejecutó nada: GitCat se detuvo antes del primer paso, así que el proyecto sigue como estaba.");
 
   const changed = before && after && status !== "not_run" ? changes(plan, outcomes, before, after, say) : [];
+  for (const { branch, destination } of confirmedPublications) {
+    changed.push(say(`${branch} is now published on ${destination}.`, `${branch} ya está publicada en ${destination}.`));
+  }
   if (status === "completed" && !changed.length) changed.push(...outcomes.map((outcome) => outcome.summary));
-  const summary: CompletionSummary = { status, headline, steps, changed, remaining: after ? remaining(after, input.fetchedAt, say) : [] };
+  const lastSave = ran.filter(({ step, on }) => on === after?.currentBranch && writesHistory.has(step.operation)).at(-1)?.index ?? -1;
+  const publication = confirmedPublications.filter(({ branch, index }) => branch === after?.currentBranch && index > lastSave).at(-1);
+  const summary: CompletionSummary = { status, headline, steps, changed, remaining: after ? remaining(after, input.fetchedAt, say, publication?.destination) : [] };
   if (after && (status === "completed" || status === "no_change")) {
     const next = workOverview(after, { fetchedAt: input.fetchedAt }).next;
-    summary.next = { action: next.action, label: nextLabel(next, after, say) };
+    if (!publication?.direct || (next.action !== "publish_branch" && next.action !== "connect_remote")) {
+      summary.next = { action: next.action, label: nextLabel(next, after, say) };
+    }
   }
   return summary;
 }
@@ -375,7 +415,7 @@ function changes(plan: ActionPlan, outcomes: StepOutcome[], before: RepoSnapshot
   for (const [name, branch] of now) {
     const previous = was.get(name);
     if (!branch.upstream || branch.ahead) continue;
-    const pushed = ran.some(({ step, on }) => (step.operation === "push" && (step.args.branch ?? on) === name) || (step.operation === "github_create_repo" && on === name));
+    const pushed = ran.some(({ step, on }) => step.operation === "push" && (step.args.branch ?? on) === name);
     if (pushed && (!previous?.upstream || previous.ahead || previous.lastCommit?.hash !== branch.lastCommit?.hash)) {
       lines.push(say(`${name} is now published on ${remoteOf(branch.upstream, after.remotes) ?? branch.upstream}.`, `${name} ya está publicada en ${remoteOf(branch.upstream, after.remotes) ?? branch.upstream}.`));
     }
@@ -388,18 +428,21 @@ function changes(plan: ActionPlan, outcomes: StepOutcome[], before: RepoSnapshot
   return lines;
 }
 
-function remaining(after: RepoSnapshot, fetchedAt: string | undefined, say: Say) {
+function remaining(after: RepoSnapshot, fetchedAt: string | undefined, say: Say, publishedRemote?: string) {
   const overview = workOverview(after, { fetchedAt });
   const lines: string[] = [];
   const branch = overview.branch ?? say("this branch", "esta rama");
   const remote = overview.published.remote ?? say("the remote", "el remoto");
   if (overview.pending || overview.conflicts) lines.push(say("An unfinished operation is waiting to be finished or cancelled.", "Hay una operación a medias esperando a que la termines o la canceles."));
   if (overview.edited.count) lines.push(say(`${files(say, overview.edited.count)} still uncommitted on this computer.`, `${files(say, overview.edited.count)} siguen sin guardar en este equipo.`));
-  const { state, ahead, behind } = overview.published;
-  if (state === "no_upstream" && overview.saved.hasCommits) lines.push(say(`${branch} is only on this computer; it is not published yet.`, `${branch} solo está en este equipo; aún no está publicada.`));
-  if (state === "ahead" || state === "diverged") lines.push(say(`${commits(say, ahead)} on ${branch} not on ${remote} yet.`, `${commits(say, ahead)} de ${branch} aún no están en ${remote}.`));
+  const { state, ahead, behind, upstream } = overview.published;
+  const samePublishedUpstream = publishedRemote && upstream === `${publishedRemote}/${branch}`;
+  if (state === "no_upstream" && overview.saved.hasCommits) lines.push(publishedRemote
+    ? say(`Tracking is still missing for ${branch} on ${publishedRemote}.`, `Falta configurar el seguimiento de ${branch} en ${publishedRemote}.`)
+    : say(`${branch} is only on this computer; it is not published yet.`, `${branch} solo está en este equipo; aún no está publicada.`));
+  if ((state === "ahead" || state === "diverged") && !samePublishedUpstream) lines.push(say(`${commits(say, ahead)} on ${branch} not on ${remote} yet.`, `${commits(say, ahead)} de ${branch} aún no están en ${remote}.`));
   if (state === "behind" || state === "diverged") lines.push(say(`${remote} has ${commits(say, behind)} ${branch} does not have yet.`, `${remote} tiene ${commits(say, behind)} que ${branch} aún no tiene.`));
-  if (state === "no_remote") lines.push(say("This project is not connected to a remote, so everything stays on this computer.", "Este proyecto no está conectado a un remoto, así que todo se queda en este equipo."));
+  if (state === "no_remote" && !publishedRemote) lines.push(say("This project is not connected to a remote, so everything stays on this computer.", "Este proyecto no está conectado a un remoto, así que todo se queda en este equipo."));
   const { integration } = overview;
   if (integration.state === "integrated" && integration.targetUnpublished) lines.push(say(`${integration.target} has ${commits(say, integration.targetUnpublished)} not published yet.`, `${integration.target} tiene ${commits(say, integration.targetUnpublished)} sin publicar.`));
   return lines;

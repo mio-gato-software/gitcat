@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { rmSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { rmSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,6 +16,7 @@ registerHooks({
 });
 const service = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
 const guideModule = await import(pathToFileURL(join(root, "dist-electron/electron/conflict-guide.js")));
+const { planSummary } = await import(pathToFileURL(join(root, "dist-electron/shared/plan-summary.js")));
 
 // No provider is configured in this file. Any request to one is a failure of the test.
 let providerCalls = 0;
@@ -63,6 +64,111 @@ function mergeConflicts() {
 }
 
 const fileIn = (guide, path) => guide.files.find((file) => file.path === path);
+
+test("a conflicting path blocked by a parent file leaves the rest of the guide usable", async t => {
+  const r = repository();
+  t.after(() => rmSync(r.repo, { recursive: true, force: true }));
+  mkdirSync(join(r.repo, "nested"));
+  const nested = "nested/a.txt", other = "b.txt";
+  const save = (content) => {
+    r.write(nested, content);
+    r.write(other, content);
+    r.git("add", ".");
+    r.git("commit", "-qm", content);
+  };
+  save("base");
+  r.git("switch", "-qc", "incoming");
+  save("incoming");
+  r.git("switch", "-q", "main");
+  save("local");
+  assert.throws(() => r.git("merge", "incoming"));
+  rmSync(join(r.repo, "nested"), { recursive: true });
+  r.write("nested", "keep this file");
+
+  const guide = await service.describeConflicts(r.repo, "en");
+  assert.equal(fileIn(guide, nested).working.blocked, true);
+  assert.deepEqual(fileIn(guide, nested).choices, []);
+  const result = await service.applyConflictChoices(r.repo, guide, [{ path: other, choice: "theirs" }], "en");
+  assert.equal(result.outcomes[0].status, "applied");
+  assert.equal(r.read(other), "incoming");
+  assert.equal(r.read("nested"), "keep this file");
+});
+
+test("the guide refuses a hand edit replaced by a symlink", { skip: process.platform === "win32" }, async t => {
+  const r = mergeConflicts();
+  t.after(() => rmSync(r.repo, { recursive: true, force: true }));
+  const guide = await service.describeConflicts(r.repo, "en");
+  const stages = r.unmerged();
+  r.write("manual.txt", "ordinary text");
+  rmSync(join(r.repo, "text.txt"));
+  symlinkSync("manual.txt", join(r.repo, "text.txt"));
+
+  const result = await service.applyConflictChoices(r.repo, guide, [{ path: "text.txt", choice: "edited" }], "en");
+  assert.deepEqual(result.outcomes, [{ path: "text.txt", choice: "edited", status: "refused", reason: "path" }]);
+  assert.equal(r.unmerged(), stages);
+  assert.equal(r.read("manual.txt"), "ordinary text");
+});
+
+test("conflict plan confirms replacement, removal, or staging before touching a file", async t => {
+  const r = mergeConflicts();
+  t.after(() => rmSync(r.repo, { recursive: true, force: true }));
+  const manual = "manual edit\n";
+  r.write("text.txt", manual);
+
+  const check = async (path, side, command, effect) => {
+    const snapshot = await service.getSnapshot(r.repo);
+    const plan = await service.prepareOperation(r.repo, "resolve_conflict", { path, side }, "en");
+    assert.equal(plan.requiresConfirmation, true);
+    assert.match(plan.steps[0].command, command);
+    assert.match(plan.rationale, effect);
+    assert.ok(planSummary(plan, snapshot, "en").local.some(line => effect.test(line)));
+    return plan;
+  };
+
+  const replace = await check("text.txt", "theirs", /^git checkout --theirs .* && git add /, /Replaces.*other side/);
+  await check("text.txt", "resolved", /^git add /, /Stages.*as it is/);
+  assert.equal(r.read("text.txt"), manual);
+  assert.equal((await service.executePlan(r.repo, replace, "en")).error, undefined);
+  assert.equal(r.read("text.txt"), "uno\nDOS-suyo\ntres\n");
+
+  const remove = await check("gone-there.txt", "theirs", /^git rm /, /Removes.*from the working tree/);
+  assert.equal((await service.executePlan(r.repo, remove, "en")).error, undefined);
+  assert.equal(r.exists("gone-there.txt"), false);
+});
+
+for (const flow of ["guide", "plan"]) {
+  test(`the ${flow} treats a conflict filename with brackets as a literal path`, async t => {
+    const r = repository();
+    t.after(() => rmSync(r.repo, { recursive: true, force: true }));
+    const selected = "file[1].txt", other = "file1.txt";
+    const save = (content) => {
+      for (const file of [selected, other]) r.write(file, `${content} ${file}\n`);
+      r.git("add", "-A");
+      r.git("commit", "-qm", content);
+    };
+    save("base");
+    r.git("switch", "-qc", "incoming");
+    save("incoming");
+    r.git("switch", "-q", "main");
+    save("local");
+    assert.throws(() => r.git("merge", "incoming"));
+    const otherContents = r.read(other);
+    const otherStages = r.git("ls-files", "-u", "--", other);
+
+    if (flow === "guide") {
+      const guide = await service.describeConflicts(r.repo, "en");
+      const result = await service.applyConflictChoices(r.repo, guide, [{ path: selected, choice: "theirs" }], "en");
+      assert.deepEqual(result.outcomes.map(o => [o.path, o.status]), [[selected, "applied"]]);
+    } else {
+      const plan = await service.prepareOperation(r.repo, "resolve_conflict", { path: selected, side: "theirs" }, "en");
+      assert.equal((await service.executePlan(r.repo, plan, "en")).error, undefined);
+    }
+    assert.equal(r.read(selected), `incoming ${selected}\n`);
+    assert.equal(r.git("ls-files", "-u", "--", `:(literal)${selected}`), "");
+    assert.equal(r.read(other), otherContents);
+    assert.equal(r.git("ls-files", "-u", "--", other), otherStages);
+  });
+}
 
 test("a merge conflict is explained from the repository alone, with real branch names and supported choices", async () => {
   const r = mergeConflicts();

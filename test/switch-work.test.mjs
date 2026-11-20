@@ -125,6 +125,40 @@ test("edits after review invalidate the whole set-aside plan", async (t) => {
   await assert.rejects(service.executePlan(path, plan, "en"), /changes moved/);
   assert.equal(git("stash", "list"), "");
 });
+
+test("retry revalidates set-aside work after the stash lock is removed", async (t) => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, "file"), "mine");
+  const request = { mode: "set_aside", target: "other", label: "Pause feature" };
+  const plan = await service.prepareSwitchWork(path, request, "en");
+  const lock = join(path, ".git", "refs", "stash.lock");
+  writeFileSync(lock, "");
+  const failed = await service.executePlan(path, plan, "en");
+  assert.deepEqual(
+    failed.outcomes.map((outcome) => outcome.status),
+    ["failed", "skipped"]
+  );
+  rmSync(lock);
+  const record = { plan, outcomes: failed.outcomes, stale: false };
+
+  git("branch", "-d", "other");
+  await assert.rejects(service.prepareRetry(path, record, "en"), /branch no longer exists/);
+  git("branch", "other");
+  writeFileSync(join(path, "file"), "newer work");
+  const retry = await service.prepareRetry(path, record, "en");
+  assert.equal(retry.requiresConfirmation, true);
+  assert.deepEqual(retry.switchWork, request);
+  assert.equal(git("stash", "list"), "");
+  assert.equal(readFileSync(join(path, "file"), "utf8"), "newer work");
+  const result = await service.executePlan(path, retry, "en");
+  assert.deepEqual(
+    result.outcomes.map((outcome) => outcome.status),
+    ["completed", "completed"]
+  );
+  assert.equal(git("branch", "--show-current"), "other");
+  assert.equal(git("show", "stash@{0}:file"), "newer work");
+});
+
 test("stopping after set-aside leaves a discoverable entry and the original branch active", async (t) => {
   const { trackOperation, cancelOperation } = await import("../dist-electron/electron/operation-progress.js");
   const { path, git } = fixture(t);
@@ -150,6 +184,16 @@ test("stopping after set-aside leaves a discoverable entry and the original bran
   assert.equal(git("branch", "--show-current"), "main");
   const entry = (await service.getSwitchWork(path, "other")).entries[0];
   assert.match(entry.label, /Interrupted/);
+  const retry = await service.prepareRetry(path, { plan, outcomes: result.outcomes, stale: false }, "en");
+  assert.deepEqual(retry.switchWork, { mode: "carry", target: "other" });
+  assert.equal(retry.requiresConfirmation, true);
+  assert.deepEqual(
+    retry.steps.map((step) => step.operation),
+    ["checkout"]
+  );
+  assert.equal((await service.executePlan(path, retry, "en")).error, undefined);
+  assert.equal(git("branch", "--show-current"), "other");
+  assert.equal(git("stash", "list", "--format=%H"), entry.hash);
   await service.executePlan(
     path,
     await service.prepareSwitchWork(path, { mode: "restore", stash: entry.hash }, "en"),

@@ -1325,15 +1325,20 @@ export default function App() {
   const applyGuideChoices = async (choices: ConflictChoiceRequest[]) => {
     if (!snapshot || !guide || !choices.length || guideBusy) return;
     const path = snapshot.path;
+    let shouldReopen = true;
     setGuideBusy(true);
     try {
       const result = await window.gitcat.chooseConflictResolutions(path, guide.id, choices, locale);
-      updateSnapshot(path, result.snapshot);
+      if (!result.snapshotStale) updateSnapshot(path, result.snapshot);
+      else shouldReopen = false;
       setGuideResult(result);
       if (result.historyWarning) addActivity({ label: t("activityHistoryWarning"), detail: t("conflictHistoryWarning"), tone: "warning" });
+      if (result.postActionIssue && result.postActionIssue.kind !== "history_write") {
+        addActivity({ label: t("gitNeedsAttention"), detail: result.postActionIssue.detail, tone: "warning" });
+      }
       const applied = result.outcomes.filter((outcome) => outcome.status === "applied");
       // Conflicts left by something other than a merge, rebase, cherry-pick or revert end here, with nothing to continue.
-      if (!result.snapshot.pending && !result.snapshot.conflicts.length) {
+      if (!result.snapshotStale && !result.snapshot.pending && !result.snapshot.conflicts.length) {
         if (applied.length) addActivity({ label: t("conflictsResolved"), detail: counted(t, applied.length, "file", "files"), tone: "success" });
         closeGuide();
         return;
@@ -1344,7 +1349,7 @@ export default function App() {
     } catch (error) {
       notify({ message: cleanError(error, t("fallbackChooseConflicts")), tone: "error" });
     } finally { setGuideBusy(false); }
-    await openGuide(true);
+    if (shouldReopen) await openGuide(true);
   };
 
   const openConflictFile = async (file: string) => {
@@ -1368,10 +1373,13 @@ export default function App() {
     setApplyingResolution(true);
     try {
       const result = await window.gitcat.applyConflictResolution(path, proposal.id, accepted, locale);
-      updateSnapshot(path, result.snapshot);
+      if (!result.snapshotStale) updateSnapshot(path, result.snapshot);
       if (result.historyWarning) addActivity({ label: t("activityHistoryWarning"), detail: t("conflictHistoryWarning"), tone: "warning" });
+      if (result.postActionIssue && result.postActionIssue.kind !== "history_write") {
+        addActivity({ label: t("gitNeedsAttention"), detail: result.postActionIssue.detail, tone: "warning" });
+      }
       const applied = result.outcomes.filter((outcome) => outcome.status === "applied").map((outcome) => outcome.path);
-      if (result.complete) {
+      if (result.complete && !result.snapshotStale) {
         closeProposal();
         addActivity({ label: t("conflictsResolved"), detail: counted(t, applied.length, "acceptedFile", "acceptedFiles"), tone: "success" });
         return;
@@ -1379,7 +1387,7 @@ export default function App() {
       // Applied files are done and leave the review; the rest can be retried or reviewed again.
       setProposal({ ...proposal, resolutions: proposal.resolutions.filter((item) => !applied.includes(item.path)) });
       setProposalResult(result);
-      if (applied.length) addActivity({ label: t("conflictsPartlyResolved"), detail: counted(t, applied.length, "acceptedFile", "acceptedFiles"), tone: "warning" });
+      if (applied.length) addActivity({ label: t(result.complete ? "conflictsResolved" : "conflictsPartlyResolved"), detail: counted(t, applied.length, "acceptedFile", "acceptedFiles"), tone: result.complete ? "success" : "warning" });
     } catch (error) {
       notify({ message: cleanError(error, t("fallbackApplyResolution")), tone: "error" });
       await refreshProject(path, false);
@@ -3637,10 +3645,11 @@ function PlanCard({ plan, snapshot, onApply, onDismiss, busy }: { plan: ActionPl
   const { t } = useI18n();
   const asking = plan.kind === "question";
   const push = plan.allowed && plan.requiresConfirmation ? plan.steps.find((step) => step.operation === "push") : undefined;
+  const directPush = push?.pushDestination?.urls.length && !push.pushDestination.remote;
   return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? t("interpretedByProvider") : t("directAction")}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? t("dismissQuestion") : t("dismissPlan")}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.withheld && plan.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(plan.withheld, t) })}</p>}
     {plan.allowed && <PlanGoal plan={plan} snapshot={snapshot} />}
     {plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}
-    {push && <PublishReadiness repoPath={plan.repoPath} remote={push.pushDestination?.remote ?? push.args.setUpstream} />}
+    {push && !directPush && <PublishReadiness repoPath={plan.repoPath} remote={push.pushDestination?.remote ?? push.args.setUpstream} />}
     {plan.allowed && plan.steps.length > 1 && <ol className="plan-steps">{plan.steps.map((step, index) => <li key={`${step.command}-${index}`}><span className="step-summary">{step.summary}</span></li>)}</ol>}
     {(plan.allowed || plan.repositoryPlan) && <details className="technical-details plan-technical">
       <summary><TerminalSquare size={11} /> {t("technicalDetails")}</summary>
@@ -4026,7 +4035,7 @@ function ConflictResolverModal({ guide, result, snapshot, busy, configured, onAp
         {result.stale === "files" && <span>{t("guideStaleFiles")}</span>}
         {result.stale === "operation" && <span>{t("guideStaleOperation")}</span>}
         {result.stale === "repository" && <span>{t("guideStaleRepository")}</span>}
-        {result.outcomes.filter((outcome) => outcome.status === "refused").map((outcome) => <span key={outcome.path}>{t(outcome.reason === "missing" ? "guideRefusedMissing" : "guideRefusedMarkers", { path: outcome.path })}</span>)}
+        {result.outcomes.filter((outcome) => outcome.status === "refused").map((outcome) => <span key={outcome.path}>{t(outcome.reason === "path" ? "guideRefusedPath" : outcome.reason === "missing" ? "guideRefusedMissing" : "guideRefusedMarkers", { path: outcome.path })}</span>)}
         {result.outcomes.filter((outcome) => outcome.status === "failed").map((outcome) => <span key={outcome.path}>{t(outcome.restored ? "guideFailedRestored" : "guideFailedNotRestored", { path: outcome.path })}{outcome.detail ? ` (${outcome.detail})` : ""}</span>)}
         {notReached.length > 0 && <span>{t("guideNotReached", { files: notReached.map((outcome) => outcome.path).join(", ") })}</span>}
       </div></div>}
@@ -4044,7 +4053,7 @@ function ConflictResolverModal({ guide, result, snapshot, busy, configured, onAp
               <span>{t(conflictShapeKey(file.kind), { ours, theirs })}{file.binary ? ` ${t("conflictBinary")}` : ""}</span>
               {file.renames.map((rename) => <span key={`${rename.side}:${rename.from}:${rename.to}`}>{t("conflictRenamed", { side: nameOf(rename.side), from: rename.from, to: rename.to })}</span>)}
               {file.working.present && !file.binary && <span className={file.working.markers ? "guide-markers" : "guide-clean"}>{t(file.working.markers ? "stillHasMarkers" : "noMarkersLeft")}</span>}
-              {!file.working.present && <span>{t("notOnDisk")}</span>}
+              {!file.working.present && <span>{t(file.working.blocked ? "guideBlockedPath" : "notOnDisk")}</span>}
             </div>
             <div className="guide-file-tools">
               {(file.ours.present || file.theirs.present) && <button className="ghost-button small" onClick={() => setCompared((items) => open ? items.filter((item) => item !== file.path) : [...items, file.path])}>{t(open ? "hideVersions" : "compareVersions")}</button>}

@@ -194,7 +194,7 @@ test("push sin upstream: se explica, se ofrece publicar en el remoto y nada depe
 
   // The action is an ordinary direct control: prepared, shown and confirmed before it runs.
   const publish = await service.prepareOperation(work.path, report.actions[0].operation, report.actions[0].args, "en");
-  assert.equal(publish.command, "git push --set-upstream origin feature/sin-upstream");
+  assert.equal(publish.command, "git push --set-upstream origin refs/heads/feature/sin-upstream:refs/heads/feature/sin-upstream");
   assert.equal(publish.requiresConfirmation, true);
   assert.equal(execFileSync("git", ["--git-dir", origin.path, "branch", "--list", "feature/sin-upstream"], { encoding: "utf8" }).trim(), "", "preparing sends nothing");
   const published = await service.executePlan(work.path, publish);

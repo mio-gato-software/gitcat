@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { registerHooks } from 'node:module';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, renameSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { registerHooks, syncBuiltinESMExports } from 'node:module';
+import fs, { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, renameSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { basename, dirname, join } from 'node:path';
+import cp, { execFileSync } from 'node:child_process';
 registerHooks({resolve(s,c,n){return s==='electron'?{url:new URL('./helpers/electron-stub.mjs',import.meta.url).href,shortCircuit:true}:n(s,c);}});
 const { ActivityHistory }=await import('../dist-electron/electron/activity-history.js');
 const service=await import('../dist-electron/electron/git-service.js');
@@ -44,6 +45,51 @@ test('an unpublished save can be undone while keeping files and index, and resto
  await service.executePlan(path,restore,'en');assert.equal(git('branch','--show-current'),'main');assert.equal(git('write-tree'),index);
  assert.equal(git('rev-parse',restore.recovery.branch),base);
 });
+
+test('retry rebuilds and confirms a history recovery after a transient branch lock', async t => {
+  const { path, git } = fixture(t);
+  const base = git('rev-parse', 'HEAD');
+  const entry = await save(path);
+  const head = git('rev-parse', 'HEAD');
+  const plan = await service.prepareHistoryRecovery(path, entry.id, 'restore', 'en');
+  const branch = plan.recovery.branch;
+  const lock = join(path, '.git', 'refs', 'heads', `${branch}.lock`);
+  mkdirSync(dirname(lock), { recursive: true });
+  writeFileSync(lock, '');
+  const failed = await service.executePlan(path, plan, 'en');
+  assert.equal(failed.outcomes[0].status, 'failed');
+  assert.match(failed.error, /\.lock/);
+  rmSync(lock);
+
+  const retry = await service.prepareRetry(path, { plan, outcomes: failed.outcomes, stale: false }, 'en');
+  assert.notEqual(retry.id, plan.id);
+  assert.equal(retry.requiresConfirmation, true);
+  assert.deepEqual(retry.recovery, plan.recovery);
+  assert.equal(git('branch', '--list', branch), '');
+  const result = await service.executePlan(path, retry, 'en');
+  assert.equal(result.outcomes[0].status, 'completed');
+  assert.equal(git('rev-parse', branch), base);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+});
+
+test('retrying an undo rechecks that the saved commit is still the tip', async t => {
+  const { path, git } = fixture(t);
+  const entry = await save(path);
+  const plan = await service.prepareHistoryRecovery(path, entry.id, 'undo', 'en');
+  const lock = join(path, '.git', 'refs', 'heads', 'main.lock');
+  writeFileSync(lock, '');
+  const failed = await service.executePlan(path, plan, 'en');
+  assert.equal(failed.outcomes[0].status, 'failed');
+  assert.match(failed.error, /\.lock/);
+  rmSync(lock);
+  assert.equal(git('rev-parse', 'HEAD'), plan.recovery.commit);
+
+  git('commit', '-q', '--allow-empty', '-m', 'Newer commit');
+  const head = git('rev-parse', 'HEAD');
+  await assert.rejects(service.prepareRetry(path, { plan, outcomes: failed.outcomes, stale: false }, 'en'), /The branch has moved/);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+});
+
 test('published saves use revert, and publication after preview blocks an undo',async t=>{
  const {path,git}=fixture(t),remote=join(path,'remote.git');git('init','--bare',remote);git('remote','add','origin',remote);
  // Keep the fixture remote out of the working tree.
@@ -55,6 +101,66 @@ test('published saves use revert, and publication after preview blocks an undo',
  const revert=await service.prepareHistoryRecovery(path,entry.id,'revert','en');
  await service.executePlan(path,revert,'en');assert.equal(readFileSync(join(path,'file'),'utf8'),'base');assert.equal(git('rev-list','--count','HEAD'),'3');
 });
+
+test('undo checks every push endpoint for commits reachable from a branch tip', async t => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, '.git', 'info', 'exclude'), '*.git/\n');
+  const fetch = join(path, 'fetch.git');
+  const first = join(path, 'first.git');
+  const second = join(path, 'second.git');
+  for (const remote of [fetch, first, second]) git('init', '--bare', remote);
+  git('remote', 'add', 'origin', fetch);
+  git('remote', 'set-url', '--add', '--push', 'origin', first);
+  git('remote', 'set-url', '--add', '--push', 'origin', second);
+  const entry = await save(path);
+  const head = git('rev-parse', 'HEAD');
+  const undo = await service.prepareHistoryRecovery(path, entry.id, 'undo', 'en');
+
+  const descendant = git('commit-tree', 'HEAD^{tree}', '-p', head, '-m', 'Published descendant');
+  git('push', second, `${descendant}:refs/heads/published`);
+  await assert.rejects(service.executePlan(path, undo, 'en'), /published.*Revert/);
+  await assert.rejects(service.prepareHistoryRecovery(path, entry.id, 'undo', 'en'), /published.*Revert/);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+  assert.equal(git('for-each-ref', 'refs/gitcat/publication-check'), '');
+  assert.equal((await service.prepareHistoryRecovery(path, entry.id, 'revert', 'en')).requiresConfirmation, true);
+});
+
+for (const key of ['branch.main.pushRemote', 'remote.pushDefault', 'branch.main.remote']) {
+  test(`undo rechecks direct publication configured in ${key}`, async t => {
+    const { path, git } = fixture(t);
+    const remote = join(path, '.git', 'remote.git');
+    git('init', '--bare', remote);
+    git('config', key, remote);
+    git('config', 'push.default', 'current');
+    const entry = await save(path);
+    const head = git('rev-parse', 'HEAD');
+    const undo = await service.prepareHistoryRecovery(path, entry.id, 'undo', 'en');
+
+    const push = await service.prepareOperation(path, 'push', {}, 'en');
+    assert.equal((await service.executePlan(path, push, 'en')).error, undefined);
+    assert.equal(git('--git-dir', remote, 'rev-parse', 'main'), head);
+    await assert.rejects(service.executePlan(path, undo, 'en'), /published.*Revert/);
+    await assert.rejects(service.prepareHistoryRecovery(path, entry.id, 'undo', 'en'), /published.*Revert/);
+    assert.equal(git('rev-parse', 'HEAD'), head);
+    assert.equal(git('for-each-ref', 'refs/gitcat/publication-check'), '');
+  });
+}
+
+test('undo is unavailable when a configured push endpoint cannot be verified', async t => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, '.git', 'info', 'exclude'), 'fetch.git/\n');
+  const fetch = join(path, 'fetch.git');
+  git('init', '--bare', fetch);
+  git('remote', 'add', 'origin', fetch);
+  git('remote', 'set-url', '--push', 'origin', join(path, 'unavailable.git'));
+  const entry = await save(path);
+  const head = git('rev-parse', 'HEAD');
+  await assert.rejects(service.prepareHistoryRecovery(path, entry.id, 'undo', 'en'), /could not verify.*Revert/i);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+  assert.equal(git('for-each-ref', 'refs/gitcat/publication-check'), '');
+  assert.equal((await service.prepareHistoryRecovery(path, entry.id, 'revert', 'en')).requiresConfirmation, true);
+});
+
 test('unrelated dirty work and externally moved history refuse recovery before changing anything',async t=>{
  const {path,git}=fixture(t),entry=await save(path),plan=await service.prepareHistoryRecovery(path,entry.id,'undo','en');
  writeFileSync(join(path,'unrelated'),'mine');await assert.rejects(service.executePlan(path,plan,'en'),/unfinished work/);
@@ -205,3 +311,201 @@ test('failed post-execution inspection marks its fallback stale without losing t
  assert.equal(git('show','HEAD:file'),'saved before inspection failed');
  assert.equal((await service.getActivityHistory(path)).entries[0].after,undefined);
 });
+
+test('selective save preserves completed commit hash and history recovery when index sync is locked', async t => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, 'file'), 'ticked version\n');
+  writeFileSync(join(path, 'other.txt'), 'left out\n');
+  const before = await service.getSnapshot(path);
+  const selected = before.changes.filter(change => change.path === 'file').map(({ path: p, version }) => ({ path: p, version }));
+  const plan = await service.prepareBranchDelivery(path, { stateId: before.stateId, message: 'save file only', mergeToDefault: false, selection: selected }, 'en');
+
+  const lock = join(path, '.git', 'index.lock');
+  writeFileSync(lock, '');
+  t.after(() => rmSync(lock, { force: true }));
+
+  const result = await service.executePlan(path, plan, 'en');
+  const committedHash = git('rev-parse', 'HEAD');
+  assert.equal(git('rev-list', '--count', 'HEAD'), '2');
+  assert.equal(git('show', 'HEAD:file'), 'ticked version');
+  assert.deepEqual(result.outcomes.map(step => step.status), ['completed']);
+  assert.equal(result.outcomes[0].commitHash, committedHash);
+  assert.equal(result.postActionIssue?.kind, 'index_sync');
+  assert.match(result.error ?? '', new RegExp(committedHash.slice(0, 7)));
+
+  const entry = (await service.getActivityHistory(path)).entries[0];
+  assert.equal(entry.steps[0].status, 'completed');
+  assert.equal(entry.steps[0].afterHead, committedHash);
+
+  // Removing the lock lets history recovery use the recorded commit hash directly.
+  rmSync(lock, { force: true });
+  git('reset', '-q', '--', 'file');
+  rmSync(join(path, 'other.txt'), { force: true });
+  const undoPlan = await service.prepareHistoryRecovery(path, entry.id, 'undo', 'en');
+  assert.deepEqual(undoPlan.steps[0].argv, ['reset', '--soft', `${committedHash}^`]);
+  const revertPlan = await service.prepareHistoryRecovery(path, entry.id, 'revert', 'en');
+  assert.deepEqual(revertPlan.steps[0].argv, ['revert', '--no-edit', committedHash]);
+});
+
+test('selective save plus integrate stops subsequent steps without marking the commit failed when index sync fails', async t => {
+  const { path, git } = fixture(t);
+  git('switch', '-qc', 'feature');
+  writeFileSync(join(path, 'file'), 'feature save\n');
+  const before = await service.getSnapshot(path);
+  const selected = before.changes.map(({ path: p, version }) => ({ path: p, version }));
+  const plan = await service.prepareBranchDelivery(path, { stateId: before.stateId, message: 'save feature', mergeToDefault: true, selection: selected }, 'en');
+
+  const lock = join(path, '.git', 'index.lock');
+  writeFileSync(lock, '');
+  t.after(() => rmSync(lock, { force: true }));
+
+  const result = await service.executePlan(path, plan, 'en');
+  const committedHash = git('rev-parse', 'HEAD');
+  assert.equal(git('branch', '--show-current'), 'feature');
+  assert.deepEqual(result.outcomes.map(step => step.status), ['completed', 'skipped', 'skipped']);
+  assert.equal(result.outcomes[0].commitHash, committedHash);
+  assert.equal(result.postActionIssue?.kind, 'index_sync');
+  const entry = (await service.getActivityHistory(path)).entries[0];
+  assert.deepEqual(entry.steps.map(step => step.status), ['completed', 'skipped', 'skipped']);
+  assert.equal(entry.steps[0].afterHead, committedHash);
+});
+
+test('a rejected index sync preserves the selected commit and skips integration', async t => {
+  const { path, git } = fixture(t);
+  const main = git('rev-parse', 'HEAD');
+  git('switch', '-qc', 'feature');
+  writeFileSync(join(path, 'file'), 'saved before the index sync error\n');
+  const before = await service.getSnapshot(path);
+  const selection = before.changes.map(({ path, version }) => ({ path, version }));
+  const plan = await service.prepareBranchDelivery(path, {
+    stateId: before.stateId, message: 'save feature', mergeToDefault: true, selection
+  }, 'en');
+
+  const spawn = cp.spawn;
+  t.mock.method(cp, 'spawn', (exe, args, options) => {
+    if (args.includes('reset') && args.includes(':(literal)file')) {
+      throw new Error('Could not start index synchronization');
+    }
+    return spawn(exe, args, options);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+
+  const result = await service.executePlan(path, plan, 'en');
+  const saved = git('rev-parse', 'HEAD');
+  assert.notEqual(saved, main);
+  assert.equal(git('show', 'HEAD:file'), 'saved before the index sync error');
+  assert.equal(git('branch', '--show-current'), 'feature');
+  assert.equal(git('rev-parse', 'main'), main);
+  assert.deepEqual(result.outcomes.map(step => step.status), ['completed', 'skipped', 'skipped']);
+  assert.equal(result.outcomes[0].commitHash, saved);
+  assert.equal(result.postActionIssue?.kind, 'index_sync');
+  assert.match(result.error, /Could not start index synchronization/);
+
+  const entry = (await service.getActivityHistory(path)).entries[0];
+  assert.deepEqual(entry.steps.map(step => step.status), ['completed', 'skipped', 'skipped']);
+  assert.equal(entry.steps[0].afterHead, saved);
+});
+
+test('failure to clean the private index does not hide a confirmed selected save', async t => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, 'file'), 'saved before cleanup\n');
+  const before = await service.getSnapshot(path);
+  const plan = await service.prepareBranchDelivery(path, {
+    stateId: before.stateId, message: 'Save before cleanup', mergeToDefault: false,
+    selection: before.changes.map(({ path, version }) => ({ path, version }))
+  }, 'en');
+  const remove = fs.rmSync;
+  let privateIndexDir;
+  t.mock.method(fs, 'rmSync', (target, options) => {
+    if (typeof target === 'string' && basename(target).startsWith('gitcat-save-')) {
+      privateIndexDir = target;
+      throw new Error('Temporary index is in use');
+    }
+    return remove(target, options);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    if (privateIndexDir) remove(privateIndexDir, { recursive: true, force: true });
+  });
+
+  const result = await service.executePlan(path, plan, 'en');
+  const head = git('rev-parse', 'HEAD');
+  assert.notEqual(head, before.head);
+  assert.equal(git('show', 'HEAD:file'), 'saved before cleanup');
+  assert.equal(result.outcomes[0].status, 'completed');
+  assert.equal(result.outcomes[0].commitHash, head);
+  assert.equal(result.postActionIssue?.kind, 'temporary_cleanup');
+  assert.equal((await service.getActivityHistory(path)).entries[0].steps[0].afterHead, head);
+});
+
+for (const mode of ['choices', 'proposal']) {
+  test(`conflict resolution (${mode}) preserves per-file outcomes when final snapshot read fails`, async t => {
+    const { path, git } = fixture(t);
+    writeFileSync(join(path, 'second.txt'), 'base second\n');
+    git('add', 'second.txt');
+    git('commit', '-qm', 'add second');
+    git('switch', '-qc', 'incoming');
+    writeFileSync(join(path, 'file'), 'incoming file\n');
+    writeFileSync(join(path, 'second.txt'), 'incoming second\n');
+    git('commit', '-qam', 'incoming edits');
+    git('switch', '-q', 'main');
+    writeFileSync(join(path, 'file'), 'local file\n');
+    writeFileSync(join(path, 'second.txt'), 'local second\n');
+    git('commit', '-qam', 'local edits');
+    assert.throws(() => git('merge', 'incoming'));
+
+    const before = await service.getSnapshot(path);
+    const guide = mode === 'choices' ? await service.describeConflicts(path, 'en') : undefined;
+    const proposal = mode === 'proposal' ? {
+      repoPath: before.path,
+      summary: 'Resolve both files',
+      resolutions: [
+        { path: 'file', content: 'resolved file\n', explanation: 'merge both' },
+        { path: 'second.txt', content: 'resolved second\n', explanation: 'merge both' }
+      ],
+      skipped: [],
+      binding: {
+        operation: (await service.describeConflicts(path, 'en')).binding.operation,
+        files: Object.fromEntries((await service.describeConflicts(path, 'en')).files.map(file => [
+          file.path,
+          {
+            stages: git('ls-files', '-u', '-z', '--', file.path).split('\0').filter(Boolean).map(r => r.slice(0, r.indexOf('\t'))).sort().join('\n'),
+            content: createHash('sha256').update(readFileSync(join(path, file.path))).digest('hex')
+          }
+        ]))
+      }
+    } : undefined;
+
+    const nativeSpawn = cp.spawn;
+    let stagedCount = 0;
+    t.mock.method(cp, 'spawn', (exe, args, options) => {
+      if (Array.isArray(args) && args[0] === 'add') stagedCount += 1;
+      if (stagedCount >= 2 && Array.isArray(args) && args[0] === 'status') {
+        return nativeSpawn(process.execPath, ['-e', 'process.stderr.write("fatal: simulated snapshot read error\\n"); process.exit(128);'], options);
+      }
+      return nativeSpawn(exe, args, options);
+    });
+    syncBuiltinESMExports();
+    t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+
+    const result = mode === 'choices'
+      ? await service.applyConflictChoices(path, guide, [{ path: 'file', choice: 'theirs' }, { path: 'second.txt', choice: 'ours' }], 'en')
+      : await service.applyConflictResolution(path, proposal, ['file', 'second.txt'], 'en');
+
+    assert.equal(result.complete, true);
+    assert.equal(result.snapshotStale, true);
+    assert.equal(result.snapshot.head, before.head);
+    assert.equal(result.postActionIssue?.kind, 'snapshot_read');
+    assert.match(result.postActionIssue?.detail ?? '', /simulated snapshot read error/);
+    assert.deepEqual(result.outcomes.map(item => [item.path, item.status]), [['file', 'applied'], ['second.txt', 'applied']]);
+
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    assert.equal(git('ls-files', '-u'), '');
+    const entry = (await service.getActivityHistory(path)).entries[0];
+    assert.deepEqual(entry.steps.map(step => step.status), ['completed', 'completed']);
+    assert.equal(entry.after, undefined);
+  });
+}

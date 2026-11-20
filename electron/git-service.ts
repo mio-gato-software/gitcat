@@ -1,7 +1,8 @@
 import { branchArguments, isBranchNameSafe, parseBranchOperation, validateBranchOperation, type BranchOperation } from "./branch-operation.js";
-import { displayPushAddress, pushArguments, pushRepository, readPushDestination } from "./push-destination.js";
+import { displayPushAddress, parsePushOperation, pushArguments, pushRepository, readDirectPushEndpoints, readPushDestination, readRemoteUrls, validatePushOperation, verifiedTransportRemote, verifyInitialPushUrl, type PushOperation } from "./push-destination.js";
 import { assistantQueryArguments, parseAssistantCommand, type AssistantCommand } from "./assistant-git-command.js";
-import { walkPlanSteps } from "../shared/plan-summary.js";
+import { conflictResolutionEffect, walkPlanSteps } from "../shared/plan-summary.js";
+import type { ConflictResolutionAction } from "../shared/types.js";
 import { syncDestinations } from "../shared/remote-sync.js";
 import { PracticeProjects } from "./practice-project.js";
 import { previewReview, publishReview, type ReviewTools } from "./share-review.js";
@@ -17,10 +18,10 @@ import type { HistoryRecovery, SwitchWorkRequest, SwitchWorkPreview } from "../s
 import { operationContext, operationCheckpoint, operationPhase, inspectOperation, OperationCancelled } from "./operation-progress.js";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, readlinkSync, accessSync, constants, copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { createReadStream, readlinkSync, accessSync, constants, copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync, type Stats } from "node:fs";
 import { signalProcessTree } from "./process-tree.js";
 import { homedir, tmpdir } from "node:os";
-import { basename, delimiter, join, resolve, sep } from "node:path";
+import { basename, delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
 import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
 import { parseWorktrees, parseWorktreeList } from "./worktrees.js";
@@ -56,7 +57,7 @@ import {
 } from "./outbound-content.js";
 import type {
   ActionPlan, ActivityHistoryView, AiSharingFile, AiSharingPreview, AiSharingPurpose, Branch, Commit, CommitDetail, Conflict, ConversationMessage, DefaultBranchSource,
-  DeliveryRequest, ExecutionResult, FileChange, GitProtocol, SecretFinding, SecretKind, SelectedChange, WithheldFile,
+  DeliveryRequest, ExecutionResult, FileChange, GitProtocol, PostActionIssue, SecretFinding, SecretKind, SelectedChange, WithheldFile,
   ConflictApplyResult, ConflictFileOutcome, ConflictProposal, ConflictChoice, ConflictChoiceOutcome, ConflictChoiceRequest, ConflictChoiceResult,
   ConflictFileVersion, ConflictGuide, ConflictGuideFile, ConflictSideIdentity, ConflictSideId, ExecutionFailure, HistoryPage, HistoryRequest, HistoryScope, LlmConfig, LlmConfigInput, LlmConnectResult, AiConnectionProblem,
   Locale, Operation, PendingOperation, PlanStep, RepoSnapshot, StepOutcome, AssistantUnavailable, RecoveryReport,
@@ -203,7 +204,7 @@ function outputBuffer() {
   };
 }
 
-async function runCommand(command: string, args: string[], cwd: string, timeoutMs = 60_000, extraEnv: NodeJS.ProcessEnv = {}): Promise<CommandResult> {
+async function runCommand(command: string, args: string[], cwd: string, timeoutMs = 60_000, extraEnv: NodeJS.ProcessEnv = {}, input?: string): Promise<CommandResult> {
   const executable = await resolveTool(command);
   const searchPath = (await toolDirectories()).join(delimiter);
   return new Promise((resolvePromise, reject) => {
@@ -211,7 +212,7 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
       cwd,
       env: commandEnv(searchPath, extraEnv),
       windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       detached: process.platform !== "win32"
     });
     const stdout = outputBuffer();
@@ -232,10 +233,12 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
       if (active.signal.aborted) cancel();
     }
     const cleanup = () => { clearTimeout(timer); if (canAbort) active.signal.removeEventListener("abort", cancel); };
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", stdout.append);
-    child.stderr.on("data", stderr.append);
+    const childStdout = child.stdout!;
+    const childStderr = child.stderr!;
+    childStdout.setEncoding("utf8");
+    childStderr.setEncoding("utf8");
+    childStdout.on("data", stdout.append);
+    childStderr.on("data", stderr.append);
     child.on("error", (error) => { if (!settled) { settled = true; cleanup(); reject(error); } });
     child.on("close", (code) => {
       if (!settled) {
@@ -248,6 +251,11 @@ async function runCommand(command: string, args: string[], cwd: string, timeoutM
         });
       }
     });
+    if (child.stdin) {
+      // Early exit is reported by Git's exit status.
+      child.stdin.on("error", () => {});
+      child.stdin.end(input);
+    }
   });
 }
 
@@ -316,21 +324,116 @@ function parseStatus(raw: string) {
   return changes;
 }
 
-/** The staged entries of every path, as `ls-files --stage -z` lists them, so each change can be bound to its own. */
-function parseStage(raw: string) {
-  const entries = new Map<string, string[]>();
-  for (const record of raw.split("\0").filter(Boolean)) {
-    const tab = record.indexOf("\t");
-    if (tab < 0) continue;
-    const path = record.slice(tab + 1);
-    entries.set(path, [...(entries.get(path) ?? []), record.slice(0, tab)]);
-  }
-  return entries;
+const stageHeaderPattern = /^[0-7]{6} [0-9a-f]{40,64} [0-3]$/;
+const incompleteIndexMessage = "Git returned an incomplete index listing. GitCat could not verify the repository state.";
+
+/**
+ * Streams `git ls-files --stage -z` so large tracked indexes never hit the buffered-output cap.
+ * Every record is validated and hashed into the repository fingerprint, while only staged entries
+ * for paths with local changes are retained in memory.
+ */
+async function readStageIndex(
+  repoRoot: string,
+  neededPaths: ReadonlySet<string>,
+  timeoutMs = 60_000
+): Promise<{ digest: string; entries: Map<string, string[]> }> {
+  const child = await spawnGit(repoRoot, ["ls-files", "--stage", "-z"], { group: true });
+  return new Promise((resolvePromise, reject) => {
+    const digest = createHash("sha256");
+    const entries = new Map<string, string[]>();
+    const stderr = outputBuffer();
+    let pending: Buffer = Buffer.alloc(0);
+    let settled = false;
+    let stopped: Error | undefined;
+    const active = operationContext();
+    const stop = (error: Error) => {
+      if (stopped) return;
+      stopped = error;
+      signalProcessTree(child, "SIGTERM");
+      setTimeout(() => { if (!settled) signalProcessTree(child, "SIGKILL"); }, 2_000).unref();
+    };
+    const timer = setTimeout(() => stop(new Error("git ls-files timed out. The final repository state must be checked; changes may have completed.")), timeoutMs);
+    const cancel = () => stop(new OperationCancelled());
+    const canAbort = active && !active.mutation && !active.inspecting;
+    if (canAbort) {
+      active.signal.addEventListener("abort", cancel, { once: true });
+      if (active.signal.aborted) cancel();
+    }
+    const cleanup = () => {
+      clearTimeout(timer);
+      if (canAbort) active.signal.removeEventListener("abort", cancel);
+    };
+
+    const consumeRecord = (raw: Buffer) => {
+      const record = raw.toString("utf8");
+      const tab = record.indexOf("\t");
+      if (tab < 0) return false;
+      const header = record.slice(0, tab);
+      const path = record.slice(tab + 1);
+      if (!path || !stageHeaderPattern.test(header)) return false;
+      if (neededPaths.has(path)) {
+        const list = entries.get(path);
+        if (list) list.push(header);
+        else entries.set(path, [header]);
+      }
+      return true;
+    };
+
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      if (stopped) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      digest.update(buffer);
+      let start = 0;
+      while (start < buffer.length) {
+        const nul = buffer.indexOf(0, start);
+        if (nul < 0) break;
+        const slice = buffer.subarray(start, nul);
+        const record = pending.length ? Buffer.concat([pending, slice]) : slice;
+        pending = Buffer.alloc(0);
+        if (!consumeRecord(record)) {
+          stop(new Error(incompleteIndexMessage));
+          return;
+        }
+        start = nul + 1;
+      }
+      if (start < buffer.length) {
+        const tail = buffer.subarray(start);
+        pending = pending.length ? Buffer.concat([pending, tail]) : Buffer.from(tail);
+        if (pending.length > commandOutputLimit) {
+          stop(new Error(incompleteIndexMessage));
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", stderr.append);
+    child.stdout.on("error", (error) => { if (!settled) { settled = true; cleanup(); reject(error); } });
+    child.on("error", (error) => { if (!settled) { settled = true; cleanup(); reject(error); } });
+    child.on("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (stopped) { reject(stopped); return; }
+      if (signal) { reject(new Error(incompleteIndexMessage)); return; }
+      if (code !== 0) {
+        reject(new Error(stderr.text.trim() || `git ls-files --stage -z terminó con código ${code ?? 1}`));
+        return;
+      }
+      if (pending.length > 0) {
+        reject(new Error(incompleteIndexMessage));
+        return;
+      }
+      resolvePromise({ digest: digest.digest("hex"), entries });
+    });
+  });
 }
 
 /** A pathspec that means this exact path: no glob, no magic, whatever characters the name has. */
+function literalPath(path: string) {
+  return `:(literal)${path}`;
+}
+
 function literalPaths(paths: string[]) {
-  return paths.map((path) => `:(literal)${path}`);
+  return paths.map(literalPath);
 }
 
 function parseTrack(track: string) {
@@ -605,13 +708,13 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
       worktree.changes = parseStatus(await checkedGit(worktree.path, ["--no-optional-locks", "status", "--short", "--untracked-files=all", "-z"], true));
     } catch { worktree.statusUnavailable = true; }
   }));
-  const stageRaw = await checkedGit(repoRoot, ["ls-files", "--stage", "-z"], true);
-  const stage = parseStage(stageRaw);
+  const neededStagePaths = new Set(changes.flatMap((change) => change.from ? [change.path, change.from] : [change.path]));
+  const { digest: stageDigest, entries: stage } = await readStageIndex(repoRoot, neededStagePaths);
   const stashRaw = await checkedGit(repoRoot, ["stash", "list", "--format=%H"]);
   // A file can change while keeping exactly the same status code. Bind reviews to its
   // contents, the staged version, the branch refs and checkout, not just "M file.txt".
   const fingerprint = createHash("sha256").update(JSON.stringify([
-    head, currentBranch, statusRaw, branchRaw, remoteBranchRaw, pending, worktreeBinding, stageRaw, stashRaw
+    head, currentBranch, statusRaw, branchRaw, remoteBranchRaw, pending, worktreeBinding, stageDigest, stashRaw
   ]));
   for (const change of changes) {
     // Each change also gets a version of its own: the commit and branch it sits on, its status, the
@@ -624,15 +727,21 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
       const file = resolve(repoRoot, path);
       version.update(`\0${path}\0`);
       try {
-        const stat = lstatSync(file);
+        const state = inspectWorktreePath(repoRoot, file);
+        if (state.kind !== "present") {
+          version.update(state.kind);
+          continue;
+        }
+        const { stat } = state;
         version.update(String(stat.mode));
         if (stat.isSymbolicLink()) version.update(readlinkSync(file));
         else if (stat.isFile()) {
           for await (const chunk of createReadStream(file)) version.update(chunk);
         } else if (stat.isDirectory()) version.update(await optionalGit(file, ["rev-parse", "HEAD"]));
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        version.update("missing");
+        const kind = unavailableWorktreePath(error);
+        if (!kind) throw error;
+        version.update(kind);
       }
     }
     change.version = version.digest("hex");
@@ -800,9 +909,10 @@ export async function getCommitFileDiff(cwd: string, hash: string, file: string)
   const files = parseNameStatus(statusRaw);
   const selected = files.filter((change) => change.path === relative || change.from === relative);
   if (!selected.length) throw new Error("Ese archivo no forma parte de este commit.");
+  const pathspec = literalPath(relative);
   const patch = base
-    ? await readDiffPreview(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", base, commit, "--", relative])
-    : await readDiffPreview(repoRoot, ["show", "--no-color", "--no-ext-diff", "--unified=3", "--format=", commit, "--", relative]);
+    ? await readDiffPreview(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", base, commit, "--", pathspec])
+    : await readDiffPreview(repoRoot, ["show", "--no-color", "--no-ext-diff", "--unified=3", "--format=", commit, "--", pathspec]);
   const stats = await commitFileStats(repoRoot, commit, base);
   return { hash: commit, files: selected, stats: Object.fromEntries(selected.flatMap((change) => stats[change.path] ? [[change.path, stats[change.path]]] : [])), ...cutDiff(patch.stdout.trim(), patch.stdoutTruncated) };
 }
@@ -814,14 +924,15 @@ export async function getWorkingFileDiff(cwd: string, file: string): Promise<Com
   // A path from the interface is still a path: it has to land inside the repository that asked.
   if (absolute !== repoRoot && !absolute.startsWith(`${repoRoot}${sep}`)) throw new Error("La ruta no pertenece a este repositorio.");
   const relative = absolute.slice(repoRoot.length + 1).split(sep).join("/");
+  const pathspec = literalPath(relative);
   const head = await optionalGit(repoRoot, ["rev-parse", "HEAD"]);
-  const tracked = await readDiffPreview(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", ...(head ? ["HEAD"] : []), "--", relative]);
+  const tracked = await readDiffPreview(repoRoot, ["diff", "--no-color", "--no-ext-diff", "--unified=3", ...(head ? ["HEAD"] : []), "--", pathspec]);
   if (tracked.stdoutTruncated || tracked.stdout.trim()) {
     return { hash: "", files: [], stats: {}, ...cutDiff(tracked.stdout.trim(), tracked.stdoutTruncated) };
   }
 
   // Untracked files have nothing to diff against, so the file itself is the change.
-  const untracked = await checkedGit(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z", "--", relative]);
+  const untracked = await checkedGit(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z", "--", pathspec]);
   if (!untracked.split("\0").filter(Boolean).length) return { hash: "", files: [], stats: {}, diff: "", truncated: false };
   try {
     const content = readFileSync(absolute);
@@ -857,7 +968,7 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
     case "stash_pop": return "git stash pop --index stash@{0}";
     case "fetch": return "git fetch --prune";
     case "pull": return "git pull --ff-only";
-    case "push": return ["git", ...pushArguments(args)].map(quoteToken).join(" ");
+    case "push": return ["git", ...pushArguments(parsePushOperation(args))].map(quoteToken).join(" ");
     case "set_identity": {
       const where = args.scope === "global" ? " --global" : "";
       return `git config${where} user.name ${JSON.stringify(args.user ?? "")} && git config${where} user.email ${JSON.stringify(args.email ?? "")}`;
@@ -866,7 +977,6 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
     case "abort_operation": return `git ${args.pending ?? "rebase"} --abort`;
     case "continue_operation": return `git ${args.pending ?? "rebase"} --continue`;
     case "skip_operation": return `git ${args.pending ?? "rebase"} --skip`;
-    case "resolve_conflict": return resolveConflictCommand(args);
     case "commit": return `git add -A && git commit -m "${args.message ?? ""}"`;
     case "ignore_path": return `echo ${JSON.stringify(args.line ?? "")} >> .gitignore`;
     case "git_command": return ["git", ...argv].map(quoteToken).join(" ");
@@ -878,7 +988,7 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
         if (args.account && args.account !== args.activeAccount) steps.push(`gh auth switch --hostname ${args.host} --user ${args.account}`);
         steps.push(`GH_HOST=${args.host} gh repo create ${args.owner}/${args.name} --private`);
       }
-      steps.push(`git -C ${JSON.stringify(args.source)} remote add ${args.remote} ${args.remoteUrl}`);
+      steps.push(`git -C ${JSON.stringify(args.source)} remote ${args.replaceRemote === "true" ? "set-url" : "add"} ${args.remote} ${args.remoteUrl}`);
       if (args.push === "true") steps.push(`git -C ${JSON.stringify(args.source)} push -u ${args.remote} HEAD`);
       if (args.provider === "github" && args.account && args.account !== args.activeAccount) steps.push(`gh auth switch --hostname ${args.host} --user ${args.activeAccount}`);
       return steps.join(" && ");
@@ -893,25 +1003,21 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
  * their side deleted has no version to check out, so keeping "ours" there means removing the file.
  * The conflict's own shape decides, which is why this reads the snapshot rather than trusting args.
  */
-function conflictPlan(args: Record<string, string>, snapshot?: RepoSnapshot) {
+function conflictResolutionFor(args: Record<string, string>, snapshot?: RepoSnapshot): ConflictResolutionAction | undefined {
   const conflict = snapshot?.conflicts.find((item) => item.path === args.path);
-  if (args.side === "resolved" || !conflict) return { action: "add" as const, conflict };
-  return { action: resolutionFor(conflict.kind, args.side === "theirs" ? "theirs" : "ours"), conflict };
+  if (!conflict) return undefined;
+  return args.side === "resolved" ? "add" : resolutionFor(conflict.kind, args.side === "theirs" ? "theirs" : "ours");
 }
 
-function resolveConflictCommand(args: Record<string, string>, snapshot?: RepoSnapshot) {
-  const { action } = conflictPlan(args, snapshot);
-  const path = JSON.stringify(args.path ?? "");
-  if (action === "remove") return `git rm -- ${path}`;
-  if (action === "checkout") return `git checkout --${args.side} -- ${path} && git add -- ${path}`;
-  return `git add -- ${path}`;
+function resolveConflictArguments(args: Record<string, string>, action: ConflictResolutionAction): string[][] {
+  const path = literalPath(args.path);
+  if (action === "remove") return [["rm", "-q", "--", path]];
+  const stage = ["add", "--", path];
+  return action === "checkout" ? [["checkout", `--${args.side}`, "--", path], stage] : [stage];
 }
 
-async function runResolveConflict(cwd: string, args: Record<string, string>, snapshot: RepoSnapshot, locale?: Locale) {
-  const { action } = conflictPlan(args, snapshot);
-  if (action === "remove") return reportedGit(cwd, ["rm", "-q", "--", args.path]);
-  if (action === "checkout") await reportedGit(cwd, ["checkout", `--${args.side}`, "--", args.path]);
-  await reportedGit(cwd, ["add", "--", args.path]);
+async function runResolveConflict(cwd: string, args: Record<string, string>, action: ConflictResolutionAction, locale?: Locale) {
+  for (const argv of resolveConflictArguments(args, action)) await reportedGit(cwd, argv);
   return localized(locale, `${args.path} resuelto.`, `${args.path} resolved.`);
 }
 
@@ -1060,12 +1166,13 @@ export const removeHostingConnection=(id:string)=>hostingConnections().remove(id
 async function nativeGit(cwd:string,args:string[],context:NativeHostingContext) {
   const account=await hostingConnections().verify(context.connectionId);
   if(account.accountId!==context.accountId)throw new Error('The hosting account changed. Review the action again before publishing.');
+  const operation = args[0];
+  if (!["ls-remote", "fetch", "push"].includes(operation)) throw new Error("Only the reviewed remote read, fetch or push can use this hosting connection.");
+  const remote = await verifiedTransportRemote(argv => readGit(cwd, argv), context.location.gitUrl, operation === "push" ? "push" : "fetch");
   const config=nativeGitConfig(context.location,hostingConnections().authorization(context.connectionId,true));
   const argv=[...args];
-  if(argv[0]==='ls-remote')argv[argv[1]==='--heads'?2:1]=context.location.gitUrl;
-  else if(argv[0]==='fetch'||argv[0]==='push')argv[1]=context.location.gitUrl;
-  else throw new Error('Only the reviewed remote read, fetch or push can use this hosting connection.');
-  const result=await runCommand('git',[...config.args,...argv],cwd,60_000,config.env);
+  argv[operation === "ls-remote" && argv[1] === "--heads" ? 2 : 1] = remote.name;
+  const result=await runCommand('git',[...config.args,...remote.config,...argv],cwd,60_000,config.env);
   if(result.code!==0)throw new Error(`The hosting Git operation failed (${classifyAccess({code:result.code,output:result.stderr})}). Check repository access and branch protections, then review again. If Git does not support --config-env, update Git to version 2.31 or later.`);
   if (argv[0] === 'push') return 'Published the reviewed saved commits.';
   return argv[0] === 'ls-remote' ? completeGitOutput(result).trim() : commandDiagnostics(result);
@@ -1222,6 +1329,32 @@ async function identityEffects(snapshot: RepoSnapshot, args: Record<string, stri
   ];
 }
 
+async function readHostedRemoteReplacement(cwd: string, remote: string) {
+  const read = (args: string[]) => readGit(cwd, args);
+  const [pushUrls, mirror, names] = await Promise.all([
+    read(["config", "--null", "--get-all", `remote.${remote}.pushurl`]),
+    read(["config", "--type=bool", "--get", `remote.${remote}.mirror`]),
+    checkedGit(cwd, ["remote"])
+  ]);
+  if ([pushUrls, mirror].some(result => result.code !== 0 && result.code !== 1)) {
+    throw new Error("Git could not verify the remote configuration. Review it before creating the repository.");
+  }
+  if (pushUrls.code === 0) throw new Error(`Remote "${remote}" has a separate push destination. Choose a new remote name.`);
+  if (mirror.stdout.trim() === "true") throw new Error(`Remote "${remote}" mirrors references. Choose a new remote name.`);
+  if (!names.split("\n").includes(remote)) return undefined;
+
+  const [urls, local] = await Promise.all([
+    readRemoteUrls(read, remote, "fetch"),
+    read(["config", "--local", "--no-includes", "--null", "--get-all", `remote.${remote}.url`])
+  ]);
+  const raw = local.code === 0 ? local.stdout.split("\0").slice(0, -1) : [];
+  if (urls.length > 1 || raw.length > 1) throw new Error(`Remote "${remote}" has multiple URLs. Choose a new remote name.`);
+  const [rawUrl] = raw;
+  if (!rawUrl) throw new Error(`Remote "${remote}" has no editable URL in this repository. Choose a new remote name.`);
+  const [effectiveUrl] = urls;
+  return { rawUrl, effectiveUrl, binding: createHash("sha256").update(JSON.stringify([rawUrl, effectiveUrl])).digest("hex") };
+}
+
 async function prepareHostedRepository(snapshot: RepoSnapshot, input: RepositoryFields, source: ActionPlan["source"]): Promise<RepositoryPreparation> {
   const validation = validateRepositoryFields(input);
   if (validation.issues.length) return { blockers: validation.issues.map((issue) => ({ field: `repository.${issue.field}`, problem: issue.problem })) };
@@ -1324,25 +1457,39 @@ async function prepareHostedRepository(snapshot: RepoSnapshot, input: Repository
     }
   }
 
-  const remoteResult = await readGit(sourcePath, ["remote", "get-url", remote]);
-  const remoteExists = remoteResult.code === 0;
-  if (remoteExists && await optionalGit(sourcePath, ["config", "--get-all", `remote.${remote}.pushurl`])) return blocked(`remote "${remote}" has a separate push destination. Choose a new remote name so existing publishing settings are preserved`, "repository.remote");
-  if (remoteExists && !replaceRemote) {
-    return blocked(`the local remote "${remote}" already points to ${remoteResult.stdout.trim()}; replacing it requires the user to say so explicitly`, "repository.replaceRemote");
+  let existingRemote: Awaited<ReturnType<typeof readHostedRemoteReplacement>>;
+  try {
+    existingRemote = await readHostedRemoteReplacement(sourcePath, remote);
+  } catch (error) {
+    return blocked(error instanceof Error ? error.message : String(error), "repository.remote");
+  }
+  if (existingRemote && !replaceRemote) {
+    return blocked(`the local remote "${remote}" already points to ${displayPushAddress(existingRemote.effectiveUrl)}; replacing it requires the user to say so explicitly`, "repository.replaceRemote");
+  }
+  if (push) {
+    if (!isBranchNameSafe(sourceSnapshot.currentBranch) || sourceSnapshot.currentBranch === "HEAD") return blocked("Choose a local branch before publishing.");
+    const read = (args: string[]) => readGit(sourcePath, args);
+    try {
+      await verifyInitialPushUrl(read, remoteUrl);
+      if (hosting && hosting.location.gitUrl !== remoteUrl) await verifyInitialPushUrl(read, hosting.location.gitUrl);
+      await readPushDestination(read, sourceSnapshot, existingRemote ? remote : remoteUrl, sourceSnapshot.currentBranch);
+    } catch (error) {
+      return blocked(error instanceof Error ? error.message : String(error), "repository.remote");
+    }
   }
 
   const args = {
     name, owner, host, protocol, sshHost, remoteUrl, visibility: "private", source: sourcePath, remote,
     account, activeAccount, provider, namespaceId, ...(hosting?{connectionId:hosting.connectionId,serviceUrl:hosting.location.baseUrl}:{}),
-    push: String(push), replaceRemote: String(replaceRemote && remoteExists),
-    existingRemoteHash: remoteExists ? createHash("sha256").update(remoteResult.stdout.trim()).digest("hex") : ""
+    push: String(push), replaceRemote: String(replaceRemote && Boolean(existingRemote)),
+    existingRemoteHash: existingRemote?.binding ?? ""
   };
   const effects = [
     `create: ${host}/${owner}/${name} (private)`,
     `local: ${sourcePath}`,
     `${cli} account: ${hosting?.label??account}${account === activeAccount ? " (active)" : ` (temporarily active instead of ${activeAccount}, restored afterwards)`}`,
     ...(protocol === "ssh" ? [`ssh identity: ${sshHost} → ${owner}`] : []),
-    `remote ${remote}: ${remoteExists ? `${remoteResult.stdout.trim()} → ${remoteUrl}` : remoteUrl}`,
+    `remote ${remote}: ${existingRemote ? `${displayPushAddress(existingRemote.effectiveUrl)} → ${remoteUrl}` : remoteUrl}`,
     `push: ${push ? `${remote} HEAD` : "no"}`,
     ...(hosting?[`Initial publication uses the verified saved account over HTTPS: ${hosting.location.gitUrl}. Unsaved files stay local.`]:[])
   ];
@@ -2002,7 +2149,7 @@ function highestRisk(a: ActionPlan["risk"], b: ActionPlan["risk"]): ActionPlan["
  */
 async function gitOperationDraft(plan: ModelPlan, commands: AssistantCommand[], snapshot: RepoSnapshot, locale: Locale = "es", notes?: SharingNotes): Promise<PlanDraft> {
   const proposed = commands.map(command => {
-    if (command.operation !== "git_command") return stepFrom(command.operation, command.args, [], locale);
+    if (command.operation !== "git_command") return stepFrom(command.operation, command.args, [], locale, snapshot);
     const query = stepFrom(command.operation, {}, command.argv, locale);
     return query && { ...query, assistantQuery: true as const };
   });
@@ -2090,7 +2237,7 @@ async function prepareModelPlan(
         if (problem) issues.push({ field: `steps[${index}]`, problem });
       }
       const [verb, target] = step.argv;
-      if (step.operation === "git_command" && verb === "checkout" && step.argv.length === 2 &&
+      if (step.operation === "git_command" && (verb === "checkout" || verb === "switch") && step.argv.length === 2 &&
           snapshot.remoteRefs?.some(ref => target === ref || target === `refs/remotes/${ref}`)) {
         issues.push({ field: `steps[${index}].argv`, problem: "Checking out a remote ref detaches HEAD. Use sync_remote to activate its local counterpart." });
       }
@@ -2129,7 +2276,7 @@ async function bindPushDestinations(snapshot: RepoSnapshot, steps: PlanStep[]) {
     const target = pushRepository(step);
     if (target === undefined) { bound.push(step); continue; }
     const pushDestination = await readPushDestination(
-      args => readGit(snapshot.path, args), { remotes: snapshot.remotes, currentBranch: on }, target
+      args => readGit(snapshot.path, args), { remotes: snapshot.remotes, currentBranch: on }, target, step.args.branch
     );
     bound.push({ ...step, pushDestination });
   }
@@ -2176,13 +2323,52 @@ function contentVersion(raw: Buffer | undefined) {
   return raw ? createHash("sha256").update(raw).digest("hex") : "missing";
 }
 
-function readIfPresent(absolute: string) {
+function unavailableWorktreePath(error: unknown): "missing" | "blocked" | undefined {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "ENOENT") return "missing";
+  if (code === "ENOTDIR" || code === "EISDIR" || code === "ELOOP") return "blocked";
+}
+
+function inspectWorktreePath(repoRoot: string, absolute: string): { kind: "present"; stat: Stats } | { kind: "missing" | "blocked" } {
+  const path = relative(repoRoot, absolute);
+  const parts = path.split(sep);
+  if (!path || isAbsolute(path) || parts[0] === "..") return { kind: "blocked" };
   try {
-    return readFileSync(absolute);
+    let directory = repoRoot;
+    for (const part of parts.slice(0, -1)) {
+      directory = join(directory, part);
+      if (!lstatSync(directory).isDirectory()) return { kind: "blocked" };
+    }
+    return { kind: "present", stat: lstatSync(absolute) };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
+    const kind = unavailableWorktreePath(error);
+    if (!kind) throw error;
+    return { kind };
   }
+}
+
+type WorkingConflictFile =
+  | { kind: "file"; raw: Buffer }
+  | { kind: "link"; target: string }
+  | { kind: "missing" | "blocked" | "special" };
+
+function readWorkingConflictFile(repoRoot: string, absolute: string): WorkingConflictFile {
+  const state = inspectWorktreePath(repoRoot, absolute);
+  if (state.kind !== "present") return state;
+  try {
+    if (state.stat.isSymbolicLink()) return { kind: "link", target: readlinkSync(absolute) };
+    if (!state.stat.isFile()) return { kind: "special" };
+    return { kind: "file", raw: readFileSync(absolute, { flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) }) };
+  } catch (error) {
+    const kind = unavailableWorktreePath(error);
+    if (!kind) throw error;
+    return { kind };
+  }
+}
+
+function readReviewedConflictFile(repoRoot: string, absolute: string) {
+  const working = readWorkingConflictFile(repoRoot, absolute);
+  return working.kind === "file" ? working.raw : undefined;
 }
 
 /**
@@ -2197,7 +2383,8 @@ async function readConflicts(snapshot: RepoSnapshot): Promise<ConflictEntry[]> {
     const absolute = resolve(snapshot.path, conflict.path);
     if (!absolute.startsWith(`${snapshot.path}${sep}`)) return [];
     try {
-      const raw = readFileSync(absolute);
+      const raw = readReviewedConflictFile(snapshot.path, absolute);
+      if (!raw) return [{ conflict }];
       if (raw.includes(0) || raw.length > conflictFileLimit) return [{ conflict, raw }];
       const text = raw.toString("utf8");
       const findings = credentialFindings(conflict.path, text, scanText(conflict.path, text));
@@ -2285,8 +2472,34 @@ export async function proposeConflictResolution(cwd: string, locale?: Locale): P
  * that were reviewed — before a single file is written, because an edit made while the review was
  * open must never be overwritten by a draft of the older file.
  */
+async function finalizeConflictResult<T extends ConflictFileOutcome | ConflictChoiceOutcome>(
+  repoRoot: string,
+  outcomes: T[],
+  fallbackSnapshot: RepoSnapshot,
+  language: Locale
+) {
+  const complete = outcomes.every((outcome) => outcome.status === "applied");
+  try {
+    return { snapshot: await getSnapshot(repoRoot), complete, outcomes };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      snapshot: fallbackSnapshot,
+      snapshotStale: true,
+      complete,
+      outcomes,
+      postActionIssue: {
+        kind: "snapshot_read" as const,
+        detail: localized(language,
+          `No se pudo volver a leer el estado del repositorio después de aplicar los conflictos. Los archivos ya aplicados se conservan. Actualiza la vista antes de continuar.\n${detail}`,
+          `Could not re-read the repository state after applying conflict resolutions. Files already applied remain in place. Refresh the view before continuing.\n${detail}`)
+      }
+    };
+  }
+}
+
 async function applyConflictResolutionBody(
-  cwd: string, proposal: IssuedConflictProposal, accepted: string[], locale?: Locale
+  cwd: string, proposal: IssuedConflictProposal, accepted: string[], fallbackSnapshot: RepoSnapshot, locale?: Locale
 ): Promise<ConflictApplyResult> {
   const language = normalizeLocale(locale);
   const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
@@ -2316,7 +2529,7 @@ async function applyConflictResolutionBody(
   const reviewedNow = (path: string) => {
     const reviewed = proposal.binding.files[path];
     return Boolean(reviewed?.stages) && stages.get(path) === reviewed.stages &&
-      contentVersion(readIfPresent(resolve(repoRoot, path))) === reviewed.content;
+      contentVersion(readReviewedConflictFile(repoRoot, resolve(repoRoot, path))) === reviewed.content;
   };
   const changed = new Set(chosen.filter((resolution) => !reviewedNow(resolution.path)).map((resolution) => resolution.path));
   if (changed.size) {
@@ -2324,21 +2537,21 @@ async function applyConflictResolutionBody(
   }
 
   // Everything still matches the review. Write and stage one file at a time, and stop at the first
-  // failure: what was applied stays applied and is reported as such, the file that failed is put back
-  // as it was, and the rest is left alone for another try.
+  // failure: completed resolutions stay applied, and rollback only replaces bytes we wrote.
   const outcomes: ConflictFileOutcome[] = [];
   for (const resolution of chosen) {
     const absolute = resolve(repoRoot, resolution.path);
-    const original = readIfPresent(absolute);
+    const original = readReviewedConflictFile(repoRoot, absolute);
     // The last look before writing: an editor can still save between the check above and here.
-    if (contentVersion(original) !== proposal.binding.files[resolution.path].content) {
+    if (!original || contentVersion(original) !== proposal.binding.files[resolution.path].content) {
       outcomes.push({ path: resolution.path, status: "changed" });
       break;
     }
     let failure: string | undefined;
+    const proposed = Buffer.from(resolution.content, "utf8");
     try {
-      writeFileSync(absolute, resolution.content, "utf8");
-      const staged = await runGit(repoRoot, ["add", "--", resolution.path]);
+      writeFileSync(absolute, proposed);
+      const staged = await runGit(repoRoot, ["add", "--", literalPath(resolution.path)]);
       if (staged.code !== 0) failure = staged.stderr.trim() || staged.stdout.trim() || `git add -- ${resolution.path}`;
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
@@ -2349,18 +2562,14 @@ async function applyConflictResolutionBody(
     }
     let restored = false;
     try {
-      if (original) writeFileSync(absolute, original);
-      restored = contentVersion(readIfPresent(absolute)) === proposal.binding.files[resolution.path].content;
+      if (readReviewedConflictFile(repoRoot, absolute)?.equals(proposed)) writeFileSync(absolute, original);
+      restored = contentVersion(readReviewedConflictFile(repoRoot, absolute)) === proposal.binding.files[resolution.path].content;
     } catch { /* reported below: the file may now hold the proposed content */ }
     outcomes.push({ path: resolution.path, status: "failed", restored, detail: failure });
     break;
   }
   for (const resolution of chosen.slice(outcomes.length)) outcomes.push({ path: resolution.path, status: "not_applied" });
-  return {
-    snapshot: await getSnapshot(repoRoot),
-    complete: outcomes.every((outcome) => outcome.status === "applied"),
-    outcomes
-  };
+  return finalizeConflictResult(repoRoot, outcomes, fallbackSnapshot, language);
 }
 
 /**
@@ -2515,22 +2724,18 @@ export async function describeConflicts(cwd: string, locale?: Locale): Promise<I
     const held = entries.get(conflict.path) ?? [];
     const at = (stage: number) => held.find((entry) => entry.stage === stage);
     const [ours, theirs] = await Promise.all([versionFrom(repoRoot, at(sideStage.ours)), versionFrom(repoRoot, at(sideStage.theirs))]);
-    let working: ConflictGuideFile["working"] = { present: false, binary: false, markers: false };
-    let raw: Buffer | undefined;
-    try {
-      const stat = lstatSync(absolute);
-      if (stat.isSymbolicLink() || !stat.isFile()) working = { present: true, binary: true, markers: false };
-      else {
-        raw = readFileSync(absolute);
-        const binary = isBinaryContent(raw);
-        working = { present: true, binary, markers: !binary && hasConflictMarkers(raw.toString("utf8")) };
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
+    const current = readWorkingConflictFile(repoRoot, absolute);
+    const present = current.kind !== "missing" && current.kind !== "blocked";
+    const working: ConflictGuideFile["working"] = {
+      present,
+      binary: current.kind === "file" ? isBinaryContent(current.raw) : present,
+      markers: false,
+      ...(current.kind === "blocked" ? { blocked: true } : {})
+    };
+    if (current.kind === "file" && !working.binary) working.markers = hasConflictMarkers(current.raw.toString("utf8"));
     const binary = ours.binary || theirs.binary || working.binary;
-    const choices = choicesFor({ ours: ours.present, theirs: theirs.present, binary, working: working.present });
-    binding.files[conflict.path] = { stages: stages.get(conflict.path) ?? "", content: working.binary && !raw ? "special" : contentVersion(raw), choices };
+    const choices = working.blocked ? [] : choicesFor({ ours: ours.present, theirs: theirs.present, binary, working: present });
+    binding.files[conflict.path] = { stages: stages.get(conflict.path) ?? "", content: workingVersion(current), choices };
     files.push({
       path: conflict.path, kind: conflict.kind, binary, renames: renamesFor(conflict.path, renames),
       ours, theirs, base: { present: Boolean(at(1)) }, working, choices
@@ -2552,22 +2757,16 @@ export async function describeConflicts(cwd: string, locale?: Locale): Promise<I
 }
 
 /** The bytes a file holds now, in the same terms the guide recorded them. */
-function workingVersion(absolute: string) {
-  try {
-    const stat = lstatSync(absolute);
-    if (stat.isSymbolicLink() || !stat.isFile()) return "special";
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
-    throw error;
-  }
-  return contentVersion(readIfPresent(absolute));
+function workingVersion(working: WorkingConflictFile) {
+  if (working.kind === "file") return contentVersion(working.raw);
+  if (working.kind === "link") return `link:${working.target}`;
+  return working.kind;
 }
 
 /** Why a hand edit cannot be marked resolved as it is, or nothing when it can. */
-function editProblem(absolute: string): ConflictChoiceOutcome["reason"] | undefined {
-  const raw = readIfPresent(absolute);
-  if (!raw) return "missing";
-  return !isBinaryContent(raw) && hasConflictMarkers(raw.toString("utf8")) ? "markers" : undefined;
+function editProblem(working: WorkingConflictFile): ConflictChoiceOutcome["reason"] | undefined {
+  if (working.kind !== "file") return working.kind === "missing" ? "missing" : "path";
+  return !isBinaryContent(working.raw) && hasConflictMarkers(working.raw.toString("utf8")) ? "markers" : undefined;
 }
 
 const conflictChoices = new Set<ConflictChoice>(["ours", "theirs", "delete", "edited"]);
@@ -2577,11 +2776,10 @@ const conflictChoices = new Set<ConflictChoice>(["ours", "theirs", "delete", "ed
  * the repository as it is now before anything is written — the same repository, the same operation,
  * the same conflict stages, and for a side choice the very bytes that were on screen — because taking
  * a side overwrites the file, and an edit made meanwhile must never be lost to it. Files are then
- * settled one at a time; the first failure stops the run and is reported exactly, with the file put
- * back as it was.
+ * settled one at a time. Rollback after a failure is limited to the version GitCat just checked out.
  */
 async function applyConflictChoicesBody(
-  cwd: string, guide: IssuedConflictGuide, requested: ConflictChoiceRequest[], locale?: Locale
+  cwd: string, guide: IssuedConflictGuide, requested: ConflictChoiceRequest[], fallbackSnapshot: RepoSnapshot, locale?: Locale
 ): Promise<ConflictChoiceResult> {
   const language = normalizeLocale(locale);
   const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
@@ -2613,10 +2811,11 @@ async function applyConflictChoicesBody(
     const bound = guide.binding.files[item.path];
     const absolute = resolve(repoRoot, item.path);
     if (!bound.stages || stages.get(item.path) !== bound.stages) { changed.add(item.path); continue; }
+    const working = readWorkingConflictFile(repoRoot, absolute);
     if (item.choice === "edited") {
-      const problem = editProblem(absolute);
+      const problem = editProblem(working);
       if (problem) refused.set(item.path, problem);
-    } else if (workingVersion(absolute) !== bound.content) changed.add(item.path);
+    } else if (workingVersion(working) !== bound.content) changed.add(item.path);
   }
   if (changed.size || refused.size) {
     return {
@@ -2632,26 +2831,42 @@ async function applyConflictChoicesBody(
     const bound = guide.binding.files[item.path];
     const absolute = resolve(repoRoot, item.path);
     // The last look before writing: an editor can still save between the check above and here.
+    const working = readWorkingConflictFile(repoRoot, absolute);
+    const before = workingVersion(working);
     if (item.choice === "edited") {
-      const problem = editProblem(absolute);
+      const problem = editProblem(working);
       if (problem) { outcomes.push({ path: item.path, choice: item.choice, status: "refused", reason: problem }); break; }
-    } else if (workingVersion(absolute) !== bound.content) {
+    } else if (before !== bound.content) {
       outcomes.push({ path: item.path, choice: item.choice, status: "changed" });
       break;
     }
-    const original = readIfPresent(absolute);
-    const before = workingVersion(absolute);
+    const original = working.kind === "file" ? working.raw : undefined;
     const action = commandFor(item.choice, new Set((entries.get(item.path) ?? []).map((entry) => entry.stage)));
+    const pathspec = literalPath(item.path);
     let failure: string | undefined;
+    let checkedOutVersion: string | undefined;
     const step = async (args: string[]) => {
       if (failure !== undefined) return;
-      const result = await runGit(repoRoot, args);
-      if (result.code !== 0) failure = result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")}`;
+      try {
+        const result = await runGit(repoRoot, args);
+        if (result.code !== 0) failure = result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")}`;
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
     };
-    if (action === "remove") await step(["rm", "-q", "--", item.path]);
+    if (action === "remove") await step(["rm", "-q", "--", pathspec]);
     else {
-      if (action === "checkout") await step(["checkout", `--${item.choice}`, "--", item.path]);
-      await step(["add", "--", item.path]);
+      if (action === "checkout") {
+        await step(["checkout", `--${item.choice}`, "--", pathspec]);
+        if (failure === undefined) {
+          try {
+            checkedOutVersion = workingVersion(readWorkingConflictFile(repoRoot, absolute));
+          } catch (error) {
+            failure = error instanceof Error ? error.message : String(error);
+          }
+        }
+      }
+      await step(["add", "--", pathspec]);
     }
     if (failure === undefined) {
       outcomes.push({ path: item.path, choice: item.choice, status: "applied" });
@@ -2659,21 +2874,23 @@ async function applyConflictChoicesBody(
     }
     let restored = false;
     try {
-      if (workingVersion(absolute) !== before) {
+      const current = workingVersion(readWorkingConflictFile(repoRoot, absolute));
+      if (current === "missing" && action === "checkout") {
+        // A failed checkout can remove the old file before a filter rejects the replacement.
+        if (original) writeFileSync(absolute, original, { flag: "wx" });
+        else if (working.kind === "link") symlinkSync(working.target, absolute);
+      } else if (current === checkedOutVersion && current !== before && current !== "blocked") {
+        if (before === "missing" || before.startsWith("link:") || (original && current.startsWith("link:"))) unlinkSync(absolute);
         if (original) writeFileSync(absolute, original);
-        else if (before === "missing") unlinkSync(absolute);
+        else if (before.startsWith("link:")) symlinkSync(before.slice("link:".length), absolute);
       }
-      restored = workingVersion(absolute) === before;
+      restored = workingVersion(readWorkingConflictFile(repoRoot, absolute)) === before;
     } catch { /* reported below: the file may now hold the chosen side */ }
     outcomes.push({ path: item.path, choice: item.choice, status: "failed", restored, detail: failure });
     break;
   }
   for (const item of requested.slice(outcomes.length)) outcomes.push({ path: item.path, choice: item.choice, status: "not_applied" });
-  return {
-    snapshot: await getSnapshot(repoRoot),
-    complete: outcomes.every((outcome) => outcome.status === "applied"),
-    outcomes
-  };
+  return finalizeConflictResult(repoRoot, outcomes, fallbackSnapshot, language);
 }
 
 /**
@@ -2762,6 +2979,8 @@ function isUnattended(step: PlanStep) {
 
 function operationDraft(operation: Operation, args: Record<string, string>, snapshot?: RepoSnapshot, argv: string[] = [], locale: Locale = "es"): PlanDraft {
   const branch = parseBranchOperation(operation, args, locale);
+  const push = operation === "push" ? parsePushOperation(args, locale) : undefined;
+  const conflictResolution = operation === "resolve_conflict" ? conflictResolutionFor(args, snapshot) : undefined;
   // The preview can include a URL supplied in a raw push. Keep its credentials out of the copy.
   const displayArgs = argv[0] === "push" ? argv.map(token => token.includes("://") ? displayPushAddress(token) : token) : argv;
   const details: Partial<Record<Operation, [string, string, ActionPlan["risk"]]>> = {
@@ -2777,17 +2996,24 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
     rename_branch: [localized(locale, `Renombrar ${args.name} a ${args.to}`, `Rename ${args.name} to ${args.to}`), localized(locale, "Cambia el nombre de una rama local. No toca su historia ni la rama remota.", "Renames a local branch. It does not change its history or the remote branch."), "medium"],
     fetch: [localized(locale, "Actualizar referencias remotas", "Update remote references"), localized(locale, "Descarga referencias y elimina remotas obsoletas.", "Downloads references and prunes stale remote-tracking branches."), "low"],
     pull: [localized(locale, "Actualizar la rama actual", "Update the current branch"), localized(locale, "Usa pull --ff-only para evitar merges implícitos.", "Uses pull --ff-only to avoid implicit merges."), "high"],
-    push: args.setUpstream
-      ? [localized(locale, `Publicar ${args.branch} en ${args.setUpstream}`, `Publish ${args.branch} to ${args.setUpstream}`), localized(locale, `Envía tus commits a ${args.setUpstream} y lo recuerda como el destino de esta rama, para que los próximos push y pull sepan adónde ir. Tus archivos locales no cambian.`, `Sends your commits to ${args.setUpstream} and remembers it as this branch's destination, so later pushes and pulls know where to go. Your local files do not change.`), "high"]
-      : args.noVerify === "true"
-      ? [localized(locale, "Publicar la rama actual omitiendo las verificaciones", "Publish the current branch without verification"), localized(locale, "Envía los commits al upstream configurado con --no-verify: los hooks pre-push no se ejecutan.", "Pushes commits to the configured upstream with --no-verify: pre-push hooks do not run."), "high"]
-      : [localized(locale, "Publicar la rama actual", "Publish the current branch"), localized(locale, "Envía los commits al upstream configurado.", "Pushes commits to the configured upstream."), "high"],
+    push: push?.kind === "set_upstream"
+      ? [localized(locale, `Publicar ${push.branch} en ${push.remote}`, `Publish ${push.branch} to ${push.remote}`), localized(locale, `Envía tus commits a ${push.remote} y lo recuerda como el destino de esta rama, para que los próximos push y pull sepan adónde ir. Tus archivos locales no cambian.`, `Sends your commits to ${push.remote} and remembers it as this branch's destination, so later pushes and pulls know where to go. Your local files do not change.`), "high"]
+      : push?.kind === "branch" || push?.kind === "refspec"
+      ? [localized(locale, `Publicar ${push.branch} en ${push.remote}`, `Publish ${push.branch} to ${push.remote}`), localized(locale, `Envía los commits de ${push.branch} a ${push.remote}.`, `Sends commits of ${push.branch} to ${push.remote}.`), "high"]
+      : push?.noVerify
+      ? [localized(locale, "Publicar la rama actual omitiendo las verificaciones", "Publish the current branch without verification"), localized(locale, "Envía los commits al destino de publicación configurado y omite los hooks pre-push.", "Pushes commits to the configured publishing destination and skips pre-push hooks."), "high"]
+      : [localized(locale, "Publicar la rama actual", "Publish the current branch"), localized(locale, "Envía los commits al destino de publicación configurado.", "Pushes commits to the configured publishing destination."), "high"],
     merge: [localized(locale, `Fusionar ${args.name}`, `Merge ${args.name}`), localized(locale, "Integra la rama seleccionada en la rama actual.", "Integrates the selected branch into the current branch."), "high"],
     rebase: [localized(locale, `Rebase sobre ${args.onto}`, `Rebase onto ${args.onto}`), localized(locale, "Reescribe la base de la rama actual.", "Rewrites the base of the current branch."), "high"],
     abort_operation: [localized(locale, `Abortar ${args.pendingLabel ?? "la operación"}`, `Abort ${args.pendingLabel ?? "the operation"}`), localized(locale, "Deshace el trabajo a medias y devuelve el repositorio a como estaba antes de empezar.", "Discards the half-finished work and returns the repository to how it was before it started."), "high"],
     continue_operation: [localized(locale, `Continuar ${args.pendingLabel ?? "la operación"}`, `Continue ${args.pendingLabel ?? "the operation"}`), localized(locale, "Sigue desde donde se detuvo, una vez resueltos los conflictos.", "Continues from where it stopped after conflicts are resolved."), "high"],
     skip_operation: [localized(locale, `Saltar el commit atascado de ${args.pendingLabel ?? "la operación"}`, `Skip the stuck commit from ${args.pendingLabel ?? "the operation"}`), localized(locale, "Descarta el commit en el que se atascó y sigue con el resto.", "Discards the stuck commit and continues with the rest."), "high"],
-    resolve_conflict: [localized(locale, `Resolver ${args.path} quedándose con ${args.side === "theirs" ? "el otro lado" : args.side === "ours" ? "nuestro lado" : "el archivo tal cual está"}`, `Resolve ${args.path} by keeping ${args.side === "theirs" ? "the other side" : args.side === "ours" ? "our side" : "the file as it is"}`), localized(locale, "Marca el conflicto de un archivo como resuelto. No modifica el contenido de ningún archivo.", "Marks a file conflict as resolved. It does not change file content."), "medium"],
+    resolve_conflict: [
+      localized(locale, `Resolver el conflicto en ${args.path}`, `Resolve the conflict in ${args.path}`),
+      conflictResolution ? conflictResolutionEffect(conflictResolution, args.path, args.side, locale)
+        : localized(locale, "Revisa este conflicto antes de elegir una resolución.", "Review this conflict before choosing a resolution."),
+      conflictResolution === "add" ? "medium" : "high"
+    ],
     commit: [localized(locale, `Crear commit “${args.message ?? ""}”`, `Create commit “${args.message ?? ""}”`), localized(locale, "Añade todos los cambios y crea un commit.", "Stages all changes and creates a commit."), "high"],
     set_identity: args.scope === "global"
       ? [localized(locale, `Firmar los commits de todos los repositorios de este equipo como ${args.user} <${args.email}>`, `Sign commits in every repository on this computer as ${args.user} <${args.email}>`), localized(locale, "Guarda el nombre y el correo que Git anota en cada commit en tu configuración global de Git, para todos los repositorios de este equipo que no tengan los suyos. Tus archivos y tu historial no cambian.", "Saves the name and email Git records with each commit in your global Git settings, for every repository on this computer that does not set its own. Your files and history do not change."), "high"]
@@ -2802,8 +3028,14 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
   };
   const detail = details[operation];
   if (!detail || operation === "none") return refused(localized(locale, "La operación solicitada no está permitida.", "The requested operation is not allowed."));
-  const command = branch ? ["git", ...branchArguments(branch)].map(quoteToken).join(" ") : buildCommand(operation, args, displayArgs);
-  const steps: PlanStep[] = [{ operation, args, ...(argv.length ? { argv } : {}), command, summary: detail[0], risk: detail[2] }];
+  const command = branch
+    ? ["git", ...branchArguments(branch)].map(quoteToken).join(" ")
+    : push
+      ? ["git", ...pushArguments(push)].map(quoteToken).join(" ")
+      : conflictResolution
+        ? resolveConflictArguments(args, conflictResolution).map(argv => ["git", ...argv].map(quoteToken).join(" ")).join(" && ")
+        : buildCommand(operation, args, displayArgs);
+  const steps: PlanStep[] = [{ operation, args, ...(argv.length ? { argv } : {}), ...(conflictResolution ? { conflictResolution } : {}), command, summary: detail[0], risk: detail[2] }];
   return sequenceDraft(steps, detail[1], renameEffects(steps, snapshot), locale);
 }
 
@@ -2845,8 +3077,8 @@ function sequenceDraft(steps: PlanStep[], rationale: string, effects?: string[],
 }
 
 /** A step the model asked for, described and priced by the deterministic table above. */
-function stepFrom(operation: Operation, args: Record<string, string>, argv: string[] = [], locale: Locale = "es"): PlanStep | undefined {
-  const draft = operationDraft(operation, args, undefined, argv, locale);
+function stepFrom(operation: Operation, args: Record<string, string>, argv: string[] = [], locale: Locale = "es", snapshot?: RepoSnapshot): PlanStep | undefined {
+  const draft = operationDraft(operation, args, snapshot, argv, locale);
   return draft.allowed ? draft.steps[0] : undefined;
 }
 
@@ -2930,6 +3162,7 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
   // Only what each direct control needs reaches the step: a publish names the active branch as Git
   // reads it now, and an identity or a remote address is trimmed of stray spaces.
   const normalized = operation === "push" && args.setUpstream ? { setUpstream: args.setUpstream, branch: snapshot.currentBranch, ...(args.noVerify === "true" ? { noVerify: "true" } : {}) }
+    : operation === "push" && args.remote ? { remote: args.remote, branch: args.branch ?? snapshot.currentBranch, ...(args.noVerify === "true" ? { noVerify: "true" } : {}) }
     : operation === "set_identity" ? { user: (args.user ?? "").trim(), email: (args.email ?? "").trim(), scope: typeof args.scope === "string" ? args.scope : "local" }
     : operation === "add_remote" ? { name: (args.name ?? "origin").trim() || "origin", url: (args.url ?? "").trim() }
     : operation === "stash_push" ? { message: `GitCat set aside: ${snapshot.currentBranch}` }
@@ -3157,6 +3390,12 @@ export async function prepareBranchDelivery(cwd: string, request: DeliveryReques
   return plan;
 }
 
+type StepRunResult = {
+  output: string;
+  commitHash?: string;
+  postActionIssue?: PostActionIssue;
+};
+
 /**
  * Saves only the selected paths, in a commit built from a private copy of the index. The copy starts
  * from the last saved version, each selected path is recorded whole as it is on disk (so a file with
@@ -3164,13 +3403,14 @@ export async function prepareBranchDelivery(cwd: string, request: DeliveryReques
  * index is only touched afterwards, and only for those paths: whatever was staged in any other file
  * stays staged, and every file that was left out keeps its contents on disk.
  */
-async function commitSelected(repoRoot: string, paths: string[], message: string, locale?: Locale) {
+async function commitSelected(repoRoot: string, paths: string[], message: string, locale?: Locale): Promise<StepRunResult> {
   const language = normalizeLocale(locale);
   const head = await optionalGit(repoRoot, ["rev-parse", "--verify", "--quiet", "HEAD"]);
   const directory = mkdtempSync(join(tmpdir(), "gitcat-save-"));
   const index = join(directory, "index");
   const git = (args: string[], timeoutMs = 120_000) => runCommand("git", args, repoRoot, timeoutMs, { GIT_INDEX_FILE: index });
   const detail = (result: CommandResult, args: string[]) => commandDiagnostics(result) || `git ${args[0]} terminó con código ${result.code}`;
+  let saved: StepRunResult | undefined;
   try {
     if (head) {
       // Starting from a copy keeps what Git knows about unchanged files, so it does not re-read them all.
@@ -3201,16 +3441,40 @@ async function commitSelected(repoRoot: string, paths: string[], message: string
     const committed = await git(["commit", "-m", message], 600_000);
     const output = detail(committed, ["commit"]);
     if (committed.code !== 0) throw new Error(output);
-    const reset = await runGit(repoRoot, ["reset", "-q", "--", ...literalPaths(paths)]);
-    if (reset.code !== 0) {
-      const saved = await optionalGit(repoRoot, ["rev-parse", "--short", "HEAD"]);
-      throw new Error(localized(language,
-        `Los archivos marcados se guardaron en el commit ${saved}, pero Git no pudo actualizar su lista de cambios preparados para ellos: ${detail(reset, ["reset"])}. Tus archivos en disco no cambiaron.`,
-        `The ticked files were saved in commit ${saved}, but Git could not update its list of staged changes for them: ${detail(reset, ["reset"])}. Your files on disk did not change.`));
+    // Git has saved the commit. Later child-process failures must preserve that result.
+    const verifyHead = ["rev-parse", "--verify", "--quiet", "HEAD"];
+    const commitHash = await optionalGit(repoRoot, verifyHead).catch(() => "")
+      || await git(verifyHead).then(result => result.code === 0 ? completeGitOutput(result).trim() : "").catch(() => "");
+    saved = { output, ...(commitHash ? { commitHash } : {}) };
+    const resetArgs = ["reset", "-q", "--", ...literalPaths(paths)];
+    let failure: string;
+    try {
+      const reset = await runGit(repoRoot, resetArgs);
+      if (reset.code === 0) return saved;
+      failure = detail(reset, resetArgs);
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
     }
-    return output;
+    const shortHash = commitHash ? ` ${commitHash.slice(0, 7)}` : "";
+    saved.postActionIssue = {
+      kind: "index_sync",
+      detail: localized(language,
+        `Los archivos marcados se guardaron en un commit${shortHash}, pero Git no pudo actualizar su lista de cambios preparados para ellos: ${failure}. Tus archivos en disco no cambiaron.`,
+        `The ticked files were saved in a commit${shortHash}, but Git could not update its list of staged changes for them: ${failure}. Your files on disk did not change.`)
+    };
+    return saved;
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    try { rmSync(directory, { recursive: true, force: true }); }
+    catch (error) {
+      if (saved) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const cleanup = localized(language,
+          `GitCat guardó el commit. No pudo limpiar su índice temporal: ${reason}`,
+          `GitCat saved the commit. It could not clean up its temporary index: ${reason}`);
+        const problem = saved.postActionIssue;
+        saved.postActionIssue = { kind: problem?.kind ?? "temporary_cleanup", detail: problem ? `${problem.detail}\n${cleanup}` : cleanup };
+      }
+    }
   }
 }
 
@@ -3377,12 +3641,50 @@ async function prepareRemoteSync(initial: RepoSnapshot, args: Record<string, str
   return plan;
 }
 
+type ValidatedStep =
+  | { kind: "branch"; branch: BranchOperation }
+  | { kind: "push"; push: PushOperation }
+  | { kind: "resolve_conflict"; action: ConflictResolutionAction }
+  | { kind: "git_command"; argv: string[] }
+  | undefined;
+
+function equalArgv(actual: string[], expected: string[]) {
+  return actual.length === expected.length && actual.every((token, index) => token === expected[index]);
+}
+
+function historyRecoveryArguments(recovery: HistoryRecovery): string[] {
+  if (recovery.mode === "restore") return ["branch", recovery.branch!, recovery.commit];
+  if (recovery.mode === "revert") return ["revert", "--no-edit", recovery.commit];
+  return ["reset", "--soft", `${recovery.commit}^`];
+}
+
+function switchWorkCommandArguments(request: SwitchWorkRequest, branch: string): string[] | undefined {
+  if (request.mode === "restore" && request.stash) return ["stash", "apply", "--index", request.stash];
+  if (request.mode === "set_aside" && request.label) {
+    const label = `GitCat set aside: ${request.label.trim()} [${branch}]`;
+    return ["stash", "push", ...(request.includeUntracked ? ["--include-untracked"] : []), "-m", label];
+  }
+  return undefined;
+}
+
+function expectedInternalGitCommand(plan: ActionPlan, snapshot: RepoSnapshot, argv: string[]): string[] | undefined {
+  if (plan.recovery) {
+    const expected = historyRecoveryArguments(plan.recovery);
+    if (equalArgv(argv, expected)) return expected;
+  }
+  if (plan.switchWork) {
+    const expected = switchWorkCommandArguments(plan.switchWork, snapshot.currentBranch);
+    if (expected && equalArgv(argv, expected)) return expected;
+  }
+  return undefined;
+}
+
 /**
  * A step against the repository as it stands right now. Every step of a sequence goes through this,
  * including the ones prepared before the earlier steps moved the repository, so nothing runs on a
  * state it was not checked against.
  */
-function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
+function validateStep(step: PlanStep, snapshot: RepoSnapshot, plan: ActionPlan, locale?: Locale): ValidatedStep {
   const language = normalizeLocale(locale);
   const { operation, args } = step;
   if (operation === "none" || !allowedOperations.has(operation)) throw new Error(localized(language, "La acción no está permitida.", "The action is not allowed."));
@@ -3398,7 +3700,7 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
   const branch = parseBranchOperation(operation, args, language);
   if (branch) {
     validateBranchOperation(branch, snapshot, language);
-    return branch;
+    return { kind: "branch", branch };
   }
   const branchArg = args.name || args.onto;
   if (branchArg && !isBranchNameSafe(branchArg)) throw new Error(localized(language, "Nombre de rama no válido.", "Invalid branch name."));
@@ -3420,12 +3722,10 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
     const missing = step.paths.find((path) => !listed.has(path));
     if (!step.paths.length || missing) throw new Error(localized(language, `${missing ?? "—"} ya no es un cambio sin guardar. Revisa los archivos de nuevo.`, `${missing ?? "—"} is no longer an unsaved change. Review the files again.`));
   }
-  if (operation === "push" && (args.setUpstream !== undefined || args.remote !== undefined)) {
-    const remote = args.setUpstream ?? args.remote;
-    if (!remoteNamePattern.test(remote) || !snapshot.remotes.includes(remote)) throw new Error(localized(language, `El remoto ${remote} no existe en este repositorio.`, `Remote ${remote} does not exist in this repository.`));
-    if (snapshot.currentBranch === "HEAD" || args.branch !== snapshot.currentBranch || !isBranchNameSafe(args.branch)) {
-      throw new Error(localized(language, "Solo se puede publicar la rama activa, y no es la que nombra este plan.", "Only the active branch can be published, and it is not the one this plan names."));
-    }
+  if (operation === "push") {
+    const push = parsePushOperation(args, language);
+    validatePushOperation(push, snapshot, language);
+    return { kind: "push", push };
   }
   if (operation === "set_identity") {
     const user = args.user?.trim() ?? "";
@@ -3447,12 +3747,22 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, locale?: Locale) {
     if (!args.line || gitignoreLine(args.path) !== args.line) throw new Error(localized(language, "La regla de .gitignore no es válida.", "The .gitignore rule is invalid."));
   }
   if (operation === "resolve_conflict") {
-    if (!snapshot.conflicts.some((conflict) => conflict.path === args.path)) throw new Error(localized(language, `${args.path} no está en conflicto.`, `${args.path} is not in conflict.`));
     if (!["ours", "theirs", "resolved"].includes(args.side)) throw new Error(localized(language, "Hay que decir con qué lado quedarse.", "The side to keep must be specified."));
+    const action = conflictResolutionFor(args, snapshot);
+    if (!action) throw new Error(localized(language, `${args.path} no está en conflicto.`, `${args.path} is not in conflict.`));
+    if (action !== step.conflictResolution) throw new StalePlanError(localized(language,
+      "El efecto de resolver este conflicto cambió. Revisa y confirma la resolución de nuevo.",
+      "The effect of resolving this conflict changed. Review and confirm the resolution again."));
+    return { kind: "resolve_conflict", action };
   }
   if (operation === "git_command") {
     const argv = step.argv ?? [];
     if (!argv.length || argv.some((token) => !token.trim())) throw new Error(localized(language, "El comando Git propuesto no es válido.", "The proposed Git command is invalid."));
+    if (step.assistantQuery) return { kind: "git_command", argv: assistantQueryArguments(argv) };
+    if (plan.source === "llm") throw new Error("An assistant command must be approved as a GitCat operation or an inspection query.");
+    const internal = expectedInternalGitCommand(plan, snapshot, argv);
+    if (!internal) throw new Error(localized(language, "La acción no está permitida.", "The action is not allowed."));
+    return { kind: "git_command", argv: internal };
   }
 }
 
@@ -3483,7 +3793,13 @@ function validateExecution(plan: ActionPlan, snapshot: RepoSnapshot, locale?: Lo
       "Un archivo marcado, su versión preparada o la rama de destino cambió después de la revisión, así que no se guardó nada. Revisa los archivos marcados de nuevo.",
       "A ticked file, its staged version or the target branch changed after the review, so nothing was saved. Review the ticked files again."));
   } else if (plan.stateId !== snapshot.stateId) throw new StalePlanError(localized(language, "Los cambios locales variaron desde que se preparó el plan. Prepara la acción de nuevo.", "Local changes moved after this plan was prepared. Prepare the action again."));
-  return validateStep(plan.steps[0], snapshot, language);
+  for (const step of plan.steps) {
+    if (step.operation === "git_command") {
+      if (step.assistantQuery) assistantQueryArguments(step.argv ?? []);
+      else if (plan.source === "llm") throw new Error("An assistant command must be approved as a GitCat operation or an inspection query.");
+    }
+  }
+  return validateStep(plan.steps[0], snapshot, plan, language);
 }
 
 function validateHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
@@ -3507,7 +3823,7 @@ function validateHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
   if (plan.repositoryPlan.remoteUrl !== remoteUrl || plan.repositoryPlan.localPath !== source || plan.repositoryPlan.host !== host || plan.repositoryPlan.owner !== owner || plan.repositoryPlan.repository !== name || plan.repositoryPlan.protocol !== protocol || hostingProvider(host, plan.repositoryPlan.provider) !== provider) throw new Error(localized(language, "El plan JSON no coincide con los argumentos de ejecución.", "The JSON plan does not match the execution arguments."));
 }
 
-async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
+async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale): Promise<StepRunResult> {
   const language = normalizeLocale(locale);
   validateHostedRepositoryPlan(plan, language);
   const source = realpathSync.native(plan.args.source);
@@ -3549,12 +3865,28 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
     if (!/HTTP 404|not found/i.test(`${existing.stderr}\n${existing.stdout}`)) throw new Error(localized(language, "No se pudo confirmar que el repositorio remoto siga disponible.", "Could not confirm that the remote repository is still available."));
   }
 
-  const currentRemote = await readGit(source, ["remote", "get-url", plan.args.remote]);
-  if (currentRemote.code !== 0 && plan.args.existingRemoteHash) throw new Error("The remote was removed after validation. Prepare the action again.");
-  if (currentRemote.code === 0 && plan.args.replaceRemote !== "true") throw new Error(localized(language, `El remoto “${plan.args.remote}” existe y no se autorizó reemplazarlo.`, `Remote “${plan.args.remote}” exists and replacing it was not authorized.`));
-  if (currentRemote.code === 0 && createHash("sha256").update(currentRemote.stdout.trim()).digest("hex") !== plan.args.existingRemoteHash) throw new Error(localized(language, `El remoto “${plan.args.remote}” cambió desde la validación.`, `Remote “${plan.args.remote}” changed after validation.`));
-  const previousRemoteUrl = currentRemote.code === 0 ? currentRemote.stdout.trim() : "";
-  if (currentRemote.code === 0 && await optionalGit(source, ["config", "--get-all", `remote.${plan.args.remote}.pushurl`])) throw new Error("The remote now has a separate push destination. Choose a new remote name and prepare again.");
+  const checkRemote = async () => {
+    const existing = await readHostedRemoteReplacement(source, plan.args.remote);
+    if ((existing?.binding ?? "") !== plan.args.existingRemoteHash || (existing && plan.args.replaceRemote !== "true")) {
+      throw new Error(localized(language,
+        `El remoto “${plan.args.remote}” cambió desde la revisión. Prepara la acción de nuevo.`,
+        `Remote “${plan.args.remote}” changed after review. Prepare the action again.`));
+    }
+    return existing;
+  };
+  const currentRemote = await checkRemote();
+  const previousRemoteUrl = currentRemote?.rawUrl;
+  const read = (args: string[]) => readGit(source, args);
+  const verifyInitialPush = async (configuredRemote?: string) => {
+    await verifyInitialPushUrl(read, plan.args.remoteUrl, configuredRemote);
+    if (hosting && hosting.location.gitUrl !== plan.args.remoteUrl) await verifyInitialPushUrl(read, hosting.location.gitUrl);
+    await readPushDestination(read, { ...snapshot, remotes: configuredRemote ? [...snapshot.remotes, configuredRemote] : snapshot.remotes },
+      configuredRemote ?? (currentRemote ? plan.args.remote : plan.args.remoteUrl), snapshot.currentBranch);
+  };
+  if (plan.args.push === "true") {
+    if (!isBranchNameSafe(snapshot.currentBranch) || snapshot.currentBranch === "HEAD") throw new Error("Choose a local branch before publishing.");
+    await verifyInitialPush();
+  }
 
   // gh has no per-command account flag, so the active one is switched and restored around the work.
   const switching = provider === "github" && plan.args.account !== plan.args.activeAccount;
@@ -3573,17 +3905,36 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
       const created = JSON.parse(createOutput);
       if (created.path_with_namespace !== `${plan.args.owner}/${plan.args.name}` || created.visibility !== "private") throw new Error("GitLab returned unexpected project details. Check the project before connecting or publishing it.");
     }
+    await checkRemote();
     await reportedGit(source, ["remote", previousRemoteUrl ? "set-url" : "add", plan.args.remote, plan.args.remoteUrl]);
     remoteChanged = true;
-    let pushOutput='';
+    let pushOutput = '';
+    let postActionIssue: PostActionIssue | undefined;
     if(plan.args.push==='true'){
       if(hosting){
         const facts=await nativeRepositoryFacts((url,method,body)=>hostingConnections().request(hosting.connectionId,url,method,body),hosting.location);
         const bound={...hosting,repositoryId:facts.id};
+        await verifyInitialPush(plan.args.remote);
         pushOutput=await nativeGit(source,['push',plan.args.remote,`${snapshot.head}:refs/heads/${snapshot.currentBranch}`],bound);
-        await nativeGit(source,['fetch',plan.args.remote,`+refs/heads/${snapshot.currentBranch}:refs/remotes/${plan.args.remote}/${snapshot.currentBranch}`],bound);
-        await reportedGit(source,['branch',`--set-upstream-to=${plan.args.remote}/${snapshot.currentBranch}`,snapshot.currentBranch]);
-      }else pushOutput=await reportedGit(source,["push", "-u", plan.args.remote, "HEAD"]);
+        const upstream = `${plan.args.remote}/${snapshot.currentBranch}`;
+        try {
+          await nativeGit(source, ['fetch', plan.args.remote, `+refs/heads/${snapshot.currentBranch}:refs/remotes/${upstream}`], bound);
+          await reportedGit(source, ['branch', `--set-upstream-to=${upstream}`, snapshot.currentBranch]);
+        } catch (error) {
+          postActionIssue = {
+            kind: "upstream_setup",
+            detail: localized(language,
+              `La rama ${snapshot.currentBranch} ya se publicó y el remoto ${plan.args.remote} quedó conectado. Falló el seguimiento de ${upstream}. Configura el seguimiento antes de sincronizar.`,
+              `Branch ${snapshot.currentBranch} was published and remote ${plan.args.remote} is connected. Tracking setup for ${upstream} failed. Set up tracking before syncing.`)
+              + `\n${error instanceof Error ? error.message : String(error)}`
+          };
+        }
+      } else {
+        await verifyInitialPush(plan.args.remote);
+        pushOutput = await reportedGit(source, pushArguments({
+          kind: "set_upstream", remote: plan.args.remote, branch: snapshot.currentBranch, noVerify: false
+        }));
+      }
     }
     // The user confirmed it and it worked: this is the moment the choice becomes worth remembering.
     const now = new Date().toISOString();
@@ -3596,9 +3947,10 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
       { provider, ...(hosting?{connectionId:hosting.connectionId}:{}), host: plan.args.host, owner: plan.args.owner, protocol: plan.args.protocol as GitProtocol, remote: plan.args.remote },
       now
     ));
-    return [native?`Created private repository ${plan.args.host}/${plan.args.owner}/${plan.args.name}.`:createOutput, pushOutput].filter(Boolean).join("\n");
+    const output = [native?`Created private repository ${plan.args.host}/${plan.args.owner}/${plan.args.name}.`:createOutput, pushOutput].filter(Boolean).join("\n");
+    return { output, ...(postActionIssue ? { postActionIssue } : {}) };
   } catch (error) {
-    if (remoteChanged) await reportedGit(source, previousRemoteUrl ? ["remote", "set-url", plan.args.remote, previousRemoteUrl] : ["remote", "remove", plan.args.remote]).catch(() => undefined);
+    if (remoteChanged) await reportedGit(source, previousRemoteUrl ? ["remote", "set-url", "--", plan.args.remote, previousRemoteUrl] : ["remote", "remove", plan.args.remote]).catch(() => undefined);
     const message = error instanceof Error ? error.message : localized(language, "gh no pudo crear el repositorio.", "gh could not create the repository.");
     if (repositoryCreated) throw new Error(localized(language, `El repositorio remoto se creó, pero no se pudo configurar o publicar el remoto local: ${message}`, `The remote repository was created, but the local remote could not be configured or published: ${message}`), { cause: error });
     if (/forbidden|permission|not accessible|403/i.test(message)) throw new Error(localized(language, "No hay permisos suficientes para crear el repositorio privado solicitado.", "You do not have enough permission to create the requested private repository."), { cause: error });
@@ -3611,10 +3963,10 @@ async function executeHostedRepositoryPlan(plan: ActionPlan, locale?: Locale) {
   }
 }
 
-async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: RepoSnapshot, branch: BranchOperation | undefined, locale?: Locale): Promise<string> {
+async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: RepoSnapshot, validated: ValidatedStep, locale?: Locale): Promise<string | StepRunResult> {
   const pushTarget = pushRepository(step);
   if (pushTarget !== undefined) {
-    const current = await readPushDestination(args => readGit(cwd, args), snapshot, pushTarget).catch(error => {
+    const current = await readPushDestination(args => readGit(cwd, args), snapshot, pushTarget, step.args.branch).catch(error => {
       if (error instanceof OperationCancelled) throw error;
       return undefined;
     });
@@ -3624,7 +3976,17 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
         "The publishing destination changed or can no longer be verified. Review and confirm the push again."));
     }
   }
-  if (branch) return reportedGit(cwd, branchArguments(branch));
+  if (validated?.kind === "branch") return reportedGit(cwd, branchArguments(validated.branch));
+  if (validated?.kind === "push") {
+    const pushArgs = pushArguments(validated.push);
+    if (plan.hostingConnection) {
+      if (validated.push.kind !== "refspec") throw new Error("The saved hosting connection can only publish the reviewed branch.");
+      return nativeGit(cwd, pushArgs, plan.hostingConnection);
+    }
+    return reportedGit(cwd, pushArgs);
+  }
+  if (validated?.kind === "git_command") return reportedGit(cwd, validated.argv);
+  if (validated?.kind === "resolve_conflict") return runResolveConflict(cwd, step.args, validated.action, locale);
   const { args } = step;
   switch (step.operation) {
     case "status": return "";
@@ -3644,7 +4006,6 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     }
     case "fetch": return reportedGit(cwd, ["fetch", "--prune"]);
     case "pull": return reportedGit(cwd, ["pull", "--ff-only"]);
-    case "push": return reportedGit(cwd, pushArguments(args));
     case "set_identity": {
       const global = args.scope === "global";
       await reportedGit(cwd, ["config", global ? "--global" : "--local", "user.name", args.user]);
@@ -3657,18 +4018,14 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
     case "abort_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--abort"]);
     case "continue_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--continue"]);
     case "skip_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--skip"]);
-    case "resolve_conflict": return runResolveConflict(cwd, args, snapshot, locale);
-    case "commit":
+    case "commit": {
       if (step.paths) return commitSelected(snapshot.path, step.paths, args.message, locale);
       await reportedGit(cwd, ["add", "-A"]);
-      return reportedGit(cwd, ["commit", "-m", args.message]);
-    case "ignore_path": return ignorePath(snapshot.path, args, locale);
-    case "git_command": {
-      if (step.assistantQuery) return reportedGit(cwd, assistantQueryArguments(step.argv ?? []));
-      if (plan.source === "llm") throw new Error("An assistant command must be approved as a GitCat operation or an inspection query.");
-      if(plan.hostingConnection){if(step.argv?.[0]!=='push')throw new Error('The saved hosting connection can only publish the reviewed branch.');return nativeGit(cwd,step.argv,plan.hostingConnection);}
-      return reportedGit(cwd, step.argv ?? []);
+      const output = await reportedGit(cwd, ["commit", "-m", args.message]);
+      const commitHash = await optionalGit(cwd, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+      return { output, ...(commitHash ? { commitHash } : {}) };
     }
+    case "ignore_path": return ignorePath(snapshot.path, args, locale);
     case "github_create_repo": return executeHostedRepositoryPlan(plan, locale);
     default: throw new Error(localized(locale, "La acción no está permitida.", "The action is not allowed."));
   }
@@ -3749,6 +4106,12 @@ function showsWithheld(plan: ActionPlan, outcomes: StepOutcome[]) {
     outcomes.some((outcome) => redactText(outcome.output).redacted > 0);
 }
 
+class PostActionSnapshotError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
 /**
  * Runs the approved plan end to end. Each step is validated against the repository the previous step
  * produced, and the first failure stops the sequence: a half-finished merge must never be reported as
@@ -3758,7 +4121,7 @@ async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutc
   const language = normalizeLocale(locale);
   let snapshot = await getSnapshot(cwd);
   const selectionNow = plan.selection ? await selectionBinding(snapshot, currentVersions(snapshot, plan.selection.changes), plan.selection.target) : undefined;
-  const firstBranch = validateExecution(plan, snapshot, language, selectionNow);
+  const firstValidated = validateExecution(plan, snapshot, language, selectionNow);
   if (plan.selection?.target) {
     // Files left out can have changed since the review; one that now blocks the switch is named before anything is saved.
     const resolved = resolveSelection(snapshot.changes, plan.selection.changes);
@@ -3772,12 +4135,20 @@ async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutc
         error: localized(language, "Se detuvo antes del siguiente paso. Los cambios completados siguen hechos; no se deshizo nada.", "Stopped before the next step. Completed changes remain; nothing was rolled back."), outcomes };
     }
     operationPhase("executing", index + 1, plan.steps.length);
+    let stepResult: StepRunResult;
     try {
       if (index > 0) snapshot = await getSnapshot(cwd);
-      const branch = index === 0 ? firstBranch : validateStep(step, snapshot, language);
-      outcomes[index] = { ...outcomes[index], status: "completed", output: await runStep(cwd, step, plan, snapshot, branch, language) };
+      const validated = index === 0 ? firstValidated : validateStep(step, snapshot, plan, language);
+      const rawStepResult = await runStep(cwd, step, plan, snapshot, validated, language);
+      stepResult = typeof rawStepResult === "string" ? { output: rawStepResult } : rawStepResult;
+      outcomes[index] = {
+        ...outcomes[index],
+        status: "completed",
+        output: stepResult.output,
+        ...(stepResult.commitHash ? { commitHash: stepResult.commitHash } : {})
+      };
     } catch (error) {
-      if (index === 0 && step.pushDestination && error instanceof StalePlanError) throw error;
+      if (index === 0 && (step.pushDestination || step.operation === "push") && error instanceof StalePlanError) throw error;
       const detail = error instanceof Error ? error.message : localized(language, "Git no pudo completar la acción.", "Git could not complete the action.");
       outcomes[index] = { ...outcomes[index], status: "failed", output: detail };
       operationPhase("inspecting");
@@ -3791,11 +4162,44 @@ async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutc
         ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {})
       };
     }
+    if (stepResult.postActionIssue) {
+      operationPhase("inspecting");
+      const after = await inspectOperation(() => getSnapshot(cwd)).catch(() => undefined);
+      let journalError: string | undefined;
+      try {
+        activityHistory().step(activityId, index, outcomes[index], snapshot, after, stepResult.commitHash ?? after?.head);
+      } catch (error) {
+        journalError = error instanceof Error ? error.message : String(error);
+      }
+      const skipped = outcomes.filter((outcome) => outcome.status === "skipped");
+      const tail = skipped.length
+        ? localized(language,
+          ` No se ejecutó: ${skipped.map((outcome) => outcome.summary).join(", ")}.`,
+          ` Not run: ${skipped.map((outcome) => outcome.summary).join(", ")}.`)
+        : "";
+      return {
+        snapshot: after ?? snapshot,
+        ...(!after ? { snapshotStale: true } : {}),
+        output: executionReport(outcomes, language),
+        error: [`${stepResult.postActionIssue.detail}${tail}`, ...(journalError ? [journalError] : [])].join("\n"),
+        postActionIssue: stepResult.postActionIssue,
+        outcomes,
+        ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {})
+      };
+    }
     // Git has settled. Observation or persistence errors must never change its outcome.
-    activityHistory().step(activityId, index, outcomes[index], snapshot, await inspectOperation(() => getSnapshot(cwd)));
+    let after: RepoSnapshot;
+    try {
+      after = await inspectOperation(() => getSnapshot(cwd));
+    } catch (error) {
+      try { activityHistory().step(activityId, index, outcomes[index], snapshot, undefined, stepResult.commitHash); } catch { /* reported by executePlan */ }
+      throw new PostActionSnapshotError(error);
+    }
+    activityHistory().step(activityId, index, outcomes[index], snapshot, after, stepResult.commitHash ?? after.head);
+    snapshot = after;
   }
   operationPhase("inspecting");
-  return { snapshot: await inspectOperation(() => getSnapshot(cwd)), output: executionReport(outcomes, language), outcomes, ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {}) };
+  return { snapshot, output: executionReport(outcomes, language), outcomes, ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {}) };
 }
 
 /**
@@ -3909,7 +4313,16 @@ export async function prepareRetry(cwd: string, record: FailedPlanRecord, locale
       "Hay una operación de Git a medias. Termínala o abórtala primero; lo que ya se hizo sigue hecho y no se repite.",
       "A Git operation is still half-finished. Finish or abort it first; what already ran stays done and is not repeated."));
   }
+  if (record.plan.recovery) return buildHistoryRecoveryPlan(snapshot.path, record.plan.recovery, language);
   const start = record.outcomes.findIndex((outcome) => outcome.status !== "completed");
+  const work = record.plan.switchWork;
+  if (work && start === 0) return prepareSwitchWork(snapshot.path, work, language);
+  if (work?.mode === "set_aside" && start === 1) {
+    const retry = await prepareSwitchWork(snapshot.path, { mode: "carry", target: work.target }, language);
+    return { ...retry, effects: [localized(language,
+      "El trabajo que ya apartaste sigue disponible en su entrada de stash.",
+      "Work already set aside is still available in its stash entry."), ...(retry.effects ?? [])] };
+  }
   const remaining = await bindPushDestinations(snapshot, record.plan.steps.slice(start));
   const sync = remaining.find(step => step.operation === "sync_remote");
   if (sync) return prepareRemoteSync(snapshot, { ref: sync.args.ref, name: sync.args.name, side: sync.args.mode === "prefer_remote" ? "theirs" : "" }, language);
@@ -4042,7 +4455,7 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
     const safeLocal = new Set(['status','diff','log','show','branch','switch','checkout','add','commit','merge','rebase','stash','revert','reset','ls-files','rev-parse']);
     if ((await getSnapshot(cwd)).remotes.length || plan.steps.some(step=>['push','fetch','pull','add_remote','github_create_repo'].includes(step.operation) || (step.operation==='set_identity'&&step.args.scope==='global') || (step.operation==='git_command'&&!safeLocal.has(step.argv?.[0]??'')))) throw new Error('Practice stays local. Publishing, remote access and global settings are disabled here. Use a real project for collaboration.');
   }
-  if (plan.recovery) await validateHistoryRecovery(cwd, plan.recovery);
+  if (plan.recovery) await validateHistoryRecovery(cwd, plan.recovery, locale);
   if (plan.switchWork) await validateSwitchWork(cwd, plan.switchWork);
   const before = await getSnapshot(cwd);
   const history = activityHistory(), id = history.begin(plan, before);
@@ -4062,28 +4475,78 @@ export async function executePlan(cwd: string, plan: ActionPlan, locale?: Locale
       throw error;
     }
     const after = await inspectOperation(() => getSnapshot(cwd)).catch(() => undefined);
+    const detail = bookkeepingError(error);
     result = {
       snapshot: after ?? before,
       ...(!after ? { snapshotStale: true } : {}),
-      output: executionReport(outcomes, language), error: bookkeepingError(error), outcomes,
+      output: executionReport(outcomes, language),
+      error: detail,
+      postActionIssue: { kind: error instanceof PostActionSnapshotError || !after ? "snapshot_read" : "history_write", detail },
+      outcomes,
       ...(showsWithheld(plan, outcomes) ? { withheldFromAssistant: true } : {})
     };
   }
   try {
     history.finish(id, result.snapshotStale ? undefined : result.snapshot, outcomes, result.error);
   } catch (error) {
-    result.error = [result.error, bookkeepingError(error)].filter(Boolean).join("\n");
+    const detail = bookkeepingError(error);
+    result.error = [result.error, detail].filter(Boolean).join("\n");
+    result.postActionIssue ??= { kind: "history_write", detail };
   }
   return result;
 }
 
-async function validateHistoryRecovery(cwd: string, recovery: HistoryRecovery) {
+async function pushEndpointContains(cwd: string, endpoint: string, commit: string) {
+  const namespace = `refs/gitcat/publication-check/${randomUUID()}`;
+  const remote = await verifiedTransportRemote(args => readGit(cwd, args), endpoint, "fetch");
+  try {
+    await checkedGit(cwd, [...remote.config, "-c", "protocol.ext.allow=never", "fetch", "--atomic", "--no-tags", "--no-recurse-submodules",
+      "--no-write-fetch-head", "--refmap=", "--", remote.name,
+      `+refs/heads/*:${namespace}/heads/*`, `+refs/tags/*:${namespace}/tags/*`]);
+    return Boolean(await checkedGit(cwd, ["for-each-ref", `--contains=${commit}`, "--count=1", "--format=%(refname)", namespace]));
+  } finally {
+    await inspectOperation(async () => {
+      const refs = await checkedGit(cwd, ["for-each-ref", "--format=delete %(refname)", namespace]);
+      if (refs) {
+        const args = ["update-ref", "--stdin"];
+        assertGitSuccess(await runCommand("git", args, cwd, undefined, undefined, `start\n${refs}\nprepare\ncommit\n`), args);
+      }
+    });
+  }
+}
+
+async function historyIsPublished(cwd: string, snapshot: RepoSnapshot, commit: string, locale?: Locale) {
+  const read = (args: string[]) => readGit(cwd, args);
+  const fetchUrls = new Set<string>(), pushUrls = new Set<string>();
+  try {
+    for (const endpoint of await readDirectPushEndpoints(read, snapshot.remotes)) pushUrls.add(endpoint);
+    for (const remote of snapshot.remotes) {
+      const [url] = await readRemoteUrls(read, remote, "fetch");
+      fetchUrls.add(url);
+      for (const endpoint of await readRemoteUrls(read, remote, "push")) pushUrls.add(endpoint);
+      await reportedGit(cwd, ["fetch", "--prune", remote,
+        `+refs/heads/*:refs/remotes/${remote}/*`, `+refs/tags/*:refs/gitcat/remotes/${remote}/tags/*`]);
+    }
+    if (await checkedGit(cwd, ["for-each-ref", `--contains=${commit}`, "--count=1", "--format=%(refname)", "refs/remotes", "refs/gitcat/remotes"])) return true;
+    for (const endpoint of pushUrls) {
+      if (!fetchUrls.has(endpoint) && await pushEndpointContains(cwd, endpoint, commit)) return true;
+    }
+    return false;
+  } catch (error) {
+    if (error instanceof OperationCancelled) throw error;
+    throw new Error(localized(locale,
+      "GitCat no pudo verificar todos los destinos de publicación. Usa Revertir para conservar el historial compartido.",
+      "GitCat could not verify every publishing destination. Use Revert to preserve shared history."), { cause: error });
+  }
+}
+
+async function validateHistoryRecovery(cwd: string, recovery: HistoryRecovery, locale?: Locale) {
   if (!/^[a-f0-9]{40,64}$/.test(recovery.commit)) throw new Error("Invalid recovery reference.");
   await checkedGit(cwd, ["cat-file", "-e", `${recovery.commit}^{commit}`]);
   let snapshot = await getSnapshot(cwd);
   if (recovery.mode === "restore") {
     if (!recovery.branch || !isBranchNameSafe(recovery.branch) || snapshot.branches.some(b=>b.name===recovery.branch)) throw new Error("The recovery branch already exists or its name is invalid. No branch was overwritten.");
-    return;
+    return snapshot;
   }
   if (snapshot.isDirty || snapshot.pending) throw new Error("Review or set aside your unfinished work first. Recovery will not combine it with other changes.");
   const parents = (await checkedGit(cwd,["rev-list","--parents","-n","1",recovery.commit])).split(/\s+/);
@@ -4091,12 +4554,13 @@ async function validateHistoryRecovery(cwd: string, recovery: HistoryRecovery) {
   if ((await runGit(cwd,["merge-base","--is-ancestor",recovery.commit,"HEAD"])).code !== 0) throw new Error("That saved version is not part of the active branch. Create a recovery branch to review it.");
   if (recovery.mode === "undo") {
     if (snapshot.head !== recovery.commit) throw new Error("The branch has moved since that save. Review its history; the latest save can be kept as files only while it is still the tip.");
-    // Check all branch tips on every configured remote. Offline/permission failures block rewriting.
-    for (const remote of snapshot.remotes) await reportedGit(cwd,["fetch","--prune",remote,`+refs/heads/*:refs/remotes/${remote}/*`,`+refs/tags/*:refs/gitcat/remotes/${remote}/tags/*`]);
-    if ((await checkedGit(cwd,["for-each-ref",`--contains=${recovery.commit}`,"--format=%(refname)","refs/remotes","refs/gitcat/remotes"])).trim()) throw new Error("This saved version is published. Revert it with a new commit instead; shared history stays intact.");
+    if (await historyIsPublished(cwd, snapshot, recovery.commit, locale)) throw new Error(localized(locale,
+      "Este guardado ya está publicado. Usa Revertir para añadir un commit nuevo y conservar el historial compartido.",
+      "This saved version is published. Revert it with a new commit instead; shared history stays intact."));
     snapshot=await getSnapshot(cwd);
     if (snapshot.head!==recovery.commit || snapshot.isDirty || snapshot.pending) throw new Error("The project changed during the publication check. Review recovery again.");
   }
+  return snapshot;
 }
 
 export async function prepareHistoryRecovery(cwd: string, id: string, mode: HistoryRecovery['mode'], locale?: Locale) {
@@ -4107,9 +4571,13 @@ export async function prepareHistoryRecovery(cwd: string, id: string, mode: Hist
   const commit = mode === "restore" ? entry.before.head : [...entry.steps].reverse().find(step=>step.status==='completed' && step.operation==='commit')?.afterHead;
   if (!commit) throw new Error("This entry has no confirmed saved version for that recovery. Never-saved files cannot be recovered from this history.");
   const recovery: HistoryRecovery={mode,commit,...(mode==='restore'?{branch:`recovered/${id.slice(0,8)}`}:{})};
-  await validateHistoryRecovery(cwd,recovery);
-  const current=await getSnapshot(cwd), language=normalizeLocale(locale);
-  const argv=mode==='restore'?['branch',recovery.branch!,commit]:mode==='revert'?['revert','--no-edit',commit]:['reset','--soft',`${commit}^`];
+  return buildHistoryRecoveryPlan(snapshot.path, recovery, normalizeLocale(locale));
+}
+
+async function buildHistoryRecoveryPlan(cwd: string, recovery: HistoryRecovery, language: Locale) {
+  const { mode, commit } = recovery;
+  const current = await validateHistoryRecovery(cwd, recovery, language);
+  const argv=historyRecoveryArguments(recovery);
   const summary=mode==='restore'?localized(language,'Crear una rama para revisar la versión anterior','Create a branch to review the earlier version'):mode==='revert'?localized(language,'Revertir el guardado con un nuevo commit','Revert the save with a new commit'):localized(language,'Deshacer el último guardado conservando los archivos','Undo the latest save while keeping files');
   const effects=[localized(language,'Solo recupera versiones guardadas en Git. No guarda ni recupera archivos que nunca se guardaron.','Only versions saved in Git can be recovered. Never-saved files are not backed up or recovered.')];
   if (mode==='undo') effects.push(localized(language,'Se comprueban ramas y etiquetas de los remotos configurados. GitCat no puede demostrar que nunca se compartió en otro lugar. Si alguien lo recibió, usa revertir.','Configured remote branches and tags are checked. GitCat cannot prove this was never shared elsewhere. If someone received it, use revert.'));
@@ -4118,7 +4586,7 @@ export async function prepareHistoryRecovery(cwd: string, id: string, mode: Hist
 }
 
 
-async function recordConflictActivity<T extends ConflictApplyResult | ConflictChoiceResult>(cwd: string, count: number, task: () => Promise<T>): Promise<T> {
+async function recordConflictActivity<T extends ConflictApplyResult | ConflictChoiceResult>(cwd: string, count: number, task: (before: RepoSnapshot) => Promise<T>): Promise<T> {
   if (practiceProjects().registered(cwd) && !practiceProjects().owns(cwd)) throw new Error('Practice ownership changed. No conflict files were written.');
   const before = await getSnapshot(cwd);
   const history = activityHistory();
@@ -4126,7 +4594,7 @@ async function recordConflictActivity<T extends ConflictApplyResult | ConflictCh
   const id = history.begin({ steps }, before);
   let result: T;
   try {
-    result = await task();
+    result = await task(before);
   } catch (error) {
     try {
       history.finish(id, await getSnapshot(cwd).catch(() => undefined), [], error instanceof Error ? error.message : String(error));
@@ -4137,18 +4605,25 @@ async function recordConflictActivity<T extends ConflictApplyResult | ConflictCh
     command: '', summary: 'resolve_conflict',
     status: item.status === 'applied' ? 'completed' : item.status === 'not_applied' ? 'skipped' : 'failed', output: ''
   }));
+  const errorMessage = result.postActionIssue?.detail
+    ?? (result.complete ? undefined : 'Conflict resolution did not complete. Review the remaining conflicts.');
   try {
-    history.finish(id, result.snapshot, outcomes, result.complete ? undefined : 'Conflict resolution did not complete. Review the remaining conflicts.');
-  } catch {
-    return { ...result, historyWarning: true };
+    history.finish(id, result.snapshotStale ? undefined : result.snapshot, outcomes, errorMessage);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ...result,
+      historyWarning: true,
+      postActionIssue: result.postActionIssue ?? { kind: "history_write", detail }
+    };
   }
   return result;
 }
 export async function applyConflictResolution(cwd: string, proposal: IssuedConflictProposal, accepted: string[], locale?: Locale): Promise<ConflictApplyResult> {
-  return recordConflictActivity(cwd,Array.isArray(accepted)?accepted.length:0,()=>applyConflictResolutionBody(cwd,proposal,accepted,locale));
+  return recordConflictActivity(cwd, Array.isArray(accepted) ? accepted.length : 0, (before) => applyConflictResolutionBody(cwd, proposal, accepted, before, locale));
 }
 export async function applyConflictChoices(cwd: string, guide: IssuedConflictGuide, requested: ConflictChoiceRequest[], locale?: Locale): Promise<ConflictChoiceResult> {
-  return recordConflictActivity(cwd,Array.isArray(requested)?requested.length:0,()=>applyConflictChoicesBody(cwd,guide,requested,locale));
+  return recordConflictActivity(cwd, Array.isArray(requested) ? requested.length : 0, (before) => applyConflictChoicesBody(cwd, guide, requested, before, locale));
 }
 
 
@@ -4184,8 +4659,8 @@ async function validateSwitchWork(cwd: string, request: SwitchWorkRequest) {
     if (!selected.length) throw new Error('Only new files are present. Include new files to set them aside.');
     const untracked=snapshot.changes.filter(isUntracked);
     if (!request.includeUntracked && preview.blockers.some(p=>untracked.some(c=>c.path===p))) throw new Error('New files would block the switch. Include them in the set-aside entry or keep working here.');
-    const staged=await checkedGit(cwd,['ls-files','--stage']);
-    if (selected.some(c=>staged.split('\n').some(line=>line.startsWith('160000 ') && line.endsWith('\t'+c.path)))) throw new Error('A submodule has unfinished work. Save or set it aside inside that submodule first.');
+    const { entries: staged } = await readStageIndex(cwd, new Set(selected.map(c => c.path)));
+    if (selected.some(c => (staged.get(c.path) ?? []).some(header => header.startsWith('160000 ')))) throw new Error('A submodule has unfinished work. Save or set it aside inside that submodule first.');
   }
 }
 export async function prepareSwitchWork(cwd: string, request: SwitchWorkRequest, locale?: Locale) {
@@ -4193,7 +4668,7 @@ export async function prepareSwitchWork(cwd: string, request: SwitchWorkRequest,
   const snapshot=await getSnapshot(cwd),language=normalizeLocale(locale);
   let steps:PlanStep[], summary:string, effects:string[];
   if (request.mode==='restore') {
-    steps=[stepFrom('git_command',{},['stash','apply','--index',request.stash!],language)!];
+    steps=[stepFrom('git_command',{},switchWorkCommandArguments(request, snapshot.currentBranch)!,language)!];
     summary=localized(language,`Restaurar trabajo apartado en ${snapshot.currentBranch}`,`Restore set-aside work on ${snapshot.currentBranch}`);
     effects=[localized(language,'Restaura los archivos y lo que estaba preparado. Puede detenerse con conflictos; la entrada se conserva, incluso si falla. Revisa los archivos antes de volver a aplicar.','Restores files and their staged state. It may stop with conflicts; the entry is retained even on failure. Review the files before applying it again.')];
   } else {
@@ -4203,8 +4678,7 @@ export async function prepareSwitchWork(cwd: string, request: SwitchWorkRequest,
     effects=[localized(language,`La rama activa será ${target}. No se publica nada.`,`The active branch will be ${target}. Nothing is published.`)];
     if (request.mode==='carry') effects.push(localized(language,`Los ${snapshot.changes.length} archivos sin guardar te acompañan a ${target}, conservando el índice.`,`The ${snapshot.changes.length} unsaved files come with you to ${target}, keeping the index.`));
     else {
-      const label=`GitCat set aside: ${request.label!.trim()} [${snapshot.currentBranch}]`;
-      steps.unshift(stepFrom('git_command',{},['stash','push',...(request.includeUntracked?['--include-untracked']:[]),'-m',label],language)!);
+      steps.unshift(stepFrom('git_command',{},switchWorkCommandArguments(request, snapshot.currentBranch)!,language)!);
       effects.push(localized(language,`Aparta los cambios seguidos${request.includeUntracked?' y archivos nuevos':''} como “${request.label}”. Conserva el estado preparado para restaurarlo. Los archivos ignorados${request.includeUntracked?'':' y nuevos'} permanecen en la carpeta. Si el cambio de rama falla, la entrada sigue disponible.`,`Sets aside tracked edits${request.includeUntracked?' and new files':''} as “${request.label}”, preserving staged state for restoration. Ignored files${request.includeUntracked?'':' and new files'} remain in the folder. If switching fails, the entry remains available.`));
     }
   }
@@ -4219,20 +4693,32 @@ const reviewTools: ReviewTools = {
   api:(context,url,method,body)=>hostingConnections().request(context.connectionId,url,method,body),
   publish:async preview=>{
     const snapshot=await getSnapshot(preview.repoPath);
-    const argv=['push',preview.request.remote,`${preview.headHash}:refs/heads/${preview.request.head}`];
-    const steps=await bindPushDestinations(snapshot,[stepFrom('git_command',{},argv,'en')!]);
+    const steps=await bindPushDestinations(snapshot,[stepFrom('push',{remote:preview.request.remote,commit:preview.headHash,branch:preview.request.head},[],'en')!]);
     const urls=steps[0].pushDestination?.urls;
     if (urls?.length!==1 || urls[0]!==displayPushAddress(preview.remoteUrl)) {
       throw new Error('The publishing destination changed. Review sharing again; nothing was published.');
     }
     const plan=bindPlan(snapshot,sequenceDraft(steps,'Publish the reviewed branch',undefined,'en'));
     if(preview.hosting)plan.hostingConnection=preview.hosting;
-    const result=await executePlan(preview.repoPath,plan,'en'); if(result.error)throw new Error(result.error);
+    const result=await executePlan(preview.repoPath,plan,'en');
+    if(result.outcomes[0]?.status==='completed'){
+      const issue=result.postActionIssue?.kind;
+      if(issue==='history_write'||issue==='snapshot_read')return issue;
+      if(!result.error)return;
+    }
+    throw new Error(result.error ?? 'Git did not complete the push.');
   },
   create:async preview=>{
-    const snapshot=await getSnapshot(preview.repoPath),history=activityHistory();
-    const id=history.begin({steps:[{operation:'pull_request'}]},snapshot);
+    const snapshot=await inspectOperation(()=>getSnapshot(preview.repoPath)).catch(()=>undefined);
+    const history=activityHistory();
+    let warning: 'history_write' | 'snapshot_read' | undefined;
+    let id: string | undefined;
+    if(snapshot){
+      try { id=history.begin({steps:[{operation:'pull_request'}]},snapshot); }
+      catch { warning='history_write'; }
+    } else warning='snapshot_read';
     try {
+      operationCheckpoint();
       if(preview.hosting){
         const api=(url:string,method?:string,body?:unknown)=>hostingConnections().request(preview.hosting!.connectionId,url,method,body);
         const facts=await nativeRepositoryFacts(api,preview.hosting.location);
@@ -4243,8 +4729,14 @@ const reviewTools: ReviewTools = {
         if(preview.provider==='github')await checkedGh(args,preview.repoPath,preview.host);
         else await checkedGlab(args,preview.repoPath,preview.host);
       }
-      history.finish(id,snapshot,[{command:'',summary:'pull_request',status:'completed',output:''}]);
-    } catch(error){history.finish(id,snapshot,[{command:'',summary:'pull_request',status:'failed',output:''}],String(error));throw error;}
+    } catch(error) {
+      try { history.finish(id,snapshot,[{command:'',summary:'pull_request',status:'failed',output:''}],String(error)); }
+      catch { /* Preserve the provider's failure. */ }
+      throw error;
+    }
+    try { history.finish(id,snapshot,[{command:'',summary:'pull_request',status:'completed',output:''}]); }
+    catch { warning ??= 'history_write'; }
+    return warning;
   }
 };
 export const previewShareReview=(cwd:string,request:ShareReviewRequest)=>previewReview(reviewTools,cwd,request);

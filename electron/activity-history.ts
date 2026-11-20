@@ -89,10 +89,17 @@ export class ActivityHistory {
       steps:plan.steps.map(step=>({ operation:step.operation, status:'pending' })) });
     this.write(s); return id;
   }
-  step(id: string | undefined, index: number, outcome: StepOutcome, before: RepoSnapshot, after: RepoSnapshot) {
+  step(id: string | undefined, index: number, outcome: StepOutcome, before: RepoSnapshot, after?: RepoSnapshot, afterHead?: string) {
     if (!id) return;
     const s=this.read(), entry=s.entries.find(e=>e.id===id); if (!entry) return;
-    entry.steps[index]={ ...entry.steps[index], status:outcome.status, beforeHead:before.head, afterHead:after.head, at:new Date().toISOString() };
+    const recordedAfterHead = afterHead ?? outcome.commitHash ?? after?.head;
+    entry.steps[index]={
+      ...entry.steps[index],
+      status:outcome.status,
+      beforeHead:before.head,
+      ...(recordedAfterHead !== undefined ? { afterHead: recordedAfterHead } : {}),
+      at:new Date().toISOString()
+    };
     this.write(s);
   }
   finish(id: string | undefined, snapshot: RepoSnapshot | undefined, outcomes: StepOutcome[], error?: string) {
@@ -100,7 +107,11 @@ export class ActivityHistory {
     const s=this.read(), entry=s.entries.find(e=>e.id===id); if (!entry) return;
     entry.state=error ? 'failed':'completed'; entry.finishedAt=new Date().toISOString();
     if (snapshot) entry.after={head:snapshot.head,branch:snapshot.currentBranch};
-    entry.steps=entry.steps.map((step,i)=>({...step,status:outcomes[i]?.status ?? step.status}));
+    entry.steps=entry.steps.map((step,i)=>({
+      ...step,
+      status:outcomes[i]?.status ?? step.status,
+      ...(outcomes[i]?.commitHash && !step.afterHead ? { afterHead: outcomes[i].commitHash } : {})
+    }));
     if (error) entry.error=redactSecrets(redactText(error).text).slice(0,1000);
     this.write(s);
   }
