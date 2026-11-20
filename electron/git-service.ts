@@ -1526,8 +1526,8 @@ type ProviderResponse = {
 function extractOutputText(body: ProviderResponse): string {
   if (typeof body?.output_text === "string" && body.output_text.trim()) return body.output_text;
   const textParts: string[] = [];
-  for (const item of body?.output ?? []) {
-    for (const content of item?.content ?? []) {
+  for (const item of Array.isArray(body?.output) ? body.output : []) {
+    for (const content of Array.isArray(item?.content) ? item.content : []) {
       if (typeof content?.refusal === "string" && content.refusal.trim()) throw new Error(`El modelo rechazó la petición: ${content.refusal.slice(0, 300)}`);
       if (typeof content?.text === "string") textParts.push(content.text);
     }
@@ -1575,7 +1575,12 @@ async function sendToProvider(body: Record<string, unknown>, timeoutMs: number, 
       const raw = maskKeys(await response.text().catch(() => ""));
       throw new ProviderError("error", `The provider responded ${response.status}: ${raw.slice(0, 300)}`, { status: response.status, body: raw.slice(0, 4_000) });
     }
-    return await response.json();
+    try {
+      return await response.json();
+    } catch (error) {
+      if (error instanceof SyntaxError) throw new ProviderError("invalid_response", "The provider returned invalid JSON.", { cause: error });
+      throw error;
+    }
   } catch (error) {
     if (active?.signal.aborted) throw new OperationCancelled();
     if (error instanceof ProviderError) throw error;
@@ -1630,6 +1635,14 @@ function unavailableReason(error: unknown): AssistantUnavailable {
   return "error";
 }
 
+function assistantFailureText(error: unknown, reason: AssistantUnavailable, locale: Locale) {
+  if (reason === "invalid_response") return localized(locale,
+    "El proveedor devolvió una respuesta que no cumple el esquema del plan. Vuelve a intentarlo.",
+    "The provider returned a response in a format GitCat could not use for a plan. Try again.");
+  const detail = error instanceof Error ? error.message : localized(locale, "error desconocido", "unknown error");
+  return localized(locale, `No pude consultar el proveedor LLM: ${detail}`, `I could not query the LLM provider: ${detail}`);
+}
+
 /**
  * How long a request waits for the assistant. A recovery already shows what GitCat can prove, so it
  * does not keep the person waiting on a slow provider for as long as a plan would.
@@ -1645,7 +1658,7 @@ async function askProvider(body: Record<string, unknown>, timeoutMs?: number): P
       : `El proveedor no completó la respuesta (${reason ?? "motivo desconocido"}).`);
   }
   const text = extractOutputText(payload);
-  if (!text.trim()) throw new Error("El proveedor devolvió una respuesta vacía.");
+  if (!text.trim()) throw new ProviderError("invalid_response", "El proveedor devolvió una respuesta vacía.");
   return text;
 }
 
@@ -2122,7 +2135,7 @@ async function requestPlan(request: string, snapshot: RepoSnapshot, context: Con
     text: { format: planResponseFormat }
   }, timeoutMs);
   const plan = parseModelPlan(text);
-  if (!plan) throw new Error("El proveedor devolvió una respuesta que no cumple el esquema del plan.");
+  if (!plan) throw new ProviderError("invalid_response", "The response did not match the plan schema.");
   return plan;
 }
 
@@ -2942,9 +2955,10 @@ export async function planRecovery(cwd: string, failure: ExecutionFailure, conte
     const plan = await requestPlan(RECOVERY_REQUEST, snapshot, context, issues, notes, providerLimits.recoveryMs);
     return withNotes(await prepareModelPlan(plan, snapshot, RECOVERY_REQUEST, context, language, notes), notes);
   } catch (error) {
+    const reason = unavailableReason(error);
     return bindPlan(snapshot, {
-      ...refused(localized(language, `No pude consultar el proveedor LLM: ${error instanceof Error ? error.message : "error desconocido"}`, `I could not query the LLM provider: ${error instanceof Error ? error.message : "unknown error"}`), "llm"),
-      assistantUnavailable: unavailableReason(error)
+      ...refused(assistantFailureText(error, reason, language), "llm"),
+      assistantUnavailable: reason
     });
   }
 }
@@ -2964,9 +2978,10 @@ export async function planAction(cwd: string, request: string, context: Conversa
     const plan = await requestPlan(request, snapshot, context, [], notes);
     return withNotes(await prepareModelPlan(plan, snapshot, request, context, language, notes), notes);
   } catch (error) {
+    const reason = unavailableReason(error);
     return bindPlan(snapshot, {
-      ...refused(localized(language, `No pude consultar el proveedor LLM: ${error instanceof Error ? error.message : "error desconocido"}`, `I could not query the LLM provider: ${error instanceof Error ? error.message : "unknown error"}`), "llm"),
-      assistantUnavailable: unavailableReason(error)
+      ...refused(assistantFailureText(error, reason, language), "llm"),
+      assistantUnavailable: reason
     });
   }
 }

@@ -538,7 +538,7 @@ export type ActionPlan = {
   assistantUnavailable?: AssistantUnavailable;
 };
 
-export type AssistantUnavailable = "not_configured" | "timeout" | "unreachable" | "error";
+export type AssistantUnavailable = "not_configured" | "timeout" | "unreachable" | "invalid_response" | "error";
 
 /**
  * Why the AI assistant could not be connected or stopped answering, told apart so the interface can
