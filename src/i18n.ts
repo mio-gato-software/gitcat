@@ -68,6 +68,7 @@ const en = {
   shareReviewCommits: "Commits to publish",
   shareReviewLiveStatus: "Live review status",
   shareReviewConfirmation: "Confirmation publishes only these saved commits, then creates or updates an open review. It does not merge, force-push, or bypass branch protections.",
+  shareReviewOpen: "Open review",
   shareReviewPublishExisting: "Publish to this review",
   shareReviewPublishNew: "Publish and create a new review",
   shareReviewHistoryWarning: "The review is open. GitCat could not save all of this operation in Activity.",
@@ -1316,6 +1317,7 @@ const es: { [K in keyof typeof en]: string } = {
   shareReviewCommits: "Commits que se publicarán",
   shareReviewLiveStatus: "Estado real de la revisión",
   shareReviewConfirmation: "La confirmación publica solo estos commits guardados y luego crea o actualiza una revisión abierta. No integra, fuerza la publicación ni evita protecciones de ramas.",
+  shareReviewOpen: "Abrir revisión",
   shareReviewPublishExisting: "Publicar en esta revisión",
   shareReviewPublishNew: "Publicar y crear una revisión nueva",
   shareReviewHistoryWarning: "La revisión está abierta. GitCat no pudo guardar toda la operación en Actividad.",
@@ -2512,6 +2514,13 @@ export function writeLocale(locale: Locale) {
 }
 
 export function localeTag(locale: Locale) { return locale === "es" ? "es-ES" : "en-US"; }
+
+export function formatDate(date: string, locale: Locale) {
+  if (!date) return "—";
+  const value = new Date(date);
+  if (Number.isNaN(value.valueOf())) return date;
+  return new Intl.DateTimeFormat(localeTag(locale), { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(value);
+}
 
 export function translate(locale: Locale): Translate {
   const messages = locale === "es" ? es : en;
