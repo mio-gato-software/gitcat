@@ -1128,9 +1128,12 @@ app.whenReady().then(async () => {
   git('config', '--unset', 'branch.main.pushRemote');
   git('config', '--unset', 'push.default');
   git('remote', 'remove', 'origin');
-  // Double-clicking a branch label in the graph checks that branch out.
+  // Double-clicking a local branch label in the graph opens the same review.
   await waitFor(`[...document.querySelectorAll('.ref-tag')].some((node) => node.textContent === 'feature/search')`);
   await js(`[...document.querySelectorAll('.ref-tag')].find((node) => node.textContent === 'feature/search').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await waitFor(`document.querySelector('.plan-card .plan-actions .primary-button')`);
+  assert.equal(git('branch', '--show-current'), 'main');
+  await js(`document.querySelector('.plan-card .plan-actions .primary-button').click()`);
   for (let attempt = 0; attempt < 100 && git('branch', '--show-current') !== 'feature/search'; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(git('branch', '--show-current'), 'feature/search');
   await waitFor(`document.querySelector('.toolbar-field.branch strong')?.textContent === 'feature/search'`);
@@ -1533,6 +1536,37 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.ref-tag.head').title`), /Las copias local y remota coinciden/);
   assert.equal(await js(`document.querySelectorAll('.branch-presence .branch-sync-badge .lucide-check').length`), 1, 'Sidebar still shows matching copies');
   await capture('copies-synced');
+  await js(`document.querySelector('.ref-tag.head button.ref-cloud').click()`);
+  await waitFor(`document.querySelector('.sync-modal')`);
+  assert.match(await js(`document.querySelector('.sync-modal').innerText`), /origin\/main/);
+  await js(`document.querySelector('.sync-modal .ghost-button').click()`);
+  at(copies, 'branch', '--track', 'ui/tracked', 'origin/main');
+  restored = { projects: [await service.getSnapshot(copies)], unavailable: [], order: [copies], activePath: copies };
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  await waitFor(`document.querySelector('.branch-section input')`);
+  await js(`(() => {
+    const input = document.querySelector('.branch-section input');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'ui/tracked');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  const trackedRow = `document.querySelector('.branch-list .branch-row')`;
+  await waitFor(`${trackedRow}?.querySelector('.branch-main')?.title.includes('ui/tracked')`);
+  assert.match(await js(`${trackedRow}.querySelector('.branch-main').title`), /doble clic para cambiar/i);
+  await js(`${trackedRow}.querySelector('.branch-main').click()`);
+  assert.equal(at(copies, 'branch', '--show-current'), 'main');
+  assert.equal(await js(`Boolean(document.querySelector('.plan-card .plan-actions, .sync-modal'))`), false);
+  for (const gesture of [
+    `${trackedRow}.querySelector('.branch-main').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`,
+    `${trackedRow}.querySelector('.branch-switch').click()`
+  ]) {
+    await js(gesture);
+    await waitFor(`document.querySelector('.plan-card:has(.plan-actions)')?.innerText.includes('ui/tracked')`);
+    assert.equal(await js(`Boolean(document.querySelector('.sync-modal'))`), false);
+    assert.equal(at(copies, 'branch', '--show-current'), 'main');
+    await js(`document.querySelector('.plan-card .plan-actions .ghost-button').click()`);
+    await waitFor(`!document.querySelector('.plan-card .plan-actions')`);
+  }
+  at(copies, 'branch', '-d', 'ui/tracked');
   at(scratch, 'clone', '-q', copiesRemote, copiesWriter);
   at(copiesWriter, 'config', 'user.name', 'QA'); at(copiesWriter, 'config', 'user.email', 'qa@example.test');
   fs.writeFileSync(path.join(copies, 'local.txt'), 'local'); at(copies, 'add', '.'); at(copies, 'commit', '-qm', 'local');
@@ -1569,6 +1603,10 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.sync-modal .recovery-option').innerText`), /Actualizar main dando prioridad a origin\/main/);
   await js(`document.querySelector('.input-modal .ghost-button').click()`);
   await js(`document.querySelector('.ref-tag.head').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  assert.equal(await js(`Boolean(document.querySelector('.sync-modal'))`), false, 'Double click on the current local branch does not sync');
+  await js(`document.querySelector('.ref-tag.head').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 600, clientY: 350 }))`);
+  await waitFor(`document.querySelector('.context-menu [data-action="sync-remote"]')`);
+  await js(`document.querySelector('.context-menu [data-action="sync-remote"]').click()`);
   await waitFor(`document.querySelector('#sync-title')`);
   assert.equal(await js(`document.querySelectorAll('.sync-modal select').length`), 0, 'The clicked copies are already known');
   await js(`document.querySelector('.sync-modal .recovery-option').click()`);

@@ -1113,12 +1113,19 @@ export default function App() {
         return;
       }
     }
-    if (operation === 'checkout') {
+    if (operation === "checkout") {
       try {
-        const current=await window.gitcat.getSnapshot(snapshot.path);
-        if (current.isDirty || current.branches.find(b=>b.name===args.name)?.checkedOutIn) { setSwitchWork({path:current.path,target:args.name}); return; }
+        const current = await window.gitcat.getSnapshot(snapshot.path);
+        if (current.currentBranch === args.name) return;
+        const folder = current.branches.find((branch) => branch.name === args.name)?.checkedOutIn;
+        if (folder) { await openWorktree(folder); return; }
+        if (current.isDirty) { setSwitchWork({ path: current.path, target: args.name }); return; }
       } catch (error) {
-        await recoverFrom(snapshot.path,{command:`git switch ${args.name}`,summary:t("switchBranch",{name:args.name}),error:cleanError(error,t("branchSwitchFailed")),skipped:[],stage:'prepare'});return;
+        await recoverFrom(snapshot.path, {
+          command: `git switch ${args.name}`, summary: t("switchBranch", { name: args.name }),
+          error: cleanError(error, t("branchSwitchFailed")), skipped: [], stage: "prepare"
+        });
+        return;
       }
     }
     const labels: Partial<Record<Operation, string>> = {
@@ -1435,67 +1442,20 @@ export default function App() {
     }
   };
 
-  /**
-   * A double click on a branch is the whole intent, so it prepares the switch and runs it. Anything
-   * that gets in the way — a dirty tree, a branch that vanished — is reported in the assistant column
-   * instead of being swallowed.
-   */
-  const switchBranch = async (name: string) => {
+  const activateBranch = (name: string) => {
     if (!snapshot || planning) return;
     if (name.startsWith("refs/remotes/")) {
       openSync(name.slice("refs/remotes/".length));
       return;
     }
-    const remoteOnly = snapshot.branches.find(branch => branch.name === name && branch.presence === "remote");
-    if (remoteOnly?.remoteRef) {
-      openSync(remoteOnly.remoteRef);
-      return;
-    }
-    const path = snapshot.path;
-    const turnId = addTurn(path, t("branchSwitchQuestion", { name }), false);
-    try {
-      const current=await window.gitcat.getSnapshot(path);
-      const occupied = current.branches.find(b=>b.name===name)?.checkedOutIn;
-      if (occupied) {
-        updateTurn(path, turnId, turn => ({ ...turn, status: 'completed', outcome: t("openWorktreeAction") }));
-        await openWorktree(occupied); return;
-      }
-      if (current.isDirty) {
-        updateTurn(path,turnId,turn=>({...turn,status:'cancelled',outcome:locale==='es'?'Elige qué hacer con el trabajo sin terminar.':'Choose what happens to unfinished work.'}));
-        setSwitchWork({path:current.path,target:name}); return;
-      }
-      const plan = await window.gitcat.prepareOperation(path, "checkout", { name }, locale);
-      if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
-      if (!plan.allowed) {
-        updateTurn(path, turnId, (turn) => ({ ...turn, plan, status: "completed" }));
-        addActivity({ label: t("branchSwitchFailed"), detail: plan.summary, tone: "warning" });
-        return;
-      }
-      updateTurn(path, turnId, (turn) => ({ ...turn, plan }));
-      await runPlan(turnId, plan);
-    } catch (error) {
-      const message = cleanError(error, t("branchSwitchFailed"));
-      updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
-      addActivity({ label: t("branchSwitchFailed"), detail: message, tone: "warning" });
-      await recoverFrom(path, {
-        command: `git switch ${name}`,
-        summary: t("switchBranch", { name }),
-        error: message,
-        skipped: [],
-        stage: "prepare"
-      });
-    }
-  };
-
-  const activateBranch = (name: string) => {
-    if (!snapshot || planning) return;
-    const branch = snapshot.branches.find(item => item.name === name);
-    if (branch?.checkedOutIn && !branch.isCurrent) {
+    const branch = snapshot.branches.find((item) => item.name === name);
+    if (branch?.isCurrent) return;
+    if (branch?.presence === "remote") {
+      if (branch.remoteRef) openSync(branch.remoteRef);
+    } else if (branch?.checkedOutIn) {
       void openWorktree(branch.checkedOutIn);
-    } else if (branch?.remoteRef && !branch.checkedOutIn) {
-      openSync(branch.remoteRef, branch.presence === "remote" ? undefined : name);
     } else {
-      void switchBranch(name);
+      void prepare("checkout", { name });
     }
   };
 
@@ -1610,12 +1570,12 @@ export default function App() {
       const local = branch.presence !== "remote" && !remoteRef;
       entries.push({ key: "branch-heading", heading: name });
       const syncRef = remoteRef ?? branch.remoteRef;
-      if (syncRef) entries.push({ key: "sync-remote", icon: CloudDownload, label: t("syncRemote", { ref: syncRef }), onSelect: () => openSync(syncRef, local ? name : undefined) });
-      if (!branch.isCurrent && !remoteRef) {
+      if (syncRef) entries.push({ key: "sync-remote", icon: CloudDownload, label: t("receiveBranchChanges", { ref: syncRef }), onSelect: () => openSync(syncRef, local ? name : undefined) });
+      if (!branch.isCurrent && local) {
         const folder = branch.checkedOutIn;
         entries.push(folder
           ? { key: "open-worktree", icon: TreePine, label: t("openBranchWorktree"), hint: folder, onSelect: () => void openWorktree(folder) }
-          : { key: "switch", icon: ArrowLeftRight, label: t("switchBranch", { name }), hint: t("doubleClickHint"), onSelect: () => void switchBranch(branch.presence === "remote" ? `refs/remotes/${branch.remoteRef}` : name) });
+          : { key: "switch", icon: ArrowLeftRight, label: t("switchBranch", { name }), hint: t("doubleClickHint"), onSelect: () => activateBranch(name) });
       }
       if (branch.isCurrent && !remoteRef && branch.upstream) entries.push({ key: "pull", icon: ArrowDownToLine, label: t("pullLatest"), onSelect: () => void prepare("pull") });
       if (branch.isCurrent && !remoteRef) entries.push({ key: "push", icon: ArrowUpFromLine, label: t(branch.upstream ? "pushBranch" : "publishBranch"), onSelect: () => void prepare("push") });
@@ -1792,8 +1752,7 @@ export default function App() {
               selected={selection}
               onSelect={selectBranch}
               onCreate={() => setInputDialog({ operation: "create_branch", title: t("newBranch"), label: t("branchName"), value: "" })}
-              onSwitch={(branch) => branch.checkedOutIn ? void openWorktree(branch.checkedOutIn) : void prepare("checkout", { name: branch.name })}
-              onSwitchNow={activateBranch}
+              onActivate={activateBranch}
               onDelete={(name) => void prepare("delete_branch", { name })}
               onRename={(name, to) => void prepare("rename_branch", { name, to })}
               onMenu={(branch, x, y) => setMenu({ x, y, branch: branch.name })}
@@ -2237,9 +2196,9 @@ function PaneDivider({ edge, width, onPointerDown, onNudge, onReset }: {
  * view: nothing is renamed, every group opens with one click, and the flat list with its filter is
  * still one click away for whoever already knows the name they are looking for.
  */
-function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, onSwitchNow, onDelete, onRename, onMenu, onCollapse }: {
+function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onActivate, onDelete, onRename, onMenu, onCollapse }: {
   snapshot: RepoSnapshot; busy: boolean; selected: string; onSelect: (name: string) => void; onCreate: () => void;
-  onSwitch: (branch: Branch) => void; onSwitchNow: (name: string) => void; onDelete: (name: string) => void;
+  onActivate: (name: string) => void; onDelete: (name: string) => void;
   onRename: (from: string, to: string) => void; onMenu: (branch: Branch, x: number, y: number) => void; onCollapse: () => void;
 }) {
   const { t } = useI18n();
@@ -2341,8 +2300,7 @@ function BranchPanel({ snapshot, busy, selected, onSelect, onCreate, onSwitch, o
     depth={depth}
     busy={busy}
     register={register(branch.name)}
-    onSwitch={() => onSwitch(branch)}
-    onSwitchNow={() => onSwitchNow(branch.name)}
+    onActivate={() => onActivate(branch.presence === "remote" && branch.remoteRef ? `refs/remotes/${branch.remoteRef}` : branch.name)}
     onDelete={() => onDelete(branch.name)}
     onContextMenu={(event) => openContextMenu(branch, event)}
   />;
@@ -2494,23 +2452,24 @@ function branchTooltip(branch: Branch, defaultBranch: string | undefined, t: Tra
  * branch the rest of the window is talking about, which is the thing you want far more often than a
  * checkout. Changing branch stays an explicit gesture — the double click, or the button on the row.
  */
-function BranchRow({ branch, label, variant, merged, selected, defaultBranch, colour, depth, busy, register, onSelect, onSwitch, onSwitchNow, onDelete, onContextMenu }: { branch: Branch; label: string; variant: boolean; merged: boolean; selected: boolean; defaultBranch?: string; colour: string; depth: number; busy: boolean; register: (node: HTMLButtonElement | null) => void; onSelect: () => void; onSwitch: () => void; onSwitchNow: () => void; onDelete: () => void; onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void }) {
+function BranchRow({ branch, label, variant, merged, selected, defaultBranch, colour, depth, busy, register, onSelect, onActivate, onDelete, onContextMenu }: { branch: Branch; label: string; variant: boolean; merged: boolean; selected: boolean; defaultBranch?: string; colour: string; depth: number; busy: boolean; register: (node: HTMLButtonElement | null) => void; onSelect: () => void; onActivate: () => void; onDelete: () => void; onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void }) {
   const { t } = useI18n();
   const isDefault = branch.name === defaultBranch;
   const protectedByPrefix = isProtectedBranch(branch.name);
   // Read once per render rather than per row: the panel redraws on every snapshot anyway.
   const stale = staleDays(branch, Date.now());
   const folder = !branch.isCurrent ? branch.checkedOutIn : undefined;
-  const switchLabel = folder ? t("openBranchWorktree") : t("switchBranch", { name: branch.name });
-  const switchTitle = folder ? `${switchLabel} · ${folder}` : t("switchBranchTitle", { name: branch.name });
-  const clickHint = folder ? t("worktreeOpenHint") : t(branch.remoteRef && !branch.checkedOutIn ? "doubleClickRemoteHint" : "branchClickHint");
+  const remoteOnly = branch.presence === "remote" ? branch.remoteRef : undefined;
+  const switchLabel = folder ? t("openBranchWorktree") : remoteOnly ? t("receiveBranchChanges", { ref: remoteOnly }) : t("switchBranch", { name: branch.name });
+  const switchTitle = folder ? `${switchLabel} · ${folder}` : remoteOnly ? switchLabel : t("switchBranchTitle", { name: branch.name });
+  const clickHint = t(branch.isCurrent ? "currentBranchHint" : folder ? "worktreeOpenHint" : remoteOnly ? "doubleClickRemoteHint" : "branchClickHint");
   return <div onContextMenu={onContextMenu} onKeyDown={(event) => {
     if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
       event.preventDefault(); const box = event.currentTarget.getBoundingClientRect();
       event.currentTarget.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: box.left + 20, clientY: box.bottom }));
     }
   }} className={`branch-row ${branch.isCurrent ? "current" : ""} ${selected ? "selected" : ""} ${merged ? "merged" : ""} ${branch.stackedOn ? "stacked" : ""} ${branch.presence}`}>
-    <button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onSwitchNow} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch, t)}\n${clickHint}`}>
+    <button ref={register} className="branch-main" style={{ paddingLeft: 8 + depth * 13 }} onClick={onSelect} onDoubleClick={onActivate} aria-current={branch.isCurrent} aria-pressed={selected} title={`${branchTooltip(branch, defaultBranch, t)}\n${clickHint}`}>
       <span className="branch-color" style={{ background: colour }} />
       {branch.stackedOn ? <GitFork size={14} className="branch-stack-icon" /> : <GitBranch size={14} />}
       {folder ? <span className="branch-worktree-name">
@@ -2527,8 +2486,8 @@ function BranchRow({ branch, label, variant, merged, selected, defaultBranch, co
       {isDefault && <span className="current-pill">{t("primary")}</span>}
       {(branch.ahead > 0 || branch.behind > 0) && <span className="ahead-behind">{branch.ahead > 0 ? `↑${branch.ahead}` : ""}{branch.behind > 0 ? ` ↓${branch.behind}` : ""}</span>}
     </button>
-    {!branch.isCurrent && <button className={`branch-switch${folder ? " open-worktree" : ""}`} onClick={onSwitch} disabled={busy} aria-label={folder ? switchTitle : switchLabel} title={switchTitle}>
-      {folder ? <><TreePine size={12} /> <span>{switchLabel}</span></> : <ArrowLeftRight size={12} />}
+    {!branch.isCurrent && <button className={`branch-switch${folder ? " open-worktree" : ""}`} onClick={onActivate} disabled={busy} aria-label={folder ? switchTitle : switchLabel} title={switchTitle}>
+      {folder ? <><TreePine size={12} /> <span>{switchLabel}</span></> : remoteOnly ? <CloudDownload size={12} /> : <ArrowLeftRight size={12} />}
     </button>}
     {!branch.isCurrent && !isDefault && !protectedByPrefix && branch.presence !== "remote" && <button className="branch-delete" onClick={onDelete} disabled={busy} aria-label={t("deleteBranch", { name: branch.name })} title={branch.mergedInto.length ? t("deleteMergedBranch", { name: branch.name, branches: branch.mergedInto.join(t("and")) }) : t("deleteUnmergedBranch", { name: branch.name })}><Trash2 size={12} /></button>}
   </div>;
@@ -2968,14 +2927,14 @@ function CommitRow({ commit, row, lanes, remotes, branches, worktrees, colour, b
   // A branch label is the branch: a double click moves there, a right click is about that branch.
   const branchOf = (chip?: RefChip) => chip && chip.kind !== "tag" ? chip.ref ? `refs/remotes/${chip.ref}` : chip.label : undefined;
   const chipEvents = (chip: RefChip) => chip.kind === "tag" ? {} : {
-    onDoubleClick: (event: ReactMouseEvent) => { event.stopPropagation(); if (chip.kind !== "head" || chipBranch(chip)?.remoteRef) onCheckout(branchOf(chip)!); },
+    onDoubleClick: (event: ReactMouseEvent) => { event.stopPropagation(); if (chip.kind !== "head") onCheckout(branchOf(chip)!); },
     onContextMenu: (event: ReactMouseEvent) => { event.preventDefault(); event.stopPropagation(); onMenu(branchOf(chip), event.clientX, event.clientY); }
   };
   const size = node === "merge" ? 10 : 20;
   const chipTag = (chip: RefChip) => {
     const branch = chipBranch(chip);
     const folder = chipWorktree(chip);
-    const hint = t(chip.kind === "remote" || (branch?.remoteRef && !branch.checkedOutIn) ? "doubleClickRemoteHint" : chip.kind === "head"
+    const hint = t(chip.kind === "remote" ? "doubleClickRemoteHint" : chip.kind === "head"
       ? "currentBranchHint" : folder ? "worktreeOpenHint" : "doubleClickSwitchHint");
     return <span className={`ref-tag ${chip.kind} ${branch?.remoteAhead && branch.remoteBehind ? "diverged" : ""}`}
       key={`${chip.kind}:${chip.ref ?? chip.label}`} title={`${chip.kind === "tag" ? chip.label : chipTitle(chip)}${chip.kind === "tag" ? "" : `\n${hint}`}`} {...chipEvents(chip)}>
@@ -2984,9 +2943,10 @@ function CommitRow({ commit, row, lanes, remotes, branches, worktrees, colour, b
         ? <span className="ref-worktree" data-worktree-path={folder.path} role="img" aria-label={t("worktreeBadge", { path: folder.path })} title={`${folder.path}\n${hint}`}>
             {folder.isMain ? <Laptop size={11} /> : <TreePine size={11} />}
           </span> : <Laptop size={11} />}
-      {chip.remoteRefs?.map(ref => <span className="ref-cloud" key={ref} title={`${ref} · ${t("doubleClickRemoteHint")}`}
-        onDoubleClick={event => { event.stopPropagation(); onCheckout(`refs/remotes/${ref}`); }}
-        onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onMenu(`refs/remotes/${ref}`, event.clientX, event.clientY); }}><Cloud size={11} /></span>)}
+      {chip.remoteRefs?.map(ref => <button type="button" className="ref-cloud" key={ref} title={t("receiveBranchChanges", { ref })} aria-label={t("receiveBranchChanges", { ref })}
+        onClick={event => { event.stopPropagation(); onCheckout(`refs/remotes/${ref}`); }}
+        onDoubleClick={event => event.stopPropagation()}
+        onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onMenu(`refs/remotes/${ref}`, event.clientX, event.clientY); }}><Cloud size={11} /></button>)}
       <span>{chip.kind === "remote" ? chip.ref : chip.label}</span>
       {branch?.remoteRef && <BranchSyncBadge branch={branch} hideSynced={chip.kind === "head"} />}
     </span>;
