@@ -6,17 +6,23 @@ import { localized } from "./i18n.js";
 import { redactText } from "./outbound-content.js";
 import { displayUrl } from "./readiness.js";
 
-export const assistantReadKinds = ["repository", "compare_branches", "commit", "file_history", "commit_count", "git"] as const;
+export const assistantReadKinds = ["repository", "compare_branches", "commit", "commit_identity", "commit_lines", "file_history", "commit_count", "git"] as const;
 export type PlannedRead = { kind: typeof assistantReadKinds[number]; args: string[] };
 
 const repositoryFacts = ["active_branch", "primary_branch", "working_tree", "remotes", "upstream", "deletable_branches"] as const;
 type RepositoryFact = typeof repositoryFacts[number];
 const historyEvents = ["first_addition", "latest_change", "latest_deletion"] as const;
 type FileHistoryEvent = typeof historyEvents[number];
+export type CommitRead = {
+  kind: "commit" | "commit_identity" | "commit_lines";
+  selector: "tip" | "latest_merge";
+  ref: string;
+  terms: string[];
+};
 export type AssistantRead =
   | { kind: "repository"; facts: RepositoryFact[] }
   | { kind: "compare_branches"; target: string; source?: string }
-  | { kind: "commit"; selector: "tip" | "latest_merge"; ref: string; terms: string[] }
+  | CommitRead
   | { kind: "file_history"; event: FileHistoryEvent; path: string; ref: string }
   | { kind: "git"; argv: string[] };
 export type AssistantFinding = { text: string; details?: string };
@@ -38,7 +44,9 @@ export function parseAssistantRead({ kind, args }: PlannedRead): AssistantRead |
       if (args.length <= 2 && args.every(ref)) return { kind, target: first, source: second };
       return;
     case "commit":
-      if (args.length <= 6 && (first === "tip" || first === "latest_merge") && (second === undefined || ref(second))) {
+    case "commit_identity":
+    case "commit_lines":
+      if (args.length <= (kind === "commit" ? 6 : 2) && (first === "tip" || first === "latest_merge") && (second === undefined || ref(second))) {
         const terms = [...new Set(args.slice(2).map(value => value.trim()))];
         if (terms.every(term => term.length <= 80 && !/\p{Cc}/u.test(term))) {
           return { kind, selector: first, ref: second ?? "HEAD", terms };

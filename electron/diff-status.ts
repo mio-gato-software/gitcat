@@ -27,7 +27,7 @@ export function parseNameStatus(raw: string): FileChange[] {
  */
 export function parseNumstat(raw: string): Record<string, FileStats> {
   const records = raw.split("\0");
-  const stats: Record<string, FileStats> = {};
+  const stats: [string, FileStats][] = [];
   for (let index = 0; index < records.length; index += 1) {
     const match = records[index].match(/^\s*(-|\d+)\t(-|\d+)\t(.*)$/s);
     if (!match) continue;
@@ -37,9 +37,9 @@ export function parseNumstat(raw: string): Record<string, FileStats> {
     if (!inline) index += 2;
     if (!path) continue;
     const binary = added === "-" || deleted === "-";
-    stats[path] = { additions: binary ? 0 : Number(added), deletions: binary ? 0 : Number(deleted), binary };
+    stats.push([path, { additions: binary ? 0 : Number(added), deletions: binary ? 0 : Number(deleted), binary }]);
   }
-  return stats;
+  return Object.fromEntries(stats);
 }
 
 /** The summary line `--shortstat` prints, such as " 3 files changed, 10 insertions(+), 2 deletions(-)". */

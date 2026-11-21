@@ -472,7 +472,7 @@ test("el modelo interpreta preguntas y GitCat construye la respuesta con sus lec
   assert.match(planner, /same language as the user's latest message/);
   assert.match(planner, /"git_operation", "create_repository", "answer", "needs_information", "out_of_scope"/);
   assert.match(service, /function plannerState/);
-  assert.match(service, /if \(plan\.intent === "answer"\) \{[\s\S]*?return answerFromGit\(/);
+  assert.match(service, /if \(plan\.intent === "answer"\) \{[\s\S]*?return answerWithCoverage\(/);
   assert.match(app, /plan\.answer/);
 });
 
