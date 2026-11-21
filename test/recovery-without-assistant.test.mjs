@@ -23,7 +23,12 @@ const { createPlanHandlers } = await import(pathToFileURL(join(root, "dist-elect
 /** Stubbed Responses API: every call is recorded; the behaviour is set per test. */
 const requests = [];
 let provider = () => { throw new Error("llamada al proveedor no esperada"); };
-globalThis.fetch = async (_url, init) => { requests.push(JSON.parse(init.body)); return provider(init); };
+globalThis.fetch = async (_url, init) => {
+  const body = JSON.parse(init.body);
+  if (body.text?.format?.name === "gitcat_commit_scope") return replyWith({ scope: "all", paths: [] })();
+  requests.push(body);
+  return provider(init);
+};
 const replyWith = (payload) => () => ({ ok: true, status: 200, text: async () => "", json: async () => ({ status: "completed", output_text: typeof payload === "string" ? payload : JSON.stringify(payload) }) });
 /** A provider that never answers: the request only ends when GitCat stops waiting for it. */
 const silent = (init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted"))));

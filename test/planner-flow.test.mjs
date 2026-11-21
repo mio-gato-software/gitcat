@@ -37,12 +37,19 @@ const queue = [];
 const requests = [];
 const coverageRequests = [];
 const coverageReplies = [];
+const scopeReplies = [];
+const scopeRequests = [];
 globalThis.fetch = async (_url, init) => {
   const body = JSON.parse(init.body);
   if (body.text?.format?.name === "gitcat_answer_coverage") {
     coverageRequests.push(body);
     const next = coverageReplies.shift() ?? { reads: [], uncovered: false };
     if (next instanceof Error) throw next;
+    return { ok: true, json: async () => ({ output_text: JSON.stringify(next) }) };
+  }
+  if (body.text?.format?.name === "gitcat_commit_scope") {
+    scopeRequests.push(body);
+    const next = scopeReplies.shift() ?? { scope: "all", paths: [] };
     return { ok: true, json: async () => ({ output_text: JSON.stringify(next) }) };
   }
   requests.push(body);
@@ -75,6 +82,8 @@ test.beforeEach(() => {
   requests.length = 0;
   coverageRequests.length = 0;
   coverageReplies.length = 0;
+  scopeReplies.length = 0;
+  scopeRequests.length = 0;
 });
 
 test("sin proveedor configurado no se interpreta nada", async () => {
@@ -369,6 +378,73 @@ test("git_command no cuela el borrado de una rama protegida", async () => {
   assert.match(requests[1].instructions, /default branch and is protected/);
   assert.equal(result.allowed, false);
   assert.match(result.rationale, /protegida/);
+});
+
+test("crear y cambiar a la misma rama ejecuta un solo paso", async () => {
+  reply(plan({ steps: [step("create_branch", { name: "qa/single-switch" }), step("checkout", { name: "qa/single-switch" })] }));
+  const result = await service.planAction(repo, "Crea la rama qa/single-switch y cámbiame a ella");
+  assert.deepEqual(result.steps.map(step => step.operation), ["create_branch"]);
+  assert.equal(result.requiresConfirmation, true);
+});
+
+test("el asistente guarda y publica solo el archivo pedido aunque el plan original omita el alcance", async t => {
+  const root = mkdtempSync(join(tmpdir(), "gitcat-assistant-selected-save-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const remote = join(root, "remote.git");
+  const path = join(root, "work");
+  execFileSync("git", ["init", "--bare", "-q", "-b", "main", remote]);
+  execFileSync("git", ["clone", "-q", remote, path]);
+  const run = (...args) => execFileSync("git", args, { cwd: path, encoding: "utf8" }).trim();
+  run("config", "user.name", "QA");
+  run("config", "user.email", "qa@example.test");
+  run("commit", "--allow-empty", "-qm", "base");
+  run("push", "-q", "-u", "origin", "main");
+  writeFileSync(join(path, "picked.txt"), "picked contents\n");
+  writeFileSync(join(path, "other.txt"), "unrelated staged contents\n");
+  run("add", "other.txt");
+
+  const message = "Guardar solo el archivo elegido";
+  const saving = step("commit", { message });
+  reply(plan({ steps: [saving, step("push")], summary: "Guardar todo", rationale: "Guardar ambos archivos" }));
+  scopeReplies.push({ scope: "selected", paths: ["picked.txt"] });
+  const approved = await service.planAction(path, "Guarda solo picked.txt y publica. Deja other.txt pendiente.");
+  assert.equal(approved.allowed, true, approved.rationale);
+  assert.equal(approved.requiresConfirmation, true);
+  assert.deepEqual(approved.steps[0].paths, ["picked.txt"]);
+  assert.deepEqual(approved.selection.changes.map(change => change.path), ["picked.txt"]);
+  assert.doesNotMatch(approved.rationale, /ambos/);
+  const result = await service.executePlan(path, approved);
+  assert.equal(result.error, undefined);
+  assert.deepEqual(result.outcomes.map(outcome => outcome.status), ["completed", "completed"]);
+  assert.equal(run("show", "-s", "--format=%s", "HEAD"), message);
+  assert.equal(run("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"), "picked.txt");
+  assert.equal(run("diff", "--cached", "--name-only"), "other.txt");
+  assert.equal(run("rev-parse", "origin/main"), run("rev-parse", "HEAD"));
+  assert.doesNotMatch(scopeRequests[0].input, /picked contents|unrelated staged contents/);
+});
+
+test("una selección explícita ausente o ambigua no se amplía a los archivos pendientes", async t => {
+  const path = mkdtempSync(join(tmpdir(), "gitcat-assistant-missing-selection-"));
+  t.after(() => rmSync(path, { recursive: true, force: true }));
+  execFileSync("git", ["clone", "-q", repo, path]);
+  writeFileSync(join(path, "unrelated.txt"), "leave pending\n");
+  const saving = step("commit", { message: "Guardar muestra" });
+  reply(plan({ steps: [{ ...saving, paths: ["missing.txt"] }] }));
+  const exact = await service.planAction(path, "Guarda solo missing.txt");
+  assert.equal(exact.allowed, false);
+  assert.deepEqual(exact.steps, []);
+  assert.equal(scopeRequests.length, 0);
+  reply(plan({ steps: [saving, { ...saving, paths: ["unrelated.txt"] }] }));
+  const later = await service.planAction(path, "Primero guarda todo y después guarda únicamente unrelated.txt");
+  assert.equal(later.allowed, false);
+  assert.deepEqual(later.steps, []);
+  assert.equal(scopeRequests.length, 0);
+  reply(plan({ steps: [saving] }));
+  scopeReplies.push({ scope: "unclear", paths: [] });
+  const ambiguous = await service.planAction(path, "Guarda solo el archivo del que hablamos");
+  assert.equal(ambiguous.allowed, false);
+  assert.match(ambiguous.rationale, /Indica sus nombres/);
+  assert.equal(readFileSync(join(path, "unrelated.txt"), "utf8"), "leave pending\n");
 });
 
 test("git_command sin argv vuelve al modelo como incidencia estructurada", async () => {

@@ -32,11 +32,16 @@ const secrets = [AWS, GITHUB, OPENAI, PASSWORD, PEM_BODY];
 const queue = [];
 const requests = [];
 const coverageRequests = [];
+const scopeRequests = [];
 globalThis.fetch = async (_url, init) => {
   const body = JSON.parse(init.body);
   if (body.text?.format?.name === "gitcat_answer_coverage") {
     coverageRequests.push(body);
     return { ok: true, json: async () => ({ output_text: '{"reads":[],"uncovered":false}' }) };
+  }
+  if (body.text?.format?.name === "gitcat_commit_scope") {
+    scopeRequests.push(body);
+    return { ok: true, json: async () => ({ output_text: '{"scope":"all","paths":[]}' }) };
   }
   requests.push(body);
   const next = queue.shift();
@@ -45,7 +50,7 @@ globalThis.fetch = async (_url, init) => {
 };
 queue.push("ok");
 await service.saveLlmConfig({ apiKey: "sk-test", model: "test-model" });
-test.beforeEach(() => { queue.length = 0; requests.length = 0; coverageRequests.length = 0; });
+test.beforeEach(() => { queue.length = 0; requests.length = 0; coverageRequests.length = 0; scopeRequests.length = 0; });
 
 const step = (operation, args = {}, argv = []) => ({ operation, argv, args: { name: "", onto: "", to: "", path: "", side: "", message: "", noVerify: "", ...args } });
 const plan = (overrides) => ({
@@ -55,7 +60,7 @@ const plan = (overrides) => ({
 });
 
 /** Everything that left for the provider, as one string, so a leak anywhere in a request is caught. */
-const sent = () => [...requests, ...coverageRequests].map((request) => JSON.stringify(request)).join("\n");
+const sent = () => [...requests, ...coverageRequests, ...scopeRequests].map((request) => JSON.stringify(request)).join("\n");
 function assertNoSecrets(text, where) {
   for (const secret of secrets) assert.equal(text.includes(secret), false, `${where} contains a synthetic secret`);
 }
