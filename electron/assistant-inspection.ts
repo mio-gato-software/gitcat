@@ -6,7 +6,7 @@ import { localized } from "./i18n.js";
 import { redactText } from "./outbound-content.js";
 import { displayUrl } from "./readiness.js";
 
-export const assistantReadKinds = ["repository", "compare_branches", "commit", "file_history", "git"] as const;
+export const assistantReadKinds = ["repository", "compare_branches", "commit", "file_history", "commit_count", "git"] as const;
 export type PlannedRead = { kind: typeof assistantReadKinds[number]; args: string[] };
 
 const repositoryFacts = ["active_branch", "primary_branch", "working_tree", "remotes", "upstream", "deletable_branches"] as const;
@@ -16,7 +16,7 @@ type FileHistoryEvent = typeof historyEvents[number];
 export type AssistantRead =
   | { kind: "repository"; facts: RepositoryFact[] }
   | { kind: "compare_branches"; target: string; source?: string }
-  | { kind: "commit"; selector: "tip" | "latest_merge"; ref: string }
+  | { kind: "commit"; selector: "tip" | "latest_merge"; ref: string; terms: string[] }
   | { kind: "file_history"; event: FileHistoryEvent; path: string; ref: string }
   | { kind: "git"; argv: string[] };
 export type AssistantFinding = { text: string; details?: string };
@@ -38,8 +38,11 @@ export function parseAssistantRead({ kind, args }: PlannedRead): AssistantRead |
       if (args.length <= 2 && args.every(ref)) return { kind, target: first, source: second };
       return;
     case "commit":
-      if (args.length <= 2 && (first === "tip" || first === "latest_merge") && (second === undefined || ref(second))) {
-        return { kind, selector: first, ref: second ?? "HEAD" };
+      if (args.length <= 6 && (first === "tip" || first === "latest_merge") && (second === undefined || ref(second))) {
+        const terms = [...new Set(args.slice(2).map(value => value.trim()))];
+        if (terms.every(term => term.length <= 80 && !/\p{Cc}/u.test(term))) {
+          return { kind, selector: first, ref: second ?? "HEAD", terms };
+        }
       }
       return;
     case "file_history": {
@@ -50,6 +53,13 @@ export function parseAssistantRead({ kind, args }: PlannedRead): AssistantRead |
       }
       return;
     }
+    case "commit_count":
+      if (args.length === 2 && (first === "--all" || ref(first))) {
+        if (second === "all") return { kind: "git", argv: ["rev-list", "--count", first] };
+        if (second === "no_merges") return { kind: "git", argv: ["rev-list", "--count", "--no-merges", first] };
+        if (second === "merges") return { kind: "git", argv: ["rev-list", "--count", "--merges", first] };
+      }
+      return;
     case "git": {
       const command = parseAssistantCommand(args);
       if (command?.operation === "git_command") return { kind, argv: command.argv };
@@ -285,7 +295,7 @@ function historyLimit(shallow: boolean | undefined, locale: Locale) {
 
 export async function inspectFileHistory(
   read: ReadGitFacts, query: Extract<AssistantRead, { kind: "file_history" }>, snapshot: RepoSnapshot, locale: Locale
-): Promise<AssistantFinding> {
+): Promise<AssistantFinding & { recordedPath?: string }> {
   const { event, path, ref } = query;
   const limit = historyLimit(snapshot.isShallow, locale);
   if (limit && event === "first_addition") return { text: localized(locale,
@@ -293,28 +303,99 @@ export async function inspectFileHistory(
     `I can't verify when ${path} first appeared. ${limit}`) };
   const tip = ref === "HEAD" ? snapshot.head : (await read(["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`])).stdout.trim();
   if (!objectHash.test(tip)) return { text: localized(locale, `Git no encontró un commit para ${ref}.`, `Git found no commit for ${ref}.`) };
-  const args = ["--literal-pathspecs", "log", "--no-patch", "--follow", "--format=%h%x00%an%x00%aI%x00%s",
+  const args = ["--literal-pathspecs", "log", "--name-only", "-z", "--follow", "--format=%h%x00%an%x00%aI%x00%s",
     ...(event === "first_addition" ? ["--diff-filter=A"] : event === "latest_deletion" ? ["-1", "--diff-filter=D"] : ["-1"]), tip, "--", path];
   const result = await read(args);
   if (!complete(result)) return { text: localized(locale, `Git no pudo completar la búsqueda en el historial de ${path}.`, `Git could not complete the history search for ${path}.`) };
-  const rows = result.stdout.trim().split("\n").filter(Boolean);
-  const entry = event === "first_addition" ? rows.at(-1) : rows[0];
-  if (!entry) return { text: localized(locale, `El historial disponible de ${ref} no muestra ese cambio en ${path}.`, `The available history of ${ref} doesn't show that change to ${path}.`) };
-  const [hash, author, date, subject] = entry.split("\0");
+  if (!result.stdout) return { text: localized(locale, `El historial disponible de ${ref} no muestra ese cambio en ${path}.`, `The available history of ${ref} doesn't show that change to ${path}.`) };
+  // --follow returns one path per record. NUL delimiters preserve names with spaces or line breaks.
+  const fields = result.stdout.split("\0");
+  if (fields.at(-1) === "") fields.pop();
+  const offset = event === "first_addition" ? fields.length - 5 : 0;
+  const [hash, author, date, subject, file] = fields.slice(offset, offset + 5);
+  if (fields.length % 5 !== 0 || !/^[0-9a-f]{4,64}$/.test(hash ?? "") || !file?.startsWith("\n")) {
+    return { text: localized(locale, "Git devolvió un historial de archivo que no pude comprobar.", "Git returned file history I couldn't verify.") };
+  }
+  const recordedPath = file.slice(1);
   const action = event === "first_addition" ? localized(locale, "añadió", "added")
     : event === "latest_deletion" ? localized(locale, "eliminó", "deleted") : localized(locale, "modificó", "changed");
   const day = date.slice(0, 10);
   const text = limit
     ? localized(locale, `La última entrada disponible de ${path} es ${hash}, de ${author}, el ${day}. ${limit}`,
       `The latest available entry for ${path} is ${hash}, by ${author}, on ${day}. ${limit}`)
-    : localized(locale, `${author} ${action} ${path} el ${day} en el commit ${hash}.`, `${author} ${action} ${path} on ${day} in commit ${hash}.`);
-  return { text, details: `${ref} · ${hash}\n${subject}\n${date}` };
+    : localized(locale, `${author} ${action} ${recordedPath} el ${day} en el commit ${hash}.`,
+      `${author} ${action} ${recordedPath} on ${day} in commit ${hash}.`);
+  const followed = recordedPath !== path ? localized(locale, `Git llegó a ese nombre al seguir el historial de ${path}.`,
+    `Git found that name by following the history of ${path}.`) : "";
+  return { text: [text, followed].filter(Boolean).join(" "), recordedPath, details: `${ref} · ${hash}\n${subject}\n${date}` };
+}
+
+/** Select exact changed lines locally. The match is evidence of a text edit, not a runtime claim. */
+export function describePatchMatches(result: GitReading, terms: string[], locale: Locale): AssistantFinding {
+  if (result.code !== 0) return { text: localized(locale, "Git no pudo leer el diff de este commit.", "Git could not read this commit's diff.") };
+  const needles = terms.map(term => term.toLowerCase());
+  const selected: { header: string; line: string; score: number }[] = [];
+  let header = "";
+  let inHunk = false;
+  for (const line of result.stdout.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      header = line;
+      inHunk = false;
+    } else if (line.startsWith("@@ ")) {
+      inHunk = true;
+    } else if (inHunk && /^[+-]/.test(line)) {
+      const normalized = line.slice(1).toLowerCase();
+      const score = needles.filter(needle => normalized.includes(needle)).length;
+      if (score) selected.push({ header, line, score });
+    }
+  }
+  selected.sort((left, right) => right.score - left.score);
+  const termList = terms.map(term => `«${term}»`).join(", ");
+  const limit = result.stdoutTruncated
+    ? localized(locale, "GitCat solo pudo revisar parte del diff por su tamaño.", "GitCat could only review part of the diff because of its size.") : "";
+  if (!selected.length) return { text: [localized(locale, `No encontré líneas cambiadas que coincidan con ${termList}.`,
+    `I didn't find changed lines matching ${termList}.`), limit].filter(Boolean).join(" ") };
+  const intro = localized(locale, `Estas son las líneas cambiadas más relacionadas con ${termList}.`, `These changed lines best match ${termList}.`);
+  const preview = selected.slice(0, 4).map(({ line }) => {
+    const label = line.startsWith("+") ? localized(locale, "Añadido", "Added") : localized(locale, "Quitado", "Removed");
+    const code = line.slice(1).trim();
+    return `${label} · ${code.length > 160 ? `${code.slice(0, 160)}…` : code}`;
+  }).join("\n");
+  return {
+    text: [intro, preview, limit].filter(Boolean).join("\n"),
+    details: selected.slice(0, 16).map(({ header, line }) => `${header}\n${line.slice(0, 1000)}`).join("\n\n")
+  };
+}
+
+function commitCount(options: string[]) {
+  if (options.filter(arg => arg === "--count").length !== 1) return;
+  const merges = options.includes("--merges") || options.includes("--min-parents=2");
+  const withoutMerges = options.includes("--no-merges") || options.includes("--max-parents=1");
+  const filters = options.filter(arg => ["--no-merges", "--merges", "--first-parent", "--min-parents=2", "--max-parents=1"].includes(arg));
+  const scopes = options.filter(arg => arg !== "--count" && !filters.includes(arg));
+  if (scopes.length !== 1 || (scopes[0].startsWith("-") && scopes[0] !== "--all")) return;
+  if (withoutMerges && merges) return;
+  return { scope: scopes[0], filter: withoutMerges ? "without_merges" : merges ? "merges" : "all",
+    firstParent: filters.includes("--first-parent") };
+}
+
+async function isUnbornBranch(read: ReadGitFacts, snapshot: RepoSnapshot, scope: string) {
+  if (snapshot.head || snapshot.currentBranch === "HEAD") return false;
+  const ref = `refs/heads/${snapshot.currentBranch}`;
+  if (!["HEAD", snapshot.currentBranch, ref].includes(scope)) return false;
+  const [symbolic, exists] = await Promise.all([read(["symbolic-ref", "--quiet", "HEAD"]), read(["show-ref", "--verify", "--quiet", "--", ref])]);
+  return complete(symbolic) && symbolic.stdout.trim() === ref && exists.code === 1 && !exists.stderr.trim();
 }
 
 export async function inspectGit(read: ReadGitFacts, argv: string[], snapshot: RepoSnapshot, locale: Locale): Promise<AssistantFinding> {
-  const result = await read(assistantQueryArguments(argv));
   const [verb, ...args] = argv;
-  const options = args.slice(0, args.includes("--") ? args.indexOf("--") : undefined);
+  const separator = args.indexOf("--");
+  const options = args.slice(0, separator < 0 ? undefined : separator);
+  const count = verb === "rev-list" && (separator < 0 || separator === args.length - 1) ? commitCount(options) : undefined;
+  if (count && await isUnbornBranch(read, snapshot, count.scope)) {
+    return { text: localized(locale, `Aún no hay commits en ${snapshot.currentBranch}.`, `${snapshot.currentBranch} doesn't have any commits yet.`) };
+  }
+  const result = await read(assistantQueryArguments(argv));
   const diffStatus = verb === "diff" && (options.includes("--exit-code") || options.includes("--quiet"));
   const validExitOne = result.code === 1 && !result.stderr.trim() && (diffStatus || verb === "grep");
   const ok = result.code === 0 || validExitOne;
@@ -324,14 +405,19 @@ export async function inspectGit(read: ReadGitFacts, argv: string[], snapshot: R
   const label = ["git", ...argv.map(arg => /[\s\p{Cc}]/u.test(arg) ? JSON.stringify(arg) : arg)].join(" ");
   const details = [label, stdout.slice(0, 8000), result.stderr.trim().slice(0, 1000),
     cut ? localized(locale, "Resultado recortado.", "Output shortened.") : ""].filter(Boolean).join("\n");
-  if (ok && !cut && !result.stderr.trim() && verb === "rev-list" && args.length === 2 && args[0] === "--count"
-      && !args[1].startsWith("-") && /^\d+$/.test(stdout)) {
-    const ref = args[1] === "HEAD" && snapshot.currentBranch !== "HEAD" ? snapshot.currentBranch : args[1];
-    const quantity = `${stdout} ${stdout === "1" ? "commit" : "commits"}`;
-    const text = args[1].includes("..")
-      ? localized(locale, `En el rango ${ref}, Git contó ${quantity}.`, `Git counted ${quantity} in the range ${ref}.`)
-      : localized(locale, `En esta copia, Git cuenta ${quantity} en el historial de ${ref}.`, `In this copy, Git counts ${quantity} in ${ref}'s history.`);
-    return { text: [text, limit].filter(Boolean).join(" "), details };
+  if (count && ok && !cut && !result.stderr.trim() && /^\d+$/.test(stdout)) {
+    const ref = count.scope === "HEAD" && snapshot.currentBranch !== "HEAD" ? snapshot.currentBranch : count.scope;
+    const noun = count.filter === "merges"
+      ? localized(locale, stdout === "1" ? "fusión" : "fusiones", stdout === "1" ? "merge" : "merges")
+      : stdout === "1" ? "commit" : "commits";
+    const scope = ref === "--all" ? localized(locale, "entre las referencias de esta copia", "across this copy's refs")
+      : ref.includes("..") ? localized(locale, `en el rango ${ref}`, `in the range ${ref}`)
+        : localized(locale, `en el historial de ${ref}`, `in ${ref}'s history`);
+    const filter = count.filter === "without_merges" ? localized(locale, ", sin contar las fusiones", ", excluding merges") : "";
+    const traversal = count.firstParent ? localized(locale, "Git siguió solo el primer padre de cada fusión.",
+      "Git followed only the first parent of each merge.") : "";
+    const text = localized(locale, `En esta copia, Git cuenta ${stdout} ${noun} ${scope}${filter}.`, `In this copy, Git counts ${stdout} ${noun} ${scope}${filter}.`);
+    return { text: [text, traversal, limit].filter(Boolean).join(" "), details };
   }
   const outcome = !ok
     ? localized(locale, "Git no pudo completar esta comprobación. El detalle explica qué falló.", "Git could not complete this check. See the details for what failed.")

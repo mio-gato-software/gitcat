@@ -1,7 +1,7 @@
 import { branchArguments, isBranchNameSafe, parseBranchOperation, validateBranchOperation, type BranchOperation } from "./branch-operation.js";
 import { displayPushAddress, parsePushOperation, pushArguments, pushRepository, readDirectPushEndpoints, readPushDestination, readRemoteUrls, validatePushOperation, verifiedTransportRemote, verifyInitialPushUrl, type PushOperation } from "./push-destination.js";
 import { assistantQueryArguments, parseAssistantCommand, type AssistantCommand } from "./assistant-git-command.js";
-import { describeRepositoryFacts, inspectBranches, inspectFileHistory, inspectGit, parseAssistantRead, type AssistantFinding, type AssistantRead } from "./assistant-inspection.js";
+import { describePatchMatches, describeRepositoryFacts, inspectBranches, inspectFileHistory, inspectGit, parseAssistantRead, type AssistantFinding, type AssistantRead } from "./assistant-inspection.js";
 import { conflictResolutionEffect, walkPlanSteps } from "../shared/plan-summary.js";
 import type { ConflictResolutionAction } from "../shared/types.js";
 import { syncDestinations } from "../shared/remote-sync.js";
@@ -2197,6 +2197,9 @@ async function inspectCommit(snapshot: RepoSnapshot, read: Extract<AssistantRead
     : localized(locale, "Ese commit", "That commit");
   const changed = files.length === 1 ? localized(locale, "un archivo", "one file") : localized(locale, `${files.length} archivos`, `${files.length} files`);
   const commits = count === "1" ? localized(locale, "un commit", "one commit") : `${count} commits`;
+  const matches = read.terms.length ? describePatchMatches(await runGit(snapshot.path, parent
+    ? ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=0", parent, commit.hash, "--"]
+    : ["show", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=0", "--format=", commit.hash, "--"]), read.terms, locale) : undefined;
   const text = [
     count !== "" ? localized(locale, `${title} (${commit.shortHash}) incorporó ${commits} y cambió ${changed}.`,
       `${title} (${commit.shortHash}) brought in ${commits} and changed ${changed}.`)
@@ -2206,7 +2209,8 @@ async function inspectCommit(snapshot: RepoSnapshot, read: Extract<AssistantRead
     files.length ? localized(locale, `Tocó ${files.slice(0, 4).map(file => file.path).join(", ")}${files.length > 4 ? ` y ${files.length - 4} más` : ""}.`,
       `It touched ${files.slice(0, 4).map(file => file.path).join(", ")}${files.length > 4 ? ` and ${files.length - 4} more` : ""}.`) : "",
     snapshot.isShallow && mergeRange ? localized(locale, "El total de commits corresponde al historial local disponible.",
-      "The commit count covers the available local history.") : ""
+      "The commit count covers the available local history.") : "",
+    matches?.text
   ].filter(Boolean).join("\n\n");
   return {
     commit, files, text,
@@ -2214,7 +2218,8 @@ async function inspectCommit(snapshot: RepoSnapshot, read: Extract<AssistantRead
       label, localized(locale, `Archivos cambiados ${base}: ${files.length}.`, `Files changed ${base}: ${files.length}.`),
       ...files.slice(0, 20).map(file => `• ${file.from ? `${file.from} → ` : ""}${file.path} (${file.code})`),
       files.length > 20 ? localized(locale, "El diff completo muestra los demás archivos.", "The full diff shows the remaining files.") : "",
-      introduced ? localized(locale, `Commits incorporados (hasta 12)\n${introduced}`, `Commits brought in (up to 12)\n${introduced}`) : ""
+      introduced ? localized(locale, `Commits incorporados (hasta 12)\n${introduced}`, `Commits brought in (up to 12)\n${introduced}`) : "",
+      matches?.details
     ].filter(Boolean).join("\n")
   };
 }
@@ -2229,7 +2234,7 @@ function queryReturnsMetadata(argv: string[]) {
   return verb === "diff" && options.some((option) => ["--stat", "--shortstat", "--name-only", "--name-status", "--numstat", "--summary"].includes(option));
 }
 
-async function answerFromGit(snapshot: RepoSnapshot, reads: AssistantRead[], locale: Locale) {
+async function answerFromGit(snapshot: RepoSnapshot, reads: AssistantRead[], locale: Locale, skipped = 0) {
   const readGit: (args: string[]) => Promise<CommandResult> = args => runGit(snapshot.path, args);
   const exclusions = recallSharing(memory, snapshot.path).exclusions;
   const sections: AssistantFinding[] = [];
@@ -2250,13 +2255,17 @@ async function answerFromGit(snapshot: RepoSnapshot, reads: AssistantRead[], loc
           const result = await inspectCommit(snapshot, reading, locale);
           sections.push(result);
           answerCommit ??= result.commit;
-          localAnswer ||= Boolean(result.files?.some(file => changePaths(file).some(path => isExcluded(path, exclusions))));
+          localAnswer ||= reading.terms.length > 0 ||
+            Boolean(result.files?.some(file => changePaths(file).some(path => isExcluded(path, exclusions))));
           break;
         }
-        case "file_history":
-          sections.push(await inspectFileHistory(readGit, reading, snapshot, locale));
-          localAnswer ||= isExcluded(reading.path, exclusions);
+        case "file_history": {
+          const result = await inspectFileHistory(readGit, reading, snapshot, locale);
+          sections.push(result);
+          localAnswer ||= isExcluded(reading.path, exclusions) ||
+            Boolean(result.recordedPath && isExcluded(result.recordedPath, exclusions));
           break;
+        }
         case "git":
           sections.push(await inspectGit(readGit, reading.argv, snapshot, locale));
           // Keep arbitrary Git output out of the next model turn, including diagnostics and patches.
@@ -2269,12 +2278,20 @@ async function answerFromGit(snapshot: RepoSnapshot, reads: AssistantRead[], loc
         "Git could not complete this read. Check the ref or ask about a smaller part of the history.") });
     }
   }
+  if (skipped) sections.push({ text: localized(locale,
+    "Parte de la pregunta quedó sin verificar porque no encontré una lectura compatible.",
+    "Part of the question remains unchecked because I couldn't find a supported read.") });
   return bindPlan(snapshot, {
     ...answerDraft(sections.map(section => section.text).join("\n\n"), localized(locale, "Consulta de Git", "Git query")),
     answerDetails: sections.map(section => section.details).filter(Boolean).join("\n\n") || undefined,
     ...(answerCommit ? { answerCommit } : {}),
     ...(localAnswer ? { localAnswer: true } : {})
   });
+}
+
+function plannedAnswerReads(plan: ModelPlan) {
+  const reads = plan.reads ?? [];
+  return plan.intent === "answer" && !plan.steps.length && reads.length <= planStepLimit ? reads.map(parseAssistantRead) : [];
 }
 
 const riskOrder = { low: 0, medium: 1, high: 2 } as const;
@@ -2366,17 +2383,26 @@ async function prepareModelPlan(
   const fallbackRefusal = localized(locale, LAST_RESORT_REFUSAL, LAST_RESORT_REFUSAL_EN);
   const answerLocale = plan.answerLanguage || locale;
   if (plan.intent === "answer") {
-    const reads = (plan.reads ?? []).map(parseAssistantRead);
-    if (!plan.steps.length && reads.length && reads.length <= planStepLimit && reads.every(read => read !== undefined)) {
-      return answerFromGit(await getSnapshot(snapshot.path), reads, answerLocale);
-    }
-    if (!retried) {
-      const repaired = await requestPlan(request, snapshot, context, [{
+    let reads = plannedAnswerReads(plan);
+    if (!retried && (!reads.length || reads.some(read => read === undefined))) {
+      const invalid = reads.flatMap((read, index) => read ? [] : [index]);
+      const issues: PlanIssue[] = [{
         field: "reads",
         problem: `For answers, provide 1–${planStepLimit} supported read-only inspections and no action steps. GitCat cannot verify free-form reply text.`
-      }], notes);
-      if (repaired.intent === "answer") return prepareModelPlan(repaired, snapshot, request, context, locale, notes, true);
+      }, ...invalid.map(index => ({
+        field: `reads[${index}]`,
+        problem: "This inspection or its arguments are unsupported. Replace it in place and preserve the other reads and their order."
+      }))];
+      try {
+        const repaired = plannedAnswerReads(await requestPlan(request, snapshot, context, issues, notes));
+        if (!reads.some(Boolean)) reads = repaired;
+        else if (repaired.length === reads.length) reads = reads.map((read, index) => read ?? repaired[index]);
+      } catch (error) {
+        if (error instanceof OperationCancelled || !reads.some(Boolean)) throw error;
+      }
     }
+    const verified = reads.filter((read): read is AssistantRead => read !== undefined);
+    if (verified.length) return answerFromGit(await getSnapshot(snapshot.path), verified, answerLocale, reads.length - verified.length);
     return bindPlan(snapshot, answerDraft(localized(answerLocale,
       "No encontré una lectura de Git que permita verificar la respuesta. Prueba indicando la rama, el commit o el archivo que quieres comprobar.",
       "I couldn't find a Git read that verifies the answer. Try specifying the branch, commit or file you want to check.")));

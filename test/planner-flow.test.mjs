@@ -518,6 +518,16 @@ test("el último merge usa su primer padre, se responde en el turno y conserva e
   assert.equal(requests.length, 1);
   assert.equal((await service.getSnapshot(path)).stateId, before.stateId);
 
+  writeFileSync(join(path, "retry.txt"), "reintentar en el directorio de trabajo\n");
+  reply(plan({ intent: "answer", reads: [{ kind: "commit", args: ["latest_merge", "main", "reintentar"] }] }));
+  const excerpt = await service.planAction(path, "¿Qué cambió con los reintentos en la última fusión?");
+  assert.match(excerpt.answer, /Añadido · reintentar\n?$/);
+  assert.match(excerpt.answerDetails, /diff --git a\/retry\.txt b\/retry\.txt\n\+reintentar/);
+  assert.doesNotMatch(excerpt.answerDetails, /directorio de trabajo/);
+  assert.equal(excerpt.answerCommit.hash, merge);
+  assert.equal(excerpt.localAnswer, true);
+  run("restore", "--", "retry.txt");
+
   reply(plan({ intent: "answer", reads: [{ kind: "file_history", args: ["first_addition", "retry.txt"] }] }));
   const file = await service.planAction(path, "¿Quién añadió retry.txt y cuándo?");
   const [hash, day] = run("log", "-1", "--format=%h %as", "--", "retry.txt").split(" ");
@@ -540,6 +550,56 @@ test("el último merge usa su primer padre, se responde en el turno y conserva e
   assert.match(partial.answer, /No puedo comprobar cuándo apareció por primera vez retry\.txt/);
   assert.equal((await service.getSnapshot(shallow)).isShallow, true);
   assert.equal(partial.answerCommit, undefined);
+});
+
+test("las lecturas distinguen una rama sin commits, los conteos filtrados y el nombre histórico de un archivo", async t => {
+  const path = mkdtempSync(join(tmpdir(), "gitcat-answer-history-coverage-"));
+  t.after(() => rmSync(path, { recursive: true, force: true }));
+  const run = (...args) => execFileSync("git", args, { cwd: path, encoding: "utf8" }).trim();
+  run("init", "-q", "-b", "trunk");
+  run("config", "user.name", "QA");
+  run("config", "user.email", "qa@example.test");
+  reply(plan({ intent: "answer", reads: [{ kind: "git", args: ["rev-list", "--count", "trunk"] }] }));
+  const unborn = await service.planAction(path, "¿Cuántos commits hay en trunk?");
+  assert.equal(unborn.answer, "Aún no hay commits en trunk.");
+  assert.equal(unborn.requiresConfirmation, false);
+  writeFileSync(join(path, "antiguo [1].txt"), "base\n");
+  run("add", "--", "antiguo [1].txt");
+  run("commit", "-qm", "crear");
+  const creation = run("rev-parse", "--short", "HEAD");
+  run("switch", "-qc", "change");
+  run("mv", "--", "antiguo [1].txt", "vigente [2].txt");
+  run("commit", "-qm", "renombrar");
+  run("switch", "-q", "trunk");
+  run("merge", "-q", "--no-ff", "change", "-m", "integrar");
+  reply(plan({ intent: "answer", reads: [
+    { kind: "git", args: ["rev-list", "--no-merges", "--count", "HEAD", "--"] },
+    { kind: "commit_count", args: ["--all", "all"] },
+    { kind: "commit_count", args: ["trunk", "merges"] },
+    { kind: "file_history", args: ["first_addition", "vigente [2].txt"] }
+  ] }));
+  const result = await service.planAction(path, "¿Cuántos commits hay y quién añadió el archivo renombrado?");
+  assert.match(result.answer, /2 commits en el historial de trunk, sin contar las fusiones/);
+  assert.match(result.answer, /3 commits entre las referencias de esta copia/);
+  assert.match(result.answer, /1 fusión en el historial de trunk/);
+  assert.match(result.answer, /QA añadió antiguo \[1\]\.txt/);
+  assert.match(result.answer, /Git llegó a ese nombre al seguir el historial de vigente \[2\]\.txt/);
+  assert.ok(result.answer.includes(creation));
+});
+
+test("una lectura inválida conserva los resultados válidos aunque el proveedor no logre repararla", async () => {
+  reply(plan({ intent: "answer", reads: [
+    { kind: "commit_count", args: ["HEAD", "all"] },
+    { kind: "git", args: ["push"] }
+  ] }));
+  reply(plan({ intent: "out_of_scope", reply: "Fallo inventado." }));
+  const result = await service.planAction(repo, "¿Cuántos commits hay y cuál es la URL de push?");
+  assert.match(result.answer, /Git cuenta \d+ commits? en el historial de main/);
+  assert.match(result.answer, /Parte de la pregunta quedó sin verificar/);
+  assert.doesNotMatch(result.answer, /Fallo inventado/);
+  assert.match(requests[1].instructions, /reads\[1\]/);
+  assert.deepEqual(result.steps, []);
+  assert.equal(result.requiresConfirmation, false);
 });
 
 test("la respuesta distingue el índice y el directorio de trabajo y lee las URL efectivas", async t => {
