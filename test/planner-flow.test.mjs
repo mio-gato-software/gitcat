@@ -363,20 +363,21 @@ test("git_command sin argv vuelve al modelo como incidencia estructurada", async
   assert.equal(result.allowed, false);
 });
 
-test("todo git_command espera confirmación, aunque se proponga como lectura", async () => {
+test("una lectura se contesta en el mismo turno, mientras un push sigue necesitando confirmación", async () => {
+  const before = await service.getSnapshot(repo);
   reply(plan({
     intent: "git_operation",
     steps: [step("git_command", {}, ["log", "-1", "--format=%ad"])],
     summary: "Leer la fecha del último commit", rationale: "…", risk: "low"
   }));
+  reply("El último commit tiene la fecha que indica Git.");
   const reading = await service.planAction(repo, "¿cuándo fue el último commit?");
   assert.equal(reading.allowed, true, reading.rationale);
-  assert.equal(reading.requiresConfirmation, true, "los argumentos libres se revisan antes de ejecutar");
-  assert.equal(reading.risk, "high");
-
-  const execution = await service.executePlan(repo, reading);
-  assert.equal(execution.error, undefined, execution.error);
-  assert.match(execution.output, /\d{2}:\d{2}:\d{2}/, "la salida del comando llega al usuario");
+  assert.equal(reading.requiresConfirmation, false);
+  assert.equal(reading.answer, "El último commit tiene la fecha que indica Git.");
+  assert.deepEqual(reading.steps, []);
+  assert.match(requests[1].input, /\d{2}:\d{2}:\d{2}/, "la síntesis recibe la fecha que Git leyó");
+  assert.equal((await service.getSnapshot(repo)).stateId, before.stateId);
 
   reply(plan({
     intent: "git_operation",
@@ -389,7 +390,7 @@ test("todo git_command espera confirmación, aunque se proponga como lectura", a
   assert.equal(writing.steps[0].risk, "high");
 });
 
-test("una investigación con varios comandos libres espera confirmación", async () => {
+test("una investigación con varias lecturas se resume en una sola respuesta", async () => {
   reply(plan({
     intent: "git_operation",
     steps: [
@@ -398,15 +399,41 @@ test("una investigación con varios comandos libres espera confirmación", async
     ],
     summary: "Consultar el historial del archivo", rationale: "El usuario pregunta quién lo creó y quién lo eliminó.", risk: "low"
   }));
+  reply("Prueba Uno creó README.md y el historial no muestra que lo eliminara.");
   const result = await service.planAction(repo, "investiga quién creó README.md, cuándo y quién lo eliminó");
   assert.equal(result.allowed, true, result.rationale);
-  assert.equal(result.requiresConfirmation, true, "la investigación con comandos libres también se revisa");
-  assert.equal(result.steps.length, 2);
+  assert.equal(result.requiresConfirmation, false);
+  assert.match(result.answer, /Prueba Uno/);
+  assert.match(requests[1].input, /Prueba Uno/, "el autor aparece en los datos verificados");
+});
 
-  const execution = await service.executePlan(repo, result);
-  assert.equal(execution.error, undefined, execution.error);
-  assert.deepEqual(execution.outcomes.map((item) => item.status), ["completed", "completed"]);
-  assert.match(execution.output, /Prueba Uno/, "el autor del commit de creación aparece en la salida");
+test("el último merge usa su primer padre, se responde en el turno y conserva el repositorio", async (t) => {
+  const path = mkdtempSync(join(tmpdir(), "gitcat-last-merge-"));
+  t.after(() => rmSync(path, { recursive: true, force: true }));
+  const run = (...args) => execFileSync("git", args, { cwd: path, encoding: "utf8" }).trim();
+  run("init", "-q", "-b", "main");
+  run("config", "user.name", "QA");
+  run("config", "user.email", "qa@example.test");
+  run("commit", "-qm", "base", "--allow-empty");
+  run("switch", "-qc", "feature/retry");
+  writeFileSync(join(path, "retry.txt"), "reintentar\n");
+  run("add", "retry.txt");
+  run("commit", "-qm", "Añadir reintentos");
+  run("switch", "-q", "main");
+  run("merge", "-q", "--no-ff", "feature/retry", "-m", "Integrar reintentos");
+  const merge = run("rev-parse", "HEAD");
+  run("commit", "-qm", "un commit posterior", "--allow-empty");
+  const before = await service.getSnapshot(path);
+
+  reply(plan({ intent: "inspect_merge" }));
+  reply("El merge añadió los reintentos de entrega en retry.txt.");
+  const result = await service.planAction(path, "que trajo este ultimo merge?", [], "es");
+  assert.equal(result.answer, "El merge añadió los reintentos de entrega en retry.txt.");
+  assert.equal(result.answerCommit.hash, merge);
+  assert.equal(result.requiresConfirmation, false);
+  assert.match(requests[1].input, /retry\.txt.*Añadir reintentos/);
+  assert.doesNotMatch(requests[1].input, /un commit posterior/);
+  assert.equal((await service.getSnapshot(path)).stateId, before.stateId);
 });
 
 test("“merge this branch to main” se planifica y se ejecuta de principio a fin", async () => {
@@ -489,7 +516,7 @@ test("una fusión desde una rama sucia deja que el modelo decida si debe confirm
     risk: "high"
   }));
   reply("Añade el cambio pendiente");
-  const result = await service.planAction(work, "Merge feature/dirty to main");
+  const result = await service.planAction(work, "Merge feature/dirty to main", [], "en", true);
   assert.equal(requests.length, 2, "el modelo ve la petición y el diff se usa para escribir el commit");
   assert.match(requests[0].instructions, /workingTreeDiff/);
   assert.match(requests[0].instructions, /dirty\.txt/);
@@ -585,7 +612,7 @@ test("pedir un commit no pregunta el mensaje: se escribe a partir del diff real"
     summary: "Commit and push", rationale: "El usuario pidió confirmar y subir.", risk: "high"
   }));
   reply("Añade auto.txt con el contenido inicial");
-  const result = await service.planAction(repo, "haz commit de lo que hay y súbelo");
+  const result = await service.planAction(repo, "haz commit de lo que hay y súbelo", [], "es", true);
 
   assert.equal(result.allowed, true, result.rationale);
   assert.equal(result.kind, "plan", "no debe preguntar por el mensaje");

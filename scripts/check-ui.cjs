@@ -206,7 +206,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('commit:selection-diff', (_, p, paths, locale) => service.getSelectionDiff(p, paths, locale));
   // Sharing decisions are the real service's, kept in this disposable profile.
   ipcMain.handle('sharing:get', (_, p, purpose, paths, locale) => service.getAiSharing(p, purpose, paths, locale));
-  ipcMain.handle('sharing:acknowledge', (_, p) => service.acknowledgeAiSharing(p));
+  ipcMain.handle('sharing:acknowledge', (_, p, scope) => service.acknowledgeAiSharing(p, scope));
   ipcMain.handle('sharing:set-exclusions', (_, p, exclusions, locale) => service.setAiSharingExclusions(p, exclusions, locale));
   ipcMain.handle('sharing:review', (_, p, file, share, locale) => service.setAiSharingReview(p, file, share, locale));
   let recoverCalls = 0;
@@ -217,6 +217,18 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('action:prepare', async (_, p, operation, args, locale) => {
     return planHandlers.rememberPlan(await service.prepareOperation(p, operation, args, locale));
+  });
+  const assistantRequests = [];
+  ipcMain.handle('action:plan', async (_, p, question, _context, locale, includeWorkingChanges = false) => {
+    assistantRequests.push({ question, includeWorkingChanges });
+    const current = await service.getSnapshot(p);
+    const base = await service.prepareOperation(p, 'status', {}, locale);
+    if (question === 'Explica los cambios sin guardar' && !includeWorkingChanges) {
+      return { ...base, kind: 'question', allowed: false, steps: [], workingChangesRequired: true,
+        summary: 'Incluir cambios sin guardar', rationale: 'Necesito leer los cambios para explicarlos.' };
+    }
+    return { ...base, kind: 'question', steps: [], answer: 'El último merge integró el buscador.',
+      answerCommit: current.commits.find((commit) => commit.parents.length > 1) };
   });
 
   // Getting a first project in runs on the real setup service against disposable folders. The only
@@ -946,6 +958,36 @@ app.whenReady().then(async () => {
   await win.loadFile(path.join(root, 'dist/index.html'));
   await waitFor(`document.querySelector('.repo-toolbar .primary-button')`);
 
+  // History has its own short first-use consent; it never includes unsaved files.
+  await js(`document.querySelectorAll('.inspector-tabs button')[1].click()`);
+  const sendChat = async (message) => {
+    await js(`(() => {
+      const field = document.querySelector('.chat-compose textarea');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, ${JSON.stringify(message)});
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await js(`document.querySelector('.chat-compose .send-button').click()`);
+  };
+  await sendChat('¿Qué trajo el último merge?');
+  await waitFor(`document.querySelector('.sharing-modal')?.innerText.includes('historial y estado de Git')`);
+  assert.equal(assistantRequests.length, 0);
+  assert.equal(await js(`Boolean(document.querySelector('.sharing-modal .sharing-files'))`), false);
+  await js(`document.querySelector('.sharing-modal .sharing-accept').click()`);
+  await waitFor(`document.querySelector('.assistant-answer')?.innerText.includes('integró el buscador')`);
+  assert.deepEqual(assistantRequests, [{ question: '¿Qué trajo el último merge?', includeWorkingChanges: false }]);
+  assert.equal(await js(`Boolean(document.querySelector('.completion-card, .plan-actions'))`), false);
+  assert.match(await js(`document.querySelector('.conversation-turn .ghost-button').innerText`), /Diff completo/);
+
+  await sendChat('Explica los cambios sin guardar');
+  await waitFor(`document.querySelector('.sharing-modal .sharing-files')`);
+  assert.match(await js(`document.querySelector('.sharing-modal').innerText`), /Incluir cambios[\s\S]*app\.txt/);
+  await js(`document.querySelector('.sharing-modal .modal-actions .ghost-button').click()`);
+  await waitFor(`document.querySelector('.chat-compose textarea')?.value === 'Explica los cambios sin guardar'`);
+  assert.equal(assistantRequests.length, 2, 'Declining the larger scope sends no file content');
+  assert.ok(assistantRequests.every((request) => !request.includeWorkingChanges));
+  assert.equal(git('status', '--porcelain'), before);
+  await js(`document.querySelectorAll('.inspector-tabs button')[0].click()`);
+
   // Each listed file has its own tick; leaving one out is visible and the count follows.
   const rowFor = (name) => `[...document.querySelectorAll('.inspector .change-row')].find((node) => node.innerText.includes('${name}'))`;
   await waitFor(`${rowFor('new-file.txt')}?.querySelector('.change-include')`);
@@ -1008,7 +1050,7 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.commit-form-heading button').click()`);
   await waitFor(`document.querySelector('.sharing-modal')`);
   const disclosure = await js(`document.querySelector('.sharing-modal').innerText`);
-  for (const entry of [/Antes de que el asistente lea GitCat/, /OpenAI \([^,)]+, api\.openai\.com\)/, /app\.txt/, /Se envía/, /No compartir nunca de este repositorio/, /no demuestra que un repositorio sea seguro/, /No necesitas el asistente/]) assert.match(disclosure, entry);
+  for (const entry of [/Incluir cambios de GitCat/, /OpenAI \([^,)]+, api\.openai\.com\)/, /app\.txt/, /Se envía/, /No compartir nunca de este repositorio/]) assert.match(disclosure, entry);
   assert.doesNotMatch(disclosure, /new-file\.txt/, 'Only the ticked files are part of the description request');
   assert.equal(described.length, 0, 'Still nothing sent while the disclosure is open');
   await capture('sharing-disclosure');
@@ -1143,6 +1185,7 @@ app.whenReady().then(async () => {
   const recoveryText = await js(`document.querySelector('.recovery-card[data-kind="no_remote"]').innerText`);
   for (const entry of [/aún no tiene dónde publicarse/, /Comprobado en este equipo/, /Se detuvo aquí/, /Tus commits están a salvo/, /Conectar un remoto/]) assert.match(recoveryText, entry);
   assert.equal(recoverCalls, 0, 'A failure GitCat can prove needs no assistant');
+  assert.match(await js(`document.querySelector('.recovery-ask-assistant')?.innerText`), /Pedir ayuda al asistente/);
   await js(`document.querySelector('.recovery-card').scrollIntoView()`);
   await capture('recovery-card');
   await js(`[...document.querySelectorAll('.recovery-card .recovery-actions button')].find((node) => node.innerText.includes('Conectar un remoto')).click()`);
@@ -1197,6 +1240,23 @@ app.whenReady().then(async () => {
   assert.equal(await js(`Boolean(document.querySelector('.secret-warning, .change-badge.secret'))`), false);
   assert.doesNotMatch(await js(`document.querySelector('.changes-view').innerText`), /posible secreto|Revisé estos archivos/);
   await capture('save-without-secret-warning');
+  // One explicit click saves only the selected file, without opening a second review.
+  fs.writeFileSync(path.join(repo, 'one-click.txt'), 'save only this\n');
+  await waitFor(`${rowFor('one-click.txt')} || (window.dispatchEvent(new Event('focus')), false)`);
+  await js(`${rowFor('.env')}.querySelector('.change-include').click()`);
+  await js(`(() => {
+    const field = document.querySelector('#commit-description');
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, 'Save one file');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await waitFor(`document.querySelector('.commit-form-actions .primary-button')?.innerText.includes('Guardar 1 archivo')`);
+  const saveBefore = git('rev-parse', 'HEAD');
+  await js(`document.querySelector('.commit-form-actions .primary-button').click()`);
+  for (let attempt = 0; attempt < 100 && git('rev-parse', 'HEAD') === saveBefore; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(git('log', '-1', '--format=%s'), 'Save one file');
+  assert.equal(git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'), 'one-click.txt');
+  assert.equal(git('status', '--porcelain'), '?? .env');
+  assert.equal(await js(`Boolean(document.querySelector('.delivery-review-modal'))`), false);
 
   // A merge that stopped on a text conflict, a modify/delete and a binary file, with no assistant
   // configured: the resolver explains both versions by name and settles everything on its own.
