@@ -25,6 +25,16 @@ function localOperand(value: string) {
     && !/^(?:[/\\]|[a-z]:)/i.test(value) && !/(?:^|[:/\\)!^])\.\.(?:[/\\]|$)/.test(value);
 }
 
+function queryFormatAllowed(option: string) {
+  const [kind, ...parts] = option.split("=");
+  if (kind !== "--format" && kind !== "--pretty") return true;
+  const format = parts.join("=");
+  if (kind === "--pretty" && /^(?:oneline|short|medium|full|fuller|reference)$/.test(format)) return true;
+  // The model may select fields and punctuation, but cannot print its own claims through Git.
+  return /^[\s<>()[\],.:|/-]*$/.test(format.replace(/^(?:t?format):/, "")
+    .replace(/%(?:[ac][nNeEdDirsIt]|[HhTtPpsSbBDdfn])/g, ""));
+}
+
 /** Only built-in queries and actions that have a matching reviewed GitCat operation are accepted. */
 export function parseAssistantCommand(argv: string[]): AssistantCommand | undefined {
   const [verb, ...parameters] = argv;
@@ -34,7 +44,8 @@ export function parseAssistantCommand(argv: string[]): AssistantCommand | undefi
     const separator = parameters.indexOf("--");
     const options = separator < 0 ? parameters : parameters.slice(0, separator);
     const paths = separator < 0 ? [] : parameters.slice(separator + 1);
-    if (options.every(value => value.startsWith("-") ? query.flags.includes(value) || query.values?.test(value) : localOperand(value))
+    if (options.every(value => value.startsWith("-")
+      ? (query.flags.includes(value) || query.values?.test(value)) && queryFormatAllowed(value) : localOperand(value))
         && paths.every(localOperand)) {
       return { operation: "git_command", argv };
     }

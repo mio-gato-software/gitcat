@@ -55,6 +55,7 @@ const step = (operation, args = {}, argv = []) => ({ operation, argv, args: { na
 const plan = (overrides) => ({
   intent: "git_operation",
   steps: [],
+  reads: [],
   repository: { localPath: "", repository: "", owner: "", host: "", protocol: "", sshHost: "", remote: "", push: true, replaceRemote: false },
   summary: "", rationale: "", reply: "", risk: "low",
   ...overrides
@@ -118,10 +119,16 @@ test("el asistente prepara la sincronización revisada con el estado posterior a
   assert.equal(readFileSync(join(path, "README.md"), "utf8"), writer);
 });
 
-test("una pregunta se responde con el texto del modelo sobre el estado real", async () => {
-  reply(plan({ intent: "answer", summary: "Last author", reply: "Prueba Uno wrote the most recent commit on main.", rationale: "From the snapshot." }));
-  const result = await service.planAction(repo, "who touched this branch last?");
-  assert.equal(result.answer, "Prueba Uno wrote the most recent commit on main.");
+test("una respuesta factual utiliza el estado de Git aunque el modelo diga otra cosa", async () => {
+  reply(plan({
+    intent: "answer", reads: [{ kind: "repository", args: ["active_branch"] }],
+    summary: "The branch is release", reply: "The active branch is release.", rationale: "Release is also clean."
+  }));
+  const result = await service.planAction(repo, "What branch am I on?", [], "en");
+  assert.equal(result.answer, "The active branch is main.");
+  assert.doesNotMatch(JSON.stringify(result), /release/i);
+  assert.equal(result.requiresConfirmation, false);
+  assert.equal(requests.length, 1);
   assert.equal(result.operation, "none");
   assert.match(requests[0].instructions, /same language as the user's latest message/);
   assert.match(requests[0].instructions, /"currentBranch": "main"/);
@@ -140,7 +147,7 @@ test("las respuestas completas del proveedor aceptan los campos de cuentas del e
     { type: "message", content: [{ type: "output_text", text: JSON.stringify(value) }] }
   ] } });
 
-  respond(plan({ intent: "answer", repository, reply: "The active branch is main." }));
+  respond(plan({ intent: "answer", repository, reads: [{ kind: "repository", args: ["active_branch"] }] }));
   const answer = await service.planAction(path, "What is the active branch?", [], "en");
   assert.deepEqual(Object.keys(repository).sort(), [...requests[0].text.format.schema.properties.repository.required].sort());
   assert.equal(answer.answer, "The active branch is main.");
@@ -367,16 +374,19 @@ test("una lectura se contesta en el mismo turno, mientras un push sigue necesita
   const before = await service.getSnapshot(repo);
   reply(plan({
     intent: "git_operation",
-    steps: [step("git_command", {}, ["log", "-1", "--format=%ad"])],
-    summary: "Leer la fecha del último commit", rationale: "…", risk: "low"
+    steps: [step("git_command", {}, ["rev-list", "--count", "HEAD"])],
+    summary: "Hay 99 commits", reply: "Hay 99 commits."
   }));
-  reply("El último commit tiene la fecha que indica Git.");
-  const reading = await service.planAction(repo, "¿cuándo fue el último commit?");
+  reply("Hay 99 commits.");
+  const reading = await service.planAction(repo, "¿Cuántos commits hay en la rama activa?");
   assert.equal(reading.allowed, true, reading.rationale);
   assert.equal(reading.requiresConfirmation, false);
-  assert.equal(reading.answer, "El último commit tiene la fecha que indica Git.");
+  assert.equal(reading.answer, `Conteo de commits para HEAD: ${git("rev-list", "--count", "HEAD").trim()}.`);
+  assert.doesNotMatch(JSON.stringify(reading), /99 commits/);
   assert.deepEqual(reading.steps, []);
-  assert.match(requests[1].input, /\d{2}:\d{2}:\d{2}/, "la síntesis recibe la fecha que Git leyó");
+  assert.equal(requests.length, 1, "no hay una síntesis del proveedor después de la lectura");
+  assert.equal(queue.length, 1);
+  queue.length = 0;
   assert.equal((await service.getSnapshot(repo)).stateId, before.stateId);
 
   reply(plan({
@@ -390,21 +400,88 @@ test("una lectura se contesta en el mismo turno, mientras un push sigue necesita
   assert.equal(writing.steps[0].risk, "high");
 });
 
-test("una investigación con varias lecturas se resume en una sola respuesta", async () => {
+test("una investigación conserva cada lectura y diferencia un resultado vacío de un fallo", async () => {
   reply(plan({
-    intent: "git_operation",
-    steps: [
-      step("git_command", {}, ["log", "--diff-filter=A", "--follow", "--format=%an <%ae> %ad", "--", "README.md"]),
-      step("git_command", {}, ["log", "--diff-filter=D", "--format=%an <%ae> %ad", "--", "README.md"])
-    ],
-    summary: "Consultar el historial del archivo", rationale: "El usuario pregunta quién lo creó y quién lo eliminó.", risk: "low"
+    intent: "answer",
+    reads: [
+      { kind: "git", args: ["log", "--diff-filter=A", "--follow", "--format=%an <%ae> %ad", "--", "README.md"] },
+      { kind: "git", args: ["log", "--diff-filter=D", "--format=%an <%ae> %ad", "--", "README.md"] },
+      { kind: "git", args: ["rev-list", "--count", "refs/heads/missing"] }
+    ]
   }));
-  reply("Prueba Uno creó README.md y el historial no muestra que lo eliminara.");
   const result = await service.planAction(repo, "investiga quién creó README.md, cuándo y quién lo eliminó");
   assert.equal(result.allowed, true, result.rationale);
   assert.equal(result.requiresConfirmation, false);
   assert.match(result.answer, /Prueba Uno/);
-  assert.match(requests[1].input, /Prueba Uno/, "el autor aparece en los datos verificados");
+  assert.match(result.answer, /--diff-filter=D[^\n]+\nLa consulta no devolvió resultados/);
+  assert.match(result.answer, /refs\/heads\/missing\nGit no pudo completar esta lectura/);
+  assert.equal(requests.length, 1);
+});
+
+test("una respuesta sin evidencia reintenta la lectura y no acepta una operación de escritura", async () => {
+  const before = await service.getSnapshot(repo);
+  reply(plan({ intent: "answer", reply: "La rama activa es falsa." }));
+  reply(plan({ intent: "git_operation", steps: [step("create_branch", { name: "falsa" })] }));
+  const result = await service.planAction(repo, "¿En cuál rama estoy?");
+  assert.match(result.answer, /verificar la respuesta/);
+  assert.doesNotMatch(JSON.stringify(result), /falsa/);
+  assert.deepEqual(result.steps, []);
+  assert.match(requests[1].instructions, /cannot verify free-form reply text/);
+  assert.equal((await service.getSnapshot(repo)).stateId, before.stateId);
+});
+
+test("una lectura rechaza argumentos de escritura y formatos que imprimen afirmaciones del modelo", async () => {
+  for (const args of [["push"], ["log", "-1", "--format=Hay 99 commits"]]) {
+    reply(plan({ intent: "answer", reads: [{ kind: "git", args }] }));
+    reply(plan({ intent: "answer", reads: [{ kind: "git", args: ["rev-list", "--count", "HEAD"] }] }));
+    const result = await service.planAction(repo, "¿Cuántos commits hay?");
+    assert.equal(result.answer, `Conteo de commits para HEAD: ${git("rev-list", "--count", "HEAD").trim()}.`);
+    assert.equal(result.requiresConfirmation, false);
+  }
+  assert.equal(requests.length, 4);
+});
+
+test("la comparación separa árboles iguales, parches equivalentes e historial distinto", async t => {
+  const path = mkdtempSync(join(tmpdir(), "gitcat-compare-branches-"));
+  t.after(() => rmSync(path, { recursive: true, force: true }));
+  const run = (...args) => execFileSync("git", args, { cwd: path, encoding: "utf8" }).trim();
+  run("init", "-q", "-b", "main");
+  run("config", "user.name", "QA");
+  run("config", "user.email", "qa@example.test");
+  run("commit", "-qm", "base", "--allow-empty");
+  run("branch", "contained");
+  run("switch", "-qc", "same-files");
+  writeFileSync(join(path, "fix.txt"), "fix\n");
+  run("add", "fix.txt");
+  run("commit", "-qm", "patch on the source");
+  run("switch", "-q", "main");
+  run("cherry-pick", "--no-commit", "same-files");
+  run("commit", "-qm", "the same patch with a different identity");
+  assert.notEqual(run("rev-parse", "main"), run("rev-parse", "same-files"));
+  assert.equal(run("rev-parse", "main^{tree}"), run("rev-parse", "same-files^{tree}"));
+  run("branch", "target-with-extra");
+  run("switch", "-q", "target-with-extra");
+  writeFileSync(join(path, "extra.txt"), "extra\n");
+  run("add", "extra.txt");
+  run("commit", "-qm", "unrelated patch on target");
+  run("switch", "-qc", "unmatched", "contained");
+  writeFileSync(join(path, "pending.txt"), "pending\n");
+  run("add", "pending.txt");
+  run("commit", "-qm", "new patch on source");
+  const before = await service.getSnapshot(path);
+  reply(plan({ intent: "answer", reads: [
+    { kind: "compare_branches", args: ["main"] },
+    { kind: "compare_branches", args: ["target-with-extra", "same-files"] }
+  ], reply: "Hay trabajo pendiente en todas las ramas." }));
+  const result = await service.planAction(path, "¿Qué ramas tienen cambios que aún no llegaron a los destinos?");
+  assert.match(result.answer, /contained — La rama de destino ya contiene este historial/);
+  assert.match(result.answer, /same-files — Los archivos de ambas puntas son idénticos/);
+  assert.match(result.answer, /unmatched — Parches sin equivalente individual: 1/);
+  assert.match(result.answer, /same-files — Git encontró parches equivalentes.*versiones actuales de los archivos difieren/);
+  assert.doesNotMatch(result.answer, /en todas las ramas/);
+  assert.equal(result.requiresConfirmation, false);
+  assert.equal(requests.length, 1);
+  assert.equal((await service.getSnapshot(path)).stateId, before.stateId);
 });
 
 test("el último merge usa su primer padre, se responde en el turno y conserva el repositorio", async (t) => {
@@ -425,14 +502,15 @@ test("el último merge usa su primer padre, se responde en el turno y conserva e
   run("commit", "-qm", "un commit posterior", "--allow-empty");
   const before = await service.getSnapshot(path);
 
-  reply(plan({ intent: "inspect_merge" }));
-  reply("El merge añadió los reintentos de entrega en retry.txt.");
+  reply(plan({ intent: "answer", reads: [{ kind: "commit", args: ["latest_merge"] }] }));
   const result = await service.planAction(path, "que trajo este ultimo merge?", [], "es");
-  assert.equal(result.answer, "El merge añadió los reintentos de entrega en retry.txt.");
+  assert.match(result.answer, /Integrar reintentos/);
+  assert.match(result.answer, /primer padre\): 1/);
   assert.equal(result.answerCommit.hash, merge);
   assert.equal(result.requiresConfirmation, false);
-  assert.match(requests[1].input, /retry\.txt.*Añadir reintentos/);
-  assert.doesNotMatch(requests[1].input, /un commit posterior/);
+  assert.match(result.answer, /retry\.txt[\s\S]*Añadir reintentos/);
+  assert.doesNotMatch(result.answer, /un commit posterior/);
+  assert.equal(requests.length, 1);
   assert.equal((await service.getSnapshot(path)).stateId, before.stateId);
 });
 
@@ -680,13 +758,15 @@ test("el estado dice qué ramas ya están integradas, aunque apunten a otro comm
   assert.equal(byName.get("pendiente").ahead, 0);
 
   // El modelo recibe la integración verificada, no solo ahead/behind.
-  reply(plan({ intent: "answer", summary: "Ramas", reply: "integrada ya está en main.", rationale: "Del estado." }));
-  await service.planAction(work, "¿qué ramas puedo borrar?");
+  reply(plan({ intent: "answer", reads: [{ kind: "repository", args: ["deletable_branches"] }] }));
+  const answer = await service.planAction(work, "¿qué ramas puedo borrar?");
+  assert.match(answer.answer, /• integrada/);
+  assert.doesNotMatch(answer.answer, /• pendiente/);
   const state = JSON.parse(requests[0].instructions.slice(requests[0].instructions.indexOf("{")));
   assert.equal(state.defaultBranch, "main");
   assert.deepEqual(state.branches.find((branch) => branch.name === "integrada").mergedInto, ["main"]);
   assert.deepEqual(state.branches.find((branch) => branch.name === "pendiente").mergedInto, []);
-  assert.match(requests[0].instructions, /it is proof, not a guess/);
+  assert.match(requests[0].instructions, /only establishes ancestry/);
 });
 
 test("la rama por defecto sale del HEAD que publica el remoto, no de un nombre adivinado", async () => {
@@ -726,7 +806,7 @@ test("la rama principal se marca para el modelo y no se puede borrar", async () 
   const snapshot = await service.getSnapshot(work);
   assert.equal(snapshot.defaultBranch, "main");
   assert.equal(snapshot.defaultBranchSource, "conventional_name");
-  reply(plan({ intent: "answer", summary: "Rama principal", reply: "main", rationale: "Del estado del repositorio." }));
+  reply(plan({ intent: "answer", reads: [{ kind: "repository", args: ["primary_branch"] }] }));
   await service.planAction(work, "¿cuál es la rama principal?");
   const state = JSON.parse(requests[0].instructions.slice(requests[0].instructions.indexOf("{")));
   assert.equal(state.defaultBranch, "main");
