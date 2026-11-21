@@ -3287,9 +3287,14 @@ export async function planRecovery(cwd: string, failure: ExecutionFailure, conte
     }] : [])
   ];
   const notes = newNotes();
+  // This synthetic request is the latest user message the planner sees, so it also sets the
+  // response language for recovery, independently of previous turns or Git's diagnostics.
+  const request = localized(language,
+    "El plan se detuvo a medias. Usa el estado actual del repositorio para proponer cómo continuar o explica qué necesita decidir la persona. Responde en español en todos los textos visibles para la persona, aunque la conversación anterior y los diagnósticos de Git usen otro idioma.",
+    "The plan stopped part-way. Use the current repository state to propose how to continue, or explain what the user needs to decide. Answer in English in all user-facing text, even if earlier messages and Git diagnostics use a different language.");
   try {
-    const plan = await requestPlan(RECOVERY_REQUEST, snapshot, context, issues, notes, providerLimits.recoveryMs);
-    return withNotes(await prepareModelPlan(plan, snapshot, RECOVERY_REQUEST, context, language, notes), notes);
+    const plan = await requestPlan(request, snapshot, context, issues, notes, providerLimits.recoveryMs);
+    return withNotes(await prepareModelPlan(plan, snapshot, request, context, language, notes), notes);
   } catch (error) {
     const reason = unavailableReason(error);
     return bindPlan(snapshot, {
@@ -3298,9 +3303,6 @@ export async function planRecovery(cwd: string, failure: ExecutionFailure, conte
     });
   }
 }
-
-const RECOVERY_REQUEST =
-  "The plan just stopped part-way and left the repository as the state below describes. Work out how to continue from exactly there and propose the next step, or explain what the user has to decide first. Answer in the language of their last message.";
 
 /** Every interpretation of what the user wrote happens in the model; this layer only validates. */
 export async function planAction(cwd: string, request: string, context: ConversationMessage[] = [], locale?: Locale, includeWorkingChanges = false): Promise<ActionPlan> {
