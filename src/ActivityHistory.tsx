@@ -35,6 +35,7 @@ const operationLabels: Record<ActivityOperation, MessageKey> = {
   discard_file: "discardFileChanges",
   set_identity: "activitySetIdentity",
   add_remote: "connectRemoteTitle",
+  edit_remote_url: "editRemoteUrl",
   none: "activityGitOperation",
   pull_request: "activityCreateReview",
   set_aside_work: "activitySetAside",

@@ -88,7 +88,10 @@ function readSidebarHidden() {
 type ActivityItem = Notification;
 
 /** `from` is the commit a new branch starts at, or the branch a rename starts from. */
-type InputDialog = { operation: "create_branch" | "merge" | "rename_branch" | "add_remote"; title: string; label: string; value: string; from?: string };
+type InputDialog = { title: string; label: string; value: string } & (
+  | { operation: "create_branch" | "merge" | "rename_branch" | "add_remote"; from?: string }
+  | { operation: "edit_remote_url"; repoPath: string; remote: string }
+);
 /** The identity under review, with where it would be written and what each place holds now. */
 type IdentityDialog = { user: string; email: string; scope: IdentityScope; author?: AuthorReadiness };
 type Suggestion = { key: string; icon: LucideIcon; label: string } & ({ question: string } | { dialog: InputDialog });
@@ -677,9 +680,12 @@ export default function App() {
   const updateSnapshot = (path: string, next: RepoSnapshot, fetched = false) => {
     snapshotWrites.current += 1;
     const now = new Date().toISOString();
-    setProjects((items) => items.map((project) => project.snapshot.path === path
-      ? { ...project, snapshot: next, loadedAt: now, ...(fetched ? { fetchedAt: now } : {}) }
-      : project));
+    setProjects((items) => items.map((project) => {
+      if (project.snapshot.path !== path) return project;
+      const { remotes, remoteUrls } = project.snapshot;
+      const sameRemotes = remotes.length === next.remotes.length && remotes.every((name) => remoteUrls[name] === next.remoteUrls[name] && next.remotes.includes(name));
+      return { ...project, snapshot: next, loadedAt: now, fetchedAt: fetched ? now : sameRemotes ? project.fetchedAt : undefined };
+    }));
   };
 
   /** Puts a project the main process validated and saved in front, in its existing tab when it has one. */
@@ -1393,10 +1399,12 @@ export default function App() {
     updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, status: "executing" }));
     const project = projects.find((item) => item.snapshot.path === plan.repoPath);
     const before = project?.snapshot;
-    const localRecovery = plan.recovery?.mode === "revert" || before?.pending?.kind === "revert";
+    const remoteEdit = plan.operation === "edit_remote_url";
+    const localRecovery = remoteEdit || plan.recovery?.mode === "revert" || before?.pending?.kind === "revert";
     try {
       const result = await window.gitcat.executePlan(plan.repoPath, plan.id, locale);
-      const completion = completionSummary({ plan, outcomes: result.outcomes, before, after: result.snapshotStale ? undefined : result.snapshot, error: result.error, fetchedAt: project?.fetchedAt }, locale);
+      const completion = completionSummary({ plan, outcomes: result.outcomes, before, after: result.snapshotStale ? undefined : result.snapshot,
+        error: result.error, fetchedAt: remoteEdit ? undefined : project?.fetchedAt }, locale);
       if (!result.snapshotStale) updateSnapshot(plan.repoPath, result.snapshot);
       setReadinessEpoch((epoch) => epoch + 1);
       if (result.error) {
@@ -1465,9 +1473,17 @@ export default function App() {
   };
 
   const submitInputDialog = () => {
-    if (!inputDialog?.value.trim()) return;
+    if (!inputDialog?.value.trim() || (inputDialog.operation === "edit_remote_url" && planning)) return;
     const value = inputDialog.value.trim();
     const operation = inputDialog.operation;
+    if (operation === "edit_remote_url") {
+      const { repoPath, remote, title } = inputDialog;
+      setInputDialog(undefined);
+      if (repoPath !== snapshot?.path) return;
+      void showPlan(title, () => window.gitcat.prepareOperation(repoPath, operation, { name: remote, url: value }, locale), repoPath,
+        { review: true, reveal: false, localRecovery: true });
+      return;
+    }
     const args: Record<string, string> = operation === "add_remote" ? { name: "origin", url: value }
       : operation === "rename_branch" && inputDialog.from ? { name: inputDialog.from, to: value }
       : operation === "create_branch" && inputDialog.from ? { name: value, from: inputDialog.from }
@@ -1845,10 +1861,14 @@ export default function App() {
       {setup && <SetupModal setup={setup} onClose={() => setSetup(undefined)} onChoose={(intent) => void openProject(intent)} onClone={() => setSetup({ kind: "clone" })}
         onStartTracking={() => void startTracking()} onOpenParent={() => void openParentProject()} onRemoteLogin={openSettings}
         onCloned={(project, empty) => showProject(project, { label: t("cloneDone", { name: project.name }), detail: empty ? t("cloneDoneEmpty", { name: project.name }) : project.path })} />}
-      {settingsOpen && <SettingsModal config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onConfigChange={setConfig}
+      {settingsOpen && <SettingsModal key={snapshot?.path} config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onConfigChange={setConfig}
         onNotice={(message) => notify({ message, tone: "success" })}
         onSetAuthor={snapshot ? () => { setSettingsOpen(false); void openIdentityDialog(); } : undefined}
-        repoPath={snapshot?.path} readinessKey={readinessEpoch}
+        snapshot={snapshot} readinessKey={readinessEpoch}
+        onEditRemote={snapshot && !planning ? (remote) => {
+          setSettingsOpen(false);
+          setInputDialog({ operation: "edit_remote_url", title: t("editRemoteUrlTitle", { name: remote }), label: t("newRemoteAddress"), value: "", repoPath: snapshot.path, remote });
+        } : undefined}
         onConnectRemote={snapshot ? () => { setSettingsOpen(false); readinessActions.onConnectRemote?.(); } : undefined} />}
       {syncDialog && snapshot?.path === syncDialog.path && <SyncModal snapshot={snapshot} initial={syncDialog}
         onClose={() => setSyncDialog(undefined)}
@@ -3531,7 +3551,8 @@ function DeliveryReviewModal({ review, snapshot, busy, onClose, onApply }: {
   const confirmLabel = save?.paths && snapshot ? t(target ? "confirmSelectedSaveAndMerge" : "confirmSelectedSave", {
     files: counted(t, save.paths.length, "file", "files"), branch: snapshot.currentBranch, target: target ?? ""
   }) : review.plan.recovery?.mode === "revert" ? t("confirmRevertCommit")
-    : review.plan.steps[0]?.operation === "discard_file" ? t("discardFileChanges") : undefined;
+    : review.plan.operation === "discard_file" ? t("discardFileChanges")
+    : review.plan.operation === "edit_remote_url" ? t("saveRemoteAddress") : undefined;
   return <div className="modal-backdrop"><section className="modal delivery-review-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("reviewDeliveryTitle")}>
     <div className="modal-heading"><h2>{t("reviewDeliveryTitle")}</h2><button className="icon-button" onClick={onClose} aria-label={t("cancel")}><X size={18} /></button></div>
     <PlanCard plan={review.plan} snapshot={snapshot} busy={busy} onApply={onApply} onDismiss={onClose} confirmLabel={confirmLabel} />
@@ -3714,15 +3735,19 @@ type AiConnectionState = "none" | "verifying" | "connected" | "attention" | "fai
  * the three sign-ins people mix up. Connecting verifies the key and model with the provider before
  * anything is saved; a failure says why in plain words and can be retried from the same place.
  */
-function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange, onNotice, onSetAuthor, repoPath, readinessKey, onConnectRemote }: {
+function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange, onNotice, onSetAuthor, snapshot, readinessKey, onConnectRemote, onEditRemote }: {
   config: LlmConfig; locale: Locale; onLocaleChange: (locale: Locale) => void; onClose: () => void;
   onConfigChange: (config: LlmConfig) => void; onNotice: (message: string) => void; onSetAuthor?: () => void;
-  repoPath?: string; readinessKey?: number; onConnectRemote?: () => void;
+  snapshot?: RepoSnapshot; readinessKey?: number; onConnectRemote?: () => void;
+  onEditRemote?: (name: string) => void;
 }) {
   const { t } = useI18n();
   // The full readiness panel: with a project open, the remote is contacted too, read-only.
   const [checkedRemote, setCheckedRemote] = useState<string>();
-  const setupReadiness = useReadiness(repoPath, { access: Boolean(repoPath), remote: checkedRemote, key: readinessKey });
+  const remotes = snapshot?.remotes ?? [];
+  const remoteChoice = checkedRemote && remotes.includes(checkedRemote) ? checkedRemote : undefined;
+  const selectedRemote = remoteChoice ?? (snapshot && workOverview(snapshot).published.remote) ?? remotes[0];
+  const setupReadiness = useReadiness(snapshot?.path, { access: Boolean(snapshot), remote: remoteChoice, key: readinessKey });
   const parentActions = useContext(ReadinessActionsContext);
   const [apiKey, setApiKey] = useState("");
   const [modelChoice, setModelChoice] = useState<"recommended" | "custom">(isSupportedModel(config.model) ? "recommended" : "custom");
@@ -3815,8 +3840,16 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange
     <section className="settings-section readiness-section" aria-labelledby="readiness-title">
       <h3 id="readiness-title">{t("readinessTitle")}</h3>
       <p className="settings-intro">{t("readinessIntro")}</p>
+      {selectedRemote && <div className="remote-settings-controls">
+        {remotes.length > 1 && <label className="readiness-remote-choice">{t("remoteSettingName")}
+          <select value={selectedRemote} onChange={(event) => setCheckedRemote(event.target.value)}>{remotes.map((name) => <option key={name} value={name}>{name}</option>)}</select>
+        </label>}
+        <button type="button" className="outline-button small edit-remote-url" disabled={!onEditRemote} onClick={() => onEditRemote?.(selectedRemote)}>
+          <PencilLine size={12} /> {t("editRemoteUrlTitle", { name: selectedRemote })}…
+        </button>
+      </div>}
       <ReadinessActionsContext.Provider value={{ ...parentActions, onSetIdentity: onSetAuthor, onConnectRemote }}>
-        <ReadinessChecklist readiness={setupReadiness} items={["git", "author", "remote"]} t={t} remoteChoice={{ value: checkedRemote, onChange: setCheckedRemote }} />
+        <ReadinessChecklist readiness={setupReadiness} items={["git", "author", "remote"]} t={t} />
       </ReadinessActionsContext.Provider>
     </section>
 
@@ -3923,12 +3956,25 @@ function InputModal({ dialog, branches, onChange, onClose, onSubmit }: { dialog:
   const { t } = useI18n();
   const dialogRef = useDialog(onClose);
   const creating = dialog.operation === "create_branch" || dialog.operation === "rename_branch";
+  const remote = dialog.operation === "add_remote" || dialog.operation === "edit_remote_url";
   const options = useMemo(
-    () => dialog.operation === "add_remote" ? [] : creating ? namingCompletions(branches) : branches.filter((branch) => !branch.isCurrent).map((branch) => branch.name),
-    [creating, branches, dialog.operation]
+    () => remote ? [] : creating ? namingCompletions(branches) : branches.filter((branch) => !branch.isCurrent).map((branch) => branch.name),
+    [creating, branches, remote]
   );
   const hint = useMemo(() => creating ? variantHint(dialog.value, branches) : undefined, [creating, dialog.value, branches]);
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="input-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><div className="modal-heading"><div><div className="eyebrow">{t("gitOperation")}</div><h2 id="input-modal-title">{dialog.title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div><label>{dialog.label}<input autoFocus value={dialog.value} onChange={(event) => onChange(event.target.value)} list={options.length ? "branch-options" : undefined} maxLength={200} /></label>{options.length > 0 && <datalist id="branch-options">{options.map((option) => <option value={option} key={option} />)}</datalist>}{hint && <p className="naming-hint" role="status"><Lightbulb size={12} /><span>{t("repositoryUses", { prefix: hint.canonical, count: counted(t, hint.count, "branch", "branches"), suggestion: `${hint.canonical}/…` })} <button type="button" onClick={() => onChange(`${hint.canonical}/${dialog.value.trim().slice(hint.typed.length + 1)}`)}><code>{hint.canonical}/…</code></button></span></p>}<div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button><button className="primary-button" disabled={!dialog.value.trim()}><GitBranch size={14} /> {t("prepare")}</button></div></form></div>;
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <form className="input-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="input-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+      <div className="modal-heading"><div><div className="eyebrow">{t("gitOperation")}</div><h2 id="input-modal-title">{dialog.title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div>
+      <label>{dialog.label}<input autoFocus value={dialog.value} onChange={(event) => onChange(event.target.value)}
+        list={options.length ? "branch-options" : undefined} maxLength={dialog.operation === "edit_remote_url" ? undefined : 200}
+        spellCheck={remote ? false : undefined} autoComplete={remote ? "off" : undefined} /></label>
+      {options.length > 0 && <datalist id="branch-options">{options.map((option) => <option value={option} key={option} />)}</datalist>}
+      {hint && <p className="naming-hint" role="status"><Lightbulb size={12} /><span>{t("repositoryUses", { prefix: hint.canonical, count: counted(t, hint.count, "branch", "branches"), suggestion: `${hint.canonical}/…` })} <button type="button" onClick={() => onChange(`${hint.canonical}/${dialog.value.trim().slice(hint.typed.length + 1)}`)}><code>{hint.canonical}/…</code></button></span></p>}
+      <div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button>
+        <button className="primary-button" disabled={!dialog.value.trim()}>{remote ? <Cloud size={14} /> : <GitBranch size={14} />} {t("prepare")}</button>
+      </div>
+    </form>
+  </div>;
 }
 
 function pendingLabel(kind: PendingOperationKind, t: Translate) {

@@ -251,6 +251,11 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
       case "add_remote":
         summary.local.push(say(`Connects this project to ${args.url} as ${args.name}. Nothing is sent yet.`, `Conecta este proyecto con ${args.url} como ${args.name}. Todavía no se envía nada.`));
         break;
+      case "edit_remote_url":
+        summary.local.push(say(
+          `Changes the download address from ${args.previousUrl} to ${args.url}.`,
+          `Cambia la dirección de descarga de ${args.previousUrl} a ${args.url}.`));
+        break;
       case "push": {
         const branch = args.branch ?? on;
         const remote = step.pushDestination ? step.pushDestination.remote : args.setUpstream ?? args.remote ?? upstreamRemote;
@@ -457,6 +462,8 @@ function changes(plan: ActionPlan, outcomes: StepOutcome[], before: RepoSnapshot
     }
   }
   for (const remote of after.remotes.filter((name) => !before.remotes.includes(name))) lines.push(say(`Connected to ${remote}.`, `Se conectó con ${remote}.`));
+  for (const { step } of ran.filter(({ step }) => step.operation === "edit_remote_url")) lines.push(say(
+    `${step.args.name} now downloads from ${step.args.url}.`, `${step.args.name} ahora descarga desde ${step.args.url}.`));
   const current = now.get(after.currentBranch), previous = was.get(after.currentBranch);
   if (current && previous && current.behind > previous.behind) lines.push(say(`${remoteOf(current.upstream, after.remotes) ?? "The remote"} has ${commits(say, current.behind - previous.behind)} for ${after.currentBranch} you do not have yet.`, `${remoteOf(current.upstream, after.remotes) ?? "El remoto"} tiene ${commits(say, current.behind - previous.behind)} para ${after.currentBranch} que aún no tienes.`));
   if (before.changes.length !== after.changes.length) lines.push(say(`Uncommitted files: ${before.changes.length} before, ${after.changes.length} now.`, `Archivos sin guardar: ${before.changes.length} antes, ${after.changes.length} ahora.`));

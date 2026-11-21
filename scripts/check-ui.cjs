@@ -1579,6 +1579,44 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.settings-modal .readiness-section').scrollIntoView()`);
   await capture('settings-readiness-remote');
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
+  await waitFor(`!document.querySelector('.settings-modal')`);
+
+  const emptyClone = path.join(cloneParent, 'empty-start');
+  const emptyGit = (...args) => execFileSync('git', args, { cwd: emptyClone, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const newRemoteAddress = path.join(setupRoot, 'new address.git');
+  execFileSync('git', ['init', '-q', '--bare', newRemoteAddress]);
+  emptyGit('remote', 'add', 'mirror', emptyRemote);
+  await refreshStatus();
+  await waitFor(`document.querySelector('.remote-status')?.innerText.includes('+1')`);
+  const reviewRemoteEdit = async () => {
+    await js(`document.querySelector('.top-actions .icon-button:last-child').click()`);
+    await waitFor(`document.querySelector('.remote-settings-controls select option[value="mirror"]')`);
+    await js(`(() => {
+      const select = document.querySelector('.remote-settings-controls select');
+      select.value = 'mirror';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor(`document.querySelector('.edit-remote-url')?.innerText.includes('mirror')`);
+    await js(`document.querySelector('.edit-remote-url').click()`);
+    await waitFor(`document.querySelector('.input-modal h2')?.innerText === 'Editar la URL de mirror'`);
+    await setText('.input-modal input', newRemoteAddress);
+    await js(`document.querySelector('.input-modal .primary-button').click()`);
+    await waitFor(`document.querySelector('.delivery-review-modal')`);
+    const review = await js(`document.querySelector('.delivery-review-modal').innerText`);
+    assert.match(review, /Cambiar la dirección de mirror[\s\S]*empty-remote\.git[\s\S]*new address\.git/);
+    assert.equal(emptyGit('remote', 'get-url', 'mirror'), emptyRemote);
+  };
+  await reviewRemoteEdit();
+  await js(`document.querySelector('.delivery-review-modal .plan-actions .ghost-button').click()`);
+  await waitFor(`!document.querySelector('.delivery-review-modal')`);
+  assert.equal(emptyGit('remote', 'get-url', 'mirror'), emptyRemote);
+  await reviewRemoteEdit();
+  await js(`document.querySelector('.delivery-review-modal .plan-actions .primary-button').click()`);
+  await waitFor(`document.querySelector('.remote-status')?.getAttribute('title').includes('new address.git')`);
+  assert.equal(emptyGit('remote', 'get-url', 'mirror'), newRemoteAddress);
+  assert.equal(emptyGit('remote', 'get-url', '--push', 'mirror'), newRemoteAddress);
+  assert.equal(emptyGit('remote', 'get-url', 'origin'), emptyRemote);
+
   await js(`document.querySelector('[aria-label="Crear proyecto de práctica desechable"]').click()`);
   await waitFor(`document.querySelector('.practice-guide')`);
   assert.match(await js(`document.querySelector('.practice-guide').innerText`),/sin remoto[\s\S]*no necesita IA/);

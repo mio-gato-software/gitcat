@@ -427,6 +427,7 @@ export type Operation =
   | "set_identity"
   /** Connects this repository to a remote address the person typed. Direct control only. */
   | "add_remote"
+  | "edit_remote_url"
   | "none";
 
 export type GitProtocol = "ssh" | "https";

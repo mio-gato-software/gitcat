@@ -66,6 +66,7 @@ import type {
 import { classifyProviderFailure, maskKeys, recommendedModel } from "../shared/ai-connection.js";
 import { classifyFailure, operationFromCommand, recoveryActions, recoveryFacts, type FailureEvidence } from "./failure-recovery.js";
 import { localized, normalizeLocale } from "./i18n.js";
+import { exclusive } from "./repository-queue.js";
 import {
   buildPlannerInstructions, commitMessageLimit, executableOperations, operationArgs,
   planIssues, parseModelPlan, planResponseFormat, type ModelPlan, type PlanIssue
@@ -87,7 +88,7 @@ const LLM_REQUIRED_EN =
   "To understand what you write, GitCat needs a connected AI provider: only the model interprets requests, never local rules. Connect one in Settings; meanwhile every Git action works from the buttons.";
 
 function llmRequired(locale?: Locale) { return localized(locale, LLM_REQUIRED, LLM_REQUIRED_EN); }
-const allowedOperations = new Set<Operation>([...executableOperations, "stash_push", "stash_pop", "github_create_repo", "ignore_path", "discard_file", "set_identity", "add_remote", "none"]);
+const allowedOperations = new Set<Operation>([...executableOperations, "stash_push", "stash_pop", "github_create_repo", "ignore_path", "discard_file", "set_identity", "add_remote", "edit_remote_url", "none"]);
 /**
  * Operations that run without asking. The bar is deliberately high: they must leave the working tree,
  * the branch history and everything already published untouched, and running one again must be
@@ -978,6 +979,7 @@ function buildCommand(operation: Operation, args: Record<string, string>, argv: 
       return `git config${where} user.name ${JSON.stringify(args.user ?? "")} && git config${where} user.email ${JSON.stringify(args.email ?? "")}`;
     }
     case "add_remote": return `git remote add ${args.name ?? ""} ${quoteToken(args.url ?? "")}`;
+    case "edit_remote_url": return ["git", ...editRemoteUrlArguments(args.name, args.url)].map(quoteToken).join(" ");
     case "abort_operation": return `git ${args.pending ?? "rebase"} --abort`;
     case "continue_operation": return `git ${args.pending ?? "rebase"} --continue`;
     case "skip_operation": return `git ${args.pending ?? "rebase"} --skip`;
@@ -3039,6 +3041,9 @@ function operationDraft(operation: Operation, args: Record<string, string>, snap
       ? [localized(locale, `Firmar los commits de todos los repositorios de este equipo como ${args.user} <${args.email}>`, `Sign commits in every repository on this computer as ${args.user} <${args.email}>`), localized(locale, "Guarda el nombre y el correo que Git anota en cada commit en tu configuración global de Git, para todos los repositorios de este equipo que no tengan los suyos. Tus archivos y tu historial no cambian.", "Saves the name and email Git records with each commit in your global Git settings, for every repository on this computer that does not set its own. Your files and history do not change."), "high"]
       : [localized(locale, `Firmar los commits de este repositorio como ${args.user} <${args.email}>`, `Sign commits in this repository as ${args.user} <${args.email}>`), localized(locale, "Guarda el nombre y el correo que Git anota en cada commit, solo para este repositorio. Tus archivos y tu historial no cambian.", "Saves the name and email Git records with each commit, for this repository only. Your files and history do not change."), "medium"],
     add_remote: [localized(locale, `Conectar este repositorio con ${args.url} como ${args.name}`, `Connect this repository to ${args.url} as ${args.name}`), localized(locale, "Añade la dirección donde se puede publicar este repositorio. Todavía no se envía nada: publicar es otro paso que confirmas aparte.", "Adds the address where this repository can be published. Nothing is sent yet: publishing is a separate step you confirm."), "medium"],
+    edit_remote_url: [localized(locale, `Cambiar la dirección de ${args.name}`, `Change the address of ${args.name}`), localized(locale,
+      "Actualiza la configuración local del remoto. Los archivos y los commits se conservan.",
+      "Updates the local remote configuration. Files and commits are kept."), "high"],
     ignore_path: [localized(locale, `Ignorar los cambios futuros de ${args.path}`, `Ignore future changes to ${args.path}`), localized(locale, "Añade una línea a .gitignore para que Git deje de listar este archivo nuevo. El archivo se queda en tu disco tal como está.", "Adds one line to .gitignore so Git stops listing this new file. The file stays on your disk exactly as it is."), "medium"],
     discard_file: [localized(locale, `Descartar los cambios de ${args.path}`, `Discard changes to ${args.path}`), localized(locale,
       "Recupera la versión de este archivo guardada en el último commit.", "Restores this file to the version saved in the latest commit."), "high"],
@@ -3188,6 +3193,7 @@ export async function prepareOperation(cwd: string, operation: Operation, args: 
       path: file.path, version: file.version!, head: snapshot.head, staged: String(file.xy![0] !== " ")
     }, snapshot, [], language));
   }
+  if (operation === "edit_remote_url") return prepareRemoteUrlEdit(snapshot, args, language);
   // Only what each direct control needs reaches the step: a publish names the active branch as Git
   // reads it now, and an identity or a remote address is trimmed of stray spaces.
   const normalized = operation === "push" && args.setUpstream ? { setUpstream: args.setUpstream, branch: snapshot.currentBranch, ...(args.noVerify === "true" ? { noVerify: "true" } : {}) }
@@ -3829,6 +3835,102 @@ function validateStep(step: PlanStep, snapshot: RepoSnapshot, plan: ActionPlan, 
 /** What a remote address looks like: a URL, an scp-style SSH address, or an absolute path. Never an option. */
 const remoteAddressPattern = /^(?:(?:https?|ssh|git|file):\/\/[^\s]+|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+|\/[^\s]*)$/;
 
+function editRemoteUrlArguments(name: string, url: string) {
+  return ["remote", "set-url", "--", name, url];
+}
+
+function editableRemoteAddress(value: unknown, locale?: Locale) {
+  const address = typeof value === "string" ? value.trim() : "";
+  const invalid = () => new Error(localized(locale,
+    "Introduce una dirección válida del repositorio, como una URL HTTPS, una dirección SSH o una ruta local.",
+    "Enter a valid repository address, such as an HTTPS URL, an SSH address, or a local path."));
+  // Control characters alone can split a config value or the lines Git uses to report URLs.
+  // eslint-disable-next-line no-control-regex
+  if (!address || /[\x00-\x1f\x7f]/.test(address)) throw invalid();
+  if (isAbsolute(address) || /^(?:\.\.?\/|~\/)/.test(address)) return address;
+  if (/^(?:https?|ssh|git|file):\/\//i.test(address)) {
+    let url: URL;
+    try { url = new URL(address); } catch { throw invalid(); }
+    if (/\s/.test(address) || (!url.hostname && url.protocol !== "file:") || url.hostname.startsWith("-") || url.username.startsWith("-")) throw invalid();
+    if (url.password || (url.username && url.protocol !== "ssh:") || url.search || url.hash) throw new Error(localized(locale,
+      "Usa la dirección del repositorio sin credenciales, parámetros ni fragmentos. Git puede usar las credenciales que ya tienes configuradas.",
+      "Use the repository address without credentials, query parameters, or a fragment. Git can use your configured credentials."));
+    return address;
+  }
+  if (/^(?:[A-Za-z0-9._][A-Za-z0-9._-]*@)?[A-Za-z0-9][A-Za-z0-9._-]*:(?![:/]{2}|:|-)[^\s]+$/.test(address)) return address;
+  throw invalid();
+}
+
+async function readEditableRemote(snapshot: RepoSnapshot, name: string, locale?: Locale) {
+  if (!isBranchNameSafe(name) || !snapshot.remotes.includes(name)) throw new Error(localized(locale,
+    "Ese remoto ya no está disponible. Actualiza la vista antes de editarlo.",
+    "That remote is no longer available. Refresh the view before editing it."));
+  const read = (args: string[]) => readGit(snapshot.path, args);
+  const values = async (key: string, local = false) => {
+    const result = await read(["config", "--null", ...(local ? ["--local", "--no-includes"] : []), "--get-all", key]);
+    if (result.code === 1 && !result.stdout) return [];
+    assertGitSuccess(result, ["config", "--get-all", key]);
+    return result.stdout.split("\0").slice(0, -1);
+  };
+  const key = `remote.${name}.url`;
+  const [local, configured, pushConfig] = await Promise.all([
+    values(key, true), values(key), values(`remote.${name}.pushurl`)
+  ]);
+  if (local.length !== 1 || !local[0] || configured.length !== 1 || local[0] !== configured[0]) throw new Error(localized(locale,
+    "Este remoto debe tener una sola dirección guardada en la configuración local del repositorio. Revisa su configuración de Git antes de editarlo.",
+    "This remote must have one address stored in the repository's local configuration. Review its Git configuration before editing it."));
+  const [fetchUrls, pushUrls] = await Promise.all([readRemoteUrls(read, name, "fetch"), readRemoteUrls(read, name, "push")]);
+  if (fetchUrls.length !== 1) throw new Error(localized(locale,
+    "GitCat no pudo verificar una única dirección de descarga para este remoto.",
+    "GitCat could not verify a single fetch address for this remote."));
+  const binding = createHash("sha256").update(JSON.stringify([local, fetchUrls, pushConfig, pushUrls])).digest("hex");
+  return { configuredUrl: local[0], fetchUrl: fetchUrls[0], pushUrls, separatePush: pushConfig.length > 0, binding };
+}
+
+async function verifyEditedRemoteAddress(cwd: string, url: string, separatePush: boolean, locale?: Locale) {
+  const read = (args: string[]) => readGit(cwd, args);
+  try {
+    await verifiedTransportRemote(read, url, "fetch");
+    if (!separatePush) await verifiedTransportRemote(read, url, "push");
+  } catch (error) {
+    if (error instanceof OperationCancelled) throw error;
+    throw new Error(localized(locale,
+      "Git no usará esa dirección tal como la escribiste. Revisa las reglas de reescritura de URLs de Git o introduce la dirección efectiva.",
+      "Git will not use that address as entered. Review Git's URL rewrite rules or enter the effective address."), { cause: error });
+  }
+}
+
+async function prepareRemoteUrlEdit(snapshot: RepoSnapshot, args: Record<string, string>, locale: Locale) {
+  const url = editableRemoteAddress(args.url, locale);
+  const current = await readEditableRemote(snapshot, args.name, locale);
+  if (url === current.configuredUrl) throw new Error(localized(locale,
+    "Esa dirección ya está configurada. Escribe la nueva dirección del remoto.",
+    "That address is already configured. Enter the remote's new address."));
+  await verifyEditedRemoteAddress(snapshot.path, url, current.separatePush, locale);
+  const draft = operationDraft("edit_remote_url", {
+    name: args.name, url, previousUrl: displayPushAddress(current.fetchUrl), remoteBinding: current.binding
+  }, snapshot, [], locale);
+  return bindPlan(snapshot, { ...draft, effects: current.separatePush
+    ? current.pushUrls.map((endpoint) => localized(locale,
+      `Se conserva la dirección de publicación ${displayPushAddress(endpoint)}.`,
+      `Keeps the separate publishing address ${displayPushAddress(endpoint)}.`))
+    : [localized(locale, "Las publicaciones también usarán la dirección nueva.", "Publishing will also use the new address.")] });
+}
+
+async function editRemoteUrl(snapshot: RepoSnapshot, args: Record<string, string>, locale?: Locale) {
+  const url = editableRemoteAddress(args.url, locale);
+  const common = realpathSync(resolve(snapshot.path, await checkedGit(snapshot.path, ["rev-parse", "--git-common-dir"])));
+  // Linked worktrees share this configuration even when their working directories run separate jobs.
+  return exclusive(join(common, "config"), async () => {
+    const current = await readEditableRemote(snapshot, args.name, locale);
+    if (current.binding !== args.remoteBinding) throw new StalePlanError(localized(locale,
+      "La configuración del remoto cambió. Vuelve a abrir Configuración y revisa la dirección antes de editarla.",
+      "The remote configuration changed. Reopen Settings and review the address before editing it."));
+    await verifyEditedRemoteAddress(snapshot.path, url, current.separatePush, locale);
+    return reportedGit(snapshot.path, editRemoteUrlArguments(args.name, url));
+  });
+}
+
 /** The repository moved after the plan was prepared, so nothing ran. Recovery tells it apart from a Git failure. */
 export class StalePlanError extends Error {
   constructor(message: string) {
@@ -4080,6 +4182,7 @@ async function runStep(cwd: string, step: PlanStep, plan: ActionPlan, snapshot: 
         : localized(locale, `Los commits de este repositorio se firmarán como ${args.user} <${args.email}>.`, `Commits in this repository will be signed as ${args.user} <${args.email}>.`);
     }
     case "add_remote": return reportedGit(cwd, ["remote", "add", args.name, args.url]);
+    case "edit_remote_url": return editRemoteUrl(snapshot, args, locale);
     case "abort_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--abort"]);
     case "continue_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--continue"]);
     case "skip_operation": return reportedGit(cwd, [pendingCommands[snapshot.pending!.kind], "--skip"]);
@@ -4216,7 +4319,7 @@ async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutc
         ...(stepResult.commitHash ? { commitHash: stepResult.commitHash } : {})
       };
     } catch (error) {
-      if (index === 0 && (step.pushDestination || step.operation === "push") && error instanceof StalePlanError) throw error;
+      if (index === 0 && (step.pushDestination || step.operation === "push" || step.operation === "edit_remote_url") && error instanceof StalePlanError) throw error;
       const detail = error instanceof Error ? error.message : localized(language, "Git no pudo completar la acción.", "Git could not complete the action.");
       outcomes[index] = { ...outcomes[index], status: "failed", output: detail };
       operationPhase("inspecting");
@@ -4313,7 +4416,7 @@ function retryableRecord(record: FailedPlanRecord | undefined) {
   const remaining = record.outcomes.some((outcome) => outcome.status !== "completed");
   // A save of selected files is bound to the reviewed versions; it is reviewed again, not replayed.
   return remaining && !record.plan.selection && !record.plan.repositoryPlan && record.plan.steps.every((step) =>
-    step.operation !== "github_create_repo" && step.operation !== "discard_file");
+    !["github_create_repo", "discard_file", "edit_remote_url"].includes(step.operation));
 }
 
 /**
