@@ -35,8 +35,17 @@ git("commit", "-m", "primer commit");
 /** Stubbed Responses API: each call consumes the next queued payload and records the request. */
 const queue = [];
 const requests = [];
+const coverageRequests = [];
+const coverageReplies = [];
 globalThis.fetch = async (_url, init) => {
-  requests.push(JSON.parse(init.body));
+  const body = JSON.parse(init.body);
+  if (body.text?.format?.name === "gitcat_answer_coverage") {
+    coverageRequests.push(body);
+    const next = coverageReplies.shift() ?? { reads: [], uncovered: false };
+    if (next instanceof Error) throw next;
+    return { ok: true, json: async () => ({ output_text: JSON.stringify(next) }) };
+  }
+  requests.push(body);
   const next = queue.shift();
   if (!next) throw new Error("llamada al proveedor no esperada");
   if (next.error) throw next.error;
@@ -61,7 +70,12 @@ const plan = (overrides) => ({
   ...overrides
 });
 
-test.beforeEach(() => { queue.length = 0; requests.length = 0; });
+test.beforeEach(() => {
+  queue.length = 0;
+  requests.length = 0;
+  coverageRequests.length = 0;
+  coverageReplies.length = 0;
+});
 
 test("sin proveedor configurado no se interpreta nada", async () => {
   const result = await service.planAction(repo, "cámbiame a la rama main");
@@ -385,6 +399,8 @@ test("una lectura se contesta en el mismo turno, mientras un push sigue necesita
   assert.doesNotMatch(JSON.stringify(reading), /99 commits/);
   assert.deepEqual(reading.steps, []);
   assert.equal(requests.length, 1, "no hay una síntesis del proveedor después de la lectura");
+  assert.equal(coverageRequests.length, 1);
+  assert.deepEqual(JSON.parse(coverageRequests[0].input).plannedReads, [{ kind: "git", argv: ["rev-list", "--count", "HEAD"] }]);
   assert.equal(queue.length, 1);
   queue.length = 0;
   assert.equal((await service.getSnapshot(repo)).stateId, before.stateId);
@@ -593,6 +609,7 @@ test("una lectura inválida conserva los resultados válidos aunque el proveedor
     { kind: "git", args: ["push"] }
   ] }));
   reply(plan({ intent: "out_of_scope", reply: "Fallo inventado." }));
+  coverageReplies.push({ reads: [], uncovered: true });
   const result = await service.planAction(repo, "¿Cuántos commits hay y cuál es la URL de push?");
   assert.match(result.answer, /Git cuenta \d+ commits? en el historial de main/);
   assert.match(result.answer, /Parte de la pregunta quedó sin verificar/);
@@ -628,6 +645,66 @@ test("la respuesta distingue el índice y el directorio de trabajo y lee las URL
   assert.equal(result.localAnswer, true, "effective URLs stay out of provider follow-ups");
   assert.equal(result.requiresConfirmation, false);
   assert.equal((await service.getSnapshot(path)).stateId, before.stateId);
+});
+
+test("la revisión recupera partes omitidas aunque las lecturas originales sean válidas", async t => {
+  const path = mkdtempSync(join(tmpdir(), "gitcat-answer-coverage-"));
+  t.after(() => rmSync(path, { recursive: true, force: true }));
+  const run = (...args) => execFileSync("git", args, { cwd: path, encoding: "utf8" }).trim();
+  run("init", "-q", "-b", "main");
+  run("config", "user.name", "Merge Author");
+  run("config", "user.email", "qa@example.test");
+  run("commit", "--allow-empty", "-qm", "base");
+  run("switch", "-qc", "feature");
+  writeFileSync(join(path, "largest.txt"), "private-contents\nline two\nline three\n");
+  writeFileSync(join(path, "small.txt"), "one line\n");
+  run("add", "-A");
+  run("commit", "-qm", "change");
+  run("switch", "-q", "main");
+  run("merge", "--no-ff", "feature", "-qm", "integrate");
+  const time = run("show", "-s", "--format=%cI", "HEAD");
+  const question = "¿Cuántos commits hay sin fusiones, quién hizo la última fusión, cuándo y qué archivo ganó más líneas?";
+  const original = { kind: "commit_count", args: ["main", "no_merges"] };
+  reply(plan({ intent: "answer", reads: [original] }));
+  coverageReplies.push({ reads: [
+    original,
+    { kind: "commit_identity", args: ["latest_merge", "main"] },
+    { kind: "commit_lines", args: ["latest_merge", "main"] }
+  ], uncovered: false });
+  const before = (await service.getSnapshot(path)).stateId;
+  const answer = await service.planAction(path, question, [{ role: "user", content: "Cuéntame sobre older-topic-ignored." }]);
+  assert.equal((answer.answer.match(/2 commits/g) ?? []).length, 1);
+  assert.ok(answer.answer.includes(`tiene como autor a Merge Author y se registró el ${time}`));
+  assert.match(answer.answer, /Más líneas añadidas: largest\.txt \(\+3\)/);
+  assert.doesNotMatch(answer.answer, /sin verificar|No pude revisar/);
+  assert.equal(answer.requiresConfirmation, false);
+  assert.equal((await service.getSnapshot(path)).stateId, before);
+  assert.equal(coverageRequests.length, 1);
+  assert.equal(JSON.parse(coverageRequests[0].input).question, question);
+  assert.doesNotMatch(coverageRequests[0].input, /private-contents|largest\.txt|older-topic-ignored/);
+});
+
+test("la revisión no convierte una pregunta en acción y conserva las lecturas ante un fallo del proveedor", async () => {
+  const read = { kind: "repository", args: ["active_branch"] };
+  reply(plan({ intent: "answer", reads: [read] }));
+  coverageReplies.push({ reads: [
+    { kind: "git", args: ["push"] },
+    { kind: "repository", args: ["active_branch", "working_tree"] }
+  ], uncovered: false });
+  const question = "¿En qué rama estoy y qué cambios tengo pendientes?";
+  const result = await service.planAction(repo, question);
+  assert.equal((result.answer.match(/La rama activa/g) ?? []).length, 1);
+  assert.match(result.answer, /No tienes cambios sin guardar/);
+  assert.match(result.answer, /Parte de la pregunta quedó sin verificar/);
+  assert.deepEqual(result.steps, []);
+  assert.equal(result.requiresConfirmation, false);
+
+  reply(plan({ intent: "answer", reads: [read] }));
+  coverageReplies.push(new Error("offline"));
+  const fallback = await service.planAction(repo, question);
+  assert.match(fallback.answer, /La rama activa es main/);
+  assert.match(fallback.answer, /No pude revisar si estas lecturas cubren toda la pregunta/);
+  assert.equal(fallback.assistantUnavailable, undefined);
 });
 
 test("“merge this branch to main” se planifica y se ejecuta de principio a fin", async () => {

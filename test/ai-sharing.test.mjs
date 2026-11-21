@@ -31,15 +31,21 @@ const secrets = [AWS, GITHUB, OPENAI, PASSWORD, PEM_BODY];
 /** Stubbed Responses API: never a paid call. Each request consumes the next queued answer and is recorded. */
 const queue = [];
 const requests = [];
+const coverageRequests = [];
 globalThis.fetch = async (_url, init) => {
-  requests.push(JSON.parse(init.body));
+  const body = JSON.parse(init.body);
+  if (body.text?.format?.name === "gitcat_answer_coverage") {
+    coverageRequests.push(body);
+    return { ok: true, json: async () => ({ output_text: '{"reads":[],"uncovered":false}' }) };
+  }
+  requests.push(body);
   const next = queue.shift();
   if (next === undefined) throw new Error("llamada al proveedor no esperada");
   return { ok: true, status: 200, text: async () => "", json: async () => ({ status: "completed", output_text: typeof next === "string" ? next : JSON.stringify(next) }) };
 };
 queue.push("ok");
 await service.saveLlmConfig({ apiKey: "sk-test", model: "test-model" });
-test.beforeEach(() => { queue.length = 0; requests.length = 0; });
+test.beforeEach(() => { queue.length = 0; requests.length = 0; coverageRequests.length = 0; });
 
 const step = (operation, args = {}, argv = []) => ({ operation, argv, args: { name: "", onto: "", to: "", path: "", side: "", message: "", noVerify: "", ...args } });
 const plan = (overrides) => ({
@@ -49,7 +55,7 @@ const plan = (overrides) => ({
 });
 
 /** Everything that left for the provider, as one string, so a leak anywhere in a request is caught. */
-const sent = () => requests.map((request) => JSON.stringify(request)).join("\n");
+const sent = () => [...requests, ...coverageRequests].map((request) => JSON.stringify(request)).join("\n");
 function assertNoSecrets(text, where) {
   for (const secret of secrets) assert.equal(text.includes(secret), false, `${where} contains a synthetic secret`);
 }
@@ -352,6 +358,8 @@ test("output of a command aimed at a withheld file stays out of the conversation
   assert.equal(reading.localAnswer, true);
   assert.match(reading.answerDetails, /DATABASE_PASSWORD/);
   assert.equal(requests.length, 1, "source text stays local");
+  assert.equal(coverageRequests.length, 1);
+  assert.doesNotMatch(coverageRequests[0].input, /DATABASE_PASSWORD/);
   assertNoSecrets(sent(), "local query history");
   queue.push(plan({ intent: "git_operation", steps: [step("git_command", {}, ["log", "-1", "--format=%s"])], summary: "Log", reply: "" }));
   const harmless = await service.planAction(repo, "last subject", [], "en");
