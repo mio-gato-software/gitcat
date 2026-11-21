@@ -59,6 +59,19 @@ export function keepFingerprints(fingerprints: Record<string, RepoFingerprint>, 
   return Object.fromEntries(Object.entries(fingerprints).filter(([path]) => paths.includes(path)));
 }
 
+/** A renderer save can arrive between opening a project and displaying its tab. Only a tab that
+ * the renderer has included in a save can be closed by omitting it from a later save. */
+export function reconcileWorkspaceTabs(record: WorkspaceRecord, paths: string[], activePath: string | undefined, awaitingTabs: Set<string>): WorkspaceRecord {
+  for (const path of paths) awaitingTabs.delete(path);
+  const retainedPaths = [...paths, ...record.paths.filter(path => awaitingTabs.has(path))];
+  const active = record.activePath && awaitingTabs.has(record.activePath) ? record.activePath : activePath;
+  return {
+    paths: retainedPaths,
+    activePath: active && retainedPaths.includes(active) ? active : retainedPaths[0],
+    fingerprints: keepFingerprints(record.fingerprints, retainedPaths)
+  };
+}
+
 /**
  * Removable and network storage is mounted under a folder of its own. When that folder is gone the
  * whole drive is, which is a different story from one project folder having moved.
