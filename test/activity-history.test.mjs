@@ -114,6 +114,122 @@ test('published saves use revert, and publication after preview blocks an undo',
  assert.equal((await service.getActivityHistory(path)).entries[0].steps[0].operation, 'revert_save');
 });
 
+test('an older commit made outside GitCat can be reviewed and reverted without changing published history', async (t) => {
+  const { path, git } = fixture(t);
+  const remote = join(path, '.git', 'test-remote.git');
+  git('init', '--bare', remote); git('remote', 'add', 'origin', remote);
+  writeFileSync(join(path, 'file'), 'older edit');
+  git('commit', '-qam', 'Edit the file');
+  const selected = git('rev-parse', 'HEAD');
+  writeFileSync(join(path, 'later'), 'independent work');
+  git('add', 'later'); git('commit', '-qm', 'Add a later file');
+  const head = git('rev-parse', 'HEAD');
+  git('push', '-u', 'origin', 'main');
+  assert.deepEqual((await service.getActivityHistory(path)).entries, []);
+
+  const plan = await service.prepareRevertCommit(path, selected, 'en');
+  assert.equal(plan.source, 'guardrail');
+  assert.equal(plan.requiresConfirmation, true);
+  assert.match(plan.summary, /Edit the file/);
+  assert.deepEqual(plan.steps[0].argv, ['revert', '--no-edit', selected]);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+  assert.equal(readFileSync(join(path, 'file'), 'utf8'), 'older edit');
+
+  const result = await service.executePlan(path, plan, 'en');
+  assert.equal(result.error, undefined);
+  assert.equal(git('rev-parse', 'HEAD^'), head);
+  assert.equal(git('rev-parse', 'HEAD^^'), selected);
+  assert.equal(git('--git-dir', remote, 'rev-parse', 'refs/heads/main'), head);
+  assert.equal(readFileSync(join(path, 'file'), 'utf8'), 'base');
+  assert.equal(readFileSync(join(path, 'later'), 'utf8'), 'independent work');
+  assert.equal((await service.getActivityHistory(path)).entries[0].steps[0].operation, 'revert_save');
+});
+
+test('history revert protects local work and checks ancestry, branch, and merge parents', async (t) => {
+  const { path, git } = fixture(t);
+  const root = git('rev-parse', 'HEAD');
+  git('switch', '-qc', 'other');
+  writeFileSync(join(path, 'other'), 'other branch');
+  git('add', 'other'); git('commit', '-qm', 'Other branch');
+  const other = git('rev-parse', 'HEAD');
+  git('switch', '-q', 'main');
+  await assert.rejects(() => service.prepareRevertCommit(path, other, 'en'), /not part of the active branch/);
+  await assert.rejects(() => service.prepareRevertCommit(path, root.slice(0, 7), 'en'), /commit reference is invalid/);
+  git('merge', '-q', '--no-ff', 'other', '-m', 'Merge other');
+  await assert.rejects(() => service.prepareRevertCommit(path, git('rev-parse', 'HEAD'), 'en'), /merge commit requires choosing/);
+
+  const plan = await service.prepareRevertCommit(path, root, 'en');
+  writeFileSync(join(path, 'file'), 'new local work');
+  await assert.rejects(() => service.executePlan(path, plan, 'en'), /Save or set aside your unfinished work/);
+  assert.equal(readFileSync(join(path, 'file'), 'utf8'), 'new local work');
+  git('restore', 'file');
+  git('switch', '-q', '--detach');
+  await assert.rejects(() => service.prepareRevertCommit(path, root, 'en'), /Open the branch/);
+  git('switch', '-q', 'main');
+  assert.equal((await service.executePlan(path, await service.prepareRevertCommit(path, root, 'en'), 'en')).error, undefined);
+  assert.equal(existsSync(join(path, 'file')), false, 'Reverting a true root reverses its addition');
+  assert.equal(readFileSync(join(path, 'other'), 'utf8'), 'other branch');
+});
+
+test('a revert conflict is reported as an in-progress operation that can be cancelled', async (t) => {
+  const { path, git } = fixture(t);
+  writeFileSync(join(path, 'file'), 'first edit');
+  git('commit', '-qam', 'First edit');
+  const selected = git('rev-parse', 'HEAD');
+  writeFileSync(join(path, 'file'), 'later edit');
+  git('commit', '-qam', 'Later edit');
+  const head = git('rev-parse', 'HEAD');
+
+  const plan = await service.prepareRevertCommit(path, selected, 'en');
+  const result = await service.executePlan(path, plan, 'en');
+  assert.equal(result.outcomes[0].status, 'failed');
+  assert.equal(result.snapshot.pending?.kind, 'revert');
+  assert.equal(result.snapshot.conflicts.length, 1);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+  const report = await service.describeFailure(path, {
+    command: plan.command, summary: plan.summary, error: result.error, skipped: [], stage: 'execute'
+  });
+  assert.equal(report.kind, 'conflict');
+  assert.ok(report.choice.some((action) => action.operation === 'abort_operation'));
+  const abort = await service.prepareOperation(path, 'abort_operation', {}, 'en');
+  assert.equal((await service.executePlan(path, abort, 'en')).error, undefined);
+  assert.equal(git('status', '--porcelain'), '');
+  assert.equal(readFileSync(join(path, 'file'), 'utf8'), 'later edit');
+});
+
+test('a revert does not replace an ignored file created after review where Git would restore a tracked file', async (t) => {
+  const { path, git } = fixture(t);
+  git('rm', '-q', 'file');
+  git('commit', '-qm', 'Remove the tracked file');
+  const head = git('rev-parse', 'HEAD');
+  const plan = await service.prepareRevertCommit(path, head, 'en');
+  writeFileSync(join(path, '.git', 'info', 'exclude'), '/file\n');
+  writeFileSync(join(path, 'file'), 'ignored local work');
+  assert.equal(git('status', '--porcelain'), '');
+
+  await assert.rejects(() => service.executePlan(path, plan, 'en'), /could overwrite ignored files at file/);
+  await assert.rejects(() => service.prepareRevertCommit(path, head, 'en'), /could overwrite ignored files at file/);
+  assert.equal(git('rev-parse', 'HEAD'), head);
+  assert.equal(readFileSync(join(path, 'file'), 'utf8'), 'ignored local work');
+});
+
+test('a revert protects ignored work when Git would restore a file in a relocated directory', async (t) => {
+  const { path, git } = fixture(t);
+  mkdirSync(join(path, 'old'));
+  writeFileSync(join(path, 'old', 'removed'), 'tracked file');
+  writeFileSync(join(path, 'old', 'kept'), 'another tracked file');
+  git('add', 'old'); git('commit', '-qm', 'Add tracked directory');
+  git('rm', '-q', 'old/removed'); git('commit', '-qm', 'Remove one file');
+  const commit = git('rev-parse', 'HEAD');
+  git('mv', 'old', 'new'); git('commit', '-qm', 'Rename the directory');
+  const plan = await service.prepareRevertCommit(path, commit, 'en');
+  writeFileSync(join(path, '.git', 'info', 'exclude'), '/new/removed\n');
+  writeFileSync(join(path, 'new', 'removed'), 'ignored work');
+  await assert.rejects(() => service.executePlan(path, plan, 'en'), /could overwrite ignored files at new\/removed/);
+  assert.equal(readFileSync(join(path, 'new', 'removed'), 'utf8'), 'ignored work');
+  assert.equal(git('status', '--porcelain'), '');
+});
+
 test('undo checks every push endpoint for commits reachable from a branch tip', async t => {
   const { path, git } = fixture(t);
   writeFileSync(join(path, '.git', 'info', 'exclude'), '*.git/\n');

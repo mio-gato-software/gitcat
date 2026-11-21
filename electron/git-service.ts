@@ -21,7 +21,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, readlinkSync, accessSync, constants, copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync, type Stats } from "node:fs";
 import { signalProcessTree } from "./process-tree.js";
 import { homedir, tmpdir } from "node:os";
-import { basename, delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, delimiter, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { safeStorage, app } from "electron";
 import { findExecutable, isExecutableFile, pathEntries, wellKnownToolDirectories } from "./executables.js";
 import { parseWorktrees, parseWorktreeList } from "./worktrees.js";
@@ -4609,25 +4609,102 @@ async function historyIsPublished(cwd: string, snapshot: RepoSnapshot, commit: s
   }
 }
 
+function gitPathAncestors(path: string) {
+  const parts = path.split("/");
+  return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"));
+}
+
+/** Directory rename detection can also place the other side's files under a moved directory. */
+function* relocatedRevertPaths(moves: FileChange[], paths: string[]) {
+  const directories = new Map<string, Set<string>>();
+  for (const move of moves) {
+    if (!move.from) continue;
+    let from = posix.dirname(move.from);
+    let to = posix.dirname(move.path);
+    while (from !== "." && from !== to) {
+      const destinations = directories.get(from) ?? new Set<string>();
+      destinations.add(to);
+      directories.set(from, destinations);
+      if (posix.basename(from) !== posix.basename(to)) break;
+      from = posix.dirname(from);
+      to = posix.dirname(to);
+    }
+  }
+  for (const path of paths) for (const from of gitPathAncestors(path)) {
+    for (const to of directories.get(from) ?? []) yield posix.join(to, path.slice(from.length + 1));
+  }
+}
+
+async function protectIgnoredRevertPaths(cwd: string, head: string, commit: string, parent: string, locale?: Locale) {
+  // Git can replace an ignored file when a revert brings back a tracked path. Check the paths the
+  // inverse change can restore, including file/directory collisions that are absent from status.
+  const inversePaths = (await checkedGit(cwd, [
+    "diff-tree", "--no-commit-id", "--name-only", "--no-renames", "--diff-filter=DMT", "-r", "-z", parent, commit
+  ], true)).split("\0").filter(Boolean);
+  if (!inversePaths.length) return;
+  const ignored = new Set((await checkedGit(cwd, [
+    "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"
+  ], true)).split("\0").filter(Boolean).map((path) => path.replace(/\/$/, "")));
+  if (!ignored.size) return;
+  const ignoredAncestors = new Set<string>();
+  for (const path of ignored) for (const ancestor of gitPathAncestors(path)) ignoredAncestors.add(ancestor);
+  const collides = (path: string) => ignored.has(path) || ignoredAncestors.has(path) || gitPathAncestors(path).some((ancestor) => ignored.has(ancestor));
+  let blocked = inversePaths.find(collides);
+  if (!blocked && head !== commit) {
+    const renameChanges = async (target: string) => parseNameStatus(await checkedGit(cwd, [
+      "diff", "--name-status", "--find-renames", "--diff-filter=AR", "-z", commit, target
+    ], true));
+    const [later, inverse] = await Promise.all([renameChanges(head), renameChanges(parent)]);
+    blocked = [...relocatedRevertPaths(later, inversePaths),
+      ...relocatedRevertPaths(inverse, later.filter((change) => change.code === "A").map((change) => change.path))].find(collides);
+  }
+  if (blocked) throw new Error(localized(locale,
+    `Revertir este commit podría sobrescribir archivos ignorados en ${blocked}. Muévelos a un lugar seguro y vuelve a revisar la reversión.`,
+    `Reverting this commit could overwrite ignored files at ${blocked}. Move them somewhere safe and review the revert again.`));
+}
+
 async function validateHistoryRecovery(cwd: string, recovery: HistoryRecovery, locale?: Locale) {
-  if (!/^[a-f0-9]{40,64}$/.test(recovery.commit)) throw new Error("Invalid recovery reference.");
-  await checkedGit(cwd, ["cat-file", "-e", `${recovery.commit}^{commit}`]);
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(recovery.commit)) throw new Error(localized(locale,
+    "La referencia al commit no es válida. Actualiza el historial y selecciónalo de nuevo.",
+    "The commit reference is invalid. Refresh history and select it again."));
+  const commit = await optionalGit(cwd, ["rev-parse", "--verify", "--quiet", `${recovery.commit}^{commit}`]);
+  if (commit !== recovery.commit) throw new Error(localized(locale,
+    "Ese commit ya no se puede verificar. Actualiza el historial y selecciónalo de nuevo.",
+    "That commit can no longer be verified. Refresh history and select it again."));
   let snapshot = await getSnapshot(cwd);
   if (recovery.mode === "restore") {
     if (!recovery.branch || !isBranchNameSafe(recovery.branch) || snapshot.branches.some(b=>b.name===recovery.branch)) throw new Error("The recovery branch already exists or its name is invalid. No branch was overwritten.");
     return snapshot;
   }
-  if (snapshot.isDirty || snapshot.pending) throw new Error("Review or set aside your unfinished work first. Recovery will not combine it with other changes.");
+  if (snapshot.pending || snapshot.conflicts.length) throw new Error(localized(locale,
+    "Termina o cancela la operación en curso antes de recuperar un commit.",
+    "Finish or cancel the operation in progress before recovering a commit."));
+  if (snapshot.currentBranch === "HEAD") throw new Error(localized(locale,
+    "Abre la rama en la que quieres recuperar el commit y vuelve a intentarlo.",
+    "Open the branch where you want to recover the commit and try again."));
+  if (snapshot.isDirty) throw new Error(localized(locale,
+    "Guarda o aparta tus cambios pendientes antes de recuperar un commit.",
+    "Save or set aside your unfinished work before recovering a commit."));
   const parents = (await checkedGit(cwd,["rev-list","--parents","-n","1",recovery.commit])).split(/\s+/);
-  if (parents.length !== 2) throw new Error("This saved version needs a specific recovery plan because it is an initial or merge commit.");
-  if ((await runGit(cwd,["merge-base","--is-ancestor",recovery.commit,"HEAD"])).code !== 0) throw new Error("That saved version is not part of the active branch. Create a recovery branch to review it.");
   if (recovery.mode === "undo") {
+    if (parents.length !== 2) throw new Error("This saved version needs a specific recovery plan because it is an initial or merge commit.");
     if (snapshot.head !== recovery.commit) throw new Error("The branch has moved since that save. Review its history; the latest save can be kept as files only while it is still the tip.");
     if (await historyIsPublished(cwd, snapshot, recovery.commit, locale)) throw new Error(localized(locale,
       "Este guardado ya está publicado. Usa Revertir para añadir un commit nuevo y conservar el historial compartido.",
       "This saved version is published. Revert it with a new commit instead; shared history stays intact."));
     snapshot=await getSnapshot(cwd);
     if (snapshot.head!==recovery.commit || snapshot.isDirty || snapshot.pending) throw new Error("The project changed during the publication check. Review recovery again.");
+  } else {
+    if (parents.length > 2) throw new Error(localized(locale,
+      "Un commit de fusión requiere elegir qué rama conservar. Para esta acción, selecciona un commit que no sea de fusión.",
+      "A merge commit requires choosing which side to keep. Select a non-merge commit for this action."));
+    if (parents.length === 1 && await checkedGit(cwd, ["rev-parse", "--is-shallow-repository"]) === "true") throw new Error(localized(locale,
+      "El historial de este clon empieza en ese commit. Descarga su historial completo antes de revertirlo.",
+      "This clone's history starts at that commit. Download its full history before reverting it."));
+    if ((await runGit(cwd, ["merge-base", "--is-ancestor", recovery.commit, snapshot.head])).code !== 0) throw new Error(localized(locale,
+      "Ese commit no forma parte de la rama activa. Abre una rama que lo contenga para revertirlo.",
+      "That commit is not part of the active branch. Open a branch that contains it to revert it."));
+    if (parents[1]) await protectIgnoredRevertPaths(snapshot.path, snapshot.head, recovery.commit, parents[1], locale);
   }
   return snapshot;
 }
@@ -4644,9 +4721,6 @@ export async function suggestHistoryRecovery(cwd: string, id: string, locale?: L
   const path = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
   const commit = historyRecoveryReference(path, id, "revert");
   const snapshot = await validateHistoryRecovery(path, { mode: "revert", commit }, locale);
-  if (snapshot.currentBranch === "HEAD") throw new Error(localized(locale,
-    "Abre una rama para revisar este guardado o crea una rama de recuperación.",
-    "Open a branch to review this save, or create a recovery branch."));
   if (snapshot.head !== commit) return { mode: "revert", reason: "older" };
 
   let published: boolean | undefined;
@@ -4668,14 +4742,25 @@ export async function prepareHistoryRecovery(cwd: string, id: string, mode: Hist
   return buildHistoryRecoveryPlan(snapshot.path, recovery, normalizeLocale(locale));
 }
 
+export function prepareRevertCommit(cwd: string, commit: string, locale?: Locale) {
+  return buildHistoryRecoveryPlan(cwd, { mode: "revert", commit }, normalizeLocale(locale));
+}
+
 async function buildHistoryRecoveryPlan(cwd: string, recovery: HistoryRecovery, language: Locale) {
   const { mode, commit } = recovery;
   const current = await validateHistoryRecovery(cwd, recovery, language);
   const argv=historyRecoveryArguments(recovery);
-  const summary=mode==='restore'?localized(language,'Crear una rama para revisar la versión anterior','Create a branch to review the earlier version'):mode==='revert'?localized(language,'Revertir el guardado con un nuevo commit','Revert the save with a new commit'):localized(language,'Deshacer el último guardado conservando los archivos','Undo the latest save while keeping files');
+  if (mode === "revert") {
+    const subject = await checkedGit(current.path, ["show", "-s", "--format=%s", commit]);
+    const summary = localized(language, `Revertir ${commit.slice(0, 7)} «${subject}»`, `Revert ${commit.slice(0, 7)} “${subject}”`);
+    const rationale = localized(language, "Se conservan los commits existentes y el nuevo queda en este equipo hasta que lo publiques.", "Existing commits stay in history, and the new commit stays on this computer until you publish it.");
+    const step = { ...stepFrom("git_command", {}, argv, language)!, summary };
+    return bindPlan(current, { ...sequenceDraft([step], rationale, undefined, language), recovery });
+  }
+  const summary=mode==='restore'?localized(language,'Crear una rama para revisar la versión anterior','Create a branch to review the earlier version'):localized(language,'Deshacer el último guardado conservando los archivos','Undo the latest save while keeping files');
   const effects=[localized(language,'Solo recupera versiones guardadas en Git. No guarda ni recupera archivos que nunca se guardaron.','Only versions saved in Git can be recovered. Never-saved files are not backed up or recovered.')];
   if (mode==='undo') effects.push(localized(language,'Se comprueban ramas y etiquetas de los remotos configurados. GitCat no puede demostrar que nunca se compartió en otro lugar. Si alguien lo recibió, usa revertir.','Configured remote branches and tags are checked. GitCat cannot prove this was never shared elsewhere. If someone received it, use revert.'));
-  effects.push(mode==='restore'?localized(language,`Crea ${recovery.branch} en ${commit.slice(0,7)} sin cambiar de rama ni tocar tus archivos.`,`Creates ${recovery.branch} at ${commit.slice(0,7)} without switching branches or touching files.`):mode==='undo'?localized(language,'Mueve solo la punta de la rama al padre. Conserva exactamente el índice y los archivos; los cambios del guardado quedan preparados. No publica nada.','Moves only the branch tip to its parent. Keeps the index and files unchanged; the saved changes remain staged. Publishes nothing.'):localized(language,'Añade un commit inverso. Conserva el historial compartido; puede detenerse con conflictos. No publica nada.','Adds an inverse commit. Preserves shared history; may stop with conflicts. Publishes nothing.'));
+  effects.push(mode==='restore'?localized(language,`Crea ${recovery.branch} en ${commit.slice(0,7)} sin cambiar de rama ni tocar tus archivos.`,`Creates ${recovery.branch} at ${commit.slice(0,7)} without switching branches or touching files.`):localized(language,'Mueve solo la punta de la rama al padre. Conserva exactamente el índice y los archivos; los cambios del guardado quedan preparados. No publica nada.','Moves only the branch tip to its parent. Keeps the index and files unchanged; the saved changes remain staged. Publishes nothing.'));
   return bindPlan(current,{...sequenceDraft([stepFrom('git_command',{},argv,language)!],summary,effects,language),summary,recovery,requiresConfirmation:true});
 }
 

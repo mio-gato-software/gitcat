@@ -112,6 +112,7 @@ type ConversationTurn = {
   recovery?: RecoveryReport;
   /** The stopped plan, so a retry prepares only what did not finish. */
   recoveryPlanId?: string;
+  localRecovery?: boolean;
   /** Where the assistant's view of the failure stands. */
   assistant?: "consulting" | "not_shared" | AssistantUnavailable;
   /** The person chose to leave things as they are. */
@@ -1005,7 +1006,7 @@ export default function App() {
   });
 
   const showPlan = async (question: string, loader: () => Promise<ActionPlan>, path = snapshot?.path,
-    { review = false, reveal = true } = {}): Promise<ActionPlan | undefined> => {
+    { review = false, reveal = true, localRecovery = false } = {}): Promise<ActionPlan | undefined> => {
     if (!path || planning) return undefined;
     const turnId = addTurn(path, question, reveal);
     try {
@@ -1034,13 +1035,14 @@ export default function App() {
         return undefined;
       }
       updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
+      if (localRecovery) notify({ message, tone: "error" });
       await recoverFrom(path, {
         command: question,
         summary: t("prepareRequestedAction"),
         error: message,
         skipped: [],
         stage: "prepare"
-      });
+      }, localRecovery);
       return undefined;
     }
   };
@@ -1160,7 +1162,7 @@ export default function App() {
         // Remote preparation fetches before binding the plan; show those same facts during review.
         if (operation === "sync_remote") await refreshProject(path, false);
       }
-    }, path);
+    }, path, { localRecovery: snapshot.pending?.kind === "revert" && ["abort_operation", "continue_operation", "skip_operation"].includes(operation) });
   };
 
   const openSync = (ref?: string, name?: string) => {
@@ -1193,18 +1195,18 @@ export default function App() {
    * only when a choice or an unknown cause calls for judgment, and when it is missing, silent or not
    * allowed to read the repository, the card says so and the options stand as a focused question.
    */
-  const recoverFrom = async (path: string, failure: ExecutionFailure) => {
-    const context = conversationContext(conversations[path] ?? []);
+  const recoverFrom = async (path: string, failure: ExecutionFailure, localRecovery = false) => {
     const turnId = addTurn(path, t("actionQuestion"));
     let report: RecoveryReport | undefined;
     try {
       report = await window.gitcat.describeFailure(path, failure);
       if (report.repoPath !== path) throw new Error(t("planOtherRepository"));
       const described = report;
-      updateTurn(path, turnId, (turn) => ({ ...turn, recovery: described, recoveryPlanId: failure.planId, status: "completed" }));
+      updateTurn(path, turnId, (turn) => ({ ...turn, recovery: described, recoveryPlanId: failure.planId, localRecovery, status: "completed" }));
     } catch {
       updateTurn(path, turnId, (turn) => ({ ...turn, error: t("recoveryDescribeFailed"), status: "error" }));
     }
+    if (localRecovery) return;
     if (report && !report.needsJudgment) return;
     if (!config.configured) {
       updateTurn(path, turnId, (turn) => ({ ...turn, assistant: "not_configured" }));
@@ -1216,6 +1218,7 @@ export default function App() {
     }
     updateTurn(path, turnId, (turn) => ({ ...turn, assistant: "consulting" }));
     try {
+      const context = conversationContext(conversations[path] ?? []);
       const plan = await window.gitcat.planRecovery(path, failure, context, locale);
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
       if (plan.steps.some(step => step.operation === "sync_remote")) await refreshProject(path, false);
@@ -1253,7 +1256,7 @@ export default function App() {
       case "retry":
         if (turn.recoveryPlanId) {
           const planId = turn.recoveryPlanId;
-          await showPlan(t("recoveryRetryQuestion"), () => window.gitcat.prepareRetry(path, planId, locale), path);
+          await showPlan(t("recoveryRetryQuestion"), () => window.gitcat.prepareRetry(path, planId, locale), path, { localRecovery: turn.localRecovery });
         }
         return;
       case "inspect_changes": setFocus({ kind: "wip" }); setInspectorTab("details"); return;
@@ -1390,6 +1393,7 @@ export default function App() {
     updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, status: "executing" }));
     const project = projects.find((item) => item.snapshot.path === plan.repoPath);
     const before = project?.snapshot;
+    const localRecovery = plan.recovery?.mode === "revert" || before?.pending?.kind === "revert";
     try {
       const result = await window.gitcat.executePlan(plan.repoPath, plan.id, locale);
       const completion = completionSummary({ plan, outcomes: result.outcomes, before, after: result.snapshotStale ? undefined : result.snapshot, error: result.error, fetchedAt: project?.fetchedAt }, locale);
@@ -1417,7 +1421,7 @@ export default function App() {
           skipped: (result.outcomes ?? []).filter((outcome) => outcome.status === "skipped").map((outcome) => outcome.summary),
           planId: plan.id,
           stage: "execute"
-        });
+        }, localRecovery);
       } else {
         // The model still reads what Git printed; the person reads what changed and what is left.
         const outcome = result.output || completion.headline;
@@ -1439,7 +1443,7 @@ export default function App() {
         skipped: plan.steps.map((step) => step.summary),
         planId: plan.id,
         stage: "execute"
-      });
+      }, localRecovery);
     }
   };
 
@@ -1604,7 +1608,11 @@ export default function App() {
       entries.push({ key: "branch-here", icon: GitBranchPlus, label: t("createBranchHere"), onSelect: () => setInputDialog({ operation: "create_branch", title: t("newBranchFrom", { hash: commit.shortHash }), label: t("branchName"), value: "", from: commit.hash }) });
       entries.push({ key: "diff", icon: Maximize2, label: t("fullDiff"), onSelect: () => setModalCommit({ commit }) });
       entries.push({ key: "explain-commit", icon: MessageSquareText, label: t("explainCommit"), onSelect: () => ask(t("explainCommitQuestion", { hash: commit.shortHash, subject: commit.subject })), disabled: !config.configured, hint: assistantHint });
-      entries.push({ key: "revert", icon: Undo2, label: t("revertCommit"), onSelect: () => ask(t("revertCommitQuestion", { hash: commit.shortHash, subject: commit.subject, branch: current })), disabled: !config.configured, hint: assistantHint ?? t("revertCommitHint") });
+      entries.push({ key: "revert", icon: Undo2, label: t("revertCommit"), onSelect: () => {
+        const path = snapshot.path;
+        void showPlan(t("revertCommitReview", { hash: commit.shortHash }), () => window.gitcat.prepareRevertCommit(path, commit.hash, locale), path,
+          { review: true, reveal: false, localRecovery: true });
+      }, disabled: planning, hint: t("revertCommitHint") });
     }
 
     entries.push({ key: "copy-separator", separator: true });
@@ -1829,7 +1837,7 @@ export default function App() {
         onClose={() => setWorktreesPath(undefined)} onOpen={(next) => showWorktree(next, worktreesPath)} />}
       {historyPath && <ActivityHistory key={historyPath} path={historyPath} locale={locale} onClose={() => setHistoryPath(undefined)} onRecover={(id, mode) => {
         const path=historyPath; setHistoryPath(undefined);
-        void showPlan(locale === 'es' ? 'Revisar recuperación' : 'Review recovery', () => window.gitcat.prepareHistoryRecovery(path,id,mode,locale),path,{ review: true });
+        void showPlan(locale === 'es' ? 'Revisar recuperación' : 'Review recovery', () => window.gitcat.prepareHistoryRecovery(path,id,mode,locale),path,{ review: true, localRecovery: mode === "revert" });
       }} />}
       {deliveryReview && <DeliveryReviewModal review={deliveryReview} snapshot={projects.find((item) => item.snapshot.path === deliveryReview.plan.repoPath)?.snapshot} busy={planning}
         onClose={() => { updateTurn(deliveryReview.plan.repoPath, deliveryReview.turnId, (turn) => ({ ...turn, status: "cancelled", outcome: t("planDiscarded") })); delivery.setReview(undefined); }}
@@ -3522,7 +3530,8 @@ function DeliveryReviewModal({ review, snapshot, busy, onClose, onApply }: {
   const target = review.plan.selection?.target;
   const confirmLabel = save?.paths && snapshot ? t(target ? "confirmSelectedSaveAndMerge" : "confirmSelectedSave", {
     files: counted(t, save.paths.length, "file", "files"), branch: snapshot.currentBranch, target: target ?? ""
-  }) : review.plan.steps[0]?.operation === "discard_file" ? t("discardFileChanges") : undefined;
+  }) : review.plan.recovery?.mode === "revert" ? t("confirmRevertCommit")
+    : review.plan.steps[0]?.operation === "discard_file" ? t("discardFileChanges") : undefined;
   return <div className="modal-backdrop"><section className="modal delivery-review-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("reviewDeliveryTitle")}>
     <div className="modal-heading"><h2>{t("reviewDeliveryTitle")}</h2><button className="icon-button" onClick={onClose} aria-label={t("cancel")}><X size={18} /></button></div>
     <PlanCard plan={review.plan} snapshot={snapshot} busy={busy} onApply={onApply} onDismiss={onClose} confirmLabel={confirmLabel} />

@@ -118,6 +118,7 @@ app.whenReady().then(async () => {
     return service.suggestHistoryRecovery(p, id, locale);
   });
   ipcMain.handle('activity:recover', async (_, p, id, mode, locale) => planHandlers.rememberPlan(await service.prepareHistoryRecovery(p, id, mode, locale)));
+  ipcMain.handle('commit:prepare-revert', async (_, p, commit, locale) => planHandlers.rememberPlan(await service.prepareRevertCommit(p, commit, locale)));
   ipcMain.handle('activity:repair', () => service.repairActivityHistory());
   ipcMain.handle('activity:retention', (_, days) => service.setActivityRetention(days));
   ipcMain.handle('activity:clear', (_, p) => service.clearActivityHistory(p));
@@ -830,7 +831,7 @@ app.whenReady().then(async () => {
   await js(`(() => { const row = [...document.querySelectorAll('.commit-row')].find((node) => node.querySelector('.ref-tag')?.textContent === 'main'); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 600, clientY: 300 })); })()`);
   await waitFor(`document.querySelector('.context-menu')`);
   const menuText = await js(`document.querySelector('.context-menu').innerText`);
-  for (const entry of [/Cambiar a la rama main/, /Mover feature\/new-menu encima de main/, /Nueva rama desde este commit/, /Deshacer este commit/, /Copiar el hash/]) assert.match(menuText, entry);
+  for (const entry of [/Cambiar a la rama main/, /Mover feature\/new-menu encima de main/, /Nueva rama desde este commit/, /Revertir este commit/, /Copiar el hash/]) assert.match(menuText, entry);
   // main is already inside feature/new-menu, so a merge would bring nothing and is not offered.
   assert.doesNotMatch(menuText, /Fusionar main en/);
   assert.doesNotMatch(menuText, /Eliminar la rama main|Renombrar/, 'The default branch is never offered for deletion or renaming');
@@ -1099,7 +1100,7 @@ app.whenReady().then(async () => {
   await js(`${recoveryEntry}.querySelector('.primary-button').click()`);
   await waitFor(`document.querySelector('.delivery-review-modal')`);
   assert.match(await js(`document.querySelector('.delivery-review-modal').innerText`), canUndoTip
-    ? /Deshacer el último guardado conservando los archivos/ : /Revertir el guardado con un nuevo commit/);
+    ? /Deshacer el último guardado conservando los archivos/ : /Crear commit de reversión/);
   assert.equal(git('rev-parse', 'HEAD'), tipBeforeRecoveryReview, 'Recommendations and their review leave history alone');
   await js(`document.querySelector('.delivery-review-modal .plan-actions .ghost-button').click()`);
   await waitFor(`!document.querySelector('.activity-history')`);
@@ -1278,6 +1279,37 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.assistant-setup').innerText`), /Conecta un asistente de IA para preguntar con tus propias palabras/);
   assert.equal(await js(`document.querySelector('.chat-compose textarea').disabled`), true);
   await capture('assistant-not-connected');
+
+  // A historical commit made outside GitCat can be reverted even with no provider configured.
+  cwrite('revert-only.txt', 'temporary content\n');
+  cgit('add', 'revert-only.txt'); cgit('commit', '-qm', 'Archivo temporal');
+  const targetToRevert = cgit('rev-parse', 'HEAD');
+  cwrite('keep.txt', 'independent content\n');
+  cgit('add', 'keep.txt'); cgit('commit', '-qm', 'Archivo que se conserva');
+  const beforeRevert = await service.getSnapshot(conflictRepo);
+  restored = { projects: [beforeRevert], unavailable: [], order: [beforeRevert.path], activePath: beforeRevert.path };
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  const revertRow = `document.querySelector('.commit-row[data-hash="${targetToRevert}"]')`;
+  const showRevert = async () => {
+    await waitFor(revertRow);
+    await js(`${revertRow}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 600, clientY: 300 }))`);
+    await waitFor(`document.querySelector('.context-menu [data-action="revert"]:enabled')`);
+    await js(`document.querySelector('.context-menu [data-action="revert"]').click()`);
+    await waitFor(`document.querySelector('.delivery-review-modal')`);
+  };
+  await showRevert();
+  assert.match(await js(`document.querySelector('.delivery-review-modal').innerText`), /Archivo temporal[\s\S]*commit nuevo/);
+  assert.equal(await js(`Boolean(document.querySelector('.sharing-modal'))`), false);
+  assert.equal(cgit('rev-parse', 'HEAD'), beforeRevert.head);
+  await js(`document.querySelector('.delivery-review-modal .plan-actions .ghost-button').click()`);
+  await waitFor(`!document.querySelector('.delivery-review-modal')`);
+  assert.equal(cgit('rev-parse', 'HEAD'), beforeRevert.head);
+  await showRevert();
+  await js(`document.querySelector('.delivery-review-modal .plan-actions .primary-button').click()`);
+  for (let attempt = 0; attempt < 100 && cgit('rev-parse', 'HEAD') === beforeRevert.head; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(cgit('rev-parse', 'HEAD^'), beforeRevert.head);
+  assert.equal(fs.existsSync(path.join(conflictRepo, 'revert-only.txt')), false);
+  assert.equal(fs.readFileSync(path.join(conflictRepo, 'keep.txt'), 'utf8'), 'independent content\n');
 
   // A fresh profile: nothing saved, no provider. Opening a project is the first thing offered.
   restored = { projects: [], unavailable: [], order: [] };
