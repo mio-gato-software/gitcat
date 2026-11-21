@@ -253,7 +253,7 @@ const helpPages: Record<HelpPage, string> = {
   bitbucket_dc_tokens: "https://confluence.atlassian.com/bitbucketserver/managing-http-access-tokens-1005339986.html",
   azure_tokens: "https://learn.microsoft.com/en-us/azure/devops/organizations/accounts/use-personal-access-tokens-to-authenticate"
 };
-const sharingPurposes = new Set<AiSharingPurpose>(["planning", "description", "conflicts", "recovery"]);
+const sharingPurposes = new Set<AiSharingPurpose>(["planning", "description", "conflicts", "recovery", "working_changes"]);
 
 const failureStages = new Set(["prepare", "execute", "stale"]);
 
@@ -681,15 +681,16 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
     if (!record || record.plan.repoPath !== repoPath) throw new Error(localized(locale, "Ese intento ya no está disponible. Actualiza y prepara la acción de nuevo.", "That attempt is no longer available. Refresh and prepare the action again."));
     return rememberPlan(await tracked(event, repoPath, "planning", () => prepareRetry(repoPath, record, locale), false, "wait"));
   });
-  ipcMain.handle("action:plan", async (event, cwd: string, request: string, context?: ConversationMessage[], locale?: Locale) => {
+  ipcMain.handle("action:plan", async (event, cwd: string, request: string, context?: ConversationMessage[], locale?: Locale, includeWorkingChanges = false) => {
     assertTrustedSender(event);
     // Shape is still checked; length is not. The model decides what it can handle.
     if (typeof request !== "string") throw new Error("La solicitud no es válida.");
+    if (typeof includeWorkingChanges !== "boolean") throw new Error("El alcance del contexto no es válido.");
     if (context !== undefined && (!Array.isArray(context) || context.some((message) =>
       !message || !["user", "assistant"].includes(message.role) || typeof message.content !== "string"
     ))) throw new Error("El contexto de conversación no es válido.");
     const repoPath = assertOpenedRepository(cwd);
-    return rememberPlan(await tracked(event, repoPath, "planning", () => planAction(repoPath, request, context, locale)));
+    return rememberPlan(await tracked(event, repoPath, "planning", () => planAction(repoPath, request, context, locale, includeWorkingChanges)));
   });
   ipcMain.handle("action:prepare", async (event, cwd: string, operation: Operation, args?: Record<string, string>, locale?: Locale) => {
     assertTrustedSender(event);
@@ -720,9 +721,10 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
     const selected = paths === undefined ? undefined : assertPathList(paths);
     return getAiSharing(assertOpenedRepository(cwd), purpose as AiSharingPurpose, selected, locale);
   });
-  ipcMain.handle("sharing:acknowledge", (event, cwd: string) => {
+  ipcMain.handle("sharing:acknowledge", (event, cwd: string, scope: unknown) => {
     assertTrustedSender(event);
-    return acknowledgeAiSharing(assertOpenedRepository(cwd));
+    if (scope !== "metadata" && scope !== "changes") throw new Error("El alcance del contexto no es válido.");
+    return acknowledgeAiSharing(assertOpenedRepository(cwd), scope);
   });
   ipcMain.handle("sharing:set-exclusions", (event, cwd: string, exclusions: unknown, locale?: Locale) => {
     assertTrustedSender(event);

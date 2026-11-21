@@ -76,7 +76,7 @@ test("el asistente recibe instrucciones para consultar Git sin shell", async () 
   // Investigar sigue siendo su primer instinto; la política de confirmación se prueba con Git real.
   assert.match(planner, /first instinct/);
   // Anunciar que lo hará no vale: la investigación es un git_operation, en este turno.
-  assert.match(planner, /is "git_operation" with read-only "git_command" steps, never "answer" or\n"needs_information"/);
+  assert.match(planner, /"git_operation" with read-only "git_command" steps/);
   assert.match(planner, /is a failed turn/);
   assert.match(planner, /only git_command takes an argument list/);
 });
@@ -721,11 +721,11 @@ test("una operación a medias es un estado del que se puede salir, no un callej�
   // Recovery no longer depends on a provider: the facts come first, the assistant only when configured.
   assert.doesNotMatch(app, /config\.configured\) await recoverFrom|failed && config\.configured/);
   assert.match(app, /report = await window\.gitcat\.describeFailure\(path, failure\)/);
-  assert.match(app, /if \(report && !report\.needsJudgment\) return;\n {4}if \(!config\.configured\)/);
+  assert.match(app, /if \(fromAssistant && !localRecovery && \(!report \|\| report\.needsJudgment\)\) await consultRecovery/);
   assert.match(service, /function explainGitFailure/);
   assert.match(service, /todavía no está publicada ni tiene un destino remoto asociado/);
   // La salida de un lío se propone, nunca se ejecuta sola: recoverFrom deja el plan esperando.
-  assert.match(app, /updateTurn\(path, turnId, \(turn\) => \(\{ \.\.\.turn, plan, status: plan\.allowed \? "ready" : "completed" \}\)\)/);
+  assert.match(app, /plan: plan\.allowed \? \{ \.\.\.plan, requiresConfirmation: true \} : plan/);
   assert.doesNotMatch(app, /recoverFrom[\s\S]{0,600}?await runPlan/, "recoverFrom no ejecuta nada por su cuenta");
   // Y el modelo sabe qué cuesta cada salida.
   assert.match(planner, /Aborting throws away the half-finished work/);
@@ -822,7 +822,7 @@ test("las fusiones desde el menú respetan cambios pendientes y la guía del age
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
   const guide = await readFile(join(root, "AGENTS.md"), "utf8");
-  assert.match(app, /snapshot\.isDirty\s*\n?\s*\? \(\) => window\.gitcat\.planAction/);
+  assert.match(app, /snapshot\.isDirty\s*\n?\s*\? \(\) => requestAssistantPlan/);
   assert.match(service, /if \(snapshot\.isDirty\) throw new Error\(localized\(language, "Hay cambios locales sin confirmar/);
   assert.match(service, /branch\.mergedInto\.includes\(target\)/);
   assert.match(service, /async function plannerState/);

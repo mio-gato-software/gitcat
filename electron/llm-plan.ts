@@ -2,7 +2,7 @@ import { isBranchNameSafe } from "./branch-operation.js";
 import type { HostingProvider, Operation } from "../shared/types.js";
 import { hostingProviders } from '../shared/hosting.js';
 
-export type PlannerIntent = "git_operation" | "create_repository" | "answer" | "needs_information" | "out_of_scope";
+export type PlannerIntent = "git_operation" | "create_repository" | "answer" | "needs_information" | "out_of_scope" | "inspect_merge" | "needs_working_changes";
 
 export type PlannedArgs = { name: string; onto: string; to: string; path: string; side: string; message: string; noVerify: string };
 
@@ -45,7 +45,7 @@ export const executableOperations = new Set<Operation>([
   "git_command"
 ]);
 const branchOperations = new Set<Operation>(["checkout", "create_branch", "delete_branch", "rename_branch", "merge"]);
-const intents: PlannerIntent[] = ["git_operation", "create_repository", "answer", "needs_information", "out_of_scope"];
+const intents: PlannerIntent[] = ["git_operation", "create_repository", "answer", "needs_information", "out_of_scope", "inspect_merge", "needs_working_changes"];
 const risks = ["low", "medium", "high"];
 const planKeys = ["intent", "rationale", "reply", "repository", "risk", "steps", "summary"];
 const stepKeys = ["args", "argv", "operation"];
@@ -134,11 +134,13 @@ Pick exactly one intent:
 - "git_operation": the user wants something done with Git in the open repository. Put in "steps" every operation it takes, in the order they must run.
 - "create_repository": the user wants to create a remote repository for a local repository, optionally pushing to it. Fill "repository".
 - "answer": the user asks something the repository state below already answers. Put the full answer in "reply". When the state does not settle it, prefer a read-only "git_command" that finds the answer over declaring it unknown.
+- "inspect_merge": the user asks what the latest merge brought into the current branch. Leave "steps" empty. GitCat finds that merge in the branch's first-parent history, compares it with its first parent and uses the result to answer.
+- "needs_working_changes": the user asks about unsaved file content or needs it to make a decision, and "workingTreeDiffAvailable" is false while "hasLocalChanges" is true. Leave "steps" empty and say why the content matters in "reply". For questions about history, branch state, which files are modified, or other facts that Git can answer from metadata, use the metadata already available.
 
 A question the state does not answer but Git can — when a file was created, who deleted it, what a
-commit changed — is "git_operation" with read-only "git_command" steps, never "answer" or
-"needs_information": you cannot put in "reply" what you have not read yet, and those commands run
-immediately, so their output is the reply. A path the user names is all you need; never ask which
+commit changed — can use "git_operation" with read-only "git_command" steps. GitCat runs a plan
+made entirely of validated local reads as part of answering. Prefer history and statistics over
+source text when they settle the question. A path the user names is all you need; never ask which
 file they meant. For example, "who created proto/x.test.js and when" is
 ["log", "--diff-filter=A", "--follow", "--format=%an <%ae> %ad", "--", "proto/x.test.js"], and if
 they also ask who deleted it, add ["log", "--diff-filter=D", "--format=%an <%ae> %ad", "--",
@@ -196,7 +198,7 @@ explicit push examples above. Queries can use log, show, diff, status, blame, ls
 or grep. Use long options with an attached value, such as "--format=%h". The command stays inside
 the open project. Use a structured operation for changes whenever possible. Global Git options,
 aliases, external helpers and options that write to a file are unavailable. There is no shell.
-Queries still wait for approval. Investigating a question with a read-only command is always your first instinct; saying
+Investigating a question with a read-only command is always your first instinct; saying
 "I can't determine that" is the last resort, for when a command could not find it either. Leave
 "argv" empty for every other operation.
 

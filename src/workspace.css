@@ -308,6 +308,8 @@
 .delivery-option input { accent-color: var(--coral); }
 .commit-form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .save-preview { margin-top: 10px; }
+.assistant-answer, .assistant-local-result { white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant-local-result { max-height: 280px; overflow: auto; margin: 0; font-size: 11px; line-height: 1.5; }
 .save-preview > .ghost-button { display: inline-flex; align-items: center; gap: 6px; }
 .save-preview .diff-view { margin-top: 4px; }
 .save-preview .diff-view pre { max-height: 28vh; }

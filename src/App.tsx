@@ -46,7 +46,7 @@ import type { GraphRow } from "../shared/commit-graph";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
 import type {
-  ActionPlan, AiConnectionProblem, AiSharingPreview, AiSharingPurpose, AssistantUnavailable, Branch, ClonePreview, CloneResult, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
+  ActionPlan, AiConnectionProblem, AiSharingPreview, AiSharingPurpose, AiSharingScope, AssistantUnavailable, Branch, ClonePreview, CloneResult, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
   ConflictChoice, ConflictChoiceRequest, ConflictChoiceResult, ConflictGuide, ConflictGuideFile, ConflictSideId, ConflictSideIdentity,
   FileChange, FileStats, FolderPreview, FolderProblem, HistoryScope, LlmConfig, LlmConnectResult, Locale, Operation, PendingOperationKind, ProjectLocateResult, ProjectSelectResult, ProjectUnavailableReason,
   RecoveryAction, RecoveryReport, RepoSnapshot, SecretFinding, UnavailableProject, WithheldFile, AuthorReadiness, HelpPage, IdentityScope, Worktree
@@ -100,6 +100,8 @@ type ConversationTurn = {
   question: string;
   status: "loading" | "ready" | "executing" | "completed" | "cancelled" | "error";
   answer?: string;
+  answerCommit?: Commit;
+  localAnswer?: boolean;
   plan?: ActionPlan;
   outcome?: string;
   /** What actually changed, read from the repository before and after, told in terms of the goal. */
@@ -115,6 +117,7 @@ type ConversationTurn = {
   recovery?: RecoveryReport;
   /** The stopped plan, so a retry prepares only what did not finish. */
   recoveryPlanId?: string;
+  recoveryFailure?: ExecutionFailure;
   localRecovery?: boolean;
   /** Where the assistant's view of the failure stands. */
   assistant?: "consulting" | "not_shared" | AssistantUnavailable;
@@ -123,7 +126,7 @@ type ConversationTurn = {
 };
 
 /** What goes back to the assistant in place of output it may not read. Model-facing, so it stays in English. */
-const privateOutputNote = "[GitCat kept this output out of the conversation: it shows a file the assistant may not read.]";
+const privateOutputNote = "[GitCat omitted file content from this turn.]";
 
 /** A finding as a person reads it: the line when there is one and what it looks like, never the value. */
 function findingDetail(finding: SecretFinding, t: Translate) {
@@ -475,7 +478,7 @@ export default function App() {
   const [historyPath, setHistoryPath] = useState<string>();
   const [sharingDialog, setSharingDialog] = useState<{ preview: AiSharingPreview; paths?: string[]; resolve?: (accepted: boolean) => void }>();
   /** Repositories the person already agreed to share with the assistant, so the question is not asked again. */
-  const sharingAcknowledged = useRef(new Set<string>());
+  const sharingAcknowledged = useRef(new Map<string, AiSharingScope>());
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [panes, setPanes] = useState<PaneWidths | undefined>(readPaneWidths);
   /** Counts every deliberate snapshot update, so a slower background read never overwrites a newer one. */
@@ -1005,27 +1008,31 @@ export default function App() {
       const report = turn.recovery;
       return [{ role: "user" as const, content: turn.question }, { role: "assistant" as const, content: `GitCat classified the failure of "${report.failedSummary}" as ${report.kind}.${report.completed.length ? ` Completed: ${report.completed.join("; ")}.` : ""}${report.notRun.length ? ` Not run: ${report.notRun.join("; ")}.` : ""}${turn.kept ? " The user chose to leave it as it is." : ""}` }];
     }
-    const response = turn.answer ?? (turn.private && (turn.error || turn.outcome) ? privateOutputNote : undefined) ?? turn.error ?? turn.outcome ?? (turn.plan
+    const response = (turn.private || turn.plan?.workingContextUsed ? privateOutputNote : undefined) ?? turn.answer ?? turn.error ?? turn.outcome ?? (turn.plan
       ? `${turn.plan.allowed ? t("planWord") : t("refusalWord")}: ${turn.plan.summary}. ${turn.plan.rationale}`
       : undefined);
     return response ? [{ role: "user" as const, content: turn.question }, { role: "assistant" as const, content: response }] : [];
   });
 
   const showPlan = async (question: string, loader: () => Promise<ActionPlan>, path = snapshot?.path,
-    { review = false, reveal = true, localRecovery = false } = {}): Promise<ActionPlan | undefined> => {
+    { review = false, reveal = true, localRecovery = false, saveSelected = false } = {}): Promise<ActionPlan | undefined> => {
     if (!path || planning) return undefined;
     const turnId = addTurn(path, question, reveal);
     try {
       const plan = await loader();
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
       if (plan.answer) {
-        updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, withheld: plan.withheld, status: "completed" }));
-        addActivity({ label: t("responsePrepared"), detail: plan.summary, tone: "neutral" });
+        updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, answerCommit: plan.answerCommit,
+          private: plan.localAnswer || plan.workingContextUsed, localAnswer: plan.localAnswer, withheld: plan.withheld, status: "completed" }));
         return plan;
       }
-      if (review && plan.allowed && plan.requiresConfirmation && snapshotRef.current?.path === path) delivery.setReview({ turnId, plan });
-      const unattended = plan.allowed && !plan.requiresConfirmation;
-      updateTurn(path, turnId, (turn) => ({ ...turn, plan, status: plan.allowed ? "ready" : "completed" }));
+      const confirmedSave = saveSelected && plan.source === "guardrail" && Boolean(plan.selection && !plan.selection.target)
+        && plan.steps.length === 1 && plan.steps[0].operation === "commit";
+      if ((review || saveSelected && !confirmedSave) && plan.allowed && plan.requiresConfirmation && snapshotRef.current?.path === path) {
+        delivery.setReview({ turnId, plan });
+      }
+      const unattended = plan.allowed && (!plan.requiresConfirmation || confirmedSave);
+      updateTurn(path, turnId, (turn) => ({ ...turn, plan: confirmedSave ? { ...plan, requiresConfirmation: false } : plan, status: plan.allowed ? "ready" : "completed" }));
       addActivity({
         label: unattended ? t("actionInProgress") : plan.allowed ? t("planPrepared") : plan.kind === "question" ? t("assistantQuestion") : t("requestRejected"),
         detail: plan.summary,
@@ -1065,10 +1072,11 @@ export default function App() {
    * leave the computer and lists the files; declining sends nothing and leaves every Git control working.
    */
   const ensureSharing = async (path: string, purpose: AiSharingPurpose, paths?: string[]) => {
-    if (sharingAcknowledged.current.has(path)) return true;
+    const accepted = sharingAcknowledged.current.get(path);
+    if (accepted === "changes" || (accepted === "metadata" && (purpose === "planning" || purpose === "recovery"))) return true;
     try {
       const preview = await window.gitcat.getAiSharing(path, purpose, paths, locale);
-      if (preview.acknowledged) { sharingAcknowledged.current.add(path); return true; }
+      if (preview.acknowledged) { sharingAcknowledged.current.set(path, preview.scope); return true; }
       return await askSharing(preview, paths);
     } catch (error) {
       notify({ message: cleanError(error, t("fallbackSharing")), tone: "error" });
@@ -1079,7 +1087,7 @@ export default function App() {
   const openSharingReview = async () => {
     if (!snapshot) return;
     try {
-      setSharingDialog({ preview: await window.gitcat.getAiSharing(snapshot.path, "planning", undefined, locale) });
+      setSharingDialog({ preview: await window.gitcat.getAiSharing(snapshot.path, "working_changes", undefined, locale) });
     } catch (error) {
       notify({ message: cleanError(error, t("fallbackSharing")), tone: "error" });
     }
@@ -1093,10 +1101,17 @@ export default function App() {
   const acceptSharing = async () => {
     if (!sharingDialog) return;
     const path = sharingDialog.preview.repoPath;
-    await window.gitcat.acknowledgeAiSharing(path);
-    sharingAcknowledged.current.add(path);
+    const { scope } = sharingDialog.preview;
+    await window.gitcat.acknowledgeAiSharing(path, scope);
+    sharingAcknowledged.current.set(path, scope);
     sharingDialog.resolve?.(true);
     setSharingDialog(undefined);
+  };
+
+  const requestAssistantPlan = async (path: string, question: string, context: ConversationMessage[]) => {
+    const plan = await window.gitcat.planAction(path, question, context, locale);
+    if (!plan.workingChangesRequired || snapshotRef.current?.path !== path || !(await ensureSharing(path, "working_changes"))) return plan;
+    return window.gitcat.planAction(path, question, context, locale, true);
   };
 
   const propose = async (text: string) => {
@@ -1107,10 +1122,10 @@ export default function App() {
     setRequest("");
     // Declining keeps what was typed, so nothing the person wrote is lost.
     if (!(await ensureSharing(path, "planning"))) { setRequest(question); return; }
-    const plan = await showPlan(question, () => window.gitcat.planAction(path, question, context, locale), path);
+    const plan = await showPlan(question, () => requestAssistantPlan(path, question, context), path);
     if (plan && plan.stateId !== snapshot.stateId) await refreshProject(path, false);
     // When the assistant could not answer, what was typed comes back, unless something new was typed meanwhile.
-    if (!plan || plan.assistantUnavailable) setRequest((current) => current || question);
+    if (!plan || plan.assistantUnavailable || plan.workingChangesRequired) setRequest((current) => current || question);
   };
 
   const prepare = async (operation: Operation, args: Record<string, string> = {}, question?: string) => {
@@ -1185,7 +1200,7 @@ export default function App() {
     const context = conversationContext(conversations[path] ?? []);
     if (snapshot.isDirty && !(await ensureSharing(path, "planning"))) return;
     await showPlan(question, snapshot.isDirty
-      ? () => window.gitcat.planAction(path, question, context, locale)
+      ? () => requestAssistantPlan(path, question, context)
       : () => window.gitcat.prepareMergeToDefault(path, name, locale), path);
   };
 
@@ -1198,31 +1213,35 @@ export default function App() {
    * How to carry on from where the repository actually is. GitCat first reads the repository again and
    * explains the failure from facts: what completed, what failed, what never ran, what is still safe
    * and which ways on this state supports. That part never needs the assistant. The assistant is asked
-   * only when a choice or an unknown cause calls for judgment, and when it is missing, silent or not
-   * allowed to read the repository, the card says so and the options stand as a focused question.
+   * automatically only when its own plan left a decision open. A direct Git action offers help on
+   * the recovery card, so the locally verified options are available immediately.
    */
-  const recoverFrom = async (path: string, failure: ExecutionFailure, localRecovery = false) => {
+  const recoverFrom = async (path: string, failure: ExecutionFailure, localRecovery = false, fromAssistant = false) => {
     const turnId = addTurn(path, t("actionQuestion"));
     let report: RecoveryReport | undefined;
     try {
       report = await window.gitcat.describeFailure(path, failure);
       if (report.repoPath !== path) throw new Error(t("planOtherRepository"));
       const described = report;
-      updateTurn(path, turnId, (turn) => ({ ...turn, recovery: described, recoveryPlanId: failure.planId, localRecovery, status: "completed" }));
+      updateTurn(path, turnId, (turn) => ({ ...turn, recovery: described, recoveryPlanId: failure.planId,
+        recoveryFailure: localRecovery ? undefined : failure, localRecovery, status: "completed" }));
     } catch {
       updateTurn(path, turnId, (turn) => ({ ...turn, error: t("recoveryDescribeFailed"), status: "error" }));
     }
-    if (localRecovery) return;
-    if (report && !report.needsJudgment) return;
+    if (fromAssistant && !localRecovery && (!report || report.needsJudgment)) await consultRecovery(path, turnId, failure);
+  };
+
+  const consultRecovery = async (path: string, turnId: number, failure: ExecutionFailure) => {
     if (!config.configured) {
       updateTurn(path, turnId, (turn) => ({ ...turn, assistant: "not_configured" }));
       return;
     }
+    updateTurn(path, turnId, (turn) => ({ ...turn, assistant: "consulting" }));
     if (!(await ensureSharing(path, "recovery"))) {
-      updateTurn(path, turnId, (turn) => report ? { ...turn, assistant: "not_shared" } : { ...turn, answer: t("recoveryNotShared"), status: "completed" });
+      updateTurn(path, turnId, (turn) => turn.recovery ? { ...turn, assistant: "not_shared" }
+        : { ...turn, assistant: undefined, answer: t("recoveryNotShared"), status: "completed" });
       return;
     }
-    updateTurn(path, turnId, (turn) => ({ ...turn, assistant: "consulting" }));
     try {
       const context = conversationContext(conversations[path] ?? []);
       const plan = await window.gitcat.planRecovery(path, failure, context, locale);
@@ -1234,12 +1253,14 @@ export default function App() {
         return;
       }
       if (plan.answer) {
-        updateTurn(path, turnId, (turn) => ({ ...turn, assistant: undefined, answer: plan.answer, withheld: plan.withheld, status: "completed" }));
+        updateTurn(path, turnId, (turn) => ({ ...turn, assistant: undefined, answer: plan.answer, answerCommit: plan.answerCommit,
+          private: plan.localAnswer || plan.workingContextUsed, localAnswer: plan.localAnswer, withheld: plan.withheld, status: "completed" }));
         return;
       }
       // Never unattended: a way out of a half-finished operation is always the user's call.
       updateTurn(path, turnId, (turn) => ({ ...turn, assistant: undefined }));
-      updateTurn(path, turnId, (turn) => ({ ...turn, plan, status: plan.allowed ? "ready" : "completed" }));
+      updateTurn(path, turnId, (turn) => ({ ...turn,
+        plan: plan.allowed ? { ...plan, requiresConfirmation: true } : plan, status: plan.allowed ? "ready" : "completed" }));
     } catch (error) {
       updateTurn(path, turnId, (turn) => turn.recovery
         ? { ...turn, assistant: "error" }
@@ -1429,7 +1450,7 @@ export default function App() {
           skipped: (result.outcomes ?? []).filter((outcome) => outcome.status === "skipped").map((outcome) => outcome.summary),
           planId: plan.id,
           stage: "execute"
-        }, localRecovery);
+        }, localRecovery, plan.source === "llm");
       } else {
         // The model still reads what Git printed; the person reads what changed and what is left.
         const outcome = result.output || completion.headline;
@@ -1451,7 +1472,7 @@ export default function App() {
         skipped: plan.steps.map((step) => step.summary),
         planId: plan.id,
         stage: "execute"
-      }, localRecovery);
+      }, localRecovery, plan.source === "llm");
     }
   };
 
@@ -1836,7 +1857,7 @@ export default function App() {
                 : activeFocus
                   ? <CommitInspector key={activeFocus.commit.hash} commit={activeFocus.commit} snapshot={snapshot} known={graphCommits} onFocus={(commit) => focusOn({ kind: "commit", commit }, true)} onOpen={(file) => setModalCommit({ commit: activeFocus.commit, file })} />
                   : <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommitSelected")}</strong><span>{t("noCommitSelectedHint")}</span></div>}
-            </div> : <div className="assistant-body">{config.configured ? <p className="assistant-copy">{t("assistantConfiguredCopy")}</p> : <AssistantSetupCard onConnect={openSettings} />}{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => void openSharingReview()} disabled={!config.configured}><Eye size={12} /> {t("sharingOpen")}</button><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} snapshot={snapshot} busy={planning} configured={config.configured} onRecoveryAction={(action) => void runRecoveryAction(turn.id, turn, action)} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div>}
+            </div> : <div className="assistant-body">{config.configured ? <p className="assistant-copy">{t("assistantConfiguredCopy")}</p> : <AssistantSetupCard onConnect={openSettings} />}{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => void openSharingReview()} disabled={!config.configured}><Eye size={12} /> {t("sharingOpen")}</button><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} snapshot={snapshot} busy={planning} configured={config.configured} onRecoveryAction={(action) => void runRecoveryAction(turn.id, turn, action)} onApply={(plan) => void applyPlan(turn.id, plan)} onShowCommit={(commit) => setModalCommit({ commit })} onAskAssistant={turn.recoveryFailure && config.configured && !turn.answer && !turn.plan ? () => void consultRecovery(snapshot.path, turn.id, turn.recoveryFailure!) : undefined} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div>}
             <div className="chat-compose"><textarea aria-label={t("assistantRequest")} disabled={!config.configured} value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder={config.configured ? t("assistantPlaceholder") : t("configureAssistantPlaceholder")} rows={2} /><button className="send-button" aria-label={t("prepareRequest")} onClick={() => void propose(request)} disabled={planning || !request.trim() || !config.configured}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div>
           </aside>
         </main>
@@ -3470,7 +3491,10 @@ function ChangesView({ readiness, snapshot, delivery, busy, configured, onIgnore
         {stale && <div className="delivery-stale" role="alert">{t("filesChangedReview")} <button className="outline-button small" onClick={() => delivery.beginDelivery(merge, true)}>{t("reviewUpdatedFiles")}</button></div>}
         {!selected.length && <p className="file-inclusion-note selection-empty" role="status">{t("tickFilesToSave")}</p>}
         <div className="commit-form-actions">
-          <button className="primary-button" onClick={() => delivery.prepareCommit()} disabled={generating || busy}><ShieldCheck size={14} />{t(merge && canMerge ? "reviewSaveAndMerge" : "reviewSave")}</button>
+          <button className="primary-button" onClick={() => delivery.prepareCommit()} disabled={generating || busy}><Check size={14} />{
+            merge && canMerge ? t("reviewSaveAndMerge")
+              : selected.length ? t("saveSelectedFiles", { files: counted(t, selected.length, "file", "files") }) : t("saveChanges")
+          }</button>
         </div>
         <p className="file-inclusion-note">{t("selectedFilesNote")}</p>
       </div>
@@ -3559,13 +3583,13 @@ function DeliveryReviewModal({ review, snapshot, busy, onClose, onApply }: {
   </section></div>;
 }
 
-function ConversationEntry({ turn, snapshot, busy, configured, onRecoveryAction, onApply, onDismiss }: {
-  turn: ConversationTurn; snapshot?: RepoSnapshot; busy: boolean; configured: boolean; onRecoveryAction: (action: RecoveryAction) => void; onApply: (plan: ActionPlan) => void; onDismiss: () => void;
+function ConversationEntry({ turn, snapshot, busy, configured, onRecoveryAction, onApply, onShowCommit, onAskAssistant, onDismiss }: {
+  turn: ConversationTurn; snapshot?: RepoSnapshot; busy: boolean; configured: boolean; onRecoveryAction: (action: RecoveryAction) => void; onApply: (plan: ActionPlan) => void; onShowCommit: (commit: Commit) => void; onAskAssistant?: () => void; onDismiss: () => void;
 }) {
   const { t } = useI18n();
   // A sequence reports itself step by step, marks included, so it needs no outer verdict icon or colour.
   const sequence = (turn.plan?.steps.length ?? 0) > 1;
-  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading" role="status"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && <p>{turn.answer}</p>}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} snapshot={snapshot} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.completion ? <CompletionCard summary={turn.completion} output={turn.output} /> : turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error" role="alert"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
+  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading" role="status"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} onAskAssistant={onAskAssistant} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && (turn.localAnswer ? <pre className="assistant-local-result">{turn.answer}</pre> : <p className="assistant-answer">{turn.answer}</p>)}{turn.answerCommit && <button type="button" className="ghost-button small" onClick={() => onShowCommit(turn.answerCommit!)}><FileDiff size={13} /> {t("fullDiff")} · {turn.answerCommit.shortHash}</button>}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} snapshot={snapshot} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.completion ? <CompletionCard summary={turn.completion} output={turn.output} /> : turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error" role="alert"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
 }
 
 
@@ -3595,8 +3619,9 @@ function recoveryActionDetail(action: RecoveryAction, facts: RecoveryReport["fac
  * is still safe and the ways on the repository supports. A real choice is asked as one focused
  * question with what each answer costs, and nothing is picked for the person.
  */
-function RecoveryCard({ report, assistant, kept, busy, configured, retryable, onAction }: {
+function RecoveryCard({ report, assistant, kept, busy, configured, retryable, onAction, onAskAssistant }: {
   report: RecoveryReport; assistant?: ConversationTurn["assistant"]; kept: boolean; busy: boolean; configured: boolean; retryable: boolean; onAction: (action: RecoveryAction) => void;
+  onAskAssistant?: () => void;
 }) {
   const { t } = useI18n();
   const { facts, kind } = report;
@@ -3641,7 +3666,12 @@ function RecoveryCard({ report, assistant, kept, busy, configured, retryable, on
       <strong>{t("recoveryChoicePrompt")}</strong>
       {report.choice.map((action, index) => <button key={`${action.kind}-${action.option ?? ""}-${index}`} className="recovery-option" disabled={busy || kept} onClick={() => onAction(action)}><span>{recoveryActionLabel(action, facts, t, configured)}</span>{recoveryActionDetail(action, facts, t) && <small>{recoveryActionDetail(action, facts, t)}</small>}</button>)}
     </div>}
-    {actions.length > 0 && <div className="recovery-actions" aria-label={t("recoveryNextHeading")}>{actions.map((action, index) => button(action, index, index === 0 && !report.choice))}</div>}
+    {(actions.length > 0 || onAskAssistant) && <div className="recovery-actions" aria-label={t("recoveryNextHeading")}>
+      {actions.map((action, index) => button(action, index, index === 0 && !report.choice))}
+      {onAskAssistant && <button className="ghost-button small recovery-ask-assistant" disabled={busy || kept || assistant === "consulting"} onClick={onAskAssistant}>
+        <Sparkles size={12} /> {t("askRecoveryAssistant")}
+      </button>}
+    </div>}
     {kept && <p className="recovery-note">{t("recoveryKept")}</p>}
     {assistant === "consulting" && <p className="recovery-note"><LoaderCircle className="spin" size={12} /> {t("recoveryAssistantConsulting")}</p>}
     {assistant && assistant !== "consulting" && <p className="recovery-note assistant-unavailable">{assistant === "not_shared" ? t("recoveryNotShared") : t(`recoveryAssistant_${assistant}` as MessageKey)}</p>}
@@ -3690,6 +3720,11 @@ function PlanCard({ plan, snapshot, onApply, onDismiss, busy, confirmLabel }: { 
   const asking = plan.kind === "question";
   const push = plan.allowed && plan.requiresConfirmation ? plan.steps.find((step) => step.operation === "push") : undefined;
   const directPush = push?.pushDestination?.urls.length && !push.pushDestination.remote;
+  const target = plan.steps.length === 1 ? push?.pushDestination : undefined;
+  const branch = target?.targetRef?.replace(/^refs\/heads\//, "");
+  const destination = target?.remote ? [target.remote, branch].filter(Boolean).join("/") : target?.urls.length === 1 ? target.urls[0] : undefined;
+  const label = confirmLabel ?? (destination ? t("publishToDestination", { destination })
+    : plan.operation === "discard_file" ? t("discardFileChanges") : t("confirmAction"));
   return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? t("interpretedByProvider") : t("directAction")}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? t("dismissQuestion") : t("dismissPlan")}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.withheld && plan.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(plan.withheld, t) })}</p>}
     {plan.allowed && <PlanGoal plan={plan} snapshot={snapshot} />}
     {plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}
@@ -3703,7 +3738,7 @@ function PlanCard({ plan, snapshot, onApply, onDismiss, busy, confirmLabel }: { 
     {/* A plan with nothing to confirm is already running, so it offers no button that could decide otherwise. */}
     {plan.allowed && !plan.requiresConfirmation
       ? <p className="plan-running"><LoaderCircle className="spin" size={12} /> {t("runningWithoutConfirmation")}</p>
-      : plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>{t("cancel")}</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {confirmLabel ?? t("confirmAction")}</button></div>
+      : plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>{t("cancel")}</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {label}</button></div>
       : asking ? <p className="plan-hint">{t("answerBelow")}</p>
       : <button className="ghost-button plan-close" onClick={onDismiss}>{t("understood")}</button>}</div>;
 }
@@ -4441,13 +4476,15 @@ function SharingDialog({ initial, paths, repoName, onAccept, onClose, onShowFile
     setBusy(true); setError(undefined);
     try { await onAccept(); } catch (reason) { setError(cleanError(reason, t("fallbackSharing"))); setBusy(false); }
   };
+  const historyOnly = preview.scope === "metadata";
   return <div className="modal-backdrop">
     <div className="commit-modal sharing-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="sharing-title">
       <div className="modal-heading">
-        <div><div className="eyebrow">{t("sharingEyebrow")}</div><h2 id="sharing-title">{t(preview.acknowledged ? "sharingReviewTitle" : "sharingTitle", { name: repoName })}</h2></div>
+        <h2 id="sharing-title">{t(historyOnly ? "sharingHistoryTitle" : preview.acknowledged ? "sharingReviewTitle" : "sharingTitle", { name: repoName })}</h2>
         <button className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button>
       </div>
-      <p className="sharing-copy">{t("sharingWhatLeaves", { provider: "OpenAI", model: preview.model, destination: preview.destination })}</p>
+      {historyOnly ? <p className="sharing-copy">{t("sharingHistoryCopy", { model: preview.model, destination: preview.destination })}</p> : <>
+      <p className="sharing-copy">{t("sharingWhatLeaves", { model: preview.model, destination: preview.destination })}</p>
       <p className="sharing-copy">{t(`sharingPurpose_${preview.purpose}` as MessageKey)}</p>
       <section className="sharing-section" aria-label={t("sharingFilesHeading")}>
         <span className="eyebrow">{t("sharingFilesHeading")}</span>
@@ -4477,14 +4514,16 @@ function SharingDialog({ initial, paths, repoName, onAccept, onClose, onShowFile
         </form>
         <small>{t("exclusionsHelp")}</small>
       </section>
-      <div className="modal-note"><ShieldCheck size={15} /><span>{t("secretDetectorLimits")} {t("sharingStorage")}</span></div>
-      <p className="file-inclusion-note">{t("sharingManualPath")}</p>
+      <details className="technical-details"><summary>{t("sharingEyebrow")}</summary>
+        <p>{t("secretDetectorLimits")} {t("sharingStorage")}</p>
+      </details>
       {preview.acknowledgedAt && <p className="file-inclusion-note">{t("sharingAgreedOn", { date: formatDateFull(preview.acknowledgedAt, locale) })}</p>}
+      </>}
       {error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}
       <div className="modal-actions">
         {preview.acknowledged
           ? <button className="primary-button" onClick={onClose}><Check size={14} />{t("sharingDone")}</button>
-          : <><button className="ghost-button" onClick={onClose}>{t("sharingNotNow")}</button><button className="primary-button sharing-accept" onClick={() => void accept()} disabled={busy}><Check size={14} />{t("sharingAccept")}</button></>}
+          : <><button className="ghost-button" onClick={onClose}>{t("sharingNotNow")}</button><button className="primary-button sharing-accept" onClick={() => void accept()} disabled={busy}><Check size={14} />{t(historyOnly ? "sharingAllowHistory" : "sharingAccept")}</button></>}
       </div>
     </div>
   </div>;

@@ -80,5 +80,5 @@ export function assistantQueryArguments(argv: string[]) {
   if (parsed?.operation !== "git_command") throw new Error("The assistant query is not supported for this project.");
   const [verb, ...args] = parsed.argv;
   const diffOptions = ["diff", "show", "log"].includes(verb) ? ["--no-ext-diff", "--no-textconv"] : [];
-  return ["--no-pager", "--no-optional-locks", "-c", "core.fsmonitor=false", verb, ...diffOptions, ...args];
+  return ["--no-pager", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false", verb, ...diffOptions, ...args];
 }
