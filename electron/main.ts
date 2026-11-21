@@ -14,7 +14,7 @@ import {
   getHostingConnections, connectHosting, removeHostingConnection,
   createPractice, getPracticeInfo, setPracticeLesson, editPractice, removePractice, previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, repairActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, suggestHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
   getLlmConfig, getSnapshot, openWorktree, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
-  prepareMergeToDefault, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
+  prepareMergeToDefault, prepareRevertCommit, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
   setAiSharingExclusions, setAiSharingReview, type IssuedConflictGuide, type IssuedConflictProposal
 } from "./git-service.js";
 import { localized } from "./i18n.js";
@@ -544,6 +544,12 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
     assertTrustedSender(event); const path=assertOpenedRepository(cwd);
     if (typeof id !== 'string' || !['revert','undo','restore'].includes(String(mode))) throw new Error('Invalid recovery request');
     return rememberPlan(await tracked(event,path,'planning',()=>prepareHistoryRecovery(path,id,mode as 'revert'|'undo'|'restore',locale)));
+  });
+  ipcMain.handle("commit:prepare-revert", async (event, cwd: unknown, commit: unknown, locale?: Locale) => {
+    assertTrustedSender(event);
+    const path = assertOpenedRepository(cwd);
+    if (typeof commit !== "string") throw new Error("Invalid commit.");
+    return rememberPlan(await tracked(event, path, "planning", () => prepareRevertCommit(path, commit, locale), false, "wait"));
   });
   ipcMain.handle("operation:list", (event) => { assertTrustedSender(event); return listOperations(); });
   ipcMain.handle("operation:cancel", (event, cwd: string, id: unknown) => {

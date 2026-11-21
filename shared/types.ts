@@ -1012,6 +1012,7 @@ export type GitlineApi = {
   setActivityRetention: (days: number) => Promise<void>;
   clearActivityHistory: (path: string) => Promise<void>;
   prepareHistoryRecovery: (path: string, id: string, mode: HistoryRecovery['mode'], locale?: Locale) => Promise<ActionPlan>;
+  prepareRevertCommit: (path: string, commit: string, locale?: Locale) => Promise<ActionPlan>;
   suggestHistoryRecovery: (path: string, id: string, locale?: Locale) => Promise<HistoryRecoverySuggestion>;
   onOperationProgress: (listener: (progress: OperationProgress) => void) => () => void;
   listOperations: () => Promise<OperationProgress[]>;

@@ -288,7 +288,10 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         break;
       }
       case "git_command":
-        if (work?.mode === "set_aside") {
+        if (plan.recovery?.mode === "revert") {
+          summary.local.push(say(`Adds a new commit on ${here} reversing the selected commit.`, `Añade en ${here} un commit nuevo que revierte el commit elegido.`));
+          summary.partial.push(say("If Git finds conflicting edits, you can resolve them or cancel the revert.", "Si Git encuentra cambios en conflicto, puedes resolverlos o cancelar la reversión."));
+        } else if (work?.mode === "set_aside") {
           const label = work.label?.trim();
           summary.local.push(work.includeUntracked
             ? say(`Sets aside tracked edits and new files in “${label}”, keeping staged versions for restoration.`, `Aparta los cambios en archivos seguidos y los archivos nuevos en «${label}» y conserva las versiones preparadas para restaurarlas.`)
