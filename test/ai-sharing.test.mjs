@@ -350,7 +350,7 @@ test("output of a command aimed at a withheld file stays out of the conversation
   const reading = await service.planAction(repo, "show me .env", [], "en");
   assert.equal(reading.requiresConfirmation, false);
   assert.equal(reading.localAnswer, true);
-  assert.match(reading.answer, /DATABASE_PASSWORD/);
+  assert.match(reading.answerDetails, /DATABASE_PASSWORD/);
   assert.equal(requests.length, 1, "source text stays local");
   assertNoSecrets(sent(), "local query history");
   queue.push(plan({ intent: "git_operation", steps: [step("git_command", {}, ["log", "-1", "--format=%s"])], summary: "Log", reply: "" }));

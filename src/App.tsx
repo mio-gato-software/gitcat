@@ -100,8 +100,8 @@ type ConversationTurn = {
   question: string;
   status: "loading" | "ready" | "executing" | "completed" | "cancelled" | "error";
   answer?: string;
+  answerDetails?: string;
   answerCommit?: Commit;
-  localAnswer?: boolean;
   plan?: ActionPlan;
   outcome?: string;
   /** What actually changed, read from the repository before and after, told in terms of the goal. */
@@ -1022,8 +1022,8 @@ export default function App() {
       const plan = await loader();
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
       if (plan.answer) {
-        updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, answerCommit: plan.answerCommit,
-          private: plan.localAnswer || plan.workingContextUsed, localAnswer: plan.localAnswer, withheld: plan.withheld, status: "completed" }));
+        updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, answerDetails: plan.answerDetails, answerCommit: plan.answerCommit,
+          private: plan.localAnswer || plan.workingContextUsed, withheld: plan.withheld, status: "completed" }));
         return plan;
       }
       const confirmedSave = saveSelected && plan.source === "guardrail" && Boolean(plan.selection && !plan.selection.target)
@@ -1253,8 +1253,8 @@ export default function App() {
         return;
       }
       if (plan.answer) {
-        updateTurn(path, turnId, (turn) => ({ ...turn, assistant: undefined, answer: plan.answer, answerCommit: plan.answerCommit,
-          private: plan.localAnswer || plan.workingContextUsed, localAnswer: plan.localAnswer, withheld: plan.withheld, status: "completed" }));
+        updateTurn(path, turnId, (turn) => ({ ...turn, assistant: undefined, answer: plan.answer, answerDetails: plan.answerDetails, answerCommit: plan.answerCommit,
+          private: plan.localAnswer || plan.workingContextUsed, withheld: plan.withheld, status: "completed" }));
         return;
       }
       // Never unattended: a way out of a half-finished operation is always the user's call.
@@ -3589,7 +3589,7 @@ function ConversationEntry({ turn, snapshot, busy, configured, onRecoveryAction,
   const { t } = useI18n();
   // A sequence reports itself step by step, marks included, so it needs no outer verdict icon or colour.
   const sequence = (turn.plan?.steps.length ?? 0) > 1;
-  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading" role="status"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} onAskAssistant={onAskAssistant} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && (turn.localAnswer ? <pre className="assistant-local-result">{turn.answer}</pre> : <p className="assistant-answer">{turn.answer}</p>)}{turn.answerCommit && <button type="button" className="ghost-button small" onClick={() => onShowCommit(turn.answerCommit!)}><FileDiff size={13} /> {t("fullDiff")} · {turn.answerCommit.shortHash}</button>}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} snapshot={snapshot} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.completion ? <CompletionCard summary={turn.completion} output={turn.output} /> : turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error" role="alert"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
+  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading" role="status"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} onAskAssistant={onAskAssistant} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && <p className="assistant-answer">{turn.answer}</p>}{turn.answerCommit && <button type="button" className="ghost-button small" onClick={() => onShowCommit(turn.answerCommit!)}><FileDiff size={13} /> {t("fullDiff")} · {turn.answerCommit.shortHash}</button>}{turn.answerDetails && <AssistantAnswerDetails output={turn.answerDetails} />}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} snapshot={snapshot} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.completion ? <CompletionCard summary={turn.completion} output={turn.output} /> : turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error" role="alert"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
 }
 
 
@@ -3741,6 +3741,14 @@ function PlanCard({ plan, snapshot, onApply, onDismiss, busy, confirmLabel }: { 
       : plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>{t("cancel")}</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {label}</button></div>
       : asking ? <p className="plan-hint">{t("answerBelow")}</p>
       : <button className="ghost-button plan-close" onClick={onDismiss}>{t("understood")}</button>}</div>;
+}
+
+function AssistantAnswerDetails({ output }: { output: string }) {
+  const { t } = useI18n();
+  return <details className="technical-details assistant-answer-details">
+    <summary><TerminalSquare size={11} /> {t("technicalDetails")}</summary>
+    <pre>{output}</pre>
+  </details>;
 }
 
 /**

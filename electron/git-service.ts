@@ -1,7 +1,7 @@
 import { branchArguments, isBranchNameSafe, parseBranchOperation, validateBranchOperation, type BranchOperation } from "./branch-operation.js";
 import { displayPushAddress, parsePushOperation, pushArguments, pushRepository, readDirectPushEndpoints, readPushDestination, readRemoteUrls, validatePushOperation, verifiedTransportRemote, verifyInitialPushUrl, type PushOperation } from "./push-destination.js";
 import { assistantQueryArguments, parseAssistantCommand, type AssistantCommand } from "./assistant-git-command.js";
-import { describeRepositoryFacts, inspectBranches, inspectGit, parseAssistantRead, type AssistantRead } from "./assistant-inspection.js";
+import { describeRepositoryFacts, inspectBranches, inspectFileHistory, inspectGit, parseAssistantRead, type AssistantFinding, type AssistantRead } from "./assistant-inspection.js";
 import { conflictResolutionEffect, walkPlanSteps } from "../shared/plan-summary.js";
 import type { ConflictResolutionAction } from "../shared/types.js";
 import { syncDestinations } from "../shared/remote-sync.js";
@@ -623,6 +623,7 @@ export async function openWorktree(cwd: string, target: string, language: Locale
 export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
   const repoRoot = resolve(await checkedGit(cwd, ["rev-parse", "--show-toplevel"]));
   const head = await optionalGit(repoRoot, ["rev-parse", "HEAD"]);
+  const historyDepth = await optionalGit(repoRoot, ["rev-parse", "--is-shallow-repository"]);
   const currentBranch = (await optionalGit(repoRoot, ["branch", "--show-current"])) || "HEAD";
   const statusRaw = await checkedGit(repoRoot, ["status", "--short", "--untracked-files=all", "-z"], true);
   const branchRaw = await checkedGit(repoRoot, [
@@ -756,6 +757,7 @@ export async function getSnapshot(cwd: string): Promise<RepoSnapshot> {
     name: basename(repoRoot),
     head,
     stateId: fingerprint.digest("hex"),
+    isShallow: historyDepth === "true" ? true : historyDepth === "false" ? false : undefined,
     stashCount: stashRaw.split("\n").filter(Boolean).length,
     remoteRefs: remoteBranchRaw.split("\n").filter(Boolean).map(line => line.split("\0")[0]).filter(ref => !ref.endsWith("/HEAD")),
     currentBranch,
@@ -2079,6 +2081,7 @@ async function plannerState(snapshot: RepoSnapshot, notes: SharingNotes = newNot
     currentBranch: snapshot.currentBranch,
     defaultBranch: snapshot.defaultBranch ?? null,
     defaultBranchSource: snapshot.defaultBranchSource ?? null,
+    shallowHistory: snapshot.isShallow ?? null,
     detachedHead: snapshot.currentBranch === "HEAD",
     isRebasing: snapshot.isRebasing,
     // A half-finished job blocks almost everything else, so it is stated rather than left to be inferred.
@@ -2169,10 +2172,13 @@ async function inspectCommit(snapshot: RepoSnapshot, read: Extract<AssistantRead
     "log", "-1", "--no-patch", "--date=iso-strict", ...(latestMerge ? ["--first-parent", "--merges"] : []),
     historyFormat, tip, "--"
   ]))[0];
-  if (!commit) return { text: localized(locale, `El historial disponible de ${read.ref} no contiene un merge.`, `The available history of ${read.ref} contains no merge.`) };
+  if (!commit) return { text: snapshot.isShallow
+    ? localized(locale, `Esta copia de ${read.ref} tiene historial superficial. Git no puede confirmar cuál fue la última fusión ni compararla con sus padres desde aquí.`,
+      `This copy of ${read.ref} has shallow history. Git cannot verify the last merge or compare it with its parents from here.`)
+    : localized(locale, `Git no encontró ninguna fusión en el historial de ${read.ref}.`, `Git found no merge in the history of ${read.ref}.`) };
   const parent = commit.parents[0];
   const label = `Commit ${commit.shortHash} · ${commit.subject}`;
-  if (!parent && await checkedGit(snapshot.path, ["rev-parse", "--is-shallow-repository"]) === "true") {
+  if (!parent && snapshot.isShallow) {
     return { text: `${label}\n${localized(locale, "El historial parcial impide comprobar qué cambió este commit.", "Shallow history prevents checking what this commit changed.")}` };
   }
   const names = await checkedGit(snapshot.path, parent
@@ -2181,12 +2187,30 @@ async function inspectCommit(snapshot: RepoSnapshot, read: Extract<AssistantRead
   const files = parseNameStatus(names);
   const base = parent ? localized(locale, `respecto a ${parent.slice(0, 10)} (primer padre)`, `compared with ${parent.slice(0, 10)} (first parent)`)
     : localized(locale, "en el commit inicial", "in the initial commit");
-  const introduced = commit.parents.length > 1 ? await checkedGit(snapshot.path, [
-    "log", "--no-patch", "-12", "--format=%h %s", ...commit.parents.slice(1), "--not", parent, "--"
-  ]) : "";
+  const mergeRange = commit.parents.length > 1 ? [...commit.parents.slice(1), "--not", parent, "--"] : undefined;
+  const [count, introduced] = mergeRange ? await Promise.all([
+    checkedGit(snapshot.path, ["rev-list", "--count", ...mergeRange]),
+    checkedGit(snapshot.path, ["log", "--no-patch", "-12", "--format=%h %s", ...mergeRange])
+  ]) : ["", ""];
+  const ref = read.ref === "HEAD" && snapshot.currentBranch !== "HEAD" ? snapshot.currentBranch : read.ref;
+  const title = latestMerge ? localized(locale, `La última fusión de ${ref}`, `The latest merge on ${ref}`)
+    : localized(locale, "Ese commit", "That commit");
+  const changed = files.length === 1 ? localized(locale, "un archivo", "one file") : localized(locale, `${files.length} archivos`, `${files.length} files`);
+  const commits = count === "1" ? localized(locale, "un commit", "one commit") : `${count} commits`;
+  const text = [
+    count !== "" ? localized(locale, `${title} (${commit.shortHash}) incorporó ${commits} y cambió ${changed}.`,
+      `${title} (${commit.shortHash}) brought in ${commits} and changed ${changed}.`)
+      : localized(locale, `${title} (${commit.shortHash}) cambió ${changed}.`, `${title} (${commit.shortHash}) changed ${changed}.`),
+    count === "1" && introduced ? localized(locale, `El mensaje del commit es «${introduced.slice(introduced.indexOf(" ") + 1)}».`,
+      `The commit message is “${introduced.slice(introduced.indexOf(" ") + 1)}”.`) : "",
+    files.length ? localized(locale, `Tocó ${files.slice(0, 4).map(file => file.path).join(", ")}${files.length > 4 ? ` y ${files.length - 4} más` : ""}.`,
+      `It touched ${files.slice(0, 4).map(file => file.path).join(", ")}${files.length > 4 ? ` and ${files.length - 4} more` : ""}.`) : "",
+    snapshot.isShallow && mergeRange ? localized(locale, "El total de commits corresponde al historial local disponible.",
+      "The commit count covers the available local history.") : ""
+  ].filter(Boolean).join("\n\n");
   return {
-    commit, files,
-    text: [
+    commit, files, text,
+    details: [
       label, localized(locale, `Archivos cambiados ${base}: ${files.length}.`, `Files changed ${base}: ${files.length}.`),
       ...files.slice(0, 20).map(file => `• ${file.from ? `${file.from} → ` : ""}${file.path} (${file.code})`),
       files.length > 20 ? localized(locale, "El diff completo muestra los demás archivos.", "The full diff shows the remaining files.") : "",
@@ -2208,15 +2232,15 @@ function queryReturnsMetadata(argv: string[]) {
 async function answerFromGit(snapshot: RepoSnapshot, reads: AssistantRead[], locale: Locale) {
   const readGit: (args: string[]) => Promise<CommandResult> = args => runGit(snapshot.path, args);
   const exclusions = recallSharing(memory, snapshot.path).exclusions;
-  const sections: string[] = [];
+  const sections: AssistantFinding[] = [];
   let answerCommit: Commit | undefined;
   let localAnswer = false;
   for (const reading of reads) {
     try {
       switch (reading.kind) {
         case "repository":
-          sections.push(describeRepositoryFacts(snapshot, reading.facts, locale));
-          localAnswer ||= reading.facts.includes("working_tree") &&
+          sections.push(await describeRepositoryFacts(readGit, snapshot, reading.facts, locale));
+          localAnswer ||= reading.facts.includes("remotes") || reading.facts.includes("working_tree") &&
             snapshot.changes.some(file => changePaths(file).some(path => isExcluded(path, exclusions)));
           break;
         case "compare_branches":
@@ -2224,25 +2248,30 @@ async function answerFromGit(snapshot: RepoSnapshot, reads: AssistantRead[], loc
           break;
         case "commit": {
           const result = await inspectCommit(snapshot, reading, locale);
-          sections.push(result.text);
+          sections.push(result);
           answerCommit ??= result.commit;
           localAnswer ||= Boolean(result.files?.some(file => changePaths(file).some(path => isExcluded(path, exclusions))));
           break;
         }
+        case "file_history":
+          sections.push(await inspectFileHistory(readGit, reading, snapshot, locale));
+          localAnswer ||= isExcluded(reading.path, exclusions);
+          break;
         case "git":
-          sections.push(await inspectGit(readGit, reading.argv, locale));
+          sections.push(await inspectGit(readGit, reading.argv, snapshot, locale));
           // Keep arbitrary Git output out of the next model turn, including diagnostics and patches.
           localAnswer = true;
           break;
       }
     } catch (error) {
       if (error instanceof OperationCancelled) throw error;
-      sections.push(localized(locale, "Git no pudo completar esta lectura. Comprueba la referencia o consulta una parte más pequeña del historial.",
-        "Git could not complete this read. Check the ref or ask about a smaller part of the history."));
+      sections.push({ text: localized(locale, "Git no pudo completar esta lectura. Comprueba la referencia o consulta una parte más pequeña del historial.",
+        "Git could not complete this read. Check the ref or ask about a smaller part of the history.") });
     }
   }
   return bindPlan(snapshot, {
-    ...answerDraft(sections.join("\n\n"), localized(locale, "Consulta de Git", "Git query")),
+    ...answerDraft(sections.map(section => section.text).join("\n\n"), localized(locale, "Consulta de Git", "Git query")),
+    answerDetails: sections.map(section => section.details).filter(Boolean).join("\n\n") || undefined,
     ...(answerCommit ? { answerCommit } : {}),
     ...(localAnswer ? { localAnswer: true } : {})
   });
@@ -2335,10 +2364,11 @@ async function prepareModelPlan(
   plan: ModelPlan, snapshot: RepoSnapshot, request: string, context: ConversationMessage[], locale: Locale = "es", notes: SharingNotes = newNotes(), retried = false
 ): Promise<ActionPlan> {
   const fallbackRefusal = localized(locale, LAST_RESORT_REFUSAL, LAST_RESORT_REFUSAL_EN);
+  const answerLocale = plan.answerLanguage || locale;
   if (plan.intent === "answer") {
     const reads = (plan.reads ?? []).map(parseAssistantRead);
     if (!plan.steps.length && reads.length && reads.length <= planStepLimit && reads.every(read => read !== undefined)) {
-      return answerFromGit(await getSnapshot(snapshot.path), reads, locale);
+      return answerFromGit(await getSnapshot(snapshot.path), reads, answerLocale);
     }
     if (!retried) {
       const repaired = await requestPlan(request, snapshot, context, [{
@@ -2347,7 +2377,7 @@ async function prepareModelPlan(
       }], notes);
       if (repaired.intent === "answer") return prepareModelPlan(repaired, snapshot, request, context, locale, notes, true);
     }
-    return bindPlan(snapshot, answerDraft(localized(locale,
+    return bindPlan(snapshot, answerDraft(localized(answerLocale,
       "No encontré una lectura de Git que permita verificar la respuesta. Prueba indicando la rama, el commit o el archivo que quieres comprobar.",
       "I couldn't find a Git read that verifies the answer. Try specifying the branch, commit or file you want to check.")));
   }
@@ -2389,7 +2419,7 @@ async function prepareModelPlan(
     if (commands.length && commands.every((command) => command.operation === "git_command" || command.operation === "status")) {
       const queries = commands.map((command) => command.operation === "git_command"
         ? command : { operation: "git_command" as const, argv: ["status", "--short", "--branch"] });
-      return answerFromGit(await getSnapshot(snapshot.path), queries.map(({ argv }) => ({ kind: "git", argv })), locale);
+      return answerFromGit(await getSnapshot(snapshot.path), queries.map(({ argv }) => ({ kind: "git", argv })), answerLocale);
     }
     if (!notes.includeWorkingChanges && snapshot.isDirty &&
       commands.some((command) => command.operation === "commit" && !command.args.message?.trim())) {

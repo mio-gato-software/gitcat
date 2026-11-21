@@ -1,5 +1,5 @@
 import { isBranchNameSafe } from "./branch-operation.js";
-import type { HostingProvider, Operation } from "../shared/types.js";
+import type { HostingProvider, Locale, Operation } from "../shared/types.js";
 import { hostingProviders } from '../shared/hosting.js';
 import { assistantReadKinds, type PlannedRead } from "./assistant-inspection.js";
 
@@ -27,6 +27,7 @@ export type ModelPlan = {
   intent: PlannerIntent;
   steps: PlannedStep[];
   reads?: PlannedRead[];
+  answerLanguage?: Locale | "";
   repository: PlannedRepository;
   summary: string;
   rationale: string;
@@ -62,9 +63,10 @@ export const planResponseFormat = {
   schema: {
     type: "object",
     additionalProperties: false,
-    required: [...planKeys, "reads"],
+    required: [...planKeys, "reads", "answerLanguage"],
     properties: {
       intent: { type: "string", enum: intents },
+      answerLanguage: { type: "string", enum: ["es", "en", ""] },
       reads: {
         type: "array", items: {
           type: "object", additionalProperties: false, required: ["kind", "args"],
@@ -150,17 +152,25 @@ Pick exactly one intent:
 - "out_of_scope": the request has nothing to do with this repository, with Git or with creating a repository. Say so briefly in "reply".
 
 For an answer, "reads" is an array whose entries have "kind" and "args". GitCat reads Git and renders the results.
+Set "answerLanguage" to "es" or "en" to match the user's question, or "" to use the app language.
 Choose the smallest useful set. Every other intent leaves "reads" empty.
-- "repository": use one or more of active_branch, primary_branch, working_tree, remotes, deletable_branches.
+- "repository": use one or more of active_branch, primary_branch, working_tree, remotes, upstream,
+  deletable_branches. working_tree separates staged, unstaged, new, and conflicting files.
+  remotes includes the effective fetch and push URLs. upstream includes the local ahead/behind counts.
 - "compare_branches": args are [target] for all local branches, or [target, source] for one
   comparison. Use exact branch names or refs. Use this for questions about remaining work between
   branches. It distinguishes ancestry, identical contents and equivalent individual patches.
 - "commit": args are [selector] or [selector, ref]. Selectors are tip or latest_merge. The ref
-  defaults to HEAD. GitCat shows what the commit changed relative to its first parent.
+  defaults to HEAD. GitCat shows changed files and how many commits a merge brought in.
+- "file_history": args are [event, path] or [event, path, ref]. Events are first_addition,
+  latest_change and latest_deletion. Use for an author, date or commit that matches the event.
 - "git": args are an allowed read-only Git command without the leading "git". Use for any
   other evidence, including file history and exact counts. For example, file creation can be
   read with ["log", "--diff-filter=A", "--follow", "--format=%an <%ae> %ad", "--", "proto/x.test.js"].
-  Provide separate reads for separate results. Put only Git placeholders and separators in formats.
+  Cover every part of the question with the appropriate read. Put only Git placeholders and
+  separators in formats. When a question depends on unavailable history, choose the relevant
+  read and let GitCat explain the limits of this shallow copy. A search of the current files
+  cannot establish what an older commit changed; inspect that commit or its patch instead.
 
 You decide how to reach what the user asked for. Plenty of ordinary requests take several operations,
 and it is your job to work out which ones and in what order, from the repository state below:
@@ -454,13 +464,14 @@ function hasExactKeys(value: unknown, keys: string[]): value is Record<string, u
 }
 
 function validate(value: unknown): ModelPlan | undefined {
-  const hasReads = value !== null && typeof value === "object" && Object.hasOwn(value, "reads");
-  if (!hasExactKeys(value, hasReads ? [...planKeys, "reads"] : planKeys)) return undefined;
+  const optionalKeys = ["reads", "answerLanguage"].filter(key => value !== null && typeof value === "object" && Object.hasOwn(value, key));
+  if (!hasExactKeys(value, [...planKeys, ...optionalKeys])) return undefined;
   const record = value as Record<string, unknown>;
   if (typeof record.intent !== "string" || !intents.includes(record.intent as PlannerIntent)) return undefined;
   if (typeof record.risk !== "string" || !risks.includes(record.risk)) return undefined;
   for (const key of ["summary", "rationale", "reply"]) if (typeof record[key] !== "string") return undefined;
-  if (hasReads && (!Array.isArray(record.reads) || !record.reads.every(read =>
+  if (optionalKeys.includes("answerLanguage") && !["es", "en", ""].some(lang => lang === record.answerLanguage)) return undefined;
+  if (optionalKeys.includes("reads") && (!Array.isArray(record.reads) || !record.reads.every(read =>
     hasExactKeys(read, ["kind", "args"]) && assistantReadKinds.some(kind => kind === read.kind)
     && Array.isArray(read.args) && read.args.every(arg => typeof arg === "string")))) return undefined;
   if (!Array.isArray(record.steps)) return undefined;
