@@ -1,5 +1,11 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+if (process.platform === "darwin") {
+  ipcRenderer.on("window:fullscreen", (_event, fullscreen) => {
+    globalThis.document.documentElement?.toggleAttribute("data-native-fullscreen", fullscreen);
+  });
+}
+
 contextBridge.exposeInMainWorld("gitcat", {
   platform: process.platform,
   openWorktree: (path, target, locale) => ipcRenderer.invoke("worktree:open", path, target, locale),

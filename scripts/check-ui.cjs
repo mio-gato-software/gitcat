@@ -258,6 +258,8 @@ app.whenReady().then(async () => {
 
   // Hosted Macs may have a small display; still exercise the requested desktop sizes.
   const win = new BrowserWindow({ width: 1480, height: 940, show: false, enableLargerThanScreen: true, webPreferences: { backgroundThrottling: false, preload: path.join(root, 'electron/preload.cjs') } });
+  const { syncMacFullscreen } = await import(pathToFileURL(path.join(root, 'dist-electron/electron/window-chrome.js')));
+  syncMacFullscreen(win);
   const js = code => win.webContents.executeJavaScript(code).catch((error) => { if (process.env.GITCAT_UI_DEBUG) console.error('JS FAILED:', code.slice(0, 300)); throw error; });
   // A snapshot starts many Git processes in sequence. Hosted Windows runners can
   // take more than 20 seconds for a read; keep each wait bounded by a minute.
@@ -1800,6 +1802,24 @@ app.whenReady().then(async () => {
   assert.equal(await js(`document.querySelector('#commit-description').value`), '');
   secondDescription.resolve('Description from the second tab');
   await waitFor(`document.querySelector('#commit-description:not(:disabled)')?.value === 'Description from the second tab'`);
+
+  if (process.platform === 'darwin') {
+    const titleBar = `document.querySelector('.topbar')`;
+    const style = `getComputedStyle(${titleBar})`;
+    const normalInset = `${style}.paddingLeft === '88px'`;
+    const fullscreenInset = `${titleBar} && ${style}.paddingLeft === ${style}.paddingRight`;
+    assert.equal(await js(normalInset), true, 'The native controls have room in windowed mode');
+    win.show();
+    win.setFullScreen(true);
+    await waitFor(fullscreenInset);
+    assert.equal(win.isFullScreen(), true);
+    await win.loadFile(path.join(root, 'dist/index.html'));
+    await waitFor(fullscreenInset);
+    win.setFullScreen(false);
+    await waitFor(normalInset);
+    assert.equal(win.isFullScreen(), false);
+    console.log('PASS: the logo follows native macOS fullscreen state across entry, reload, and exit.');
+  }
 
   win.destroy();
   console.log('PASS: worktree list, safe opening with separate edits and tree tab badges; unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, a work overview separating edited, saved, integrated and published work with one next step, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, saving without secret warnings, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');
