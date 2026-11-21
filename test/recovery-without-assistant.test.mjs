@@ -433,6 +433,54 @@ test("una red caída y un remoto que niega el acceso se distinguen de un conflic
   assert.deepEqual(kinds(denied.actions), ["retry", "refresh"]);
 });
 
+test("la sugerencia después de un push rechazado usa el idioma de GitCat", async (t) => {
+  const origin = repository("gitcat-rec-rejected-origin-", { bare: true });
+  const work = seeded("gitcat-rec-rejected-work-");
+  for (const path of [origin.path, work.path]) t.after(() => rmSync(path, { recursive: true, force: true }));
+  work.run("remote", "add", "origin", origin.path);
+  work.run("push", "-u", "origin", "main");
+  const remoteHead = origin.run("rev-parse", "main").trim();
+  const hook = join(origin.path, "hooks", "pre-receive");
+  writeFileSync(hook, "#!/bin/sh\necho 'Publication rejected by test policy' >&2\nexit 1\n");
+  chmodSync(hook, 0o755);
+  work.run("commit", "--allow-empty", "-m", "Guardar antes de publicar");
+  const localHead = work.run("rev-parse", "HEAD").trim();
+
+  const push = await service.prepareOperation(work.path, "push", {}, "es");
+  const { result, record } = await run(work.path, push);
+  assert.match(result.error, /Publication rejected by test policy/);
+  const failure = failureOf(push, record, result.error);
+  const report = await service.describeFailure(work.path, failure, record);
+
+  provider = replyWith("ok");
+  await service.saveLlmConfig({ apiKey: "sk-prueba", model: "gpt-5.6-luna" });
+  await service.acknowledgeAiSharing(work.path);
+  requests.length = 0;
+  provider = init => {
+    const spanish = /Responde en español/.test(JSON.parse(init.body).input.at(-1).content);
+    return replyWith({
+      intent: "needs_information", risk: "low", steps: [],
+      repository: { localPath: "", repository: "", owner: "", host: "", protocol: "", sshHost: "", remote: "", push: false, replaceRemote: false },
+      summary: spanish ? "El commit sigue en este equipo" : "The commit is still local",
+      rationale: "",
+      reply: spanish ? "El remoto rechazó el envío. El commit quedó guardado en main."
+        : "The remote rejected the push. The commit is still saved on main."
+    })();
+  };
+
+  const spanish = await service.planRecovery(work.path, failure, [{ role: "user", content: "Please publish main." }], "es", report);
+  assert.match(spanish.rationale, /El remoto rechazó el envío/);
+  assert.match(requests[0].input.at(-1).content, /Responde en español/);
+  assert.match(requests[0].instructions, /Publication rejected by test policy/);
+  assert.deepEqual(spanish.steps, []);
+
+  const english = await service.planRecovery(work.path, failure, [{ role: "user", content: "Publica main." }], "en", report);
+  assert.match(english.rationale, /The remote rejected the push/);
+  assert.match(requests[1].input.at(-1).content, /Answer in English/);
+  assert.equal(work.run("rev-parse", "HEAD").trim(), localHead);
+  assert.equal(origin.run("rev-parse", "main").trim(), remoteHead);
+});
+
 test("sin remoto ni identidad, las salidas son configurar lo que falta y se validan antes de prepararse", async () => {
   const work = seeded("gitcat-rec-config-");
   const plan = await service.prepareOperation(work.path, "push", {}, "en");
