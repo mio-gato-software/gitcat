@@ -277,7 +277,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 
 .workspace-loading { flex: 1; display: grid; place-content: center; justify-items: center; gap: 12px; color: var(--muted); font-size: 11px; }
 .workspace-loading svg { color: #6bd8cb; }
-.app-shell.platform-darwin .topbar { padding-left: 88px; }
+:root:not([data-native-fullscreen]) .app-shell.platform-darwin .topbar { padding-left: 88px; }
 
 /* Una operación a medias y su salida: cada opción dice lo que cuesta. */
 .rebase-banner { flex-wrap: wrap; }

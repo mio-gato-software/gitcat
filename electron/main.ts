@@ -5,6 +5,7 @@ import { exclusive } from "./repository-queue.js";
 import { opensSafely } from "./conflict-guide.js";
 import { installApplicationMenu } from "./application-menu.js";
 import { keepSingleInstance } from "./single-instance.js";
+import { syncMacFullscreen } from "./window-chrome.js";
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -314,6 +315,7 @@ async function createWindow() {
       sandbox: true
     }
   });
+  syncMacFullscreen(window);
 
   window.webContents.on("will-navigate", (event, url) => {
     if (!isTrustedFrame(url)) event.preventDefault();
