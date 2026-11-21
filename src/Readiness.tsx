@@ -200,6 +200,7 @@ export function ReadinessChecklist({ readiness, items, t, compact = false, title
 }
 
 function accessHelpKey(access: string, protocol: string): MessageKey {
+  if (access === "not_found" && protocol === "local") return "readinessAccessHelp_not_found_local";
   if (access === "denied") return protocol === "ssh" ? "readinessAccessHelp_denied_ssh" : "readinessAccessHelp_denied";
   if (access === "credentials" && protocol !== "https") return "readinessAccessHelp_credentials_ssh";
   return `readinessAccessHelp_${access}` as MessageKey;

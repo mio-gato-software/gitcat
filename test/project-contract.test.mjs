@@ -731,6 +731,16 @@ test("una operación a medias es un estado del que se puede salir, no un callej�
   assert.match(planner, /so they are "theirs", which is the\nopposite of what most people expect/);
 });
 
+test("la recuperación enseña el resultado traducido y deja el diagnóstico original en los detalles", async () => {
+  const app = await readFile(join(root, "src/App.tsx"), "utf8");
+  assert.match(app, /turn\.completion[\s\S]*?<CompletionCard summary=\{turn\.completion\} output=\{technicalOutput\}/);
+  assert.match(app, /!turn\.completion && turn\.error && <div className="conversation-error"/);
+  assert.match(app, /report\.stage !== "stale" && <li className="failed"/);
+  assert.match(app, /case "review_remotes": openSettings\(\); return;/);
+  const readiness = await readFile(join(root, "src/Readiness.tsx"), "utf8");
+  assert.match(readiness, /access === "not_found" && protocol === "local"\) return "readinessAccessHelp_not_found_local"/);
+});
+
 test("resolver un conflicto con el modelo se propone, se revisa y solo entonces se escribe", async () => {
   const resolution = await readFile(join(root, "electron/conflict-resolution.ts"), "utf8");
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
