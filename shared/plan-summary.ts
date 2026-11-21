@@ -407,7 +407,7 @@ export function completionSummary(input: CompletionInput, locale?: Locale): Comp
     : status === "failed" ? (outcomes.length > 1
       ? say(`“${failed!.summary}” did not complete, so the other steps did not run.`, `«${failed!.summary}» no se completó, así que los demás pasos no se ejecutaron.`)
       : say(`“${failed!.summary}” did not complete.`, `«${failed!.summary}» no se completó.`))
-    : say("Nothing ran: GitCat stopped before the first step, so the project is as it was.", "No se ejecutó nada: GitCat se detuvo antes del primer paso, así que el proyecto sigue como estaba.");
+    : say("Nothing ran: GitCat stopped before the first step.", "No se ejecutó nada. GitCat se detuvo antes del primer paso.");
 
   const changed = before && after && status !== "not_run" ? changes(plan, outcomes, before, after, say) : [];
   for (const { branch, destination } of confirmedPublications) {
@@ -461,7 +461,14 @@ function changes(plan: ActionPlan, outcomes: StepOutcome[], before: RepoSnapshot
       lines.push(say(`${name} is now published on ${remoteOf(branch.upstream, after.remotes) ?? branch.upstream}.`, `${name} ya está publicada en ${remoteOf(branch.upstream, after.remotes) ?? branch.upstream}.`));
     }
   }
-  for (const remote of after.remotes.filter((name) => !before.remotes.includes(name))) lines.push(say(`Connected to ${remote}.`, `Se conectó con ${remote}.`));
+  const connected = new Set(ran.flatMap(({ step }) => {
+    if (step.operation === "add_remote") return [step.args.name];
+    if (step.operation === "github_create_repo") return [step.args.remote];
+    return [];
+  }));
+  for (const remote of after.remotes.filter((name) => connected.has(name) && !before.remotes.includes(name))) {
+    lines.push(say(`Connected to ${remote}.`, `Se conectó con ${remote}.`));
+  }
   for (const { step } of ran.filter(({ step }) => step.operation === "edit_remote_url")) lines.push(say(
     `${step.args.name} now downloads from ${step.args.url}.`, `${step.args.name} ahora descarga desde ${step.args.url}.`));
   const current = now.get(after.currentBranch), previous = was.get(after.currentBranch);

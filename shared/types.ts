@@ -721,7 +721,7 @@ export type ExecutionFailure = {
 
 /** Why a Git action stopped, as far as Git's own output and the repository state can prove it. */
 export type FailureKind =
-  | "network" | "auth" | "missing_upstream" | "no_remote" | "divergent" | "conflict" | "pending"
+  | "network" | "auth" | "remote_unavailable" | "missing_upstream" | "no_remote" | "divergent" | "conflict" | "pending"
   | "hook" | "identity" | "stale" | "lock" | "detached_pull" | "unknown";
 
 export type FailureStage = "prepare" | "execute" | "stale";
@@ -743,6 +743,8 @@ export type RecoveryActionKind =
   | "configure_identity"
   /** Ask for a remote address, then prepare `add_remote`. */
   | "configure_remote"
+  /** Open the current project's remote settings. */
+  | "review_remotes"
   /** Reopen conflict resolution. */
   | "resolve_conflicts"
   /** An allow-listed operation, prepared by `prepareOperation` and confirmed as usual. */
@@ -772,7 +774,7 @@ export type RecoveryFacts = {
   remote?: string;
   pending?: PendingOperation;
   conflicts: number;
-  /** Uncommitted changes, which stay exactly as they were. */
+  /** Uncommitted changes reported by the current snapshot. */
   changes: number;
   /** The hook that stopped the step, such as "pre-commit". */
   hook?: string;

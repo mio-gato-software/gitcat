@@ -1289,6 +1289,7 @@ export default function App() {
       case "inspect_changes": setFocus({ kind: "wip" }); setInspectorTab("details"); return;
       case "configure_identity": await openIdentityDialog(); return;
       case "configure_remote": setInputDialog({ operation: "add_remote", title: t("connectRemoteTitle"), label: t("remoteAddress"), value: "" }); return;
+      case "review_remotes": openSettings(); return;
       // The guided resolver works without the assistant; a draft from it stays one optional button inside.
       case "resolve_conflicts": await openGuide(); return;
       case "keep": updateTurn(path, turnId, (item) => ({ ...item, kept: true })); return;
@@ -1432,7 +1433,7 @@ export default function App() {
         // A sequence that stopped halfway did change the repository: show what ran, not only the failure.
         const progress = plan.steps.length > 1 ? result.output : undefined;
         updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, outcome: progress, completion, output: result.output, error: result.error, private: result.withheldFromAssistant, status: "error" }));
-        addActivity({ label: t("gitNeedsAttention"), detail: result.error, tone: "warning" });
+        addActivity({ label: t("gitNeedsAttention"), detail: completion.headline, tone: "warning" });
         /**
          * The repository is now holding a half-finished job the user did not ask for, and this is
          * exactly where the conversation used to end. Planning is not acting, so the assistant is
@@ -1460,9 +1461,10 @@ export default function App() {
       }
     } catch (error) {
       const message = cleanError(error, t("fallbackGitAction"));
+      const completion = completionSummary({ plan, error: message }, locale);
       setReadinessEpoch((epoch) => epoch + 1);
-      updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, completion: completionSummary({ plan, error: message }, locale), error: message, status: "error" }));
-      notify({ message, tone: "error" });
+      updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, completion, error: message, status: "error" }));
+      notify({ message: completion.headline, tone: "error" });
       await refreshProject(plan.repoPath, false);
       // The main process kept what happened to this plan, including whether the repository moved under it.
       await recoverFrom(plan.repoPath, {
@@ -3589,7 +3591,9 @@ function ConversationEntry({ turn, snapshot, busy, configured, onRecoveryAction,
   const { t } = useI18n();
   // A sequence reports itself step by step, marks included, so it needs no outer verdict icon or colour.
   const sequence = (turn.plan?.steps.length ?? 0) > 1;
-  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading" role="status"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} onAskAssistant={onAskAssistant} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && <p className="assistant-answer">{turn.answer}</p>}{turn.answerCommit && <button type="button" className="ghost-button small" onClick={() => onShowCommit(turn.answerCommit!)}><FileDiff size={13} /> {t("fullDiff")} · {turn.answerCommit.shortHash}</button>}{turn.answerDetails && <AssistantAnswerDetails output={turn.answerDetails} />}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} snapshot={snapshot} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.completion ? <CompletionCard summary={turn.completion} output={turn.output} /> : turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error" role="alert"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
+  const technicalOutput = turn.error && !turn.output?.includes(turn.error)
+    ? [turn.output, turn.error].filter(Boolean).join("\n\n") : turn.output;
+  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading" role="status"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} onAskAssistant={onAskAssistant} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && <p className="assistant-answer">{turn.answer}</p>}{turn.answerCommit && <button type="button" className="ghost-button small" onClick={() => onShowCommit(turn.answerCommit!)}><FileDiff size={13} /> {t("fullDiff")} · {turn.answerCommit.shortHash}</button>}{turn.answerDetails && <AssistantAnswerDetails output={turn.answerDetails} />}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} snapshot={snapshot} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.completion ? <CompletionCard summary={turn.completion} output={technicalOutput} /> : turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{!turn.completion && turn.error && <div className="conversation-error" role="alert"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
 }
 
 
@@ -3639,6 +3643,7 @@ function RecoveryCard({ report, assistant, kept, busy, configured, retryable, on
   };
   const why = kind === "divergent" ? (facts.behind === 0 ? "recoveryWhy_divergent_unseen" : facts.ahead === 0 ? "recoveryWhy_divergent_behind" : "recoveryWhy_divergent")
     : kind === "missing_upstream" && !report.actions.some((action) => action.option === "publish") && !report.choice ? "recoveryWhy_missing_upstream_open"
+    : kind === "conflict" && !facts.pending ? "recoveryWhy_conflict_no_abort"
     : kind === "hook" && !facts.hook ? "recoveryWhy_hook_unnamed"
     : kind === "lock" && !facts.lock ? "recoveryWhy_lock_unnamed"
     : `recoveryWhy_${kind}`;
@@ -3646,9 +3651,7 @@ function RecoveryCard({ report, assistant, kept, busy, configured, retryable, on
     report.completed.length ? t("recoverySafeCompleted") : report.stage !== "execute" ? t("recoverySafeNothingRan") : undefined,
     facts.changes ? t("recoverySafeChanges", { changes: counted(t, facts.changes, "change", "changes") }) : undefined,
     ["network", "auth", "missing_upstream", "no_remote"].includes(kind) ? t("recoverySafeRemote") : undefined,
-    ["conflict", "pending"].includes(kind) && operation ? t("recoverySafeBackOut", { operation }) : undefined,
-    ["network", "auth", "missing_upstream", "no_remote", "hook", "identity", "lock"].includes(kind) ? t("recoverySafeCommits") : undefined,
-    kind === "unknown" && !facts.changes ? t("recoverySafeFiles") : undefined
+    ["network", "auth", "remote_unavailable", "missing_upstream", "no_remote", "hook", "identity", "lock"].includes(kind) ? t("recoverySafeCommits") : undefined,
   ].filter((line): line is string => Boolean(line));
   const actions = report.actions.filter((action) => action.kind !== "retry" || retryable);
   const button = (action: RecoveryAction, index: number, primary: boolean) => <button key={`${action.kind}-${action.option ?? ""}-${index}`} className={primary ? "outline-button small" : "ghost-button small"} disabled={busy || kept} onClick={() => onAction(action)}>{recoveryActionLabel(action, facts, t, configured)}</button>;
@@ -3657,7 +3660,7 @@ function RecoveryCard({ report, assistant, kept, busy, configured, retryable, on
     <p className="recovery-why">{t(why as MessageKey, values)}</p>
     <ol className="recovery-steps">
       {report.completed.map((summary, index) => <li key={`done-${index}`} className="done"><Check size={12} /><span>{summary}</span><em>{t("recoveryCompleted")}</em></li>)}
-      <li className="failed"><X size={12} /><span>{report.failedSummary}</span><em>{t("recoveryFailedStep")}</em></li>
+      {report.stage !== "stale" && <li className="failed"><X size={12} /><span>{report.failedSummary}</span><em>{t("recoveryFailedStep")}</em></li>}
       {report.notRun.map((summary, index) => <li key={`skip-${index}`} className="skipped"><CircleDot size={12} /><span>{summary}</span><em>{t("recoveryNotRunStep")}</em></li>)}
     </ol>
     {safe.length > 0 && <div className="recovery-safe"><strong>{t("recoverySafeHeading")}</strong><ul>{safe.map((line) => <li key={line}>{line}</li>)}</ul></div>}

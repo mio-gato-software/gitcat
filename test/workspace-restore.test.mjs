@@ -17,7 +17,7 @@ registerHooks({
 const { getSnapshot, rootCommits } = await import(pathToFileURL(join(root, "dist-electron/electron/git-service.js")));
 const {
   classifyFailure, compareFingerprints, fingerprintFrom, inspectProject, nearestExistingFolder, normalizeRemoteUrl, parseWorkspace,
-  relocateProject, restoreProjects, volumeRoot
+  reconcileWorkspaceTabs, relocateProject, restoreProjects, volumeRoot
 } = await import(pathToFileURL(join(root, "dist-electron/electron/workspace-restore.js")));
 const { emptyMemory, recallRepository, relocateRepository, rememberRepository } =
   await import(pathToFileURL(join(root, "dist-electron/electron/memory.js")));
@@ -193,6 +193,23 @@ test("localizar una carpeta que ya está abierta retira la entrada vieja en luga
   assert.deepEqual(relocated.fingerprints, {});
   const untouched = record(["/a"], "/a");
   assert.equal(relocateProject(untouched, "/unknown", "/b"), untouched);
+});
+
+test("guardar las pestañas anteriores mientras se abre otra no cierra el repositorio nuevo", () => {
+  const fingerprint = { roots: ["new-root"], remotes: [] };
+  const current = record(["/old", "/new"], "/new", { "/new": fingerprint });
+  const awaitingTabs = new Set(["/new"]);
+  const staleSave = reconcileWorkspaceTabs(current, ["/old"], "/old", awaitingTabs);
+  assert.deepEqual(staleSave, current);
+  assert.deepEqual([...awaitingTabs], ["/new"]);
+
+  const visible = reconcileWorkspaceTabs(staleSave, ["/new", "/old"], "/old", awaitingTabs);
+  assert.deepEqual(visible.paths, ["/new", "/old"]);
+  assert.equal(visible.activePath, "/old");
+  assert.equal(awaitingTabs.size, 0);
+
+  const closed = reconcileWorkspaceTabs(visible, ["/old"], "/old", awaitingTabs);
+  assert.deepEqual(closed, record(["/old"], "/old"));
 });
 
 test("las direcciones de un remoto se comparan en una sola forma", () => {

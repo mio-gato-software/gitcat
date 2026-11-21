@@ -156,9 +156,23 @@ test("a plan prepared against an older state is flagged, and a refusal before th
   const en = completionSummary({ plan: save, error: "The repository changed after this plan was prepared." }, "en");
   assert.equal(en.status, "not_run");
   assert.match(en.headline, /^Nothing ran: GitCat stopped before the first step/);
+  assert.doesNotMatch(en.headline, /project is as it was/);
   assert.deepEqual(en.steps.map((item) => item.status), ["skipped"]);
   assert.equal(en.next, undefined);
   assert.match(completionSummary({ plan: save, error: "x" }, "es").headline, /^No se ejecutó nada/);
+});
+
+test("a failed fetch does not claim it connected a remote added outside GitCat", () => {
+  const before = snapshot({ remotes: [] });
+  const after = snapshot();
+  const fetch = plan([step("fetch", {}, "Actualizar referencias remotas")]);
+  const failed = completionSummary({ plan: fetch, error: "Remote folder missing", outcomes: done(fetch.steps, ["failed"]), before, after }, "es");
+  assert.equal(failed.status, "failed");
+  assert.deepEqual(failed.changed, []);
+
+  const connect = plan([step("add_remote", { name: "origin" }, "Conectar origin")]);
+  const connected = completionSummary({ plan: connect, outcomes: done(connect.steps, ["completed"]), before, after }, "es");
+  assert.ok(connected.changed.includes("Se conectó con origin."));
 });
 
 test("a partial failure tells completed, failed and unrun steps apart and is never a success", () => {

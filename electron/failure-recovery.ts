@@ -43,7 +43,8 @@ const patterns = {
   identity: /Please tell me who you are|Author identity unknown|Committer identity unknown|unable to auto-detect email address|empty ident name|no email was given and auto-detection is disabled|no name was given and auto-detection is disabled/i,
   conflict: /^CONFLICT \(|Automatic merge failed|could not apply [0-9a-f]+|Merge conflict in|fix conflicts and then commit|Resolve all conflicts manually/im,
   pending: /You have not concluded your merge|MERGE_HEAD exists|rebase-merge directory|It seems that there is already a rebase|cherry-pick is already in progress|revert is already in progress|you are in the middle of/i,
-  auth: /Permission denied \(publickey|Permission denied, please try again|Authentication failed|could not read Username|could not read Password|terminal prompts disabled|HTTP Basic: Access denied|returned error: 40[13]|Host key verification failed|Repository not found|remote: (?:Permission|Access) .*denied|does not appear to be a git repository/i,
+  auth: /Permission denied \(publickey|Permission denied, please try again|Authentication failed|could not read Username|could not read Password|terminal prompts disabled|HTTP Basic: Access denied|returned error: 40[13]|Host key verification failed|remote: (?:Permission|Access) .*denied/i,
+  remoteUnavailable: /Repository not found|does not appear to be a git repository/i,
   network: /Could not resolve host|Could not resolve hostname|Connection refused|Connection timed out|Operation timed out|Network is unreachable|No route to host|Failed to connect|Connection reset|early EOF|remote end hung up unexpectedly|unable to access '[^']*': (?!.*40[13])|SSL_ERROR|excedió el tiempo máximo|timed out/i,
   noUpstream: /has no upstream branch|There is no tracking information for the current branch|no such ref was fetched|does not track a remote branch/i,
   noRemote: /No configured push destination|specify a remote repository|No remote repository specified|'origin' does not appear to be a git repository/i,
@@ -69,9 +70,10 @@ export function classifyFailure(evidence: FailureEvidence, snapshot: RepoSnapsho
   if (patterns.identity.test(detail)) return "identity";
   if (snapshot.conflicts.length || (snapshot.pending && patterns.conflict.test(detail))) return "conflict";
   if (snapshot.pending && (patterns.pending.test(detail) || ["abort_operation", "continue_operation", "skip_operation"].includes(operation ?? ""))) return "pending";
-  // A remote that refused is about access; one that could not be reached is about the network. Neither
-  // is about the files, which is why they are told apart from conflicts and from each other.
-  if (patterns.auth.test(detail) && !(snapshot.remotes.length === 0 && patterns.noRemote.test(detail))) return "auth";
+  if (patterns.auth.test(detail)) return "auth";
+  if (operation && remoteOperations.has(operation) && patterns.remoteUnavailable.test(detail)) {
+    return !snapshot.remotes.length && patterns.noRemote.test(detail) ? "no_remote" : "remote_unavailable";
+  }
   if (patterns.network.test(detail)) return "network";
   if (patterns.noRemote.test(detail) || (!snapshot.remotes.length && operation && remoteOperations.has(operation))) return "no_remote";
   if (operation === "pull" && snapshot.currentBranch === "HEAD" && !snapshot.pending && !snapshot.conflicts.length) return "detached_pull";
@@ -130,6 +132,11 @@ export function recoveryActions(kind: FailureKind, facts: RecoveryFacts, evidenc
       break;
     case "lock":
     case "auth":
+      retryOrReview();
+      actions.push(refresh);
+      break;
+    case "remote_unavailable":
+      if (facts.remotes.length) actions.push({ kind: "review_remotes" });
       retryOrReview();
       actions.push(refresh);
       break;
