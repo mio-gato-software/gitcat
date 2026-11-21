@@ -161,16 +161,23 @@ Choose the smallest useful set. Every other intent leaves "reads" empty.
   comparison. Use exact branch names or refs. Use this for questions about remaining work between
   branches. It distinguishes ancestry, identical contents and equivalent individual patches.
 - "commit": args are [selector] or [selector, ref]. Selectors are tip or latest_merge. The ref
-  defaults to HEAD. GitCat shows changed files and how many commits a merge brought in.
+  defaults to HEAD. GitCat shows changed files and how many commits a merge brought in. For
+  questions about a specific change or code behavior, use [selector, ref, term, ...] with up to
+  four short, literal search terms likely to occur in changed lines (identifiers, error text,
+  feature names or their English equivalents). GitCat finds matching removed and added lines in
+  that commit's diff locally, without making a claim about runtime behavior. For these questions
+  include terms in the commit read instead of returning a bare commit plus an unfiltered diff.
 - "file_history": args are [event, path] or [event, path, ref]. Events are first_addition,
   latest_change and latest_deletion. Use for an author, date or commit that matches the event.
+- "commit_count": args are [ref, filter]. Use HEAD for the current branch, an exact ref or range,
+  or "--all" for all local refs. Filters: all, no_merges, merges. Use one read per requested count.
 - "git": args are an allowed read-only Git command without the leading "git". Use for any
-  other evidence, including file history and exact counts. For example, file creation can be
+  other evidence. For example, file creation can be
   read with ["log", "--diff-filter=A", "--follow", "--format=%an <%ae> %ad", "--", "proto/x.test.js"].
   Cover every part of the question with the appropriate read. Put only Git placeholders and
   separators in formats. When a question depends on unavailable history, choose the relevant
   read and let GitCat explain the limits of this shallow copy. A search of the current files
-  cannot establish what an older commit changed; inspect that commit or its patch instead.
+  cannot establish what an older commit changed.
 
 You decide how to reach what the user asked for. Plenty of ordinary requests take several operations,
 and it is your job to work out which ones and in what order, from the repository state below:
