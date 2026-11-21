@@ -15,7 +15,7 @@ export type RepositoryMemory = { provider?: HostingProvider; connectionId?: stri
  * `exclusions` are path patterns it must never read, and `reviewed` holds the flagged files they looked
  * at and chose to share, each bound to the version they saw — an edit makes it a new question.
  */
-export type SharingMemory = { acknowledgedAt?: string; exclusions: string[]; reviewed: Record<string, string>; confirmedAt: string };
+export type SharingMemory = { acknowledgedAt?: string; metadataOnly?: true; exclusions: string[]; reviewed: Record<string, string>; confirmedAt: string };
 export type Memory = { identities: Record<string, IdentityMemory>; repositories: Record<string, RepositoryMemory>; sharing: Record<string, SharingMemory> };
 
 const entryLimit = 200;
@@ -89,7 +89,8 @@ export function sanitizeMemory(value: unknown): Memory {
       .slice(0, reviewedLimit)) as Record<string, string>;
     const acknowledgedAt = optionalString(item.acknowledgedAt) && !Number.isNaN(new Date(item.acknowledgedAt as string).valueOf()) ? (item.acknowledgedAt as string).trim() : undefined;
     if (!acknowledgedAt && !exclusions.length && !Object.keys(reviewed).length) continue;
-    sharing[key] = { ...(acknowledgedAt ? { acknowledgedAt } : {}), exclusions, reviewed, confirmedAt: timestamp(item.confirmedAt) };
+    sharing[key] = { ...(acknowledgedAt ? { acknowledgedAt, ...(item.metadataOnly === true ? { metadataOnly: true } : {}) } : {}),
+      exclusions, reviewed, confirmedAt: timestamp(item.confirmedAt) };
   }
   return { identities: prune(identities), repositories: prune(repositories), sharing: prune(sharing) };
 }
@@ -109,6 +110,7 @@ export function rememberSharing(memory: Memory, path: string, patch: Partial<Omi
     confirmedAt: now
   };
   if (!next.acknowledgedAt) delete next.acknowledgedAt;
+  if (!next.metadataOnly) delete next.metadataOnly;
   return { ...memory, sharing: prune({ ...memory.sharing, [path]: next }) };
 }
 

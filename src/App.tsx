@@ -35,7 +35,7 @@ import { syncDestinations } from "../shared/remote-sync";
 import { workOverview, type NextActionId } from "../shared/work-overview";
 import { completionSummary, planSummary, type CompletionSummary } from "../shared/plan-summary";
 import { refChips } from "../shared/ref-chips";
-import { isPartlyStaged, isUntracked } from "../shared/selected-changes";
+import { canDiscardFileChange, isPartlyStaged, isUntracked } from "../shared/selected-changes";
 import { isSupportedModel, recommendedModel } from "../shared/ai-connection";
 import type { RefChip } from "../shared/ref-chips";
 import { authorAvatarUrl, avatarKey } from "../shared/avatar";
@@ -46,7 +46,7 @@ import type { GraphRow } from "../shared/commit-graph";
 import { branchOrderLabels, defaultBranchOrder, isBranchOrder, isMergedIntoDefault, sortBranches } from "../shared/branch-order";
 import type { BranchOrder } from "../shared/branch-order";
 import type {
-  ActionPlan, AiConnectionProblem, AiSharingPreview, AiSharingPurpose, AssistantUnavailable, Branch, ClonePreview, CloneResult, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
+  ActionPlan, AiConnectionProblem, AiSharingPreview, AiSharingPurpose, AiSharingScope, AssistantUnavailable, Branch, ClonePreview, CloneResult, Commit, CommitDetail, ConflictApplyResult, ConflictProposal, ConversationMessage, ExecutionFailure,
   ConflictChoice, ConflictChoiceRequest, ConflictChoiceResult, ConflictGuide, ConflictGuideFile, ConflictSideId, ConflictSideIdentity,
   FileChange, FileStats, FolderPreview, FolderProblem, HistoryScope, LlmConfig, LlmConnectResult, Locale, Operation, PendingOperationKind, ProjectLocateResult, ProjectSelectResult, ProjectUnavailableReason,
   RecoveryAction, RecoveryReport, RepoSnapshot, SecretFinding, UnavailableProject, WithheldFile, AuthorReadiness, HelpPage, IdentityScope, Worktree
@@ -88,7 +88,10 @@ function readSidebarHidden() {
 type ActivityItem = Notification;
 
 /** `from` is the commit a new branch starts at, or the branch a rename starts from. */
-type InputDialog = { operation: "create_branch" | "merge" | "rename_branch" | "add_remote"; title: string; label: string; value: string; from?: string };
+type InputDialog = { title: string; label: string; value: string } & (
+  | { operation: "create_branch" | "merge" | "rename_branch" | "add_remote"; from?: string }
+  | { operation: "edit_remote_url"; repoPath: string; remote: string }
+);
 /** The identity under review, with where it would be written and what each place holds now. */
 type IdentityDialog = { user: string; email: string; scope: IdentityScope; author?: AuthorReadiness };
 type Suggestion = { key: string; icon: LucideIcon; label: string } & ({ question: string } | { dialog: InputDialog });
@@ -97,6 +100,8 @@ type ConversationTurn = {
   question: string;
   status: "loading" | "ready" | "executing" | "completed" | "cancelled" | "error";
   answer?: string;
+  answerCommit?: Commit;
+  localAnswer?: boolean;
   plan?: ActionPlan;
   outcome?: string;
   /** What actually changed, read from the repository before and after, told in terms of the goal. */
@@ -112,6 +117,8 @@ type ConversationTurn = {
   recovery?: RecoveryReport;
   /** The stopped plan, so a retry prepares only what did not finish. */
   recoveryPlanId?: string;
+  recoveryFailure?: ExecutionFailure;
+  localRecovery?: boolean;
   /** Where the assistant's view of the failure stands. */
   assistant?: "consulting" | "not_shared" | AssistantUnavailable;
   /** The person chose to leave things as they are. */
@@ -119,7 +126,7 @@ type ConversationTurn = {
 };
 
 /** What goes back to the assistant in place of output it may not read. Model-facing, so it stays in English. */
-const privateOutputNote = "[GitCat kept this output out of the conversation: it shows a file the assistant may not read.]";
+const privateOutputNote = "[GitCat omitted file content from this turn.]";
 
 /** A finding as a person reads it: the line when there is one and what it looks like, never the value. */
 function findingDetail(finding: SecretFinding, t: Translate) {
@@ -471,7 +478,7 @@ export default function App() {
   const [historyPath, setHistoryPath] = useState<string>();
   const [sharingDialog, setSharingDialog] = useState<{ preview: AiSharingPreview; paths?: string[]; resolve?: (accepted: boolean) => void }>();
   /** Repositories the person already agreed to share with the assistant, so the question is not asked again. */
-  const sharingAcknowledged = useRef(new Set<string>());
+  const sharingAcknowledged = useRef(new Map<string, AiSharingScope>());
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [panes, setPanes] = useState<PaneWidths | undefined>(readPaneWidths);
   /** Counts every deliberate snapshot update, so a slower background read never overwrites a newer one. */
@@ -676,9 +683,12 @@ export default function App() {
   const updateSnapshot = (path: string, next: RepoSnapshot, fetched = false) => {
     snapshotWrites.current += 1;
     const now = new Date().toISOString();
-    setProjects((items) => items.map((project) => project.snapshot.path === path
-      ? { ...project, snapshot: next, loadedAt: now, ...(fetched ? { fetchedAt: now } : {}) }
-      : project));
+    setProjects((items) => items.map((project) => {
+      if (project.snapshot.path !== path) return project;
+      const { remotes, remoteUrls } = project.snapshot;
+      const sameRemotes = remotes.length === next.remotes.length && remotes.every((name) => remoteUrls[name] === next.remoteUrls[name] && next.remotes.includes(name));
+      return { ...project, snapshot: next, loadedAt: now, fetchedAt: fetched ? now : sameRemotes ? project.fetchedAt : undefined };
+    }));
   };
 
   /** Puts a project the main process validated and saved in front, in its existing tab when it has one. */
@@ -998,26 +1008,31 @@ export default function App() {
       const report = turn.recovery;
       return [{ role: "user" as const, content: turn.question }, { role: "assistant" as const, content: `GitCat classified the failure of "${report.failedSummary}" as ${report.kind}.${report.completed.length ? ` Completed: ${report.completed.join("; ")}.` : ""}${report.notRun.length ? ` Not run: ${report.notRun.join("; ")}.` : ""}${turn.kept ? " The user chose to leave it as it is." : ""}` }];
     }
-    const response = turn.answer ?? (turn.private && (turn.error || turn.outcome) ? privateOutputNote : undefined) ?? turn.error ?? turn.outcome ?? (turn.plan
+    const response = (turn.private || turn.plan?.workingContextUsed ? privateOutputNote : undefined) ?? turn.answer ?? turn.error ?? turn.outcome ?? (turn.plan
       ? `${turn.plan.allowed ? t("planWord") : t("refusalWord")}: ${turn.plan.summary}. ${turn.plan.rationale}`
       : undefined);
     return response ? [{ role: "user" as const, content: turn.question }, { role: "assistant" as const, content: response }] : [];
   });
 
-  const showPlan = async (question: string, loader: () => Promise<ActionPlan>, path = snapshot?.path, review = false): Promise<ActionPlan | undefined> => {
+  const showPlan = async (question: string, loader: () => Promise<ActionPlan>, path = snapshot?.path,
+    { review = false, reveal = true, localRecovery = false, saveSelected = false } = {}): Promise<ActionPlan | undefined> => {
     if (!path || planning) return undefined;
-    const turnId = addTurn(path, question);
+    const turnId = addTurn(path, question, reveal);
     try {
       const plan = await loader();
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
       if (plan.answer) {
-        updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, withheld: plan.withheld, status: "completed" }));
-        addActivity({ label: t("responsePrepared"), detail: plan.summary, tone: "neutral" });
+        updateTurn(path, turnId, (turn) => ({ ...turn, answer: plan.answer, answerCommit: plan.answerCommit,
+          private: plan.localAnswer || plan.workingContextUsed, localAnswer: plan.localAnswer, withheld: plan.withheld, status: "completed" }));
         return plan;
       }
-      if (review && plan.allowed && plan.requiresConfirmation && snapshotRef.current?.path === path) delivery.setReview({ turnId, plan });
-      const unattended = plan.allowed && !plan.requiresConfirmation;
-      updateTurn(path, turnId, (turn) => ({ ...turn, plan, status: plan.allowed ? "ready" : "completed" }));
+      const confirmedSave = saveSelected && plan.source === "guardrail" && Boolean(plan.selection && !plan.selection.target)
+        && plan.steps.length === 1 && plan.steps[0].operation === "commit";
+      if ((review || saveSelected && !confirmedSave) && plan.allowed && plan.requiresConfirmation && snapshotRef.current?.path === path) {
+        delivery.setReview({ turnId, plan });
+      }
+      const unattended = plan.allowed && (!plan.requiresConfirmation || confirmedSave);
+      updateTurn(path, turnId, (turn) => ({ ...turn, plan: confirmedSave ? { ...plan, requiresConfirmation: false } : plan, status: plan.allowed ? "ready" : "completed" }));
       addActivity({
         label: unattended ? t("actionInProgress") : plan.allowed ? t("planPrepared") : plan.kind === "question" ? t("assistantQuestion") : t("requestRejected"),
         detail: plan.summary,
@@ -1033,13 +1048,14 @@ export default function App() {
         return undefined;
       }
       updateTurn(path, turnId, (turn) => ({ ...turn, error: message, status: "error" }));
+      if (localRecovery) notify({ message, tone: "error" });
       await recoverFrom(path, {
         command: question,
         summary: t("prepareRequestedAction"),
         error: message,
         skipped: [],
         stage: "prepare"
-      });
+      }, localRecovery);
       return undefined;
     }
   };
@@ -1056,10 +1072,11 @@ export default function App() {
    * leave the computer and lists the files; declining sends nothing and leaves every Git control working.
    */
   const ensureSharing = async (path: string, purpose: AiSharingPurpose, paths?: string[]) => {
-    if (sharingAcknowledged.current.has(path)) return true;
+    const accepted = sharingAcknowledged.current.get(path);
+    if (accepted === "changes" || (accepted === "metadata" && (purpose === "planning" || purpose === "recovery"))) return true;
     try {
       const preview = await window.gitcat.getAiSharing(path, purpose, paths, locale);
-      if (preview.acknowledged) { sharingAcknowledged.current.add(path); return true; }
+      if (preview.acknowledged) { sharingAcknowledged.current.set(path, preview.scope); return true; }
       return await askSharing(preview, paths);
     } catch (error) {
       notify({ message: cleanError(error, t("fallbackSharing")), tone: "error" });
@@ -1070,7 +1087,7 @@ export default function App() {
   const openSharingReview = async () => {
     if (!snapshot) return;
     try {
-      setSharingDialog({ preview: await window.gitcat.getAiSharing(snapshot.path, "planning", undefined, locale) });
+      setSharingDialog({ preview: await window.gitcat.getAiSharing(snapshot.path, "working_changes", undefined, locale) });
     } catch (error) {
       notify({ message: cleanError(error, t("fallbackSharing")), tone: "error" });
     }
@@ -1084,10 +1101,17 @@ export default function App() {
   const acceptSharing = async () => {
     if (!sharingDialog) return;
     const path = sharingDialog.preview.repoPath;
-    await window.gitcat.acknowledgeAiSharing(path);
-    sharingAcknowledged.current.add(path);
+    const { scope } = sharingDialog.preview;
+    await window.gitcat.acknowledgeAiSharing(path, scope);
+    sharingAcknowledged.current.set(path, scope);
     sharingDialog.resolve?.(true);
     setSharingDialog(undefined);
+  };
+
+  const requestAssistantPlan = async (path: string, question: string, context: ConversationMessage[]) => {
+    const plan = await window.gitcat.planAction(path, question, context, locale);
+    if (!plan.workingChangesRequired || snapshotRef.current?.path !== path || !(await ensureSharing(path, "working_changes"))) return plan;
+    return window.gitcat.planAction(path, question, context, locale, true);
   };
 
   const propose = async (text: string) => {
@@ -1098,10 +1122,10 @@ export default function App() {
     setRequest("");
     // Declining keeps what was typed, so nothing the person wrote is lost.
     if (!(await ensureSharing(path, "planning"))) { setRequest(question); return; }
-    const plan = await showPlan(question, () => window.gitcat.planAction(path, question, context, locale), path);
+    const plan = await showPlan(question, () => requestAssistantPlan(path, question, context), path);
     if (plan && plan.stateId !== snapshot.stateId) await refreshProject(path, false);
     // When the assistant could not answer, what was typed comes back, unless something new was typed meanwhile.
-    if (!plan || plan.assistantUnavailable) setRequest((current) => current || question);
+    if (!plan || plan.assistantUnavailable || plan.workingChangesRequired) setRequest((current) => current || question);
   };
 
   const prepare = async (operation: Operation, args: Record<string, string> = {}, question?: string) => {
@@ -1159,7 +1183,7 @@ export default function App() {
         // Remote preparation fetches before binding the plan; show those same facts during review.
         if (operation === "sync_remote") await refreshProject(path, false);
       }
-    }, path);
+    }, path, { localRecovery: snapshot.pending?.kind === "revert" && ["abort_operation", "continue_operation", "skip_operation"].includes(operation) });
   };
 
   const openSync = (ref?: string, name?: string) => {
@@ -1176,7 +1200,7 @@ export default function App() {
     const context = conversationContext(conversations[path] ?? []);
     if (snapshot.isDirty && !(await ensureSharing(path, "planning"))) return;
     await showPlan(question, snapshot.isDirty
-      ? () => window.gitcat.planAction(path, question, context, locale)
+      ? () => requestAssistantPlan(path, question, context)
       : () => window.gitcat.prepareMergeToDefault(path, name, locale), path);
   };
 
@@ -1189,32 +1213,37 @@ export default function App() {
    * How to carry on from where the repository actually is. GitCat first reads the repository again and
    * explains the failure from facts: what completed, what failed, what never ran, what is still safe
    * and which ways on this state supports. That part never needs the assistant. The assistant is asked
-   * only when a choice or an unknown cause calls for judgment, and when it is missing, silent or not
-   * allowed to read the repository, the card says so and the options stand as a focused question.
+   * automatically only when its own plan left a decision open. A direct Git action offers help on
+   * the recovery card, so the locally verified options are available immediately.
    */
-  const recoverFrom = async (path: string, failure: ExecutionFailure) => {
-    const context = conversationContext(conversations[path] ?? []);
+  const recoverFrom = async (path: string, failure: ExecutionFailure, localRecovery = false, fromAssistant = false) => {
     const turnId = addTurn(path, t("actionQuestion"));
     let report: RecoveryReport | undefined;
     try {
       report = await window.gitcat.describeFailure(path, failure);
       if (report.repoPath !== path) throw new Error(t("planOtherRepository"));
       const described = report;
-      updateTurn(path, turnId, (turn) => ({ ...turn, recovery: described, recoveryPlanId: failure.planId, status: "completed" }));
+      updateTurn(path, turnId, (turn) => ({ ...turn, recovery: described, recoveryPlanId: failure.planId,
+        recoveryFailure: localRecovery ? undefined : failure, localRecovery, status: "completed" }));
     } catch {
       updateTurn(path, turnId, (turn) => ({ ...turn, error: t("recoveryDescribeFailed"), status: "error" }));
     }
-    if (report && !report.needsJudgment) return;
+    if (fromAssistant && !localRecovery && (!report || report.needsJudgment)) await consultRecovery(path, turnId, failure);
+  };
+
+  const consultRecovery = async (path: string, turnId: number, failure: ExecutionFailure) => {
     if (!config.configured) {
       updateTurn(path, turnId, (turn) => ({ ...turn, assistant: "not_configured" }));
       return;
     }
+    updateTurn(path, turnId, (turn) => ({ ...turn, assistant: "consulting" }));
     if (!(await ensureSharing(path, "recovery"))) {
-      updateTurn(path, turnId, (turn) => report ? { ...turn, assistant: "not_shared" } : { ...turn, answer: t("recoveryNotShared"), status: "completed" });
+      updateTurn(path, turnId, (turn) => turn.recovery ? { ...turn, assistant: "not_shared" }
+        : { ...turn, assistant: undefined, answer: t("recoveryNotShared"), status: "completed" });
       return;
     }
-    updateTurn(path, turnId, (turn) => ({ ...turn, assistant: "consulting" }));
     try {
+      const context = conversationContext(conversations[path] ?? []);
       const plan = await window.gitcat.planRecovery(path, failure, context, locale);
       if (plan.repoPath !== path) throw new Error(t("planOtherRepository"));
       if (plan.steps.some(step => step.operation === "sync_remote")) await refreshProject(path, false);
@@ -1224,12 +1253,14 @@ export default function App() {
         return;
       }
       if (plan.answer) {
-        updateTurn(path, turnId, (turn) => ({ ...turn, assistant: undefined, answer: plan.answer, withheld: plan.withheld, status: "completed" }));
+        updateTurn(path, turnId, (turn) => ({ ...turn, assistant: undefined, answer: plan.answer, answerCommit: plan.answerCommit,
+          private: plan.localAnswer || plan.workingContextUsed, localAnswer: plan.localAnswer, withheld: plan.withheld, status: "completed" }));
         return;
       }
       // Never unattended: a way out of a half-finished operation is always the user's call.
       updateTurn(path, turnId, (turn) => ({ ...turn, assistant: undefined }));
-      updateTurn(path, turnId, (turn) => ({ ...turn, plan, status: plan.allowed ? "ready" : "completed" }));
+      updateTurn(path, turnId, (turn) => ({ ...turn,
+        plan: plan.allowed ? { ...plan, requiresConfirmation: true } : plan, status: plan.allowed ? "ready" : "completed" }));
     } catch (error) {
       updateTurn(path, turnId, (turn) => turn.recovery
         ? { ...turn, assistant: "error" }
@@ -1252,7 +1283,7 @@ export default function App() {
       case "retry":
         if (turn.recoveryPlanId) {
           const planId = turn.recoveryPlanId;
-          await showPlan(t("recoveryRetryQuestion"), () => window.gitcat.prepareRetry(path, planId, locale), path);
+          await showPlan(t("recoveryRetryQuestion"), () => window.gitcat.prepareRetry(path, planId, locale), path, { localRecovery: turn.localRecovery });
         }
         return;
       case "inspect_changes": setFocus({ kind: "wip" }); setInspectorTab("details"); return;
@@ -1389,9 +1420,12 @@ export default function App() {
     updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, status: "executing" }));
     const project = projects.find((item) => item.snapshot.path === plan.repoPath);
     const before = project?.snapshot;
+    const remoteEdit = plan.operation === "edit_remote_url";
+    const localRecovery = remoteEdit || plan.recovery?.mode === "revert" || before?.pending?.kind === "revert";
     try {
       const result = await window.gitcat.executePlan(plan.repoPath, plan.id, locale);
-      const completion = completionSummary({ plan, outcomes: result.outcomes, before, after: result.snapshotStale ? undefined : result.snapshot, error: result.error, fetchedAt: project?.fetchedAt }, locale);
+      const completion = completionSummary({ plan, outcomes: result.outcomes, before, after: result.snapshotStale ? undefined : result.snapshot,
+        error: result.error, fetchedAt: remoteEdit ? undefined : project?.fetchedAt }, locale);
       if (!result.snapshotStale) updateSnapshot(plan.repoPath, result.snapshot);
       setReadinessEpoch((epoch) => epoch + 1);
       if (result.error) {
@@ -1416,7 +1450,7 @@ export default function App() {
           skipped: (result.outcomes ?? []).filter((outcome) => outcome.status === "skipped").map((outcome) => outcome.summary),
           planId: plan.id,
           stage: "execute"
-        });
+        }, localRecovery, plan.source === "llm");
       } else {
         // The model still reads what Git printed; the person reads what changed and what is left.
         const outcome = result.output || completion.headline;
@@ -1438,7 +1472,7 @@ export default function App() {
         skipped: plan.steps.map((step) => step.summary),
         planId: plan.id,
         stage: "execute"
-      });
+      }, localRecovery, plan.source === "llm");
     }
   };
 
@@ -1460,9 +1494,17 @@ export default function App() {
   };
 
   const submitInputDialog = () => {
-    if (!inputDialog?.value.trim()) return;
+    if (!inputDialog?.value.trim() || (inputDialog.operation === "edit_remote_url" && planning)) return;
     const value = inputDialog.value.trim();
     const operation = inputDialog.operation;
+    if (operation === "edit_remote_url") {
+      const { repoPath, remote, title } = inputDialog;
+      setInputDialog(undefined);
+      if (repoPath !== snapshot?.path) return;
+      void showPlan(title, () => window.gitcat.prepareOperation(repoPath, operation, { name: remote, url: value }, locale), repoPath,
+        { review: true, reveal: false, localRecovery: true });
+      return;
+    }
     const args: Record<string, string> = operation === "add_remote" ? { name: "origin", url: value }
       : operation === "rename_branch" && inputDialog.from ? { name: inputDialog.from, to: value }
       : operation === "create_branch" && inputDialog.from ? { name: value, from: inputDialog.from }
@@ -1491,7 +1533,14 @@ export default function App() {
   const ignoreFile = (file: FileChange) => {
     if (!snapshot || planning) return;
     const path = snapshot.path;
-    void showPlan(t("ignoreFutureChanges", { path: file.path }), () => window.gitcat.prepareOperation(path, "ignore_path", { path: file.path }, locale), path, true);
+    void showPlan(t("ignoreFutureChanges", { path: file.path }), () => window.gitcat.prepareOperation(path, "ignore_path", { path: file.path }, locale), path, { review: true });
+  };
+
+  const discardFile = (file: FileChange) => {
+    if (!snapshot || planning || !file.version) return;
+    const path = snapshot.path;
+    const args = { path: file.path, version: file.version };
+    void showPlan(t("discardFileChangesReview", { path: file.path }), () => window.gitcat.prepareOperation(path, "discard_file", args, locale), path, { review: true, reveal: false });
   };
 
   /** Suggestions are ordinary questions: the model answers them, in whatever language they arrive. */
@@ -1596,7 +1645,11 @@ export default function App() {
       entries.push({ key: "branch-here", icon: GitBranchPlus, label: t("createBranchHere"), onSelect: () => setInputDialog({ operation: "create_branch", title: t("newBranchFrom", { hash: commit.shortHash }), label: t("branchName"), value: "", from: commit.hash }) });
       entries.push({ key: "diff", icon: Maximize2, label: t("fullDiff"), onSelect: () => setModalCommit({ commit }) });
       entries.push({ key: "explain-commit", icon: MessageSquareText, label: t("explainCommit"), onSelect: () => ask(t("explainCommitQuestion", { hash: commit.shortHash, subject: commit.subject })), disabled: !config.configured, hint: assistantHint });
-      entries.push({ key: "revert", icon: Undo2, label: t("revertCommit"), onSelect: () => ask(t("revertCommitQuestion", { hash: commit.shortHash, subject: commit.subject, branch: current })), disabled: !config.configured, hint: assistantHint ?? t("revertCommitHint") });
+      entries.push({ key: "revert", icon: Undo2, label: t("revertCommit"), onSelect: () => {
+        const path = snapshot.path;
+        void showPlan(t("revertCommitReview", { hash: commit.shortHash }), () => window.gitcat.prepareRevertCommit(path, commit.hash, locale), path,
+          { review: true, reveal: false, localRecovery: true });
+      }, disabled: planning, hint: t("revertCommitHint") });
     }
 
     entries.push({ key: "copy-separator", separator: true });
@@ -1798,13 +1851,13 @@ export default function App() {
             {inspectorTab === "details" ? <div className="inspector-body">
               {activeFocus?.kind === "wip"
                 ? <ChangesView key={snapshot.path} readiness={readiness} snapshot={snapshot} delivery={delivery} configured={config.configured}
-                    busy={planning} onIgnore={ignoreFile} />
+                    busy={planning} onIgnore={ignoreFile} onDiscard={discardFile} />
                 : activeFocus?.kind === "worktree"
                   ? <WorktreeInspector worktree={snapshot.worktrees!.find(worktree => worktree.path === activeFocus.path)!} onOpen={() => void openWorktree(activeFocus.path)} />
                 : activeFocus
                   ? <CommitInspector key={activeFocus.commit.hash} commit={activeFocus.commit} snapshot={snapshot} known={graphCommits} onFocus={(commit) => focusOn({ kind: "commit", commit }, true)} onOpen={(file) => setModalCommit({ commit: activeFocus.commit, file })} />
                   : <div className="graph-empty"><GitCommitHorizontal size={26} /><strong>{t("noCommitSelected")}</strong><span>{t("noCommitSelectedHint")}</span></div>}
-            </div> : <div className="assistant-body">{config.configured ? <p className="assistant-copy">{t("assistantConfiguredCopy")}</p> : <AssistantSetupCard onConnect={openSettings} />}{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => void openSharingReview()} disabled={!config.configured}><Eye size={12} /> {t("sharingOpen")}</button><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} snapshot={snapshot} busy={planning} configured={config.configured} onRecoveryAction={(action) => void runRecoveryAction(turn.id, turn, action)} onApply={(plan) => void applyPlan(turn.id, plan)} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div>}
+            </div> : <div className="assistant-body">{config.configured ? <p className="assistant-copy">{t("assistantConfiguredCopy")}</p> : <AssistantSetupCard onConnect={openSettings} />}{conversation.length === 0 && config.configured && <div className="suggestion-list">{suggestionsFor(snapshot, t).map((suggestion) => <button key={suggestion.key} onClick={() => "question" in suggestion ? askSuggestion(suggestion.question) : setInputDialog(suggestion.dialog)} disabled={planning} title={"question" in suggestion ? suggestion.question : suggestion.label}><suggestion.icon size={15} /><span>{suggestion.label}</span></button>)}</div>}<div className="conversation-toolbar"><span>{conversation.length ? counted(t, conversation.length, "message", "messages") : t("newConversation")}</span><button onClick={() => void openSharingReview()} disabled={!config.configured}><Eye size={12} /> {t("sharingOpen")}</button><button onClick={() => setConversations((items) => ({ ...items, [snapshot.path]: [] }))} disabled={!conversation.length || planning}><Trash2 size={12} /> {t("clearConversation")}</button></div><div className="conversation" aria-live="polite">{conversation.map((turn) => <ConversationEntry key={turn.id} turn={turn} snapshot={snapshot} busy={planning} configured={config.configured} onRecoveryAction={(action) => void runRecoveryAction(turn.id, turn, action)} onApply={(plan) => void applyPlan(turn.id, plan)} onShowCommit={(commit) => setModalCommit({ commit })} onAskAssistant={turn.recoveryFailure && config.configured && !turn.answer && !turn.plan ? () => void consultRecovery(snapshot.path, turn.id, turn.recoveryFailure!) : undefined} onDismiss={() => updateTurn(snapshot.path, turn.id, (item) => ({ ...item, status: "cancelled", outcome: t("planDiscarded") }))} />)}<div ref={conversationEnd} /></div></div>}
             <div className="chat-compose"><textarea aria-label={t("assistantRequest")} disabled={!config.configured} value={request} onChange={(event) => setRequest(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void propose(request); } }} placeholder={config.configured ? t("assistantPlaceholder") : t("configureAssistantPlaceholder")} rows={2} /><button className="send-button" aria-label={t("prepareRequest")} onClick={() => void propose(request)} disabled={planning || !request.trim() || !config.configured}>{planning ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div>
           </aside>
         </main>
@@ -1814,14 +1867,14 @@ export default function App() {
       {shareReview && snapshot?.path===shareReview.path && <ShareReview snapshot={snapshot} head={shareReview.head} locale={locale} onClose={()=>setShareReview(undefined)} onUpdated={value=>updateSnapshot(value.path,value)} />}
       {switchWork && <SwitchWork key={`${switchWork.path}\0${switchWork.target}`} {...switchWork} locale={locale} onClose={()=>setSwitchWork(undefined)} onSave={()=>{setSwitchWork(undefined);beginDelivery(false);}} onPrepare={request=>{
         const path=switchWork.path;setSwitchWork(undefined);
-        void showPlan(locale==='es'?'Revisar trabajo sin terminar':'Review unfinished work',()=>window.gitcat.prepareSwitchWork(path,request,locale),path,true);
+        void showPlan(locale==='es'?'Revisar trabajo sin terminar':'Review unfinished work',()=>window.gitcat.prepareSwitchWork(path,request,locale),path,{ review: true });
       }} />}
       {worktreesPath && projects.find(project => project.snapshot.path === worktreesPath) && <Worktrees
         snapshot={projects.find(project => project.snapshot.path === worktreesPath)!.snapshot} locale={locale}
         onClose={() => setWorktreesPath(undefined)} onOpen={(next) => showWorktree(next, worktreesPath)} />}
       {historyPath && <ActivityHistory key={historyPath} path={historyPath} locale={locale} onClose={() => setHistoryPath(undefined)} onRecover={(id, mode) => {
         const path=historyPath; setHistoryPath(undefined);
-        void showPlan(locale === 'es' ? 'Revisar recuperación' : 'Review recovery', () => window.gitcat.prepareHistoryRecovery(path,id,mode,locale),path,true);
+        void showPlan(locale === 'es' ? 'Revisar recuperación' : 'Review recovery', () => window.gitcat.prepareHistoryRecovery(path,id,mode,locale),path,{ review: true, localRecovery: mode === "revert" });
       }} />}
       {deliveryReview && <DeliveryReviewModal review={deliveryReview} snapshot={projects.find((item) => item.snapshot.path === deliveryReview.plan.repoPath)?.snapshot} busy={planning}
         onClose={() => { updateTurn(deliveryReview.plan.repoPath, deliveryReview.turnId, (turn) => ({ ...turn, status: "cancelled", outcome: t("planDiscarded") })); delivery.setReview(undefined); }}
@@ -1829,10 +1882,14 @@ export default function App() {
       {setup && <SetupModal setup={setup} onClose={() => setSetup(undefined)} onChoose={(intent) => void openProject(intent)} onClone={() => setSetup({ kind: "clone" })}
         onStartTracking={() => void startTracking()} onOpenParent={() => void openParentProject()} onRemoteLogin={openSettings}
         onCloned={(project, empty) => showProject(project, { label: t("cloneDone", { name: project.name }), detail: empty ? t("cloneDoneEmpty", { name: project.name }) : project.path })} />}
-      {settingsOpen && <SettingsModal config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onConfigChange={setConfig}
+      {settingsOpen && <SettingsModal key={snapshot?.path} config={config} locale={locale} onLocaleChange={setLocale} onClose={() => setSettingsOpen(false)} onConfigChange={setConfig}
         onNotice={(message) => notify({ message, tone: "success" })}
         onSetAuthor={snapshot ? () => { setSettingsOpen(false); void openIdentityDialog(); } : undefined}
-        repoPath={snapshot?.path} readinessKey={readinessEpoch}
+        snapshot={snapshot} readinessKey={readinessEpoch}
+        onEditRemote={snapshot && !planning ? (remote) => {
+          setSettingsOpen(false);
+          setInputDialog({ operation: "edit_remote_url", title: t("editRemoteUrlTitle", { name: remote }), label: t("newRemoteAddress"), value: "", repoPath: snapshot.path, remote });
+        } : undefined}
         onConnectRemote={snapshot ? () => { setSettingsOpen(false); readinessActions.onConnectRemote?.(); } : undefined} />}
       {syncDialog && snapshot?.path === syncDialog.path && <SyncModal snapshot={snapshot} initial={syncDialog}
         onClose={() => setSyncDialog(undefined)}
@@ -3372,13 +3429,14 @@ function FileList({ files, stats, onOpen, selection }: { files: FileChange[]; st
  * the ticked files into a saved version. Unticked files are listed too, so leaving one out is a
  * visible decision rather than something that happens to it.
  */
-function ChangesView({ readiness, snapshot, delivery, busy, configured, onIgnore }: {
+function ChangesView({ readiness, snapshot, delivery, busy, configured, onIgnore, onDiscard }: {
   readiness: ReadinessState;
   snapshot: RepoSnapshot;
   delivery: ReturnType<typeof useCommitDelivery>;
   busy: boolean;
   configured: boolean;
   onIgnore: (file: FileChange) => void;
+  onDiscard: (file: FileChange) => void;
 }) {
   const { attention, excluded, generating, merge, message, selected, stale, suggestionOutdated, withheld } = delivery;
   const [preview, setPreview] = useState<"selected" | { path: string }>();
@@ -3416,6 +3474,8 @@ function ChangesView({ readiness, snapshot, delivery, busy, configured, onIgnore
         {(file || (preview === "selected" && selected.length > 0)) && <div className="selection-preview">
           <div className="diff-toolbar"><strong>{file?.path ?? t("selectedDiffTitle")}</strong><button className="icon-button" onClick={() => setPreview(undefined)} aria-label={t("closeDiffs")}><X size={14} /></button></div>
           <SaveDiff repoPath={snapshot.path} files={file ? [file] : selected} individual={Boolean(file)} />
+          {file && snapshot.head && !snapshot.pending && !snapshot.conflicts.length && canDiscardFileChange(file) &&
+            <button className="outline-button small discard-file" disabled={busy || generating} onClick={() => onDiscard(file)}>{t("discardFileChanges")}…</button>}
         </div>}
       </section>
       <div className="commit-form">
@@ -3431,7 +3491,10 @@ function ChangesView({ readiness, snapshot, delivery, busy, configured, onIgnore
         {stale && <div className="delivery-stale" role="alert">{t("filesChangedReview")} <button className="outline-button small" onClick={() => delivery.beginDelivery(merge, true)}>{t("reviewUpdatedFiles")}</button></div>}
         {!selected.length && <p className="file-inclusion-note selection-empty" role="status">{t("tickFilesToSave")}</p>}
         <div className="commit-form-actions">
-          <button className="primary-button" onClick={() => delivery.prepareCommit()} disabled={generating || busy}><ShieldCheck size={14} />{t(merge && canMerge ? "reviewSaveAndMerge" : "reviewSave")}</button>
+          <button className="primary-button" onClick={() => delivery.prepareCommit()} disabled={generating || busy}><Check size={14} />{
+            merge && canMerge ? t("reviewSaveAndMerge")
+              : selected.length ? t("saveSelectedFiles", { files: counted(t, selected.length, "file", "files") }) : t("saveChanges")
+          }</button>
         </div>
         <p className="file-inclusion-note">{t("selectedFilesNote")}</p>
       </div>
@@ -3511,20 +3574,22 @@ function DeliveryReviewModal({ review, snapshot, busy, onClose, onApply }: {
   const target = review.plan.selection?.target;
   const confirmLabel = save?.paths && snapshot ? t(target ? "confirmSelectedSaveAndMerge" : "confirmSelectedSave", {
     files: counted(t, save.paths.length, "file", "files"), branch: snapshot.currentBranch, target: target ?? ""
-  }) : undefined;
+  }) : review.plan.recovery?.mode === "revert" ? t("confirmRevertCommit")
+    : review.plan.operation === "discard_file" ? t("discardFileChanges")
+    : review.plan.operation === "edit_remote_url" ? t("saveRemoteAddress") : undefined;
   return <div className="modal-backdrop"><section className="modal delivery-review-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("reviewDeliveryTitle")}>
     <div className="modal-heading"><h2>{t("reviewDeliveryTitle")}</h2><button className="icon-button" onClick={onClose} aria-label={t("cancel")}><X size={18} /></button></div>
     <PlanCard plan={review.plan} snapshot={snapshot} busy={busy} onApply={onApply} onDismiss={onClose} confirmLabel={confirmLabel} />
   </section></div>;
 }
 
-function ConversationEntry({ turn, snapshot, busy, configured, onRecoveryAction, onApply, onDismiss }: {
-  turn: ConversationTurn; snapshot?: RepoSnapshot; busy: boolean; configured: boolean; onRecoveryAction: (action: RecoveryAction) => void; onApply: (plan: ActionPlan) => void; onDismiss: () => void;
+function ConversationEntry({ turn, snapshot, busy, configured, onRecoveryAction, onApply, onShowCommit, onAskAssistant, onDismiss }: {
+  turn: ConversationTurn; snapshot?: RepoSnapshot; busy: boolean; configured: boolean; onRecoveryAction: (action: RecoveryAction) => void; onApply: (plan: ActionPlan) => void; onShowCommit: (commit: Commit) => void; onAskAssistant?: () => void; onDismiss: () => void;
 }) {
   const { t } = useI18n();
   // A sequence reports itself step by step, marks included, so it needs no outer verdict icon or colour.
   const sequence = (turn.plan?.steps.length ?? 0) > 1;
-  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading" role="status"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && <p>{turn.answer}</p>}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} snapshot={snapshot} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.completion ? <CompletionCard summary={turn.completion} output={turn.output} /> : turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error" role="alert"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
+  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading" role="status"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} onAskAssistant={onAskAssistant} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && (turn.localAnswer ? <pre className="assistant-local-result">{turn.answer}</pre> : <p className="assistant-answer">{turn.answer}</p>)}{turn.answerCommit && <button type="button" className="ghost-button small" onClick={() => onShowCommit(turn.answerCommit!)}><FileDiff size={13} /> {t("fullDiff")} · {turn.answerCommit.shortHash}</button>}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} snapshot={snapshot} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.completion ? <CompletionCard summary={turn.completion} output={turn.output} /> : turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{turn.error && <div className="conversation-error" role="alert"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
 }
 
 
@@ -3554,8 +3619,9 @@ function recoveryActionDetail(action: RecoveryAction, facts: RecoveryReport["fac
  * is still safe and the ways on the repository supports. A real choice is asked as one focused
  * question with what each answer costs, and nothing is picked for the person.
  */
-function RecoveryCard({ report, assistant, kept, busy, configured, retryable, onAction }: {
+function RecoveryCard({ report, assistant, kept, busy, configured, retryable, onAction, onAskAssistant }: {
   report: RecoveryReport; assistant?: ConversationTurn["assistant"]; kept: boolean; busy: boolean; configured: boolean; retryable: boolean; onAction: (action: RecoveryAction) => void;
+  onAskAssistant?: () => void;
 }) {
   const { t } = useI18n();
   const { facts, kind } = report;
@@ -3600,7 +3666,12 @@ function RecoveryCard({ report, assistant, kept, busy, configured, retryable, on
       <strong>{t("recoveryChoicePrompt")}</strong>
       {report.choice.map((action, index) => <button key={`${action.kind}-${action.option ?? ""}-${index}`} className="recovery-option" disabled={busy || kept} onClick={() => onAction(action)}><span>{recoveryActionLabel(action, facts, t, configured)}</span>{recoveryActionDetail(action, facts, t) && <small>{recoveryActionDetail(action, facts, t)}</small>}</button>)}
     </div>}
-    {actions.length > 0 && <div className="recovery-actions" aria-label={t("recoveryNextHeading")}>{actions.map((action, index) => button(action, index, index === 0 && !report.choice))}</div>}
+    {(actions.length > 0 || onAskAssistant) && <div className="recovery-actions" aria-label={t("recoveryNextHeading")}>
+      {actions.map((action, index) => button(action, index, index === 0 && !report.choice))}
+      {onAskAssistant && <button className="ghost-button small recovery-ask-assistant" disabled={busy || kept || assistant === "consulting"} onClick={onAskAssistant}>
+        <Sparkles size={12} /> {t("askRecoveryAssistant")}
+      </button>}
+    </div>}
     {kept && <p className="recovery-note">{t("recoveryKept")}</p>}
     {assistant === "consulting" && <p className="recovery-note"><LoaderCircle className="spin" size={12} /> {t("recoveryAssistantConsulting")}</p>}
     {assistant && assistant !== "consulting" && <p className="recovery-note assistant-unavailable">{assistant === "not_shared" ? t("recoveryNotShared") : t(`recoveryAssistant_${assistant}` as MessageKey)}</p>}
@@ -3649,6 +3720,11 @@ function PlanCard({ plan, snapshot, onApply, onDismiss, busy, confirmLabel }: { 
   const asking = plan.kind === "question";
   const push = plan.allowed && plan.requiresConfirmation ? plan.steps.find((step) => step.operation === "push") : undefined;
   const directPush = push?.pushDestination?.urls.length && !push.pushDestination.remote;
+  const target = plan.steps.length === 1 ? push?.pushDestination : undefined;
+  const branch = target?.targetRef?.replace(/^refs\/heads\//, "");
+  const destination = target?.remote ? [target.remote, branch].filter(Boolean).join("/") : target?.urls.length === 1 ? target.urls[0] : undefined;
+  const label = confirmLabel ?? (destination ? t("publishToDestination", { destination })
+    : plan.operation === "discard_file" ? t("discardFileChanges") : t("confirmAction"));
   return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? t("interpretedByProvider") : t("directAction")}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? t("dismissQuestion") : t("dismissPlan")}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.withheld && plan.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(plan.withheld, t) })}</p>}
     {plan.allowed && <PlanGoal plan={plan} snapshot={snapshot} />}
     {plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}
@@ -3662,7 +3738,7 @@ function PlanCard({ plan, snapshot, onApply, onDismiss, busy, confirmLabel }: { 
     {/* A plan with nothing to confirm is already running, so it offers no button that could decide otherwise. */}
     {plan.allowed && !plan.requiresConfirmation
       ? <p className="plan-running"><LoaderCircle className="spin" size={12} /> {t("runningWithoutConfirmation")}</p>
-      : plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>{t("cancel")}</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {confirmLabel ?? t("confirmAction")}</button></div>
+      : plan.allowed ? <div className="plan-actions"><button className="ghost-button" onClick={onDismiss}>{t("cancel")}</button><button className="primary-button" onClick={() => void onApply()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} {label}</button></div>
       : asking ? <p className="plan-hint">{t("answerBelow")}</p>
       : <button className="ghost-button plan-close" onClick={onDismiss}>{t("understood")}</button>}</div>;
 }
@@ -3694,15 +3770,19 @@ type AiConnectionState = "none" | "verifying" | "connected" | "attention" | "fai
  * the three sign-ins people mix up. Connecting verifies the key and model with the provider before
  * anything is saved; a failure says why in plain words and can be retried from the same place.
  */
-function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange, onNotice, onSetAuthor, repoPath, readinessKey, onConnectRemote }: {
+function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange, onNotice, onSetAuthor, snapshot, readinessKey, onConnectRemote, onEditRemote }: {
   config: LlmConfig; locale: Locale; onLocaleChange: (locale: Locale) => void; onClose: () => void;
   onConfigChange: (config: LlmConfig) => void; onNotice: (message: string) => void; onSetAuthor?: () => void;
-  repoPath?: string; readinessKey?: number; onConnectRemote?: () => void;
+  snapshot?: RepoSnapshot; readinessKey?: number; onConnectRemote?: () => void;
+  onEditRemote?: (name: string) => void;
 }) {
   const { t } = useI18n();
   // The full readiness panel: with a project open, the remote is contacted too, read-only.
   const [checkedRemote, setCheckedRemote] = useState<string>();
-  const setupReadiness = useReadiness(repoPath, { access: Boolean(repoPath), remote: checkedRemote, key: readinessKey });
+  const remotes = snapshot?.remotes ?? [];
+  const remoteChoice = checkedRemote && remotes.includes(checkedRemote) ? checkedRemote : undefined;
+  const selectedRemote = remoteChoice ?? (snapshot && workOverview(snapshot).published.remote) ?? remotes[0];
+  const setupReadiness = useReadiness(snapshot?.path, { access: Boolean(snapshot), remote: remoteChoice, key: readinessKey });
   const parentActions = useContext(ReadinessActionsContext);
   const [apiKey, setApiKey] = useState("");
   const [modelChoice, setModelChoice] = useState<"recommended" | "custom">(isSupportedModel(config.model) ? "recommended" : "custom");
@@ -3795,8 +3875,16 @@ function SettingsModal({ config, locale, onLocaleChange, onClose, onConfigChange
     <section className="settings-section readiness-section" aria-labelledby="readiness-title">
       <h3 id="readiness-title">{t("readinessTitle")}</h3>
       <p className="settings-intro">{t("readinessIntro")}</p>
+      {selectedRemote && <div className="remote-settings-controls">
+        {remotes.length > 1 && <label className="readiness-remote-choice">{t("remoteSettingName")}
+          <select value={selectedRemote} onChange={(event) => setCheckedRemote(event.target.value)}>{remotes.map((name) => <option key={name} value={name}>{name}</option>)}</select>
+        </label>}
+        <button type="button" className="outline-button small edit-remote-url" disabled={!onEditRemote} onClick={() => onEditRemote?.(selectedRemote)}>
+          <PencilLine size={12} /> {t("editRemoteUrlTitle", { name: selectedRemote })}…
+        </button>
+      </div>}
       <ReadinessActionsContext.Provider value={{ ...parentActions, onSetIdentity: onSetAuthor, onConnectRemote }}>
-        <ReadinessChecklist readiness={setupReadiness} items={["git", "author", "remote"]} t={t} remoteChoice={{ value: checkedRemote, onChange: setCheckedRemote }} />
+        <ReadinessChecklist readiness={setupReadiness} items={["git", "author", "remote"]} t={t} />
       </ReadinessActionsContext.Provider>
     </section>
 
@@ -3903,12 +3991,25 @@ function InputModal({ dialog, branches, onChange, onClose, onSubmit }: { dialog:
   const { t } = useI18n();
   const dialogRef = useDialog(onClose);
   const creating = dialog.operation === "create_branch" || dialog.operation === "rename_branch";
+  const remote = dialog.operation === "add_remote" || dialog.operation === "edit_remote_url";
   const options = useMemo(
-    () => dialog.operation === "add_remote" ? [] : creating ? namingCompletions(branches) : branches.filter((branch) => !branch.isCurrent).map((branch) => branch.name),
-    [creating, branches, dialog.operation]
+    () => remote ? [] : creating ? namingCompletions(branches) : branches.filter((branch) => !branch.isCurrent).map((branch) => branch.name),
+    [creating, branches, remote]
   );
   const hint = useMemo(() => creating ? variantHint(dialog.value, branches) : undefined, [creating, dialog.value, branches]);
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="input-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="input-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><div className="modal-heading"><div><div className="eyebrow">{t("gitOperation")}</div><h2 id="input-modal-title">{dialog.title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div><label>{dialog.label}<input autoFocus value={dialog.value} onChange={(event) => onChange(event.target.value)} list={options.length ? "branch-options" : undefined} maxLength={200} /></label>{options.length > 0 && <datalist id="branch-options">{options.map((option) => <option value={option} key={option} />)}</datalist>}{hint && <p className="naming-hint" role="status"><Lightbulb size={12} /><span>{t("repositoryUses", { prefix: hint.canonical, count: counted(t, hint.count, "branch", "branches"), suggestion: `${hint.canonical}/…` })} <button type="button" onClick={() => onChange(`${hint.canonical}/${dialog.value.trim().slice(hint.typed.length + 1)}`)}><code>{hint.canonical}/…</code></button></span></p>}<div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button><button className="primary-button" disabled={!dialog.value.trim()}><GitBranch size={14} /> {t("prepare")}</button></div></form></div>;
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <form className="input-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="input-modal-title" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+      <div className="modal-heading"><div><div className="eyebrow">{t("gitOperation")}</div><h2 id="input-modal-title">{dialog.title}</h2></div><button type="button" className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button></div>
+      <label>{dialog.label}<input autoFocus value={dialog.value} onChange={(event) => onChange(event.target.value)}
+        list={options.length ? "branch-options" : undefined} maxLength={dialog.operation === "edit_remote_url" ? undefined : 200}
+        spellCheck={remote ? false : undefined} autoComplete={remote ? "off" : undefined} /></label>
+      {options.length > 0 && <datalist id="branch-options">{options.map((option) => <option value={option} key={option} />)}</datalist>}
+      {hint && <p className="naming-hint" role="status"><Lightbulb size={12} /><span>{t("repositoryUses", { prefix: hint.canonical, count: counted(t, hint.count, "branch", "branches"), suggestion: `${hint.canonical}/…` })} <button type="button" onClick={() => onChange(`${hint.canonical}/${dialog.value.trim().slice(hint.typed.length + 1)}`)}><code>{hint.canonical}/…</code></button></span></p>}
+      <div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>{t("cancel")}</button>
+        <button className="primary-button" disabled={!dialog.value.trim()}>{remote ? <Cloud size={14} /> : <GitBranch size={14} />} {t("prepare")}</button>
+      </div>
+    </form>
+  </div>;
 }
 
 function pendingLabel(kind: PendingOperationKind, t: Translate) {
@@ -4375,13 +4476,15 @@ function SharingDialog({ initial, paths, repoName, onAccept, onClose, onShowFile
     setBusy(true); setError(undefined);
     try { await onAccept(); } catch (reason) { setError(cleanError(reason, t("fallbackSharing"))); setBusy(false); }
   };
+  const historyOnly = preview.scope === "metadata";
   return <div className="modal-backdrop">
     <div className="commit-modal sharing-modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="sharing-title">
       <div className="modal-heading">
-        <div><div className="eyebrow">{t("sharingEyebrow")}</div><h2 id="sharing-title">{t(preview.acknowledged ? "sharingReviewTitle" : "sharingTitle", { name: repoName })}</h2></div>
+        <h2 id="sharing-title">{t(historyOnly ? "sharingHistoryTitle" : preview.acknowledged ? "sharingReviewTitle" : "sharingTitle", { name: repoName })}</h2>
         <button className="icon-button soft" onClick={onClose} aria-label={t("close")}><X size={17} /></button>
       </div>
-      <p className="sharing-copy">{t("sharingWhatLeaves", { provider: "OpenAI", model: preview.model, destination: preview.destination })}</p>
+      {historyOnly ? <p className="sharing-copy">{t("sharingHistoryCopy", { model: preview.model, destination: preview.destination })}</p> : <>
+      <p className="sharing-copy">{t("sharingWhatLeaves", { model: preview.model, destination: preview.destination })}</p>
       <p className="sharing-copy">{t(`sharingPurpose_${preview.purpose}` as MessageKey)}</p>
       <section className="sharing-section" aria-label={t("sharingFilesHeading")}>
         <span className="eyebrow">{t("sharingFilesHeading")}</span>
@@ -4411,14 +4514,16 @@ function SharingDialog({ initial, paths, repoName, onAccept, onClose, onShowFile
         </form>
         <small>{t("exclusionsHelp")}</small>
       </section>
-      <div className="modal-note"><ShieldCheck size={15} /><span>{t("secretDetectorLimits")} {t("sharingStorage")}</span></div>
-      <p className="file-inclusion-note">{t("sharingManualPath")}</p>
+      <details className="technical-details"><summary>{t("sharingEyebrow")}</summary>
+        <p>{t("secretDetectorLimits")} {t("sharingStorage")}</p>
+      </details>
       {preview.acknowledgedAt && <p className="file-inclusion-note">{t("sharingAgreedOn", { date: formatDateFull(preview.acknowledgedAt, locale) })}</p>}
+      </>}
       {error && <div className="modal-error" role="alert"><AlertTriangle size={14} />{error}</div>}
       <div className="modal-actions">
         {preview.acknowledged
           ? <button className="primary-button" onClick={onClose}><Check size={14} />{t("sharingDone")}</button>
-          : <><button className="ghost-button" onClick={onClose}>{t("sharingNotNow")}</button><button className="primary-button sharing-accept" onClick={() => void accept()} disabled={busy}><Check size={14} />{t("sharingAccept")}</button></>}
+          : <><button className="ghost-button" onClick={onClose}>{t("sharingNotNow")}</button><button className="primary-button sharing-accept" onClick={() => void accept()} disabled={busy}><Check size={14} />{t(historyOnly ? "sharingAllowHistory" : "sharingAccept")}</button></>}
       </div>
     </div>
   </div>;

@@ -237,6 +237,12 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
       case "ignore_path":
         summary.local.push(say(`Adds ${args.path} to .gitignore. The file stays on your disk.`, `Añade ${args.path} a .gitignore. El archivo se queda en tu disco.`));
         break;
+      case "discard_file":
+        summary.local.push(say(`Restores ${args.path} to its version in the latest commit.`, `Recupera la versión de ${args.path} guardada en el último commit.`));
+        summary.irreversible.push(args.staged === "true"
+          ? say("All unsaved changes to this file will be lost, including its staged changes.", "Se perderán todos los cambios sin guardar de este archivo, incluidos los cambios preparados.")
+          : say("The unsaved changes to this file will be lost.", "Se perderán los cambios sin guardar de este archivo."));
+        break;
       case "set_identity":
         summary.local.push(args.scope === "global"
           ? say(`Signs future commits in every repository on this computer as ${args.user} <${args.email}>.`, `Firma los próximos commits de todos los repositorios de este equipo como ${args.user} <${args.email}>.`)
@@ -244,6 +250,11 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         break;
       case "add_remote":
         summary.local.push(say(`Connects this project to ${args.url} as ${args.name}. Nothing is sent yet.`, `Conecta este proyecto con ${args.url} como ${args.name}. Todavía no se envía nada.`));
+        break;
+      case "edit_remote_url":
+        summary.local.push(say(
+          `Changes the download address from ${args.previousUrl} to ${args.url}.`,
+          `Cambia la dirección de descarga de ${args.previousUrl} a ${args.url}.`));
         break;
       case "push": {
         const branch = args.branch ?? on;
@@ -282,7 +293,10 @@ export function planSummary(plan: ActionPlan, snapshot?: RepoSnapshot, locale?: 
         break;
       }
       case "git_command":
-        if (work?.mode === "set_aside") {
+        if (plan.recovery?.mode === "revert") {
+          summary.local.push(say(`Adds a new commit on ${here} reversing the selected commit.`, `Añade en ${here} un commit nuevo que revierte el commit elegido.`));
+          summary.partial.push(say("If Git finds conflicting edits, you can resolve them or cancel the revert.", "Si Git encuentra cambios en conflicto, puedes resolverlos o cancelar la reversión."));
+        } else if (work?.mode === "set_aside") {
           const label = work.label?.trim();
           summary.local.push(work.includeUntracked
             ? say(`Sets aside tracked edits and new files in “${label}”, keeping staged versions for restoration.`, `Aparta los cambios en archivos seguidos y los archivos nuevos en «${label}» y conserva las versiones preparadas para restaurarlas.`)
@@ -448,6 +462,8 @@ function changes(plan: ActionPlan, outcomes: StepOutcome[], before: RepoSnapshot
     }
   }
   for (const remote of after.remotes.filter((name) => !before.remotes.includes(name))) lines.push(say(`Connected to ${remote}.`, `Se conectó con ${remote}.`));
+  for (const { step } of ran.filter(({ step }) => step.operation === "edit_remote_url")) lines.push(say(
+    `${step.args.name} now downloads from ${step.args.url}.`, `${step.args.name} ahora descarga desde ${step.args.url}.`));
   const current = now.get(after.currentBranch), previous = was.get(after.currentBranch);
   if (current && previous && current.behind > previous.behind) lines.push(say(`${remoteOf(current.upstream, after.remotes) ?? "The remote"} has ${commits(say, current.behind - previous.behind)} for ${after.currentBranch} you do not have yet.`, `${remoteOf(current.upstream, after.remotes) ?? "El remoto"} tiene ${commits(say, current.behind - previous.behind)} para ${after.currentBranch} que aún no tienes.`));
   if (before.changes.length !== after.changes.length) lines.push(say(`Uncommitted files: ${before.changes.length} before, ${after.changes.length} now.`, `Archivos sin guardar: ${before.changes.length} antes, ${after.changes.length} ahora.`));

@@ -100,7 +100,8 @@ export type SecretFinding = { path: string; line?: number; kind: SecretKind };
 export type WithheldFile = { path: string; reason: "excluded" | "likely_secret"; findings?: SecretFinding[] };
 
 /** What a request to the provider is for. Each one reads a different part of the repository. */
-export type AiSharingPurpose = "planning" | "description" | "conflicts" | "recovery";
+export type AiSharingPurpose = "planning" | "description" | "conflicts" | "recovery" | "working_changes";
+export type AiSharingScope = "metadata" | "changes";
 
 /**
  * What happens to one file in a request: its content is sent, sent because the person reviewed it,
@@ -119,6 +120,7 @@ export type AiSharingPreview = {
   acknowledged: boolean;
   acknowledgedAt?: string;
   purpose: AiSharingPurpose;
+  scope: AiSharingScope;
   /** Path patterns this repository never shares, stored on this computer rather than in the repository. */
   exclusions: string[];
   /** The files this request would read, and what happens to each one. */
@@ -422,10 +424,12 @@ export type Operation =
   | "github_create_repo"
   /** Adds one anchored line to .gitignore for an untracked file. Only a direct control prepares it; the model never can. */
   | "ignore_path"
+  | "discard_file"
   /** Sets the name and email commits are signed with, for this repository or globally (`scope`). Direct control only. */
   | "set_identity"
   /** Connects this repository to a remote address the person typed. Direct control only. */
   | "add_remote"
+  | "edit_remote_url"
   | "none";
 
 export type GitProtocol = "ssh" | "https";
@@ -509,6 +513,9 @@ export type ActionPlan = {
   summary: string;
   rationale: string;
   answer?: string;
+  answerCommit?: Commit;
+  /** Local query output that may be displayed but does not belong in a provider prompt. */
+  localAnswer?: boolean;
   effects?: string[];
   repositoryPlan?: RepositoryPlan;
   hostingConnection?: NativeHostingContext;
@@ -525,6 +532,9 @@ export type ActionPlan = {
   withheld?: WithheldFile[];
   /** Nothing was sent: the person has not yet agreed to share this repository with the assistant. */
   sharingRequired?: boolean;
+  /** The first, metadata-only request established that the answer needs unsaved file content. */
+  workingChangesRequired?: boolean;
+  workingContextUsed?: boolean;
   risk: "low" | "medium" | "high";
   requiresConfirmation: boolean;
   /** "question" is the assistant asking for something, not a failure; the interface must not dress it as one. */
@@ -989,7 +999,7 @@ export type GitlineApi = {
   /** Prepares, against a fresh read, only the steps of a stopped plan that never completed. */
   prepareRetry: (path: string, planId: string, locale?: Locale) => Promise<ActionPlan>;
   getWorkingFileDiff: (path: string, file: string) => Promise<CommitDetail>;
-  planAction: (path: string, request: string, context?: ConversationMessage[], locale?: Locale) => Promise<ActionPlan>;
+  planAction: (path: string, request: string, context?: ConversationMessage[], locale?: Locale, includeWorkingChanges?: boolean) => Promise<ActionPlan>;
   prepareOperation: (path: string, operation: Operation, args?: Record<string, string>, locale?: Locale) => Promise<ActionPlan>;
   prepareBranchDelivery: (path: string, request: DeliveryRequest, locale?: Locale) => Promise<ActionPlan>;
   prepareMergeToDefault: (path: string, branch: string, locale?: Locale) => Promise<ActionPlan>;
@@ -1011,6 +1021,7 @@ export type GitlineApi = {
   setActivityRetention: (days: number) => Promise<void>;
   clearActivityHistory: (path: string) => Promise<void>;
   prepareHistoryRecovery: (path: string, id: string, mode: HistoryRecovery['mode'], locale?: Locale) => Promise<ActionPlan>;
+  prepareRevertCommit: (path: string, commit: string, locale?: Locale) => Promise<ActionPlan>;
   suggestHistoryRecovery: (path: string, id: string, locale?: Locale) => Promise<HistoryRecoverySuggestion>;
   onOperationProgress: (listener: (progress: OperationProgress) => void) => () => void;
   listOperations: () => Promise<OperationProgress[]>;
@@ -1018,7 +1029,7 @@ export type GitlineApi = {
   executePlan: (path: string, planId: string, locale?: Locale) => Promise<ExecutionResult>;
   /** What a request to the assistant would send from this repository, and whether sharing was agreed. */
   getAiSharing: (path: string, purpose: AiSharingPurpose, paths?: string[], locale?: Locale) => Promise<AiSharingPreview>;
-  acknowledgeAiSharing: (path: string) => Promise<void>;
+  acknowledgeAiSharing: (path: string, scope: AiSharingScope) => Promise<void>;
   setAiSharingExclusions: (path: string, exclusions: string[], locale?: Locale) => Promise<string[]>;
   /** Shares one flagged file at its current version after the person reviewed it, or stops sharing it. */
   setAiSharingReview: (path: string, file: string, share: boolean, locale?: Locale) => Promise<void>;

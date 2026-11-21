@@ -118,6 +118,7 @@ app.whenReady().then(async () => {
     return service.suggestHistoryRecovery(p, id, locale);
   });
   ipcMain.handle('activity:recover', async (_, p, id, mode, locale) => planHandlers.rememberPlan(await service.prepareHistoryRecovery(p, id, mode, locale)));
+  ipcMain.handle('commit:prepare-revert', async (_, p, commit, locale) => planHandlers.rememberPlan(await service.prepareRevertCommit(p, commit, locale)));
   ipcMain.handle('activity:repair', () => service.repairActivityHistory());
   ipcMain.handle('activity:retention', (_, days) => service.setActivityRetention(days));
   ipcMain.handle('activity:clear', (_, p) => service.clearActivityHistory(p));
@@ -205,7 +206,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('commit:selection-diff', (_, p, paths, locale) => service.getSelectionDiff(p, paths, locale));
   // Sharing decisions are the real service's, kept in this disposable profile.
   ipcMain.handle('sharing:get', (_, p, purpose, paths, locale) => service.getAiSharing(p, purpose, paths, locale));
-  ipcMain.handle('sharing:acknowledge', (_, p) => service.acknowledgeAiSharing(p));
+  ipcMain.handle('sharing:acknowledge', (_, p, scope) => service.acknowledgeAiSharing(p, scope));
   ipcMain.handle('sharing:set-exclusions', (_, p, exclusions, locale) => service.setAiSharingExclusions(p, exclusions, locale));
   ipcMain.handle('sharing:review', (_, p, file, share, locale) => service.setAiSharingReview(p, file, share, locale));
   let recoverCalls = 0;
@@ -216,6 +217,18 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('action:prepare', async (_, p, operation, args, locale) => {
     return planHandlers.rememberPlan(await service.prepareOperation(p, operation, args, locale));
+  });
+  const assistantRequests = [];
+  ipcMain.handle('action:plan', async (_, p, question, _context, locale, includeWorkingChanges = false) => {
+    assistantRequests.push({ question, includeWorkingChanges });
+    const current = await service.getSnapshot(p);
+    const base = await service.prepareOperation(p, 'status', {}, locale);
+    if (question === 'Explica los cambios sin guardar' && !includeWorkingChanges) {
+      return { ...base, kind: 'question', allowed: false, steps: [], workingChangesRequired: true,
+        summary: 'Incluir cambios sin guardar', rationale: 'Necesito leer los cambios para explicarlos.' };
+    }
+    return { ...base, kind: 'question', steps: [], answer: 'El último merge integró el buscador.',
+      answerCommit: current.commits.find((commit) => commit.parents.length > 1) };
   });
 
   // Getting a first project in runs on the real setup service against disposable folders. The only
@@ -257,6 +270,8 @@ app.whenReady().then(async () => {
 
   // Hosted Macs may have a small display; still exercise the requested desktop sizes.
   const win = new BrowserWindow({ width: 1480, height: 940, show: false, enableLargerThanScreen: true, webPreferences: { backgroundThrottling: false, preload: path.join(root, 'electron/preload.cjs') } });
+  const { syncMacFullscreen } = await import(pathToFileURL(path.join(root, 'dist-electron/electron/window-chrome.js')));
+  syncMacFullscreen(win);
   const js = code => win.webContents.executeJavaScript(code).catch((error) => { if (process.env.GITCAT_UI_DEBUG) console.error('JS FAILED:', code.slice(0, 300)); throw error; });
   // A snapshot starts many Git processes in sequence. Hosted Windows runners can
   // take more than 20 seconds for a read; keep each wait bounded by a minute.
@@ -830,7 +845,7 @@ app.whenReady().then(async () => {
   await js(`(() => { const row = [...document.querySelectorAll('.commit-row')].find((node) => node.querySelector('.ref-tag')?.textContent === 'main'); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 600, clientY: 300 })); })()`);
   await waitFor(`document.querySelector('.context-menu')`);
   const menuText = await js(`document.querySelector('.context-menu').innerText`);
-  for (const entry of [/Cambiar a la rama main/, /Mover feature\/new-menu encima de main/, /Nueva rama desde este commit/, /Deshacer este commit/, /Copiar el hash/]) assert.match(menuText, entry);
+  for (const entry of [/Cambiar a la rama main/, /Mover feature\/new-menu encima de main/, /Nueva rama desde este commit/, /Revertir este commit/, /Copiar el hash/]) assert.match(menuText, entry);
   // main is already inside feature/new-menu, so a merge would bring nothing and is not offered.
   assert.doesNotMatch(menuText, /Fusionar main en/);
   assert.doesNotMatch(menuText, /Eliminar la rama main|Renombrar/, 'The default branch is never offered for deletion or renaming');
@@ -943,6 +958,36 @@ app.whenReady().then(async () => {
   await win.loadFile(path.join(root, 'dist/index.html'));
   await waitFor(`document.querySelector('.repo-toolbar .primary-button')`);
 
+  // History has its own short first-use consent; it never includes unsaved files.
+  await js(`document.querySelectorAll('.inspector-tabs button')[1].click()`);
+  const sendChat = async (message) => {
+    await js(`(() => {
+      const field = document.querySelector('.chat-compose textarea');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, ${JSON.stringify(message)});
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await js(`document.querySelector('.chat-compose .send-button').click()`);
+  };
+  await sendChat('¿Qué trajo el último merge?');
+  await waitFor(`document.querySelector('.sharing-modal')?.innerText.includes('historial y estado de Git')`);
+  assert.equal(assistantRequests.length, 0);
+  assert.equal(await js(`Boolean(document.querySelector('.sharing-modal .sharing-files'))`), false);
+  await js(`document.querySelector('.sharing-modal .sharing-accept').click()`);
+  await waitFor(`document.querySelector('.assistant-answer')?.innerText.includes('integró el buscador')`);
+  assert.deepEqual(assistantRequests, [{ question: '¿Qué trajo el último merge?', includeWorkingChanges: false }]);
+  assert.equal(await js(`Boolean(document.querySelector('.completion-card, .plan-actions'))`), false);
+  assert.match(await js(`document.querySelector('.conversation-turn .ghost-button').innerText`), /Diff completo/);
+
+  await sendChat('Explica los cambios sin guardar');
+  await waitFor(`document.querySelector('.sharing-modal .sharing-files')`);
+  assert.match(await js(`document.querySelector('.sharing-modal').innerText`), /Incluir cambios[\s\S]*app\.txt/);
+  await js(`document.querySelector('.sharing-modal .modal-actions .ghost-button').click()`);
+  await waitFor(`document.querySelector('.chat-compose textarea')?.value === 'Explica los cambios sin guardar'`);
+  assert.equal(assistantRequests.length, 2, 'Declining the larger scope sends no file content');
+  assert.ok(assistantRequests.every((request) => !request.includeWorkingChanges));
+  assert.equal(git('status', '--porcelain'), before);
+  await js(`document.querySelectorAll('.inspector-tabs button')[0].click()`);
+
   // Each listed file has its own tick; leaving one out is visible and the count follows.
   const rowFor = (name) => `[...document.querySelectorAll('.inspector .change-row')].find((node) => node.innerText.includes('${name}'))`;
   await waitFor(`${rowFor('new-file.txt')}?.querySelector('.change-include')`);
@@ -960,6 +1005,18 @@ app.whenReady().then(async () => {
   await capture('selected-diff');
   await js(`document.querySelector('.selection-preview .icon-button').click()`);
   await waitFor(`!document.querySelector('.selection-preview')`);
+  await js(`${rowFor('app.txt')}.querySelector('.change-open').click()`);
+  await waitFor(`document.querySelector('.selection-preview .discard-file')`);
+  await js(`document.querySelector('.selection-preview .discard-file').click()`);
+  await waitFor(`document.querySelector('.delivery-review-modal')`);
+  assert.match(await js(`document.querySelector('.delivery-review-modal').innerText`), /Descartar los cambios de app\.txt[\s\S]*Se perderán/);
+  await js(`document.querySelector('.delivery-review-modal .modal-heading .icon-button').click()`);
+  await waitFor(`!document.querySelector('.delivery-review-modal')`);
+  assert.equal(git('status', '--porcelain'), before, 'Cancelling the review keeps all edits');
+  await js(`${rowFor('new-file.txt')}.querySelector('.change-open').click()`);
+  await waitFor(`document.querySelector('.selection-preview .diff-toolbar strong')?.innerText === 'new-file.txt'`);
+  assert.equal(await js(`Boolean(document.querySelector('.selection-preview .discard-file'))`), false);
+  await js(`document.querySelector('.selection-preview .icon-button').click()`);
   // Ignoring an untracked file previews the exact .gitignore line and writes nothing until confirmed.
   await js(`${rowFor('new-file.txt')}.querySelector('.change-ignore').click()`);
   await waitFor(`document.querySelector('.delivery-review-modal')`);
@@ -993,7 +1050,7 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.commit-form-heading button').click()`);
   await waitFor(`document.querySelector('.sharing-modal')`);
   const disclosure = await js(`document.querySelector('.sharing-modal').innerText`);
-  for (const entry of [/Antes de que el asistente lea GitCat/, /OpenAI \([^,)]+, api\.openai\.com\)/, /app\.txt/, /Se envía/, /No compartir nunca de este repositorio/, /no demuestra que un repositorio sea seguro/, /No necesitas el asistente/]) assert.match(disclosure, entry);
+  for (const entry of [/Incluir cambios de GitCat/, /OpenAI \([^,)]+, api\.openai\.com\)/, /app\.txt/, /Se envía/, /No compartir nunca de este repositorio/]) assert.match(disclosure, entry);
   assert.doesNotMatch(disclosure, /new-file\.txt/, 'Only the ticked files are part of the description request');
   assert.equal(described.length, 0, 'Still nothing sent while the disclosure is open');
   await capture('sharing-disclosure');
@@ -1087,7 +1144,7 @@ app.whenReady().then(async () => {
   await js(`${recoveryEntry}.querySelector('.primary-button').click()`);
   await waitFor(`document.querySelector('.delivery-review-modal')`);
   assert.match(await js(`document.querySelector('.delivery-review-modal').innerText`), canUndoTip
-    ? /Deshacer el último guardado conservando los archivos/ : /Revertir el guardado con un nuevo commit/);
+    ? /Deshacer el último guardado conservando los archivos/ : /Crear commit de reversión/);
   assert.equal(git('rev-parse', 'HEAD'), tipBeforeRecoveryReview, 'Recommendations and their review leave history alone');
   await js(`document.querySelector('.delivery-review-modal .plan-actions .ghost-button').click()`);
   await waitFor(`!document.querySelector('.activity-history')`);
@@ -1128,6 +1185,7 @@ app.whenReady().then(async () => {
   const recoveryText = await js(`document.querySelector('.recovery-card[data-kind="no_remote"]').innerText`);
   for (const entry of [/aún no tiene dónde publicarse/, /Comprobado en este equipo/, /Se detuvo aquí/, /Tus commits están a salvo/, /Conectar un remoto/]) assert.match(recoveryText, entry);
   assert.equal(recoverCalls, 0, 'A failure GitCat can prove needs no assistant');
+  assert.match(await js(`document.querySelector('.recovery-ask-assistant')?.innerText`), /Pedir ayuda al asistente/);
   await js(`document.querySelector('.recovery-card').scrollIntoView()`);
   await capture('recovery-card');
   await js(`[...document.querySelectorAll('.recovery-card .recovery-actions button')].find((node) => node.innerText.includes('Conectar un remoto')).click()`);
@@ -1182,6 +1240,23 @@ app.whenReady().then(async () => {
   assert.equal(await js(`Boolean(document.querySelector('.secret-warning, .change-badge.secret'))`), false);
   assert.doesNotMatch(await js(`document.querySelector('.changes-view').innerText`), /posible secreto|Revisé estos archivos/);
   await capture('save-without-secret-warning');
+  // One explicit click saves only the selected file, without opening a second review.
+  fs.writeFileSync(path.join(repo, 'one-click.txt'), 'save only this\n');
+  await waitFor(`${rowFor('one-click.txt')} || (window.dispatchEvent(new Event('focus')), false)`);
+  await js(`${rowFor('.env')}.querySelector('.change-include').click()`);
+  await js(`(() => {
+    const field = document.querySelector('#commit-description');
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, 'Save one file');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await waitFor(`document.querySelector('.commit-form-actions .primary-button')?.innerText.includes('Guardar 1 archivo')`);
+  const saveBefore = git('rev-parse', 'HEAD');
+  await js(`document.querySelector('.commit-form-actions .primary-button').click()`);
+  for (let attempt = 0; attempt < 100 && git('rev-parse', 'HEAD') === saveBefore; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(git('log', '-1', '--format=%s'), 'Save one file');
+  assert.equal(git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'), 'one-click.txt');
+  assert.equal(git('status', '--porcelain'), '?? .env');
+  assert.equal(await js(`Boolean(document.querySelector('.delivery-review-modal'))`), false);
 
   // A merge that stopped on a text conflict, a modify/delete and a binary file, with no assistant
   // configured: the resolver explains both versions by name and settles everything on its own.
@@ -1266,6 +1341,37 @@ app.whenReady().then(async () => {
   assert.match(await js(`document.querySelector('.assistant-setup').innerText`), /Conecta un asistente de IA para preguntar con tus propias palabras/);
   assert.equal(await js(`document.querySelector('.chat-compose textarea').disabled`), true);
   await capture('assistant-not-connected');
+
+  // A historical commit made outside GitCat can be reverted even with no provider configured.
+  cwrite('revert-only.txt', 'temporary content\n');
+  cgit('add', 'revert-only.txt'); cgit('commit', '-qm', 'Archivo temporal');
+  const targetToRevert = cgit('rev-parse', 'HEAD');
+  cwrite('keep.txt', 'independent content\n');
+  cgit('add', 'keep.txt'); cgit('commit', '-qm', 'Archivo que se conserva');
+  const beforeRevert = await service.getSnapshot(conflictRepo);
+  restored = { projects: [beforeRevert], unavailable: [], order: [beforeRevert.path], activePath: beforeRevert.path };
+  await win.loadFile(path.join(root, 'dist/index.html'));
+  const revertRow = `document.querySelector('.commit-row[data-hash="${targetToRevert}"]')`;
+  const showRevert = async () => {
+    await waitFor(revertRow);
+    await js(`${revertRow}.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 600, clientY: 300 }))`);
+    await waitFor(`document.querySelector('.context-menu [data-action="revert"]:enabled')`);
+    await js(`document.querySelector('.context-menu [data-action="revert"]').click()`);
+    await waitFor(`document.querySelector('.delivery-review-modal')`);
+  };
+  await showRevert();
+  assert.match(await js(`document.querySelector('.delivery-review-modal').innerText`), /Archivo temporal[\s\S]*commit nuevo/);
+  assert.equal(await js(`Boolean(document.querySelector('.sharing-modal'))`), false);
+  assert.equal(cgit('rev-parse', 'HEAD'), beforeRevert.head);
+  await js(`document.querySelector('.delivery-review-modal .plan-actions .ghost-button').click()`);
+  await waitFor(`!document.querySelector('.delivery-review-modal')`);
+  assert.equal(cgit('rev-parse', 'HEAD'), beforeRevert.head);
+  await showRevert();
+  await js(`document.querySelector('.delivery-review-modal .plan-actions .primary-button').click()`);
+  for (let attempt = 0; attempt < 100 && cgit('rev-parse', 'HEAD') === beforeRevert.head; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(cgit('rev-parse', 'HEAD^'), beforeRevert.head);
+  assert.equal(fs.existsSync(path.join(conflictRepo, 'revert-only.txt')), false);
+  assert.equal(fs.readFileSync(path.join(conflictRepo, 'keep.txt'), 'utf8'), 'independent content\n');
 
   // A fresh profile: nothing saved, no provider. Opening a project is the first thing offered.
   restored = { projects: [], unavailable: [], order: [] };
@@ -1535,6 +1641,44 @@ app.whenReady().then(async () => {
   await js(`document.querySelector('.settings-modal .readiness-section').scrollIntoView()`);
   await capture('settings-readiness-remote');
   await js(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))`);
+  await waitFor(`!document.querySelector('.settings-modal')`);
+
+  const emptyClone = path.join(cloneParent, 'empty-start');
+  const emptyGit = (...args) => execFileSync('git', args, { cwd: emptyClone, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const newRemoteAddress = path.join(setupRoot, 'new address.git');
+  execFileSync('git', ['init', '-q', '--bare', newRemoteAddress]);
+  emptyGit('remote', 'add', 'mirror', emptyRemote);
+  await refreshStatus();
+  await waitFor(`document.querySelector('.remote-status')?.innerText.includes('+1')`);
+  const reviewRemoteEdit = async () => {
+    await js(`document.querySelector('.top-actions .icon-button:last-child').click()`);
+    await waitFor(`document.querySelector('.remote-settings-controls select option[value="mirror"]')`);
+    await js(`(() => {
+      const select = document.querySelector('.remote-settings-controls select');
+      select.value = 'mirror';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor(`document.querySelector('.edit-remote-url')?.innerText.includes('mirror')`);
+    await js(`document.querySelector('.edit-remote-url').click()`);
+    await waitFor(`document.querySelector('.input-modal h2')?.innerText === 'Editar la URL de mirror'`);
+    await setText('.input-modal input', newRemoteAddress);
+    await js(`document.querySelector('.input-modal .primary-button').click()`);
+    await waitFor(`document.querySelector('.delivery-review-modal')`);
+    const review = await js(`document.querySelector('.delivery-review-modal').innerText`);
+    assert.match(review, /Cambiar la dirección de mirror[\s\S]*empty-remote\.git[\s\S]*new address\.git/);
+    assert.equal(emptyGit('remote', 'get-url', 'mirror'), emptyRemote);
+  };
+  await reviewRemoteEdit();
+  await js(`document.querySelector('.delivery-review-modal .plan-actions .ghost-button').click()`);
+  await waitFor(`!document.querySelector('.delivery-review-modal')`);
+  assert.equal(emptyGit('remote', 'get-url', 'mirror'), emptyRemote);
+  await reviewRemoteEdit();
+  await js(`document.querySelector('.delivery-review-modal .plan-actions .primary-button').click()`);
+  await waitFor(`document.querySelector('.remote-status')?.getAttribute('title').includes('new address.git')`);
+  assert.equal(emptyGit('remote', 'get-url', 'mirror'), newRemoteAddress);
+  assert.equal(emptyGit('remote', 'get-url', '--push', 'mirror'), newRemoteAddress);
+  assert.equal(emptyGit('remote', 'get-url', 'origin'), emptyRemote);
+
   await js(`document.querySelector('[aria-label="Crear proyecto de práctica desechable"]').click()`);
   await waitFor(`document.querySelector('.practice-guide')`);
   assert.match(await js(`document.querySelector('.practice-guide').innerText`),/sin remoto[\s\S]*no necesita IA/);
@@ -1718,6 +1862,24 @@ app.whenReady().then(async () => {
   assert.equal(await js(`document.querySelector('#commit-description').value`), '');
   secondDescription.resolve('Description from the second tab');
   await waitFor(`document.querySelector('#commit-description:not(:disabled)')?.value === 'Description from the second tab'`);
+
+  if (process.platform === 'darwin') {
+    const titleBar = `document.querySelector('.topbar')`;
+    const style = `getComputedStyle(${titleBar})`;
+    const normalInset = `${style}.paddingLeft === '88px'`;
+    const fullscreenInset = `${titleBar} && ${style}.paddingLeft === ${style}.paddingRight`;
+    assert.equal(await js(normalInset), true, 'The native controls have room in windowed mode');
+    win.show();
+    win.setFullScreen(true);
+    await waitFor(fullscreenInset);
+    assert.equal(win.isFullScreen(), true);
+    await win.loadFile(path.join(root, 'dist/index.html'));
+    await waitFor(fullscreenInset);
+    win.setFullScreen(false);
+    await waitFor(normalInset);
+    assert.equal(win.isFullScreen(), false);
+    console.log('PASS: the logo follows native macOS fullscreen state across entry, reload, and exit.');
+  }
 
   win.destroy();
   console.log('PASS: worktree list, safe opening with separate edits and tree tab badges; unavailable saved project kept with retry, graph with work in progress, commit details, context menus, collapsible branch panel, compact layout, stable notifications, a work overview separating edited, saved, integrated and published work with one next step, readiness before a publish and the first save (Git, author, remote), a reviewed global identity written only to an isolated config, per-file include/exclude with selected diff and description, previewed .gitignore rule, AI sharing disclosure before the first description, reviewed save and integration, failed push recovered without the assistant, double-click checkout, background refresh, saving without secret warnings, guided conflict resolution without an assistant, fresh profile opening straight to projects with a guided AI connection (invalid key, unknown model, outage retry, unavailable secure storage), three ways to start with a start-tracking preview and first-save guidance, clone address checks, occupied destination, cancelled clone cleanup, and an empty cloned repository.');

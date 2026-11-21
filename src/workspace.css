@@ -308,10 +308,13 @@
 .delivery-option input { accent-color: var(--coral); }
 .commit-form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .save-preview { margin-top: 10px; }
+.assistant-answer, .assistant-local-result { white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant-local-result { max-height: 280px; overflow: auto; margin: 0; font-size: 11px; line-height: 1.5; }
 .save-preview > .ghost-button { display: inline-flex; align-items: center; gap: 6px; }
 .save-preview .diff-view { margin-top: 4px; }
 .save-preview .diff-view pre { max-height: 28vh; }
 .save-preview .diff-toolbar strong { overflow-wrap: anywhere; }
+.save-preview .discard-file { margin-top: 6px; }
 .commit-form-actions .primary-button { flex: 1 1 160px; }
 .file-inclusion-note { margin: 10px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.55; }
 .save-description-required { color: var(--amber); }
@@ -604,6 +607,7 @@
 .readiness-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; margin-left: -8px; }
 .readiness-remote-choice { display: flex; align-items: center; gap: 6px; margin: 3px 0 0; color: var(--muted); font-size: 10.5px; }
 .readiness-remote-choice select { width: auto; padding: 2px 6px; font-size: 10.5px; }
+.remote-settings-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .readiness-loading, .readiness-error { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; color: var(--muted); }
 .readiness-error { color: #e4b479; }
 .readiness-checklist .recovery-detail { margin: 3px 0 0; }

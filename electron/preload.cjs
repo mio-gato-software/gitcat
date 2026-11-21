@@ -1,5 +1,11 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+if (process.platform === "darwin") {
+  ipcRenderer.on("window:fullscreen", (_event, fullscreen) => {
+    globalThis.document.documentElement?.toggleAttribute("data-native-fullscreen", fullscreen);
+  });
+}
+
 contextBridge.exposeInMainWorld("gitcat", {
   platform: process.platform,
   openWorktree: (path, target, locale) => ipcRenderer.invoke("worktree:open", path, target, locale),
@@ -18,6 +24,7 @@ contextBridge.exposeInMainWorld("gitcat", {
   setActivityRetention: (days) => ipcRenderer.invoke("activity:retention", days),
   clearActivityHistory: (path) => ipcRenderer.invoke("activity:clear", path),
   prepareHistoryRecovery: (path, id, mode, locale) => ipcRenderer.invoke("activity:recover", path, id, mode, locale),
+  prepareRevertCommit: (path, commit, locale) => ipcRenderer.invoke("commit:prepare-revert", path, commit, locale),
   suggestHistoryRecovery: (path, id, locale) => ipcRenderer.invoke("activity:suggest-recovery", path, id, locale),
   onOperationProgress: (listener) => {
     const receive = (_event, progress) => listener(progress);
@@ -57,7 +64,7 @@ contextBridge.exposeInMainWorld("gitcat", {
   describeFailure: (path, failure) => ipcRenderer.invoke("action:describe-failure", path, failure),
   prepareRetry: (path, planId, locale) => ipcRenderer.invoke("action:prepare-retry", path, planId, locale),
   getWorkingFileDiff: (path, file) => ipcRenderer.invoke("commit:file-diff", path, file),
-  planAction: (path, request, context, locale) => ipcRenderer.invoke("action:plan", path, request, context, locale),
+  planAction: (path, request, context, locale, includeWorkingChanges) => ipcRenderer.invoke("action:plan", path, request, context, locale, includeWorkingChanges),
   prepareOperation: (path, operation, args, locale) => ipcRenderer.invoke("action:prepare", path, operation, args, locale),
   prepareBranchDelivery: (path, request, locale) => ipcRenderer.invoke("action:prepare-delivery", path, request, locale),
   prepareMergeToDefault: (path, branch, locale) => ipcRenderer.invoke("action:prepare-merge-to-default", path, branch, locale),
@@ -65,7 +72,7 @@ contextBridge.exposeInMainWorld("gitcat", {
   getSelectionDiff: (path, paths, locale) => ipcRenderer.invoke("commit:selection-diff", path, paths, locale),
   executePlan: (path, planId, locale) => ipcRenderer.invoke("action:execute", path, planId, locale),
   getAiSharing: (path, purpose, paths, locale) => ipcRenderer.invoke("sharing:get", path, purpose, paths, locale),
-  acknowledgeAiSharing: (path) => ipcRenderer.invoke("sharing:acknowledge", path),
+  acknowledgeAiSharing: (path, scope) => ipcRenderer.invoke("sharing:acknowledge", path, scope),
   setAiSharingExclusions: (path, exclusions, locale) => ipcRenderer.invoke("sharing:set-exclusions", path, exclusions, locale),
   setAiSharingReview: (path, file, share, locale) => ipcRenderer.invoke("sharing:review", path, file, share, locale),
   getLlmConfig: () => ipcRenderer.invoke("llm:get-config"),

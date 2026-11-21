@@ -126,7 +126,7 @@ test("nothing is sent before the person agrees, and every entry point says so", 
 
   // The preview is what the disclosure shows: every file this request would read, and its fate.
   await service.setAiSharingExclusions(repo, ["private/"]);
-  const preview = await service.getAiSharing(repo, "planning");
+  const preview = await service.getAiSharing(repo, "working_changes");
   assert.equal(preview.acknowledged, false);
   assert.equal(preview.destination, "api.openai.com");
   const status = Object.fromEntries(preview.files.map((file) => [file.path, file.status]));
@@ -136,13 +136,46 @@ test("nothing is sent before the person agrees, and every entry point says so", 
   assert.equal(requests.length, 0);
 });
 
+test("history uses no file content by default, and metadata consent cannot authorize a working diff", async () => {
+  const { repo } = fixture();
+  await service.acknowledgeAiSharing(repo, "metadata");
+  service.loadMemory();
+  const history = await service.getAiSharing(repo, "planning");
+  assert.equal(history.scope, "metadata");
+  assert.equal(history.acknowledged, true);
+  assert.deepEqual(history.files, []);
+  assert.equal((await service.getAiSharing(repo, "working_changes")).acknowledged, false);
+  assert.equal((await service.planAction(repo, "Explain the patch", [], "en", true)).sharingRequired, true);
+  await assert.rejects(() => service.generateCommitDescription(repo, "en", ["notes.md"]), /Nothing was sent/);
+  assert.equal(requests.length, 0);
+
+  queue.push(plan({ intent: "needs_working_changes", reply: "I need to see the file changes to explain them." }));
+  const first = await service.planAction(repo, "Explain the patch", [], "en");
+  assert.equal(first.workingChangesRequired, true);
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].instructions, /"workingTreeDiff": null/);
+  assert.doesNotMatch(sent(), /ordinary-visible-change|internal-roadmap-do-not-share/);
+
+  await service.acknowledgeAiSharing(repo, "changes");
+  service.loadMemory();
+  assert.equal((await service.getAiSharing(repo, "working_changes")).acknowledged, true);
+  queue.push(plan({ reply: "Notes changed." }));
+  const answer = await service.planAction(repo, "Explain the patch", [], "en", true);
+  assert.equal(answer.workingContextUsed, true);
+  assert.match(requests[1].instructions, /ordinary-visible-change/);
+  queue.push(plan({ reply: "You are on main." }));
+  await service.planAction(repo, "What branch am I on?", [], "en");
+  assert.doesNotMatch(requests[2].instructions, /ordinary-visible-change/);
+  assertNoSecrets(sent(), "separately permitted diff");
+});
+
 test("planning sends placeholders for excluded and secret files and tells the planner and the person", async () => {
   const { repo } = fixture();
   await service.setAiSharingExclusions(repo, ["private/"]);
   await service.acknowledgeAiSharing(repo);
   queue.push(plan({ reply: "Only notes.md is readable." }));
   const context = [{ role: "user", content: `remember ${GITHUB}` }, { role: "assistant", content: "ok" }];
-  const result = await service.planAction(repo, `explain my changes, my key is ${OPENAI}`, context, "en");
+  const result = await service.planAction(repo, `explain my changes, my key is ${OPENAI}`, context, "en", true);
   assert.equal(result.answer, "Only notes.md is readable.");
   assert.equal(requests.length, 1);
   assertNoSecrets(sent(), "planning request");
@@ -167,7 +200,12 @@ test("a planned commit filters outbound content without adding secret warnings t
   await service.acknowledgeAiSharing(repo);
   queue.push(plan({ intent: "git_operation", steps: [step("commit")], summary: "Commit", rationale: "…", risk: "high", reply: "" }));
   queue.push("Update notes and configuration");
-  const result = await service.planAction(repo, "commit everything", [], "en");
+  const unapproved = await service.planAction(repo, "commit everything", [], "en");
+  assert.equal(unapproved.workingChangesRequired, true);
+  assert.equal(requests.length, 1, "automatic commit text cannot silently fetch the diff");
+  requests.length = 0;
+  queue.unshift(plan({ intent: "git_operation", steps: [step("commit")], summary: "Commit", risk: "high", reply: "" }));
+  const result = await service.planAction(repo, "commit everything", [], "en", true);
   assert.equal(requests.length, 2);
   assertNoSecrets(sent(), "commit description request");
   assert.match(requests[1].input, /GitCat withheld the content of id_ed25519/);
@@ -198,14 +236,14 @@ test("a reviewed file is shared at the version that was reviewed, and an edit as
   const { repo } = fixture();
   await service.acknowledgeAiSharing(repo);
   await service.setAiSharingReview(repo, "config.js", true);
-  const preview = await service.getAiSharing(repo, "planning");
+  const preview = await service.getAiSharing(repo, "working_changes");
   assert.equal(preview.files.find((file) => file.path === "config.js").status, "reviewed");
   queue.push("Add the access key");
   await service.generateCommitDescription(repo, "en", ["config.js"]);
   assert.match(requests[0].input, new RegExp(AWS), "the person chose to share this one");
 
   writeFileSync(join(repo, "config.js"), `export const accessKey = "${AWS}";\n// edited\n`);
-  const again = await service.getAiSharing(repo, "planning");
+  const again = await service.getAiSharing(repo, "working_changes");
   assert.equal(again.files.find((file) => file.path === "config.js").status, "likely_secret");
 });
 
@@ -220,7 +258,7 @@ test("recovery redacts credentials that a failure printed", async () => {
   assert.equal(result.kind, "question");
   assertNoSecrets(sent(), "recovery request");
   assert.match(requests[0].instructions, /withheld by GitCat: looks like a GitHub token/);
-  assert.match(requests[0].instructions, /GitCat withheld the content of \.env/);
+  assert.doesNotMatch(requests[0].instructions, /ordinary-visible-change/);
 });
 
 test("conflict proposals never send excluded or secret files, and say why they were skipped", async () => {
@@ -300,7 +338,7 @@ test("removed credentials are still withheld from AI requests", async () => {
   git("add", "-A"); git("commit", "-qm", "oops");
   writeFileSync(join(repo, "config.js"), "export const accessKey = process.env.ACCESS_KEY;\n");
   // It still leaves the computer in the diff's removed line, so the assistant does not read it.
-  assert.equal((await service.getAiSharing(repo, "planning")).files[0].status, "likely_secret");
+  assert.equal((await service.getAiSharing(repo, "working_changes")).files[0].status, "likely_secret");
 });
 
 test("output of a command aimed at a withheld file stays out of the conversation", async () => {
@@ -309,12 +347,16 @@ test("output of a command aimed at a withheld file stays out of the conversation
   await service.acknowledgeAiSharing(repo);
   queue.push(plan({ intent: "git_operation", steps: [step("git_command", {}, ["show", "HEAD:.env"])], summary: "Show", reply: "" }));
   const reading = await service.planAction(repo, "show me .env", [], "en");
-  assert.equal(reading.requiresConfirmation, true);
-  const execution = await service.executePlan(repo, reading, "en");
-  assert.equal(execution.withheldFromAssistant, true);
+  assert.equal(reading.requiresConfirmation, false);
+  assert.equal(reading.localAnswer, true);
+  assert.match(reading.answer, /DATABASE_PASSWORD/);
+  assert.equal(requests.length, 1, "source text stays local");
+  assertNoSecrets(sent(), "local query history");
   queue.push(plan({ intent: "git_operation", steps: [step("git_command", {}, ["log", "-1", "--format=%s"])], summary: "Log", reply: "" }));
-  const harmless = await service.executePlan(repo, await service.planAction(repo, "last subject", [], "en"), "en");
-  assert.equal(harmless.withheldFromAssistant, undefined);
+  queue.push("The latest subject is add env.");
+  const harmless = await service.planAction(repo, "last subject", [], "en");
+  assert.equal(harmless.localAnswer, undefined);
+  assert.match(harmless.answer, /add env/);
 });
 
 test("sharing choices are remembered per repository, sanitized and moved with the project", () => {
@@ -347,7 +389,7 @@ test("the interface asks before the first content-bearing request and keeps the 
   assert.doesNotMatch(app, /secret-warning|secretBadge|secretsReviewed|scanChangesForSecrets/);
   assert.doesNotMatch(main + preload, /changes:scan-secrets|scanChangesForSecrets/);
   assert.match(app, /t\("secretDetectorLimits"\)/);
-  assert.match(app, /turn\.private && \(turn\.error \|\| turn\.outcome\) \? privateOutputNote/);
+  assert.match(app, /turn\.private \|\| turn\.plan\?\.workingContextUsed \? privateOutputNote/);
   for (const channel of ["sharing:get", "sharing:acknowledge", "sharing:set-exclusions", "sharing:review"]) {
     assert.match(main, new RegExp(`ipcMain\\.handle\\("${channel}", \\(event[^)]*\\) => \\{\\n    assertTrustedSender\\(event\\);`));
     assert.match(preload, new RegExp(`ipcRenderer\\.invoke\\("${channel}"`));
