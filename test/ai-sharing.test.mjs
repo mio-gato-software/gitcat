@@ -43,7 +43,7 @@ test.beforeEach(() => { queue.length = 0; requests.length = 0; });
 
 const step = (operation, args = {}, argv = []) => ({ operation, argv, args: { name: "", onto: "", to: "", path: "", side: "", message: "", noVerify: "", ...args } });
 const plan = (overrides) => ({
-  intent: "answer", steps: [],
+  intent: "answer", steps: [], reads: [{ kind: "repository", args: ["active_branch"] }],
   repository: { localPath: "", repository: "", owner: "", host: "", protocol: "", sshHost: "", remote: "", push: true, replaceRemote: false },
   summary: "s", rationale: "r", reply: "ok", risk: "low", ...overrides
 });
@@ -159,11 +159,11 @@ test("history uses no file content by default, and metadata consent cannot autho
   await service.acknowledgeAiSharing(repo, "changes");
   service.loadMemory();
   assert.equal((await service.getAiSharing(repo, "working_changes")).acknowledged, true);
-  queue.push(plan({ reply: "Notes changed." }));
+  queue.push(plan({ reads: [{ kind: "git", args: ["diff", "--stat"] }] }));
   const answer = await service.planAction(repo, "Explain the patch", [], "en", true);
   assert.equal(answer.workingContextUsed, true);
   assert.match(requests[1].instructions, /ordinary-visible-change/);
-  queue.push(plan({ reply: "You are on main." }));
+  queue.push(plan());
   await service.planAction(repo, "What branch am I on?", [], "en");
   assert.doesNotMatch(requests[2].instructions, /ordinary-visible-change/);
   assertNoSecrets(sent(), "separately permitted diff");
@@ -173,10 +173,11 @@ test("planning sends placeholders for excluded and secret files and tells the pl
   const { repo } = fixture();
   await service.setAiSharingExclusions(repo, ["private/"]);
   await service.acknowledgeAiSharing(repo);
-  queue.push(plan({ reply: "Only notes.md is readable." }));
+  queue.push(plan({ reads: [{ kind: "repository", args: ["working_tree"] }] }));
   const context = [{ role: "user", content: `remember ${GITHUB}` }, { role: "assistant", content: "ok" }];
   const result = await service.planAction(repo, `explain my changes, my key is ${OPENAI}`, context, "en", true);
-  assert.equal(result.answer, "Only notes.md is readable.");
+  assert.match(result.answer, /notes\.md/);
+  assert.equal(result.localAnswer, true, "excluded file names in the local answer stay out of follow-ups");
   assert.equal(requests.length, 1);
   assertNoSecrets(sent(), "planning request");
   assert.equal(sent().includes(EXCLUDED_TEXT), false, "excluded content never leaves");
@@ -353,9 +354,9 @@ test("output of a command aimed at a withheld file stays out of the conversation
   assert.equal(requests.length, 1, "source text stays local");
   assertNoSecrets(sent(), "local query history");
   queue.push(plan({ intent: "git_operation", steps: [step("git_command", {}, ["log", "-1", "--format=%s"])], summary: "Log", reply: "" }));
-  queue.push("The latest subject is add env.");
   const harmless = await service.planAction(repo, "last subject", [], "en");
-  assert.equal(harmless.localAnswer, undefined);
+  assert.equal(harmless.localAnswer, true);
+  assert.equal(requests.length, 2, "Git results stay local after the planning request");
   assert.match(harmless.answer, /add env/);
 });
 

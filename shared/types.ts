@@ -12,9 +12,9 @@ export type Branch = {
   remoteBehind?: number;
   presence: BranchPresence;
   /**
-   * Reference branches whose history already contains this branch's tip, so its work is integrated
-   * there and deleting it loses nothing. Empty means it is integrated into none of them. Note that
-   * ahead/behind compare against the upstream only, and say nothing about this.
+   * Checked reference branches whose history contains this branch's tip. This proves ancestry,
+   * and an empty list says nothing about changes integrated with different commit hashes.
+   * Ahead/behind compare only against the upstream.
    */
   mergedInto: string[];
   ahead: number;
