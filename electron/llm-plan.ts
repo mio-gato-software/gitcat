@@ -1,8 +1,9 @@
 import { isBranchNameSafe } from "./branch-operation.js";
 import type { HostingProvider, Operation } from "../shared/types.js";
 import { hostingProviders } from '../shared/hosting.js';
+import { assistantReadKinds, type PlannedRead } from "./assistant-inspection.js";
 
-export type PlannerIntent = "git_operation" | "create_repository" | "answer" | "needs_information" | "out_of_scope" | "inspect_merge" | "needs_working_changes";
+export type PlannerIntent = "git_operation" | "create_repository" | "answer" | "needs_information" | "out_of_scope" | "needs_working_changes";
 
 export type PlannedArgs = { name: string; onto: string; to: string; path: string; side: string; message: string; noVerify: string };
 
@@ -25,6 +26,7 @@ export type PlannedStep = { operation: Operation; args: PlannedArgs; argv: strin
 export type ModelPlan = {
   intent: PlannerIntent;
   steps: PlannedStep[];
+  reads?: PlannedRead[];
   repository: PlannedRepository;
   summary: string;
   rationale: string;
@@ -45,7 +47,7 @@ export const executableOperations = new Set<Operation>([
   "git_command"
 ]);
 const branchOperations = new Set<Operation>(["checkout", "create_branch", "delete_branch", "rename_branch", "merge"]);
-const intents: PlannerIntent[] = ["git_operation", "create_repository", "answer", "needs_information", "out_of_scope", "inspect_merge", "needs_working_changes"];
+const intents: PlannerIntent[] = ["git_operation", "create_repository", "answer", "needs_information", "out_of_scope", "needs_working_changes"];
 const risks = ["low", "medium", "high"];
 const planKeys = ["intent", "rationale", "reply", "repository", "risk", "steps", "summary"];
 const stepKeys = ["args", "argv", "operation"];
@@ -60,9 +62,15 @@ export const planResponseFormat = {
   schema: {
     type: "object",
     additionalProperties: false,
-    required: planKeys,
+    required: [...planKeys, "reads"],
     properties: {
       intent: { type: "string", enum: intents },
+      reads: {
+        type: "array", items: {
+          type: "object", additionalProperties: false, required: ["kind", "args"],
+          properties: { kind: { type: "string", enum: assistantReadKinds }, args: { type: "array", items: { type: "string" } } }
+        }
+      },
       steps: {
         type: "array",
         items: {
@@ -122,8 +130,8 @@ understanding the message, never by matching words or verb forms. Always write "
 You never execute anything and you never invent shell commands, repository data or values the user
 did not provide. Answer with a single JSON object that matches the schema.
 
-The application, not you, owns confirmation: every plan is shown to the user as a card they must
-approve before anything runs, and approving it runs the whole plan from the first step to the last.
+The application, not you, owns confirmation: local reads run immediately. Plans that change the
+repository go through the application's usual review.
 So never ask "shall I proceed?", never announce what you are about to do, never describe a plan
 inside "reply", and never split an errand across turns waiting to be told to continue. When you have
 what you need, return the plan itself and let the card do the asking. If the user has just approved
@@ -133,20 +141,26 @@ the plan is the doing, and it belongs in this turn.
 Pick exactly one intent:
 - "git_operation": the user wants something done with Git in the open repository. Put in "steps" every operation it takes, in the order they must run.
 - "create_repository": the user wants to create a remote repository for a local repository, optionally pushing to it. Fill "repository".
-- "answer": the user asks something the repository state below already answers. Put the full answer in "reply". When the state does not settle it, prefer a read-only "git_command" that finds the answer over declaring it unknown.
-- "inspect_merge": the user asks what the latest merge brought into the current branch. Leave "steps" empty. GitCat finds that merge in the branch's first-parent history, compares it with its first parent and uses the result to answer.
-- "needs_working_changes": the user asks about unsaved file content or needs it to make a decision, and "workingTreeDiffAvailable" is false while "hasLocalChanges" is true. Leave "steps" empty and say why the content matters in "reply". For questions about history, branch state, which files are modified, or other facts that Git can answer from metadata, use the metadata already available.
-
-A question the state does not answer but Git can — when a file was created, who deleted it, what a
-commit changed — can use "git_operation" with read-only "git_command" steps. GitCat runs a plan
-made entirely of validated local reads as part of answering. Prefer history and statistics over
-source text when they settle the question. A path the user names is all you need; never ask which
-file they meant. For example, "who created proto/x.test.js and when" is
-["log", "--diff-filter=A", "--follow", "--format=%an <%ae> %ad", "--", "proto/x.test.js"], and if
-they also ask who deleted it, add ["log", "--diff-filter=D", "--format=%an <%ae> %ad", "--",
-"proto/x.test.js"] as a second step.
+- "answer": the user wants information about the repository. Select the reads that establish it,
+  even when the supplied snapshot appears to answer it. Leave "steps" and "reply" empty.
+- "needs_working_changes": a decision about a requested action depends on unsaved content,
+  "workingTreeDiffAvailable" is false and "hasLocalChanges" is true. Leave "steps" empty and say
+  why the content matters. A local question about changes can use Git reads without sharing them.
 - "needs_information": the request is in scope but a required value is missing or ambiguous. Ask for exactly what is missing in "reply".
 - "out_of_scope": the request has nothing to do with this repository, with Git or with creating a repository. Say so briefly in "reply".
+
+For an answer, "reads" is an array whose entries have "kind" and "args". GitCat reads Git and renders the results.
+Choose the smallest useful set. Every other intent leaves "reads" empty.
+- "repository": use one or more of active_branch, primary_branch, working_tree, remotes, deletable_branches.
+- "compare_branches": args are [target] for all local branches, or [target, source] for one
+  comparison. Use exact branch names or refs. Use this for questions about remaining work between
+  branches. It distinguishes ancestry, identical contents and equivalent individual patches.
+- "commit": args are [selector] or [selector, ref]. Selectors are tip or latest_merge. The ref
+  defaults to HEAD. GitCat shows what the commit changed relative to its first parent.
+- "git": args are an allowed read-only Git command without the leading "git". Use for any
+  other evidence, including file history and exact counts. For example, file creation can be
+  read with ["log", "--diff-filter=A", "--follow", "--format=%an <%ae> %ad", "--", "proto/x.test.js"].
+  Provide separate reads for separate results. Put only Git placeholders and separators in formats.
 
 You decide how to reach what the user asked for. Plenty of ordinary requests take several operations,
 and it is your job to work out which ones and in what order, from the repository state below:
@@ -244,13 +258,10 @@ it is "conventional_name", it is the best local identification available from th
 Every branch has "isDefault" and "isCurrent" flags. Treat the default branch and the current branch
 as protected: never recommend deleting either one, even when another branch contains its history.
 
-Each branch carries "mergedInto": the reference branches whose history already contains that branch's
-tip. It is computed by Git, so it is proof, not a guess, but it is a history fact—not permission to
-delete every branch named there. For "what branches can I delete?", only consider local, non-current,
-non-default branches whose "mergedInto" includes the default branch; if there are none, say that
-there are no safe candidates. Do not treat two branches pointing at different commits as
-unintegrated: an older tip that the default branch already contains is integrated. Never fall back to
-comparing "ahead" and "behind" for this, as they only compare a branch with its own upstream.
+Each branch carries "mergedInto": the reference branches whose history contains that branch's tip.
+It is computed by Git and only establishes ancestry. Empty ancestry does not establish pending
+changes: rebasing, cherry-picking and squashing can change hashes. "ahead" and "behind" compare
+a branch with its own upstream. Use "compare_branches" for work pending against a different ref.
 
 Each branch carries a "lifecycle" derived from its prefix, which is policy rather than description.
 "permanent": kept on purpose — these branches exist to survive cleanups, so they are never deletion
@@ -443,11 +454,15 @@ function hasExactKeys(value: unknown, keys: string[]): value is Record<string, u
 }
 
 function validate(value: unknown): ModelPlan | undefined {
-  if (!hasExactKeys(value, planKeys)) return undefined;
+  const hasReads = value !== null && typeof value === "object" && Object.hasOwn(value, "reads");
+  if (!hasExactKeys(value, hasReads ? [...planKeys, "reads"] : planKeys)) return undefined;
   const record = value as Record<string, unknown>;
   if (typeof record.intent !== "string" || !intents.includes(record.intent as PlannerIntent)) return undefined;
   if (typeof record.risk !== "string" || !risks.includes(record.risk)) return undefined;
   for (const key of ["summary", "rationale", "reply"]) if (typeof record[key] !== "string") return undefined;
+  if (hasReads && (!Array.isArray(record.reads) || !record.reads.every(read =>
+    hasExactKeys(read, ["kind", "args"]) && assistantReadKinds.some(kind => kind === read.kind)
+    && Array.isArray(read.args) && read.args.every(arg => typeof arg === "string")))) return undefined;
   if (!Array.isArray(record.steps)) return undefined;
   for (const step of record.steps) {
     if (!hasExactKeys(step, stepKeys)) return undefined;

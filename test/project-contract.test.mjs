@@ -75,8 +75,7 @@ test("el asistente recibe instrucciones para consultar Git sin shell", async () 
   assert.match(planner, /there is no shell/i);
   // Investigar sigue siendo su primer instinto; la política de confirmación se prueba con Git real.
   assert.match(planner, /first instinct/);
-  // Anunciar que lo hará no vale: la investigación es un git_operation, en este turno.
-  assert.match(planner, /"git_operation" with read-only "git_command" steps/);
+  assert.match(planner, /For an answer, "reads" is an array/);
   assert.match(planner, /is a failed turn/);
   assert.match(planner, /only git_command takes an argument list/);
 });
@@ -345,7 +344,7 @@ test("la integración de una rama es un hecho de Git en el estado, no algo que e
   assert.match(branch, /No puedes borrar la rama por defecto/);
   // El modelo tiene que saber que ahead\/behind no responden esta pregunta.
   assert.match(planner, /Treat the default branch and the current branch\n+as protected/);
-  assert.match(planner, /Never fall back to\ncomparing "ahead" and "behind" for this/);
+  assert.match(planner, /"ahead" and "behind" compare\s+a branch with its own upstream/);
   assert.match(app, /mergedInto\.length/);
 });
 
@@ -464,7 +463,7 @@ test("los controles principales tienen implementaciones concretas", async () => 
   assert.doesNotMatch(app, /MoreHorizontal/);
 });
 
-test("el modelo clasifica la intención, responde preguntas y escribe en el idioma del usuario", async () => {
+test("el modelo interpreta preguntas y GitCat construye la respuesta con sus lecturas", async () => {
   const service = await readFile(join(root, "electron/git-service.ts"), "utf8");
   const planner = await readFile(join(root, "electron/llm-plan.ts"), "utf8");
   const app = await readFile(join(root, "src/App.tsx"), "utf8");
@@ -473,7 +472,7 @@ test("el modelo clasifica la intención, responde preguntas y escribe en el idio
   assert.match(planner, /same language as the user's latest message/);
   assert.match(planner, /"git_operation", "create_repository", "answer", "needs_information", "out_of_scope"/);
   assert.match(service, /function plannerState/);
-  assert.match(service, /if \(plan\.intent === "answer"\) return bindPlan\(snapshot, answerDraft\(plan\)\)/);
+  assert.match(service, /if \(plan\.intent === "answer"\) \{[\s\S]*?return answerFromGit\(/);
   assert.match(app, /plan\.answer/);
 });
 
