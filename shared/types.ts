@@ -179,6 +179,8 @@ export type RepoSnapshot = {
   name: string;
   head: string;
   stateId: string;
+  /** Git may have omitted parents and older commits in a shallow copy. */
+  isShallow?: boolean;
   currentBranch: string;
   /** The branch integration is measured against, resolved from the remote HEAD or a conventional name. */
   defaultBranch?: string;
@@ -513,6 +515,8 @@ export type ActionPlan = {
   summary: string;
   rationale: string;
   answer?: string;
+  /** Local evidence for the answer. Display it without including it in later provider requests. */
+  answerDetails?: string;
   answerCommit?: Commit;
   /** Local query output that may be displayed but does not belong in a provider prompt. */
   localAnswer?: boolean;

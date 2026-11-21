@@ -16,7 +16,7 @@ const queryOptions = new Map<string, { flags: readonly string[]; values?: RegExp
   ["status", { flags: ["--short", "-s", "--branch", "-b", "--porcelain", "--no-ahead-behind", "--untracked-files=no", "--untracked-files=all"] }],
   ["blame", { flags: ["--line-porcelain", "--porcelain", "--show-email", "-e", "--root", "-w"], values: /^-L[\d,+-]+$/ }],
   ["ls-files", { flags: ["--cached", "--deleted", "--modified", "--others", "--exclude-standard", "--stage", "--unmerged"] }],
-  ["rev-list", { flags: [...revisionOptions, "--count", "--left-right"], values: /^(?:--(?:skip|max-count)=\d+|-\d+)$/ }],
+  ["rev-list", { flags: [...revisionOptions, "--count", "--left-right", "--merges", "--no-merges", "--min-parents=2", "--max-parents=1"], values: /^(?:--(?:skip|max-count)=\d+|-\d+)$/ }],
   ["grep", { flags: ["-n", "--line-number", "-i", "--ignore-case", "-F", "--fixed-strings", "-l", "--files-with-matches", "--cached", "--count"] }]
 ]);
 

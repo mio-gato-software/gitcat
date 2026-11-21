@@ -121,10 +121,10 @@ test("el asistente prepara la sincronización revisada con el estado posterior a
 
 test("una respuesta factual utiliza el estado de Git aunque el modelo diga otra cosa", async () => {
   reply(plan({
-    intent: "answer", reads: [{ kind: "repository", args: ["active_branch"] }],
+    intent: "answer", answerLanguage: "en", reads: [{ kind: "repository", args: ["active_branch"] }],
     summary: "The branch is release", reply: "The active branch is release.", rationale: "Release is also clean."
   }));
-  const result = await service.planAction(repo, "What branch am I on?", [], "en");
+  const result = await service.planAction(repo, "What branch am I on?", [], "es");
   assert.equal(result.answer, "The active branch is main.");
   assert.doesNotMatch(JSON.stringify(result), /release/i);
   assert.equal(result.requiresConfirmation, false);
@@ -381,7 +381,7 @@ test("una lectura se contesta en el mismo turno, mientras un push sigue necesita
   const reading = await service.planAction(repo, "¿Cuántos commits hay en la rama activa?");
   assert.equal(reading.allowed, true, reading.rationale);
   assert.equal(reading.requiresConfirmation, false);
-  assert.equal(reading.answer, `Conteo de commits para HEAD: ${git("rev-list", "--count", "HEAD").trim()}.`);
+  assert.match(reading.answer, new RegExp(`^En esta copia, Git cuenta ${git("rev-list", "--count", "HEAD").trim()} commits? en el historial de main\\.$`));
   assert.doesNotMatch(JSON.stringify(reading), /99 commits/);
   assert.deepEqual(reading.steps, []);
   assert.equal(requests.length, 1, "no hay una síntesis del proveedor después de la lectura");
@@ -413,8 +413,11 @@ test("una investigación conserva cada lectura y diferencia un resultado vacío 
   assert.equal(result.allowed, true, result.rationale);
   assert.equal(result.requiresConfirmation, false);
   assert.match(result.answer, /Prueba Uno/);
-  assert.match(result.answer, /--diff-filter=D[^\n]+\nLa consulta no devolvió resultados/);
-  assert.match(result.answer, /refs\/heads\/missing\nGit no pudo completar esta lectura/);
+  assert.match(result.answer, /Git no encontró coincidencias/);
+  assert.match(result.answer, /Git no pudo completar esta comprobación/);
+  assert.doesNotMatch(result.answer, /--diff-filter/);
+  assert.match(result.answerDetails, /--diff-filter=D/);
+  assert.match(result.answerDetails, /refs\/heads\/missing/);
   assert.equal(requests.length, 1);
 });
 
@@ -435,7 +438,7 @@ test("una lectura rechaza argumentos de escritura y formatos que imprimen afirma
     reply(plan({ intent: "answer", reads: [{ kind: "git", args }] }));
     reply(plan({ intent: "answer", reads: [{ kind: "git", args: ["rev-list", "--count", "HEAD"] }] }));
     const result = await service.planAction(repo, "¿Cuántos commits hay?");
-    assert.equal(result.answer, `Conteo de commits para HEAD: ${git("rev-list", "--count", "HEAD").trim()}.`);
+    assert.match(result.answer, new RegExp(`^En esta copia, Git cuenta ${git("rev-list", "--count", "HEAD").trim()} commits? en el historial de main\\.$`));
     assert.equal(result.requiresConfirmation, false);
   }
   assert.equal(requests.length, 4);
@@ -474,10 +477,12 @@ test("la comparación separa árboles iguales, parches equivalentes e historial 
     { kind: "compare_branches", args: ["target-with-extra", "same-files"] }
   ], reply: "Hay trabajo pendiente en todas las ramas." }));
   const result = await service.planAction(path, "¿Qué ramas tienen cambios que aún no llegaron a los destinos?");
-  assert.match(result.answer, /contained — La rama de destino ya contiene este historial/);
-  assert.match(result.answer, /same-files — Los archivos de ambas puntas son idénticos/);
-  assert.match(result.answer, /unmatched — Parches sin equivalente individual: 1/);
-  assert.match(result.answer, /same-files — Git encontró parches equivalentes.*versiones actuales de los archivos difieren/);
+  assert.match(result.answer, /^2 de 4 ramas locales/);
+  assert.match(result.answer, /Conviene revisar .*unmatched/);
+  assert.match(result.answerDetails, /contained — La rama de destino ya contiene este historial/);
+  assert.match(result.answerDetails, /same-files — Los archivos de ambas puntas son idénticos/);
+  assert.match(result.answerDetails, /unmatched — Parches sin equivalente individual: 1/);
+  assert.match(result.answerDetails, /same-files — Git encontró parches equivalentes.*versiones actuales de los archivos difieren/);
   assert.doesNotMatch(result.answer, /en todas las ramas/);
   assert.equal(result.requiresConfirmation, false);
   assert.equal(requests.length, 1);
@@ -504,13 +509,124 @@ test("el último merge usa su primer padre, se responde en el turno y conserva e
 
   reply(plan({ intent: "answer", reads: [{ kind: "commit", args: ["latest_merge"] }] }));
   const result = await service.planAction(path, "que trajo este ultimo merge?", [], "es");
-  assert.match(result.answer, /Integrar reintentos/);
-  assert.match(result.answer, /primer padre\): 1/);
+  assert.match(result.answer, /^La última fusión de main .* incorporó un commit y cambió un archivo/);
+  assert.match(result.answerDetails, /primer padre\): 1/);
   assert.equal(result.answerCommit.hash, merge);
   assert.equal(result.requiresConfirmation, false);
-  assert.match(result.answer, /retry\.txt[\s\S]*Añadir reintentos/);
+  assert.match(result.answer, /Añadir reintentos[\s\S]*retry\.txt/);
   assert.doesNotMatch(result.answer, /un commit posterior/);
   assert.equal(requests.length, 1);
+  assert.equal((await service.getSnapshot(path)).stateId, before.stateId);
+
+  writeFileSync(join(path, "retry.txt"), "reintentar en el directorio de trabajo\n");
+  reply(plan({ intent: "answer", reads: [{ kind: "commit", args: ["latest_merge", "main", "reintentar"] }] }));
+  const excerpt = await service.planAction(path, "¿Qué cambió con los reintentos en la última fusión?");
+  assert.match(excerpt.answer, /Añadido · reintentar\n?$/);
+  assert.match(excerpt.answerDetails, /diff --git a\/retry\.txt b\/retry\.txt\n\+reintentar/);
+  assert.doesNotMatch(excerpt.answerDetails, /directorio de trabajo/);
+  assert.equal(excerpt.answerCommit.hash, merge);
+  assert.equal(excerpt.localAnswer, true);
+  run("restore", "--", "retry.txt");
+
+  reply(plan({ intent: "answer", reads: [{ kind: "file_history", args: ["first_addition", "retry.txt"] }] }));
+  const file = await service.planAction(path, "¿Quién añadió retry.txt y cuándo?");
+  const [hash, day] = run("log", "-1", "--format=%h %as", "--", "retry.txt").split(" ");
+  assert.equal(file.answer, `QA añadió retry.txt el ${day} en el commit ${hash}.`);
+  assert.match(file.answerDetails, /Añadir reintentos/);
+
+  const parent = mkdtempSync(join(tmpdir(), "gitcat-shallow-merge-"));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const shallow = join(parent, "clone");
+  run("branch", "shallow-tip", merge);
+  run("clone", "-q", "--branch", "shallow-tip", "--depth=1", pathToFileURL(path).href, shallow);
+  reply(plan({ intent: "answer", reads: [
+    { kind: "git", args: ["rev-list", "--count", "HEAD"] },
+    { kind: "commit", args: ["latest_merge"] },
+    { kind: "file_history", args: ["first_addition", "retry.txt"] }
+  ] }));
+  const partial = await service.planAction(shallow, "¿Cuántos commits tiene toda la historia, cuál fue su merge y cuándo apareció retry.txt?");
+  assert.match(partial.answer, /Git cuenta 1 commit[s]? en el historial de shallow-tip.*historial superficial/);
+  assert.match(partial.answer, /no puede confirmar cuál fue la última fusión/);
+  assert.match(partial.answer, /No puedo comprobar cuándo apareció por primera vez retry\.txt/);
+  assert.equal((await service.getSnapshot(shallow)).isShallow, true);
+  assert.equal(partial.answerCommit, undefined);
+});
+
+test("las lecturas distinguen una rama sin commits, los conteos filtrados y el nombre histórico de un archivo", async t => {
+  const path = mkdtempSync(join(tmpdir(), "gitcat-answer-history-coverage-"));
+  t.after(() => rmSync(path, { recursive: true, force: true }));
+  const run = (...args) => execFileSync("git", args, { cwd: path, encoding: "utf8" }).trim();
+  run("init", "-q", "-b", "trunk");
+  run("config", "user.name", "QA");
+  run("config", "user.email", "qa@example.test");
+  reply(plan({ intent: "answer", reads: [{ kind: "git", args: ["rev-list", "--count", "trunk"] }] }));
+  const unborn = await service.planAction(path, "¿Cuántos commits hay en trunk?");
+  assert.equal(unborn.answer, "Aún no hay commits en trunk.");
+  assert.equal(unborn.requiresConfirmation, false);
+  writeFileSync(join(path, "antiguo [1].txt"), "base\n");
+  run("add", "--", "antiguo [1].txt");
+  run("commit", "-qm", "crear");
+  const creation = run("rev-parse", "--short", "HEAD");
+  run("switch", "-qc", "change");
+  run("mv", "--", "antiguo [1].txt", "vigente [2].txt");
+  run("commit", "-qm", "renombrar");
+  run("switch", "-q", "trunk");
+  run("merge", "-q", "--no-ff", "change", "-m", "integrar");
+  reply(plan({ intent: "answer", reads: [
+    { kind: "git", args: ["rev-list", "--no-merges", "--count", "HEAD", "--"] },
+    { kind: "commit_count", args: ["--all", "all"] },
+    { kind: "commit_count", args: ["trunk", "merges"] },
+    { kind: "file_history", args: ["first_addition", "vigente [2].txt"] }
+  ] }));
+  const result = await service.planAction(path, "¿Cuántos commits hay y quién añadió el archivo renombrado?");
+  assert.match(result.answer, /2 commits en el historial de trunk, sin contar las fusiones/);
+  assert.match(result.answer, /3 commits entre las referencias de esta copia/);
+  assert.match(result.answer, /1 fusión en el historial de trunk/);
+  assert.match(result.answer, /QA añadió antiguo \[1\]\.txt/);
+  assert.match(result.answer, /Git llegó a ese nombre al seguir el historial de vigente \[2\]\.txt/);
+  assert.ok(result.answer.includes(creation));
+});
+
+test("una lectura inválida conserva los resultados válidos aunque el proveedor no logre repararla", async () => {
+  reply(plan({ intent: "answer", reads: [
+    { kind: "commit_count", args: ["HEAD", "all"] },
+    { kind: "git", args: ["push"] }
+  ] }));
+  reply(plan({ intent: "out_of_scope", reply: "Fallo inventado." }));
+  const result = await service.planAction(repo, "¿Cuántos commits hay y cuál es la URL de push?");
+  assert.match(result.answer, /Git cuenta \d+ commits? en el historial de main/);
+  assert.match(result.answer, /Parte de la pregunta quedó sin verificar/);
+  assert.doesNotMatch(result.answer, /Fallo inventado/);
+  assert.match(requests[1].instructions, /reads\[1\]/);
+  assert.deepEqual(result.steps, []);
+  assert.equal(result.requiresConfirmation, false);
+});
+
+test("la respuesta distingue el índice y el directorio de trabajo y lee las URL efectivas", async t => {
+  const path = mkdtempSync(join(tmpdir(), "gitcat-answer-repository-"));
+  t.after(() => rmSync(path, { recursive: true, force: true }));
+  const run = (...args) => execFileSync("git", args, { cwd: path, encoding: "utf8" }).trim();
+  run("init", "-q", "-b", "main");
+  run("config", "user.name", "QA");
+  run("config", "user.email", "qa@example.test");
+  for (const name of ["both", "staged", "unstaged"]) writeFileSync(join(path, name), "base\n");
+  run("add", "-A");
+  run("commit", "-qm", "base");
+  for (const name of ["both", "staged"]) writeFileSync(join(path, name), "staged\n");
+  run("add", "both", "staged");
+  for (const name of ["both", "unstaged", "new"]) writeFileSync(join(path, name), "worktree\n");
+  run("remote", "add", "origin", "https://example.test/fetch/repo.git");
+  run("config", "url.ssh://example.test/.pushInsteadOf", "https://example.test/");
+  const before = await service.getSnapshot(path);
+  reply(plan({ intent: "answer", reads: [{ kind: "repository", args: ["working_tree", "remotes"] }] }));
+  const result = await service.planAction(path, "¿Qué archivos están preparados y qué URL usaría para publicar?");
+  assert.match(result.answer, /Preparados para el próximo commit \(2\)\nboth, staged/);
+  assert.match(result.answer, /Con cambios que aún no están preparados \(2\)\nboth, unstaged/);
+  assert.match(result.answer, /Archivos nuevos que Git aún no sigue \(1\)\nnew/);
+  assert.match(result.answer, /Para traer cambios de origin: https:\/\/example\.test\/fetch\/repo\.git/);
+  assert.match(result.answer, /Para publicar en origin: ssh:\/\/example\.test\/fetch\/repo\.git/);
+  assert.equal(result.localAnswer, true, "effective URLs stay out of provider follow-ups");
+  assert.equal(result.requiresConfirmation, false);
   assert.equal((await service.getSnapshot(path)).stateId, before.stateId);
 });
 

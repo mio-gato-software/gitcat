@@ -228,6 +228,7 @@ app.whenReady().then(async () => {
         summary: 'Incluir cambios sin guardar', rationale: 'Necesito leer los cambios para explicarlos.' };
     }
     return { ...base, kind: 'question', steps: [], answer: 'El último merge integró el buscador.',
+      answerDetails: 'git diff --name-status HEAD^1 HEAD\nA buscador.ts',
       answerCommit: current.commits.find((commit) => commit.parents.length > 1) };
   });
 
@@ -977,6 +978,11 @@ app.whenReady().then(async () => {
   assert.deepEqual(assistantRequests, [{ question: '¿Qué trajo el último merge?', includeWorkingChanges: false }]);
   assert.equal(await js(`Boolean(document.querySelector('.completion-card, .plan-actions'))`), false);
   assert.match(await js(`document.querySelector('.conversation-turn .ghost-button').innerText`), /Diff completo/);
+  assert.equal(await js(`document.querySelector('.assistant-answer-details').open`), false);
+  assert.doesNotMatch(await js(`document.querySelector('.assistant-answer').innerText`), /git diff/);
+  await js(`document.querySelector('.assistant-answer-details summary').click()`);
+  assert.equal(await js(`document.querySelector('.assistant-answer-details').open`), true);
+  assert.match(await js(`document.querySelector('.assistant-answer-details pre').innerText`), /A buscador\.ts/);
 
   await sendChat('Explica los cambios sin guardar');
   await waitFor(`document.querySelector('.sharing-modal .sharing-files')`);

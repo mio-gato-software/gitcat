@@ -690,7 +690,8 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
       !message || !["user", "assistant"].includes(message.role) || typeof message.content !== "string"
     ))) throw new Error("El contexto de conversación no es válido.");
     const repoPath = assertOpenedRepository(cwd);
-    return rememberPlan(await tracked(event, repoPath, "planning", () => planAction(repoPath, request, context, locale, includeWorkingChanges)));
+    return rememberPlan(await tracked(event, repoPath, "planning",
+      () => planAction(assertOpenedRepository(repoPath), request, context, locale, includeWorkingChanges), false, "wait"));
   });
   ipcMain.handle("action:prepare", async (event, cwd: string, operation: Operation, args?: Record<string, string>, locale?: Locale) => {
     assertTrustedSender(event);
