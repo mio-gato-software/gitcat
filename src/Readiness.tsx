@@ -97,10 +97,8 @@ function Terminal({ command }: { command: string }) {
   return <code className="readiness-command"><TerminalSquare size={11} />{command}</code>;
 }
 
-export function ReadinessChecklist({ readiness, items, t, compact = false, title, remoteChoice }: {
+export function ReadinessChecklist({ readiness, items, t, compact = false, title }: {
   readiness: ReadinessState; items: ReadinessItem[]; t: Translate; compact?: boolean; title?: string;
-  /** Several remotes: which one to check, chosen here. */
-  remoteChoice?: { value?: string; onChange: (remote: string) => void };
 }) {
   const actions = useContext(ReadinessActionsContext);
   const { report, loading, error, recheck } = readiness;
@@ -165,7 +163,6 @@ export function ReadinessChecklist({ readiness, items, t, compact = false, title
       const accountList = account?.accounts.map((entry) => `${entry.login}${entry.active ? ` ${t("readinessActiveMarker")}` : ""}`).join(", ");
       rows.push(<Row key="remote" item="remote" state={state} icon={Cloud} title={t("readinessRemoteWhere", { url: remote.url })}>
         <span className="readiness-detail">{[remote.name, t(`readinessProtocol_${remote.protocol}` as MessageKey), remote.host && remote.resolvedHost ? `${remote.host} → ${remote.resolvedHost}` : remote.host].filter(Boolean).join(" · ")} · {t(`readinessRemoteSource_${remote.source}` as MessageKey, { count: remote.remotes.length })}</span>
-        {remoteChoice && remote.remotes.length > 1 && <label className="readiness-remote-choice">{t("readinessRemoteChoice")}<select value={remoteChoice.value ?? remote.name} onChange={(event) => remoteChoice.onChange(event.target.value)} disabled={loading}>{remote.remotes.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>}
         {host !== "github.com" && host !== "gitlab.com" && readiness.setProvider && <label className="readiness-remote-choice">{t("readinessHostingService")}<select value={readiness.provider ?? ""} onChange={event => readiness.setProvider?.(event.target.value as HostingProvider || undefined)} disabled={loading}><option value="">{t("readinessGenericGit")}</option>{hostingProviders.map(p=><option key={p} value={p}>{hostingLabels[p]}</option>)}</select></label>}
         <div className="readiness-access" data-access={remote.access}>
           <strong>{loading && remote.access === "not_checked" ? <><LoaderCircle className="spin" size={11} /> {t("readinessAccessChecking")}</> : t(`readinessAccess_${remote.access}` as MessageKey, { host })}</strong>

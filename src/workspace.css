@@ -605,6 +605,7 @@
 .readiness-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; margin-left: -8px; }
 .readiness-remote-choice { display: flex; align-items: center; gap: 6px; margin: 3px 0 0; color: var(--muted); font-size: 10.5px; }
 .readiness-remote-choice select { width: auto; padding: 2px 6px; font-size: 10.5px; }
+.remote-settings-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .readiness-loading, .readiness-error { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; color: var(--muted); }
 .readiness-error { color: #e4b479; }
 .readiness-checklist .recovery-detail { margin: 3px 0 0; }
