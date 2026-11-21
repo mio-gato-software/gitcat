@@ -21,7 +21,7 @@ export type PlannedRepository = {
   replaceRemote: boolean;
 };
 
-export type PlannedStep = { operation: Operation; args: PlannedArgs; argv: string[] };
+export type PlannedStep = { operation: Operation; args: PlannedArgs; argv: string[]; paths?: string[] };
 
 export type ModelPlan = {
   intent: PlannerIntent;
@@ -56,6 +56,42 @@ const argsKeys = ["message", "name", "noVerify", "onto", "path", "side", "to"];
 const repositoryKeys = ["host", "localPath", "owner", "protocol", "push", "remote", "replaceRemote", "repository", "sshHost"];
 export { isBranchNameSafe } from "./branch-operation.js";
 
+const readInstructions = `- "repository": use one or more of active_branch, primary_branch, working_tree, remotes, upstream,
+  deletable_branches. working_tree separates staged, unstaged, new, and conflicting files.
+  remotes includes the effective fetch and push URLs. upstream includes the local ahead/behind counts.
+- "compare_branches": args are [target] for all local branches, or [target, source] for one
+  comparison. Use exact branch names or refs. Use this for questions about remaining work between
+  branches. It distinguishes ancestry, identical contents and equivalent individual patches.
+- "commit": args are [selector] or [selector, ref]. Selectors are tip or latest_merge. The ref
+  defaults to HEAD. GitCat shows changed files and how many commits a merge brought in. For
+  questions about a specific change or code behavior, use [selector, ref, term, ...] with up to
+  four short, literal search terms likely to occur in changed lines (identifiers, error text,
+  feature names or their English equivalents). GitCat finds matching removed and added lines in
+  that commit's diff locally, without making a claim about runtime behavior. For these questions
+  include terms in the commit read instead of returning a bare commit plus an unfiltered diff.
+- "commit_identity": args are [selector] or [selector, ref] as for "commit". Reports the
+  commit author and dates. A "commit" changes summary alone does not report them.
+- "commit_lines": args are [selector] or [selector, ref] as for "commit". Reports how many files
+  changed and which gained or lost the most lines in the first-parent diff, including ties.
+- "file_history": args are [event, path] or [event, path, ref]. Events are first_addition,
+  latest_change and latest_deletion. Use for an author, date or commit that matches the event.
+- "commit_count": args are [ref, filter]. Use HEAD for the current branch, an exact ref or range,
+  or "--all" for all local refs. Filters: all, no_merges, merges. Use one read per requested count.
+- "git": args are an allowed read-only Git command without the leading "git". Use for any
+  other evidence. For example, file creation can be
+  read with ["log", "--diff-filter=A", "--follow", "--format=%an <%ae> %ad", "--", "proto/x.test.js"].
+  Cover every part of the question with the appropriate read. Put only Git placeholders and
+  separators in formats. When a question depends on unavailable history, choose the relevant
+  read and let GitCat explain the limits of this shallow copy. A search of the current files
+  cannot establish what an older commit changed.`;
+
+const readListSchema = {
+  type: "array", items: {
+    type: "object", additionalProperties: false, required: ["kind", "args"],
+    properties: { kind: { type: "string", enum: assistantReadKinds }, args: { type: "array", items: { type: "string" } } }
+  }
+};
+
 export const planResponseFormat = {
   type: "json_schema",
   name: "gitcat_plan",
@@ -67,21 +103,17 @@ export const planResponseFormat = {
     properties: {
       intent: { type: "string", enum: intents },
       answerLanguage: { type: "string", enum: ["es", "en", ""] },
-      reads: {
-        type: "array", items: {
-          type: "object", additionalProperties: false, required: ["kind", "args"],
-          properties: { kind: { type: "string", enum: assistantReadKinds }, args: { type: "array", items: { type: "string" } } }
-        }
-      },
+      reads: readListSchema,
       steps: {
         type: "array",
         items: {
           type: "object",
           additionalProperties: false,
-          required: stepKeys,
+          required: [...stepKeys, "paths"],
           properties: {
             operation: { type: "string", enum: [...executableOperations, "none"] },
             argv: { type: "array", items: { type: "string" } },
+            paths: { type: "array", items: { type: "string" } },
             args: {
               type: "object",
               additionalProperties: false,
@@ -128,6 +160,8 @@ export function buildPlannerInstructions(repositoryState: unknown, issues: PlanI
 The user may write in any language, in any phrasing, direct or indirect. Decide what they mean by
 understanding the message, never by matching words or verb forms. Always write "summary",
 "rationale" and "reply" in the same language as the user's latest message.
+Plan only for the latest request. Use earlier turns to resolve references in it, and leave earlier
+requests alone unless the user explicitly returns to them.
 
 You never execute anything and you never invent shell commands, repository data or values the user
 did not provide. Answer with a single JSON object that matches the schema.
@@ -154,30 +188,7 @@ Pick exactly one intent:
 For an answer, "reads" is an array whose entries have "kind" and "args". GitCat reads Git and renders the results.
 Set "answerLanguage" to "es" or "en" to match the user's question, or "" to use the app language.
 Choose the smallest useful set. Every other intent leaves "reads" empty.
-- "repository": use one or more of active_branch, primary_branch, working_tree, remotes, upstream,
-  deletable_branches. working_tree separates staged, unstaged, new, and conflicting files.
-  remotes includes the effective fetch and push URLs. upstream includes the local ahead/behind counts.
-- "compare_branches": args are [target] for all local branches, or [target, source] for one
-  comparison. Use exact branch names or refs. Use this for questions about remaining work between
-  branches. It distinguishes ancestry, identical contents and equivalent individual patches.
-- "commit": args are [selector] or [selector, ref]. Selectors are tip or latest_merge. The ref
-  defaults to HEAD. GitCat shows changed files and how many commits a merge brought in. For
-  questions about a specific change or code behavior, use [selector, ref, term, ...] with up to
-  four short, literal search terms likely to occur in changed lines (identifiers, error text,
-  feature names or their English equivalents). GitCat finds matching removed and added lines in
-  that commit's diff locally, without making a claim about runtime behavior. For these questions
-  include terms in the commit read instead of returning a bare commit plus an unfiltered diff.
-- "file_history": args are [event, path] or [event, path, ref]. Events are first_addition,
-  latest_change and latest_deletion. Use for an author, date or commit that matches the event.
-- "commit_count": args are [ref, filter]. Use HEAD for the current branch, an exact ref or range,
-  or "--all" for all local refs. Filters: all, no_merges, merges. Use one read per requested count.
-- "git": args are an allowed read-only Git command without the leading "git". Use for any
-  other evidence. For example, file creation can be
-  read with ["log", "--diff-filter=A", "--follow", "--format=%an <%ae> %ad", "--", "proto/x.test.js"].
-  Cover every part of the question with the appropriate read. Put only Git placeholders and
-  separators in formats. When a question depends on unavailable history, choose the relevant
-  read and let GitCat explain the limits of this shallow copy. A search of the current files
-  cannot establish what an older commit changed.
+${readInstructions}
 
 You decide how to reach what the user asked for. Plenty of ordinary requests take several operations,
 and it is your job to work out which ones and in what order, from the repository state below:
@@ -237,6 +248,11 @@ args.message is the commit message, ${commitMessageLimit} characters maximum. Le
 user dictated the message themselves: the application reads the actual diff and writes the message
 for you, and shows it on the card before anything is committed. So never ask the user what the commit
 message should be, and never invent one from the file names in the state.
+
+For a commit of specific files, fill "paths" with their exact names from localChanges, even when
+the user names only one. Leave the other files out. An empty "paths" means all unsaved changes.
+Other operations leave "paths" empty. A selected commit must be the first step and can be followed
+only by a push. Never replace a selected commit with an all-files commit to make a plan fit.
 
 "repository" is only meaningful for "create_repository". Use "" or false for anything unknown:
 - localPath: absolute path of the local repository to publish. When the user means "this repository", use the open repository path from the state below.
@@ -361,6 +377,10 @@ export function operationArgs(step: PlannedStep): Record<string, string> {
   }
 }
 
+export function selectedCommitPaths(step: PlannedStep) {
+  return step.paths?.length ? step.paths : step.args.path ? [step.args.path] : [];
+}
+
 /** Defects in one step, addressed by index so the model knows which of its own steps to fix. */
 export function operationIssues(step: PlannedStep, index = 0): PlanIssue[] {
   const at = `steps[${index}]`;
@@ -395,6 +415,12 @@ export function operationIssues(step: PlannedStep, index = 0): PlanIssue[] {
   // An empty commit message is not a defect: the application writes one from the real diff.
   if (step.operation === "commit" && args.message.length > commitMessageLimit) {
     issues.push({ field: `${at}.args.message`, problem: `${args.message.length} characters; the limit is ${commitMessageLimit}` });
+  }
+  if (step.operation === "commit" && step.args.path && step.paths?.length && !step.paths.includes(step.args.path)) {
+    issues.push({ field: `${at}.paths`, problem: "The file selections conflict. Put every selected path in paths and leave args.path empty." });
+  }
+  if (step.operation !== "commit" && step.paths?.length) {
+    issues.push({ field: `${at}.paths`, problem: "Only a commit takes a list of selected files." });
   }
   if (step.operation === "push" && step.args.noVerify.trim() && step.args.noVerify.trim() !== "true") {
     issues.push({ field: `${at}.args.noVerify`, problem: `"${step.args.noVerify}" is not a value; use "true" to skip the hooks or "" to run them` });
@@ -470,6 +496,69 @@ function hasExactKeys(value: unknown, keys: string[]): value is Record<string, u
     Object.keys(value as object).length === keys.length && keys.every((key) => Object.hasOwn(value as object, key));
 }
 
+function isReadList(value: unknown): value is PlannedRead[] {
+  return Array.isArray(value) && value.every(read =>
+    hasExactKeys(read, ["kind", "args"]) && assistantReadKinds.some(kind => kind === read.kind)
+    && Array.isArray(read.args) && read.args.every(arg => typeof arg === "string"));
+}
+
+export const commitScopeResponseFormat = {
+  type: "json_schema", name: "gitcat_commit_scope", strict: true,
+  schema: {
+    type: "object", additionalProperties: false, required: ["scope", "paths"],
+    properties: { scope: { type: "string", enum: ["all", "selected", "unclear"] }, paths: readListSchema.items.properties.args }
+  }
+} as const;
+
+export function parseCommitScope(text: string): { scope: "all" | "selected" | "unclear"; paths: string[] } | undefined {
+  for (const candidate of jsonCandidates(text.trim())) {
+    try {
+      const value: unknown = JSON.parse(candidate);
+      if (!hasExactKeys(value, ["scope", "paths"]) || !Array.isArray(value.paths) ||
+          !value.paths.every(path => typeof path === "string" && path.length > 0)) continue;
+      if (value.scope === "selected" && value.paths.length) return { scope: value.scope, paths: value.paths };
+      if ((value.scope === "all" || value.scope === "unclear") && !value.paths.length) return { scope: value.scope, paths: [] };
+    } catch { /* Try the next JSON object. */ }
+  }
+}
+
+export const answerCoverageResponseFormat = {
+  type: "json_schema",
+  name: "gitcat_answer_coverage",
+  strict: true,
+  schema: {
+    type: "object", additionalProperties: false, required: ["reads", "uncovered"],
+    properties: { reads: readListSchema, uncovered: { type: "boolean" } }
+  }
+} as const;
+
+export function buildAnswerCoverageInstructions() {
+  return `Review a GitCat read plan against the latest user question. Independently identify every part
+the user wants answered, including requested scopes, comparisons, dates, authors, counts and filters.
+Then map each part to the results the planned reads actually produce. GitCat only displays the facts
+those reads return, so selecting the right commit or branch does not by itself supply every fact
+about it. Return only the additional reads needed for any missing parts, in the user's order. If a
+part still has no suitable local verification or its scope is ambiguous, set uncovered to true. When
+the supplied reads already cover the question, return an empty reads array with uncovered false.
+Use the normalized reads to resolve references like "that branch" where possible. Add a read only
+when it answers a fact requested in the latest question. Do not propose writes or draft answer text.
+Prior reads are normalized descriptions: "git" with argv may include a normalized commit_count.
+Use the following external read kinds and args for new reads.
+
+${readInstructions}`;
+}
+
+export function parseAnswerCoverage(text: string): { reads: PlannedRead[]; uncovered: boolean } | undefined {
+  for (const candidate of jsonCandidates(text.trim())) {
+    try {
+      const value: unknown = JSON.parse(candidate);
+      if (hasExactKeys(value, ["reads", "uncovered"]) && isReadList(value.reads) && typeof value.uncovered === "boolean") {
+        return { reads: value.reads, uncovered: value.uncovered };
+      }
+    } catch { /* Try the next JSON object. */ }
+  }
+}
+
 function validate(value: unknown): ModelPlan | undefined {
   const optionalKeys = ["reads", "answerLanguage"].filter(key => value !== null && typeof value === "object" && Object.hasOwn(value, key));
   if (!hasExactKeys(value, [...planKeys, ...optionalKeys])) return undefined;
@@ -478,13 +567,13 @@ function validate(value: unknown): ModelPlan | undefined {
   if (typeof record.risk !== "string" || !risks.includes(record.risk)) return undefined;
   for (const key of ["summary", "rationale", "reply"]) if (typeof record[key] !== "string") return undefined;
   if (optionalKeys.includes("answerLanguage") && !["es", "en", ""].some(lang => lang === record.answerLanguage)) return undefined;
-  if (optionalKeys.includes("reads") && (!Array.isArray(record.reads) || !record.reads.every(read =>
-    hasExactKeys(read, ["kind", "args"]) && assistantReadKinds.some(kind => kind === read.kind)
-    && Array.isArray(read.args) && read.args.every(arg => typeof arg === "string")))) return undefined;
+  if (optionalKeys.includes("reads") && !isReadList(record.reads)) return undefined;
   if (!Array.isArray(record.steps)) return undefined;
   for (const step of record.steps) {
-    if (!hasExactKeys(step, stepKeys)) return undefined;
+    const pathList = step !== null && typeof step === "object" && Object.hasOwn(step, "paths");
+    if (!hasExactKeys(step, pathList ? [...stepKeys, "paths"] : stepKeys)) return undefined;
     const entry = step as Record<string, unknown>;
+    if (pathList && (!Array.isArray(entry.paths) || !entry.paths.every(path => typeof path === "string" && path.length > 0))) return undefined;
     if (typeof entry.operation !== "string" || !(executableOperations.has(entry.operation as Operation) || entry.operation === "none")) return undefined;
     if (!Array.isArray(entry.argv) || !entry.argv.every((item) => typeof item === "string")) return undefined;
     if (!hasExactKeys(entry.args, argsKeys) || !Object.values(entry.args as object).every((item) => typeof item === "string")) return undefined;

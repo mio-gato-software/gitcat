@@ -59,13 +59,14 @@ test("coincide con lo que git escribe de verdad, renombrado incluido", () => {
     [["A", "tercero.txt"], ["M", "otro.txt"]]);
 });
 
-test("numstat cuenta líneas por archivo, sigue los renombrados y no inventa ceros en binarios", async () => {
+test("numstat conserva los nombres y conteos de archivos normales, renombrados y binarios", async () => {
   const { parseNumstat } = await import(pathToFileURL(join(root, "dist-electron/electron/diff-status.js")));
-  const raw = ["3\t1\ta.txt", "0\t0\t", "viejo.txt", "nuevo.txt", "-\t-\timg.png", ""].join("\0");
+  const raw = ["3\t1\ta.txt", "0\t0\t", "viejo.txt", "nuevo.txt", "-\t-\timg.png", "9\t2\t__proto__", ""].join("\0");
   assert.deepEqual(parseNumstat(raw), {
     "a.txt": { additions: 3, deletions: 1, binary: false },
     "nuevo.txt": { additions: 0, deletions: 0, binary: false },
-    "img.png": { additions: 0, deletions: 0, binary: true }
+    "img.png": { additions: 0, deletions: 0, binary: true },
+    ["__proto__"]: { additions: 9, deletions: 2, binary: false }
   });
 });
 
