@@ -21,7 +21,7 @@ export type PlannedRepository = {
   replaceRemote: boolean;
 };
 
-export type PlannedStep = { operation: Operation; args: PlannedArgs; argv: string[] };
+export type PlannedStep = { operation: Operation; args: PlannedArgs; argv: string[]; paths?: string[] };
 
 export type ModelPlan = {
   intent: PlannerIntent;
@@ -109,10 +109,11 @@ export const planResponseFormat = {
         items: {
           type: "object",
           additionalProperties: false,
-          required: stepKeys,
+          required: [...stepKeys, "paths"],
           properties: {
             operation: { type: "string", enum: [...executableOperations, "none"] },
             argv: { type: "array", items: { type: "string" } },
+            paths: { type: "array", items: { type: "string" } },
             args: {
               type: "object",
               additionalProperties: false,
@@ -248,6 +249,11 @@ user dictated the message themselves: the application reads the actual diff and 
 for you, and shows it on the card before anything is committed. So never ask the user what the commit
 message should be, and never invent one from the file names in the state.
 
+For a commit of specific files, fill "paths" with their exact names from localChanges, even when
+the user names only one. Leave the other files out. An empty "paths" means all unsaved changes.
+Other operations leave "paths" empty. A selected commit must be the first step and can be followed
+only by a push. Never replace a selected commit with an all-files commit to make a plan fit.
+
 "repository" is only meaningful for "create_repository". Use "" or false for anything unknown:
 - localPath: absolute path of the local repository to publish. When the user means "this repository", use the open repository path from the state below.
 - repository: remote repository name, 1 to 100 characters from A-Z a-z 0-9 . _ -, never ending in ".git".
@@ -371,6 +377,10 @@ export function operationArgs(step: PlannedStep): Record<string, string> {
   }
 }
 
+export function selectedCommitPaths(step: PlannedStep) {
+  return step.paths?.length ? step.paths : step.args.path ? [step.args.path] : [];
+}
+
 /** Defects in one step, addressed by index so the model knows which of its own steps to fix. */
 export function operationIssues(step: PlannedStep, index = 0): PlanIssue[] {
   const at = `steps[${index}]`;
@@ -405,6 +415,12 @@ export function operationIssues(step: PlannedStep, index = 0): PlanIssue[] {
   // An empty commit message is not a defect: the application writes one from the real diff.
   if (step.operation === "commit" && args.message.length > commitMessageLimit) {
     issues.push({ field: `${at}.args.message`, problem: `${args.message.length} characters; the limit is ${commitMessageLimit}` });
+  }
+  if (step.operation === "commit" && step.args.path && step.paths?.length && !step.paths.includes(step.args.path)) {
+    issues.push({ field: `${at}.paths`, problem: "The file selections conflict. Put every selected path in paths and leave args.path empty." });
+  }
+  if (step.operation !== "commit" && step.paths?.length) {
+    issues.push({ field: `${at}.paths`, problem: "Only a commit takes a list of selected files." });
   }
   if (step.operation === "push" && step.args.noVerify.trim() && step.args.noVerify.trim() !== "true") {
     issues.push({ field: `${at}.args.noVerify`, problem: `"${step.args.noVerify}" is not a value; use "true" to skip the hooks or "" to run them` });
@@ -486,6 +502,26 @@ function isReadList(value: unknown): value is PlannedRead[] {
     && Array.isArray(read.args) && read.args.every(arg => typeof arg === "string"));
 }
 
+export const commitScopeResponseFormat = {
+  type: "json_schema", name: "gitcat_commit_scope", strict: true,
+  schema: {
+    type: "object", additionalProperties: false, required: ["scope", "paths"],
+    properties: { scope: { type: "string", enum: ["all", "selected", "unclear"] }, paths: readListSchema.items.properties.args }
+  }
+} as const;
+
+export function parseCommitScope(text: string): { scope: "all" | "selected" | "unclear"; paths: string[] } | undefined {
+  for (const candidate of jsonCandidates(text.trim())) {
+    try {
+      const value: unknown = JSON.parse(candidate);
+      if (!hasExactKeys(value, ["scope", "paths"]) || !Array.isArray(value.paths) ||
+          !value.paths.every(path => typeof path === "string" && path.length > 0)) continue;
+      if (value.scope === "selected" && value.paths.length) return { scope: value.scope, paths: value.paths };
+      if ((value.scope === "all" || value.scope === "unclear") && !value.paths.length) return { scope: value.scope, paths: [] };
+    } catch { /* Try the next JSON object. */ }
+  }
+}
+
 export const answerCoverageResponseFormat = {
   type: "json_schema",
   name: "gitcat_answer_coverage",
@@ -534,8 +570,10 @@ function validate(value: unknown): ModelPlan | undefined {
   if (optionalKeys.includes("reads") && !isReadList(record.reads)) return undefined;
   if (!Array.isArray(record.steps)) return undefined;
   for (const step of record.steps) {
-    if (!hasExactKeys(step, stepKeys)) return undefined;
+    const pathList = step !== null && typeof step === "object" && Object.hasOwn(step, "paths");
+    if (!hasExactKeys(step, pathList ? [...stepKeys, "paths"] : stepKeys)) return undefined;
     const entry = step as Record<string, unknown>;
+    if (pathList && (!Array.isArray(entry.paths) || !entry.paths.every(path => typeof path === "string" && path.length > 0))) return undefined;
     if (typeof entry.operation !== "string" || !(executableOperations.has(entry.operation as Operation) || entry.operation === "none")) return undefined;
     if (!Array.isArray(entry.argv) || !entry.argv.every((item) => typeof item === "string")) return undefined;
     if (!hasExactKeys(entry.args, argsKeys) || !Object.values(entry.args as object).every((item) => typeof item === "string")) return undefined;
