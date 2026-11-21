@@ -23,8 +23,8 @@ import { remoteNamePattern } from "./repository-plan.js";
 import { hostingProviders } from "../shared/hosting.js";
 import { cloneRepository, inspectFolder, previewClone, startTracking, type FolderInspection } from "./project-setup.js";
 import {
-  classifyFailure, compareFingerprints, emptyWorkspace, errorText, fingerprintFrom, inspectProject, keepFingerprints, nearestExistingFolder,
-  parseWorkspace, relocateProject, restoreProjects, type RepoFingerprint, type WorkspaceRecord
+  classifyFailure, compareFingerprints, emptyWorkspace, errorText, fingerprintFrom, inspectProject, nearestExistingFolder,
+  parseWorkspace, reconcileWorkspaceTabs, relocateProject, restoreProjects, type RepoFingerprint, type WorkspaceRecord
 } from "./workspace-restore.js";
 import type {
   AiSharingPurpose, CloneParentResult, HelpPage, ReadinessRequest, ClonePreview, CloneResult, ConflictChoiceRequest, ConflictGuide, ConflictProposal, ConversationMessage, ExecutionFailure, HistoryRequest, LlmConfigInput, Locale, ProviderPage, Operation, ProjectLocateResult,
@@ -42,6 +42,7 @@ if (userProfile === join(app.getPath("appData"), legacyAppName)) app.setName(leg
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let mainWindow: BrowserWindow | null = null;
 const openedRepositories = new Set<string>();
+const awaitingWorkspaceTabs = new Set<string>();
 const issuedReviews = new Map<string, import("../shared/types.js").ShareReviewPreview>();
 const verifiedReviewUrls = new Set<string>();
 function rememberReviewUrl(url: string | undefined) {
@@ -115,6 +116,7 @@ async function restoreWorkspace() {
   const before = JSON.stringify(persistedWorkspace);
   const restored = await restoreProjects(persistedWorkspace, getSnapshot);
   unavailableProjects.clear();
+  awaitingWorkspaceTabs.clear();
   for (const project of restored.projects) openedRepositories.add(project.path);
   for (const project of restored.unavailable) unavailableProjects.set(project.path, project);
   persistedWorkspace = restored.record;
@@ -138,6 +140,7 @@ function adoptLocation(from: string, project: RepoSnapshot, fingerprint: RepoFin
   unavailableProjects.delete(project.path);
   for (const [id, pending] of pendingLocations) if (pending.from === from) pendingLocations.delete(id);
   openedRepositories.add(project.path);
+  if (!persistedWorkspace.paths.includes(project.path)) awaitingWorkspaceTabs.add(project.path);
   persistedWorkspace = relocateProject(persistedWorkspace, from, project.path, fingerprint);
   if (match === "same") relocateRepositoryMemory(from, project.path);
   saveWorkspaceQuietly();
@@ -149,7 +152,10 @@ function adoptProject(snapshot: RepoSnapshot) {
   openedRepositories.add(snapshot.path);
   // Opening a saved project that was unavailable brings it back; it is not listed twice.
   unavailableProjects.delete(snapshot.path);
-  if (!persistedWorkspace.paths.includes(snapshot.path)) persistedWorkspace.paths = [...persistedWorkspace.paths, snapshot.path];
+  if (!persistedWorkspace.paths.includes(snapshot.path)) {
+    awaitingWorkspaceTabs.add(snapshot.path);
+    persistedWorkspace.paths = [...persistedWorkspace.paths, snapshot.path];
+  }
   persistedWorkspace.activePath = snapshot.path;
   saveWorkspace();
   void rememberFingerprints([snapshot]);
@@ -355,16 +361,13 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
     // A saved project that could not be opened is still a saved project; anything else must have been opened here.
     if (normalized.some((path) => !openedRepositories.has(path) && !unavailableProjects.has(path))) throw new Error("El workspace contiene un repositorio no autorizado.");
     const normalizedActivePath = typeof activePath === "string" ? resolve(activePath) : undefined;
-    persistedWorkspace = {
-      paths: normalized,
-      activePath: normalizedActivePath && normalized.includes(normalizedActivePath) ? normalizedActivePath : normalized[0],
-      fingerprints: keepFingerprints(persistedWorkspace.fingerprints, normalized)
-    };
-    for (const path of openedRepositories) if (!normalized.includes(path)) openedRepositories.delete(path);
-    for (const path of unavailableProjects.keys()) if (!normalized.includes(path)) unavailableProjects.delete(path);
-    for (const [id, pending] of pendingLocations) if (!normalized.includes(pending.from)) pendingLocations.delete(id);
-    planHandlers.retainOpenedPlans(normalized);
-    for (const [id, proposal] of issuedProposals) if (!normalized.includes(proposal.repoPath)) issuedProposals.delete(id);
+    persistedWorkspace = reconcileWorkspaceTabs(persistedWorkspace, normalized, normalizedActivePath, awaitingWorkspaceTabs);
+    const { paths: retained } = persistedWorkspace;
+    for (const path of openedRepositories) if (!retained.includes(path)) openedRepositories.delete(path);
+    for (const path of unavailableProjects.keys()) if (!retained.includes(path)) unavailableProjects.delete(path);
+    for (const [id, pending] of pendingLocations) if (!retained.includes(pending.from)) pendingLocations.delete(id);
+    planHandlers.retainOpenedPlans(retained);
+    for (const [id, proposal] of issuedProposals) if (!retained.includes(proposal.repoPath)) issuedProposals.delete(id);
     saveWorkspace();
   });
   ipcMain.handle("project:select", async (event, intent: unknown, labels: unknown): Promise<ProjectSelectResult> => {
@@ -441,6 +444,7 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
     unavailableProjects.delete(saved);
     openedRepositories.add(outcome.project.path);
     if (outcome.project.path !== saved) {
+      if (!persistedWorkspace.paths.includes(outcome.project.path)) awaitingWorkspaceTabs.add(outcome.project.path);
       persistedWorkspace = relocateProject(persistedWorkspace, saved, outcome.project.path, persistedWorkspace.fingerprints[saved]);
       saveWorkspaceQuietly();
     }

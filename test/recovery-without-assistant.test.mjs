@@ -391,7 +391,7 @@ test("una fusión que se detiene a medias dice qué se hizo, qué falló y no re
   assert.equal(work.run("branch", "--show-current").trim(), "main", "the completed step stays completed");
 });
 
-test("una red caída y un remoto que niega el acceso se distinguen de un conflicto, y reintentar solo publica", async () => {
+test("si falla la red después de guardar, reintentar solo publica", async () => {
   const work = seeded("gitcat-rec-network-");
   work.run("remote", "add", "origin", "http://127.0.0.1:1/nadie.git");
   work.run("config", "branch.main.remote", "origin");
@@ -423,14 +423,21 @@ test("una red caída y un remoto que niega el acceso se distinguen de un conflic
   assert.deepEqual(retried.steps.map((step) => step.operation), ["push"], "the commit that completed is not replayed");
   assert.match(retried.effects.join(" "), /Already done, not repeated/);
   assert.equal(work.run("rev-list", "--count", "HEAD").trim(), commits);
+});
 
-  // A remote that is not there reads as access, not as a network outage or a conflict.
-  work.run("remote", "set-url", "origin", join(tmpdir(), "gitcat-no-existe", "repo.git"));
-  const fetch = await service.prepareOperation(work.path, "fetch", {}, "en");
-  const refused = await run(work.path, fetch);
-  const denied = await service.describeFailure(work.path, failureOf(fetch, refused.record, refused.result.error), refused.record);
-  assert.equal(denied.kind, "auth");
-  assert.deepEqual(kinds(denied.actions), ["retry", "refresh"]);
+test("si falta la carpeta de un remoto, la recuperación permite revisar su dirección y volver a intentar", async (t) => {
+  const work = seeded("gitcat-rec-missing-remote-");
+  t.after(() => rmSync(work.path, { recursive: true, force: true }));
+  work.run("remote", "add", "origin", join(work.path, "missing.git"));
+  const head = work.run("rev-parse", "HEAD");
+  const fetch = await service.prepareOperation(work.path, "fetch", {}, "es");
+  const { result, record } = await run(work.path, fetch);
+  assert.match(result.error, /does not appear to be a git repository/);
+  const report = await service.describeFailure(work.path, failureOf(fetch, record, result.error), record);
+  assert.equal(report.kind, "remote_unavailable");
+  assert.equal(report.facts.remote, "origin");
+  assert.deepEqual(kinds(report.actions), ["review_remotes", "retry", "refresh"]);
+  assert.equal(work.run("rev-parse", "HEAD"), head);
 });
 
 test("la sugerencia después de un push rechazado usa el idioma de GitCat", async (t) => {
