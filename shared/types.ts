@@ -499,6 +499,10 @@ export type StepOutcome = {
 export type ActionPlan = {
   switchWork?: SwitchWorkRequest;
   recovery?: HistoryRecovery;
+  /** The stopped attempt this continuation replaces when it is executed. */
+  retryOf?: string;
+  /** Steps already completed before this continuation. Displayed alongside the new plan. */
+  completedEarlier?: string[];
   id: string;
   repoPath: string;
   head: string;

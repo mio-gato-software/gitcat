@@ -123,6 +123,8 @@ type ConversationTurn = {
   assistant?: "consulting" | "not_shared" | AssistantUnavailable;
   /** The person chose to leave things as they are. */
   kept?: boolean;
+  /** A newer continuation has replaced the actions on this recovery card. */
+  resumed?: boolean;
 };
 
 /** What goes back to the assistant in place of output it may not read. Model-facing, so it stays in English. */
@@ -1273,7 +1275,7 @@ export default function App() {
    * allow-listed operation prepared and confirmed like any other. Nothing here runs a change by itself.
    */
   const runRecoveryAction = async (turnId: number, turn: ConversationTurn, action: RecoveryAction) => {
-    if (!snapshot || planning || !turn.recovery) return;
+    if (!snapshot || planning || !turn.recovery || turn.resumed) return;
     const path = turn.recovery.repoPath;
     if (path !== snapshot.path) return;
     const facts = turn.recovery.facts;
@@ -1283,7 +1285,10 @@ export default function App() {
       case "retry":
         if (turn.recoveryPlanId) {
           const planId = turn.recoveryPlanId;
-          await showPlan(t("recoveryRetryQuestion"), () => window.gitcat.prepareRetry(path, planId, locale), path, { localRecovery: turn.localRecovery });
+          await showPlan(t("recoveryRetryQuestion"), async () => {
+            try { return await window.gitcat.prepareRetry(path, planId, locale); }
+            finally { await refreshProject(path, false); }
+          }, path, { localRecovery: turn.localRecovery });
         }
         return;
       case "inspect_changes": setFocus({ kind: "wip" }); setInspectorTab("details"); return;
@@ -1419,6 +1424,19 @@ export default function App() {
   const runPlan = async (turnId: number, plan: ActionPlan) => {
     const clearDeliveryDraft = delivery.clearDraftOnCommit(plan.repoPath);
     updateTurn(plan.repoPath, turnId, (turn) => ({ ...turn, status: "executing" }));
+    const previousAttempt = plan.retryOf;
+    if (previousAttempt) setConversations(items => ({
+      ...items,
+      [plan.repoPath]: (items[plan.repoPath] ?? []).map(turn => {
+        if (turn.recoveryPlanId === previousAttempt) {
+          return { ...turn, resumed: true, recoveryFailure: undefined, plan: undefined, assistant: undefined };
+        }
+        if (turn.id !== turnId && turn.plan?.retryOf === previousAttempt && turn.status === "ready") {
+          return { ...turn, plan: undefined, status: "cancelled", outcome: t("planDiscarded") };
+        }
+        return turn;
+      })
+    }));
     const project = projects.find((item) => item.snapshot.path === plan.repoPath);
     const before = project?.snapshot;
     const remoteEdit = plan.operation === "edit_remote_url";
@@ -3593,7 +3611,7 @@ function ConversationEntry({ turn, snapshot, busy, configured, onRecoveryAction,
   const sequence = (turn.plan?.steps.length ?? 0) > 1;
   const technicalOutput = turn.error && !turn.output?.includes(turn.error)
     ? [turn.output, turn.error].filter(Boolean).join("\n\n") : turn.output;
-  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading" role="status"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} onAskAssistant={onAskAssistant} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && <p className="assistant-answer">{turn.answer}</p>}{turn.answerCommit && <button type="button" className="ghost-button small" onClick={() => onShowCommit(turn.answerCommit!)}><FileDiff size={13} /> {t("fullDiff")} · {turn.answerCommit.shortHash}</button>}{turn.answerDetails && <AssistantAnswerDetails output={turn.answerDetails} />}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} snapshot={snapshot} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.completion ? <CompletionCard summary={turn.completion} output={technicalOutput} /> : turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{!turn.completion && turn.error && <div className="conversation-error" role="alert"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
+  return <article className="conversation-turn"><div className="conversation-question"><span>{t("you")}</span><p>{turn.question}</p></div><div className={`conversation-response ${turn.status === "error" ? "error" : ""}`}><span className="conversation-avatar"><CatMark size={17} outline /></span><div>{turn.status === "loading" && <div className="conversation-loading" role="status"><LoaderCircle className="spin" size={14} /> {t("preparingResponse")}</div>}{turn.recovery && <RecoveryCard report={turn.recovery} assistant={turn.assistant} kept={Boolean(turn.kept)} resumed={turn.resumed} busy={busy} configured={configured} retryable={Boolean(turn.recoveryPlanId)} onAction={onRecoveryAction} onAskAssistant={onAskAssistant} />}{turn.recovery && (turn.answer || turn.plan) && <p className="recovery-assistant-heading"><Sparkles size={12} /> {t("recoveryAssistantSuggests")}</p>}{turn.answer && <p className="assistant-answer">{turn.answer}</p>}{turn.answerCommit && <button type="button" className="ghost-button small" onClick={() => onShowCommit(turn.answerCommit!)}><FileDiff size={13} /> {t("fullDiff")} · {turn.answerCommit.shortHash}</button>}{turn.answerDetails && <AssistantAnswerDetails output={turn.answerDetails} />}{turn.answer && turn.withheld && turn.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(turn.withheld, t) })}</p>}{turn.plan && (turn.status === "ready" || turn.status === "executing") && <PlanCard plan={turn.plan} snapshot={snapshot} onApply={async () => onApply(turn.plan!)} onDismiss={onDismiss} busy={busy || turn.status === "executing"} />}{turn.plan && !turn.plan.allowed && turn.status === "completed" && <PlanCard plan={turn.plan} onApply={async () => undefined} onDismiss={onDismiss} busy={false} />}{turn.completion ? <CompletionCard summary={turn.completion} output={technicalOutput} /> : turn.outcome && (sequence ? <div className="conversation-report"><span>{turn.outcome}</span></div> : <div className="conversation-outcome"><Check size={13} /><span>{turn.outcome}</span></div>)}{!turn.completion && turn.error && <div className="conversation-error" role="alert"><AlertTriangle size={13} /><span>{turn.error}</span></div>}</div></div></article>;
 }
 
 
@@ -3623,8 +3641,8 @@ function recoveryActionDetail(action: RecoveryAction, facts: RecoveryReport["fac
  * is still safe and the ways on the repository supports. A real choice is asked as one focused
  * question with what each answer costs, and nothing is picked for the person.
  */
-function RecoveryCard({ report, assistant, kept, busy, configured, retryable, onAction, onAskAssistant }: {
-  report: RecoveryReport; assistant?: ConversationTurn["assistant"]; kept: boolean; busy: boolean; configured: boolean; retryable: boolean; onAction: (action: RecoveryAction) => void;
+function RecoveryCard({ report, assistant, kept, resumed, busy, configured, retryable, onAction, onAskAssistant }: {
+  report: RecoveryReport; assistant?: ConversationTurn["assistant"]; kept: boolean; resumed?: boolean; busy: boolean; configured: boolean; retryable: boolean; onAction: (action: RecoveryAction) => void;
   onAskAssistant?: () => void;
 }) {
   const { t } = useI18n();
@@ -3665,16 +3683,17 @@ function RecoveryCard({ report, assistant, kept, busy, configured, retryable, on
     </ol>
     {safe.length > 0 && <div className="recovery-safe"><strong>{t("recoverySafeHeading")}</strong><ul>{safe.map((line) => <li key={line}>{line}</li>)}</ul></div>}
     {report.detail && <details className="recovery-detail"><summary>{t("recoveryGitSaid")}</summary><pre>{report.detail}</pre></details>}
-    {report.choice && report.choice.length > 0 && <div className="recovery-choice" role="group" aria-label={t("recoveryChoicePrompt")}>
+    {!resumed && report.choice && report.choice.length > 0 && <div className="recovery-choice" role="group" aria-label={t("recoveryChoicePrompt")}>
       <strong>{t("recoveryChoicePrompt")}</strong>
       {report.choice.map((action, index) => <button key={`${action.kind}-${action.option ?? ""}-${index}`} className="recovery-option" disabled={busy || kept} onClick={() => onAction(action)}><span>{recoveryActionLabel(action, facts, t, configured)}</span>{recoveryActionDetail(action, facts, t) && <small>{recoveryActionDetail(action, facts, t)}</small>}</button>)}
     </div>}
-    {(actions.length > 0 || onAskAssistant) && <div className="recovery-actions" aria-label={t("recoveryNextHeading")}>
+    {!resumed && (actions.length > 0 || onAskAssistant) && <div className="recovery-actions" aria-label={t("recoveryNextHeading")}>
       {actions.map((action, index) => button(action, index, index === 0 && !report.choice))}
       {onAskAssistant && <button className="ghost-button small recovery-ask-assistant" disabled={busy || kept || assistant === "consulting"} onClick={onAskAssistant}>
         <Sparkles size={12} /> {t("askRecoveryAssistant")}
       </button>}
     </div>}
+    {resumed && <p className="recovery-note">{t("recoveryResumed")}</p>}
     {kept && <p className="recovery-note">{t("recoveryKept")}</p>}
     {assistant === "consulting" && <p className="recovery-note"><LoaderCircle className="spin" size={12} /> {t("recoveryAssistantConsulting")}</p>}
     {assistant && assistant !== "consulting" && <p className="recovery-note assistant-unavailable">{assistant === "not_shared" ? t("recoveryNotShared") : t(`recoveryAssistant_${assistant}` as MessageKey)}</p>}
@@ -3730,7 +3749,10 @@ function PlanCard({ plan, snapshot, onApply, onDismiss, busy, confirmLabel }: { 
     : plan.operation === "discard_file" ? t("discardFileChanges") : t("confirmAction"));
   return <div className={`plan-card ${plan.allowed ? "allowed" : asking ? "asking" : "rejected"}`}><div className="plan-header"><div className="plan-icon">{plan.allowed ? <Sparkles size={15} /> : asking ? <MessageCircle size={15} /> : <AlertTriangle size={15} />}</div><div><strong>{plan.summary}</strong><span>{plan.source === "llm" ? t("interpretedByProvider") : t("directAction")}</span></div><button className="mini-icon" onClick={onDismiss} aria-label={asking ? t("dismissQuestion") : t("dismissPlan")}><X size={14} /></button></div><p>{plan.rationale}</p>{plan.withheld && plan.withheld.length > 0 && <p className="withheld-note">{t("withheldNote", { files: withheldText(plan.withheld, t) })}</p>}
     {plan.allowed && <PlanGoal plan={plan} snapshot={snapshot} />}
-    {plan.effects && <ul className="plan-effects">{plan.effects.map((effect) => <li key={effect}>{effect}</li>)}</ul>}
+    {(plan.completedEarlier?.length || plan.effects?.length) ? <ul className="plan-effects">
+      {plan.completedEarlier?.length ? <li>{t("recoveryEarlierSteps", { steps: plan.completedEarlier.join(", ") })}</li> : null}
+      {plan.effects?.map((effect) => <li key={effect}>{effect}</li>)}
+    </ul> : null}
     {push && !directPush && <PublishReadiness repoPath={plan.repoPath} remote={push.pushDestination?.remote ?? push.args.setUpstream} />}
     {plan.allowed && plan.steps.length > 1 && <ol className="plan-steps">{plan.steps.map((step, index) => <li key={`${step.command}-${index}`}><span className="step-summary">{step.summary}</span></li>)}</ol>}
     {(plan.allowed || plan.repositoryPlan) && <details className="technical-details plan-technical">
