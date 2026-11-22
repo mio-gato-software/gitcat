@@ -14,7 +14,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   getHostingConnections, connectHosting, removeHostingConnection,
   createPractice, getPracticeInfo, setPracticeLesson, editPractice, removePractice, previewShareReview, publishShareReview, getSwitchWork, prepareSwitchWork, getActivityHistory, repairActivityHistory, setActivityRetention, clearActivityHistory, prepareHistoryRecovery, suggestHistoryRecovery, acknowledgeAiSharing, applyConflictChoices, applyConflictResolution, conflictFileToOpen, describeConflicts, describeFailure, fetchRemotes, generateCommitDescription, getAiSharing, getCommitDetail, getCommitFileDiff,
-  getLlmConfig, getSnapshot, openWorktree, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation, prepareRetry,
+  getLlmConfig, getSnapshot, openWorktree, getSelectionDiff, getWorkingFileDiff, loadHistory, loadLlmConfig, loadMemory, planAction, planRecovery, prepareOperation,
   prepareMergeToDefault, prepareRevertCommit, proposeConflictResolution, relocateRepositoryMemory, rootCommits, connectLlm, verifyLlmConfig, checkReadiness,
   setAiSharingExclusions, setAiSharingReview, type IssuedConflictGuide, type IssuedConflictProposal
 } from "./git-service.js";
@@ -677,13 +677,6 @@ if (keepSingleInstance(app, () => mainWindow && !mainWindow.isDestroyed() ? main
     const repoPath = assertOpenedRepository(cwd);
     const { record, known } = failureRecord(repoPath, failure);
     return exclusive(repoPath, () => describeFailure(repoPath, failure, record, known));
-  });
-  ipcMain.handle("action:prepare-retry", async (event, cwd: string, planId: unknown, locale?: Locale) => {
-    assertTrustedSender(event);
-    const repoPath = assertOpenedRepository(cwd);
-    const record = planHandlers.getFailure(planId);
-    if (!record || record.plan.repoPath !== repoPath) throw new Error(localized(locale, "Ese intento ya no está disponible. Actualiza y prepara la acción de nuevo.", "That attempt is no longer available. Refresh and prepare the action again."));
-    return rememberPlan(await tracked(event, repoPath, "planning", () => prepareRetry(repoPath, record, locale), false, "wait"));
   });
   ipcMain.handle("action:plan", async (event, cwd: string, request: string, context?: ConversationMessage[], locale?: Locale, includeWorkingChanges = false) => {
     assertTrustedSender(event);

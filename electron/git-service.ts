@@ -3287,14 +3287,22 @@ export async function planRecovery(cwd: string, failure: ExecutionFailure, conte
     }] : [])
   ];
   const notes = newNotes();
+  const partial = Boolean(report?.completed.length);
   // This synthetic request is the latest user message the planner sees, so it also sets the
   // response language for recovery, independently of previous turns or Git's diagnostics.
   const request = localized(language,
     "El plan se detuvo a medias. Usa el estado actual del repositorio para proponer cómo continuar o explica qué necesita decidir la persona. Responde en español en todos los textos visibles para la persona, aunque la conversación anterior y los diagnósticos de Git usen otro idioma.",
-    "The plan stopped part-way. Use the current repository state to propose how to continue, or explain what the user needs to decide. Answer in English in all user-facing text, even if earlier messages and Git diagnostics use a different language.");
+    "The plan stopped part-way. Use the current repository state to propose how to continue, or explain what the user needs to decide. Answer in English in all user-facing text, even if earlier messages and Git diagnostics use a different language.")
+    + (partial ? localized(language,
+      " Describe el siguiente paso en palabras. GitCat se encarga de preparar cualquier continuación desde el registro de ejecución.",
+      " Describe the next step in words. GitCat prepares any continuation from the execution record.") : "");
   try {
     const plan = await requestPlan(request, snapshot, context, issues, notes, providerLimits.recoveryMs);
-    return withNotes(await prepareModelPlan(plan, snapshot, request, context, language, notes), notes);
+    const prepared = await prepareModelPlan(plan, snapshot, request, context, language, notes);
+    if (partial && prepared.steps.length) return bindPlan(snapshot, answerDraft(localized(language,
+      "Usa las opciones de esta tarjeta para continuar desde donde se detuvo el plan. Los pasos ya completados quedan registrados.",
+      "Use the options on this card to pick up where the plan stopped. The completed steps are already recorded.")));
+    return withNotes(prepared, notes);
   } catch (error) {
     const reason = unavailableReason(error);
     return bindPlan(snapshot, {
@@ -4709,7 +4717,15 @@ async function executePlanBody(cwd: string, plan: ActionPlan, outcomes: StepOutc
  * What the main process keeps about a plan that stopped: the plan as approved and what each of its
  * steps did. Recovery reads this instead of what the interface reports, so "completed" is a fact.
  */
-export type FailedPlanRecord = { plan: ActionPlan; outcomes: StepOutcome[]; stale: boolean };
+export type FailedPlanRecord = {
+  plan: ActionPlan;
+  outcomes: StepOutcome[];
+  stale: boolean;
+  /** The last verified branch and HEAD after partial execution. Null means the reread failed. */
+  resumeAt?: Pick<RepoSnapshot, "currentBranch" | "head"> | null;
+  /** Steps completed in earlier attempts, separate from the current plan's indexed outcomes. */
+  completedBefore?: string[];
+};
 
 const hooksFor: Partial<Record<Operation, string[]>> = {
   sync_remote: ["pre-merge-commit", "prepare-commit-msg", "commit-msg"],
@@ -4745,10 +4761,15 @@ function relativeTo(repoRoot: string, path: string) {
 /** A plan can be prepared again only from steps it can still vouch for. */
 function retryableRecord(record: FailedPlanRecord | undefined) {
   if (!record) return false;
-  const remaining = record.outcomes.some((outcome) => outcome.status !== "completed");
+  const start = record.outcomes.findIndex((outcome) => outcome.status !== "completed");
   // A save of selected files is bound to the reviewed versions; it is reviewed again, not replayed.
-  return remaining && !record.plan.selection && !record.plan.repositoryPlan && record.plan.steps.every((step) =>
+  // Once that save is complete, the binding does not apply to the remaining steps.
+  return start >= 0 && !selectionStillPending(record) && !record.plan.repositoryPlan && record.plan.steps.slice(start).every((step) =>
     !["github_create_repo", "discard_file", "edit_remote_url"].includes(step.operation));
+}
+
+function selectionStillPending(record: FailedPlanRecord | undefined) {
+  return Boolean(record?.plan.selection && record.outcomes[0]?.status !== "completed");
 }
 
 /**
@@ -4780,7 +4801,7 @@ export async function describeFailure(cwd: string, failure: ExecutionFailure, re
   const facts = recoveryFacts(snapshot, evidence);
   const { actions, choice, needsJudgment } = recoveryActions(kind, facts, evidence, {
     retryable: retryableRecord(record) && !["conflict", "pending", "divergent", "missing_upstream", "no_remote"].includes(kind),
-    selectionBound: Boolean(record?.plan.selection)
+    selectionBound: selectionStillPending(record)
   });
   return {
     repoPath: snapshot.path,
@@ -4788,7 +4809,7 @@ export async function describeFailure(cwd: string, failure: ExecutionFailure, re
     stage: stale ? "stale" : record || failure.stage === "execute" ? "execute" : "prepare",
     failedSummary: failedOutcome?.summary ?? failure.summary,
     detail,
-    completed: outcomes ? outcomes.filter((outcome) => outcome.status === "completed").map((outcome) => outcome.summary) : [],
+    completed: [...(record?.completedBefore ?? []), ...(outcomes ?? []).filter(outcome => outcome.status === "completed").map(outcome => outcome.summary)],
     notRun: outcomes ? outcomes.filter((outcome) => outcome.status === "skipped").map((outcome) => outcome.summary) : failure.skipped.filter((summary) => summary !== failure.summary),
     facts,
     actions,
@@ -4807,7 +4828,7 @@ export async function prepareRetry(cwd: string, record: FailedPlanRecord, locale
   const snapshot = await getSnapshot(cwd);
   if (record.plan.repoPath !== snapshot.path) throw new Error(localized(language, "El plan pertenece a otro repositorio.", "The plan belongs to another repository."));
   if (!retryableRecord(record)) {
-    throw new Error(record.plan.selection
+    throw new Error(selectionStillPending(record)
       ? localized(language, "Este guardado dependía de los archivos que revisaste. Revísalos de nuevo para guardarlos; nada se repite solo.", "This save depended on the files you reviewed. Review them again to save them; nothing is repeated on its own.")
       : localized(language, "No queda ningún paso de este plan que se pueda volver a preparar.", "No step of this plan is left that can be prepared again."));
   }
@@ -4816,6 +4837,21 @@ export async function prepareRetry(cwd: string, record: FailedPlanRecord, locale
     throw new Error(localized(language,
       "Hay una operación de Git a medias. Termínala o abórtala primero; lo que ya se hizo sigue hecho y no se repite.",
       "A Git operation is still half-finished. Finish or abort it first; what already ran stays done and is not repeated."));
+  }
+  const resumeAt = record.resumeAt;
+  if (resumeAt === null) {
+    return bindPlan(snapshot, refused(localized(language,
+      "Comprueba en el historial qué se completó y prepara solo lo que falte. GitCat no pudo verificar dónde se detuvo la ejecución.",
+      "Check what completed in the activity history and prepare only the remaining work. GitCat could not verify where execution stopped."),
+    "guardrail", localized(language, "Revisa dónde se detuvo el plan", "Review where the plan stopped")));
+  }
+  if (resumeAt && (snapshot.currentBranch !== resumeAt.currentBranch ||
+      (resumeAt.currentBranch === "HEAD" && snapshot.head !== resumeAt.head))) {
+    const target = resumeAt.currentBranch === "HEAD" ? resumeAt.head.slice(0, 7) : resumeAt.currentBranch;
+    return bindPlan(snapshot, refused(localized(language,
+      `Vuelve a ${target} y usa el botón de reintento para continuar donde quedó el plan.`,
+      `Switch back to ${target} and use the retry button to pick up where the plan stopped.`),
+    "guardrail", localized(language, "El plan quedó pendiente en otra rama", "The plan stopped on a different branch")));
   }
   if (record.plan.recovery) return buildHistoryRecoveryPlan(snapshot.path, record.plan.recovery, language);
   const start = record.outcomes.findIndex((outcome) => outcome.status !== "completed");
@@ -4830,14 +4866,11 @@ export async function prepareRetry(cwd: string, record: FailedPlanRecord, locale
   const remaining = await bindPushDestinations(snapshot, record.plan.steps.slice(start));
   const sync = remaining.find(step => step.operation === "sync_remote");
   if (sync) return prepareRemoteSync(snapshot, { ref: sync.args.ref, name: sync.args.name, side: sync.args.mode === "prefer_remote" ? "theirs" : "" }, language);
-  const completed = record.outcomes.slice(0, start).map((outcome) => outcome.summary);
+  const completed = [...(record.completedBefore ?? []), ...record.outcomes.slice(0, start).map(outcome => outcome.summary)];
   const draft = sequenceDraft(remaining, localized(language,
     "Se prepara de nuevo con el repositorio tal como está ahora. Solo incluye lo que no llegó a completarse.",
-    "Prepared again against the repository as it is now. It only includes what did not complete."), [
-    ...(completed.length ? [localized(language, `Ya hecho, no se repite: ${completed.join(", ")}.`, `Already done, not repeated: ${completed.join(", ")}.`)] : []),
-    ...(record.plan.effects ?? [])
-  ], language);
-  const plan = bindPlan(snapshot, draft);
+    "Prepared again against the repository as it is now. It only includes what did not complete."), record.plan.effects, language);
+  const plan = bindPlan(snapshot, { ...draft, ...(completed.length ? { completedEarlier: completed } : {}) });
   validateExecution(plan, snapshot, language);
   return plan;
 }
