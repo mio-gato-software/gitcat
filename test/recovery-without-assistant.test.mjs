@@ -83,6 +83,7 @@ function planIpc(assertOpenedRepository) {
   return {
     ...plans,
     prepareDelivery: (path, request) => handlers.get("action:prepare-delivery")(event, path, request, "en"),
+    prepareRetry: (path, id) => handlers.get("action:prepare-retry")(event, path, id, "en"),
     execute: (path, id) => handlers.get("action:execute")(event, path, id, "en")
   };
 }
@@ -326,6 +327,121 @@ test("un guardado de archivos elegidos que un hook rechaza se revisa de nuevo en
   assert.equal(existsSync(join(work.path, "fuera.txt")), true);
 });
 
+function assistantSequenceReply(steps) {
+  return replyWith({
+    intent: "git_operation", summary: "Guardar trabajo", rationale: "Solicitud de prueba.", reply: "", risk: "high",
+    repository: { localPath: "", repository: "", owner: "", host: "", protocol: "", sshHost: "", remote: "", push: false, replaceRemote: false },
+    steps: steps.map(({ operation, paths, ...args }) => ({
+      operation, argv: [], ...(paths ? { paths } : {}), args: { name: "", onto: "", to: "", path: "", side: "", message: "", noVerify: "", ...args }
+    }))
+  });
+}
+
+async function assistantSequence(path, steps) {
+  provider = replyWith("ok");
+  await service.saveLlmConfig({ apiKey: "sk-prueba", model: "gpt-5.6-luna" });
+  await service.acknowledgeAiSharing(path);
+  provider = assistantSequenceReply(steps);
+  const plan = await service.planAction(path, "Ejecuta los pasos de prueba", [], "es");
+  assert.deepEqual(plan.steps.map(step => step.operation), steps.map(step => step.operation), plan.rationale);
+  return plan;
+}
+
+test("un guardado selectivo completado deja reintentar solo la publicación que rechazó el remoto", async (t) => {
+  const origin = repository("gitcat-rec-selected-origin-", { bare: true });
+  const work = seeded("gitcat-rec-selected-work-");
+  for (const path of [origin.path, work.path]) t.after(() => rmSync(path, { recursive: true, force: true }));
+  work.run("remote", "add", "origin", origin.path);
+  work.run("push", "-u", "origin", "main");
+  const remoteHead = origin.run("rev-parse", "main");
+  const hook = join(origin.path, "hooks", "pre-receive");
+  writeFileSync(hook, "#!/bin/sh\necho 'QA: publication rejected' >&2\nexit 1\n");
+  chmodSync(hook, 0o755);
+  writeFileSync(join(work.path, "guardar.txt"), "guardado\n");
+  writeFileSync(join(work.path, "fuera.txt"), "conservar\n");
+  const plan = await assistantSequence(work.path, [
+    { operation: "commit", message: "Guardar lo seleccionado", paths: ["guardar.txt"] }, { operation: "push" }
+  ]);
+  assert.ok(plan.selection);
+  const ipc = planIpc(() => plan.repoPath);
+  ipc.rememberPlan(plan);
+  const result = await ipc.execute(work.path, plan.id);
+  const record = ipc.getFailure(plan.id);
+  assert.deepEqual(result.outcomes.map(step => step.status), ["completed", "failed"]);
+  assert.equal(origin.run("rev-parse", "main"), remoteHead);
+  const head = work.run("rev-parse", "HEAD");
+  assert.equal(work.run("show", "--format=", "--name-only", "HEAD").trim(), "guardar.txt");
+  const failure = failureOf(plan, record, result.error);
+  const report = await service.describeFailure(work.path, failure, record);
+  assert.deepEqual(report.completed, [plan.steps[0].summary]);
+  assert.ok(kinds(report.actions).includes("retry"));
+  provider = assistantSequenceReply([{ operation: "commit", message: "Volver a guardar" }]);
+  const advice = await service.planRecovery(work.path, failure, [], "es", report);
+  assert.deepEqual(advice.steps, []);
+  assert.match(advice.answer, /opciones de esta tarjeta/);
+
+  writeFileSync(hook, "#!/bin/sh\nexit 0\n");
+  const retry = await ipc.prepareRetry(work.path, plan.id);
+  assert.deepEqual(retry.steps.map(step => step.operation), ["push"]);
+  assert.equal(retry.selection, undefined);
+  assert.equal(retry.requiresConfirmation, true);
+  assert.equal(origin.run("rev-parse", "main"), remoteHead);
+  const finished = await ipc.execute(work.path, retry.id);
+  assert.equal(finished.error, undefined);
+  assert.equal(work.run("rev-parse", "HEAD"), head);
+  assert.equal(origin.run("rev-parse", "main"), head);
+  assert.equal(work.run("status", "--porcelain").trim(), "?? fuera.txt");
+});
+
+test("una continuación conserva la rama original y desactiva intentos anteriores incluso si falla otra vez", async (t) => {
+  const work = seeded("gitcat-rec-continue-branch-");
+  t.after(() => rmSync(work.path, { recursive: true, force: true }));
+  const original = work.run("rev-parse", "HEAD");
+  const hook = join(work.path, ".git/hooks/pre-commit");
+  writeFileSync(hook, "#!/bin/sh\nexit 1\n");
+  chmodSync(hook, 0o755);
+  writeFileSync(join(work.path, "README.md"), "pendiente\n");
+  const plan = await assistantSequence(work.path, [
+    { operation: "create_branch", name: "feature/guardado" }, { operation: "commit", message: "Guardado final" },
+    { operation: "rename_branch", name: "feature/guardado", to: "feature/listo" }
+  ]);
+  const ipc = planIpc(() => plan.repoPath);
+  ipc.rememberPlan(plan);
+  const first = await ipc.execute(work.path, plan.id);
+  assert.deepEqual(first.outcomes.map(step => step.status), ["completed", "failed", "skipped"]);
+  work.run("switch", "main");
+  const wrongBranch = await ipc.prepareRetry(work.path, plan.id);
+  assert.equal(wrongBranch.allowed, false);
+  assert.match(wrongBranch.rationale, /Switch back to feature\/guardado/);
+  assert.equal(work.run("rev-parse", "main"), original);
+
+  work.run("switch", "feature/guardado");
+  const retry = await ipc.prepareRetry(work.path, plan.id);
+  const duplicate = await ipc.prepareRetry(work.path, plan.id);
+  assert.deepEqual(retry.steps.map(step => step.operation), ["commit", "rename_branch"]);
+  const second = await ipc.execute(work.path, retry.id);
+  assert.ok(second.error);
+  await assert.rejects(ipc.execute(work.path, duplicate.id), /continuation/i);
+  await assert.rejects(ipc.prepareRetry(work.path, plan.id), /attempt is no longer available/);
+  const record = ipc.getFailure(retry.id);
+  const report = await service.describeFailure(work.path, failureOf(retry, record, second.error), record);
+  assert.deepEqual(report.completed, [plan.steps[0].summary]);
+
+  writeFileSync(hook, "#!/bin/sh\nexit 0\n");
+  const final = await ipc.prepareRetry(work.path, retry.id);
+  assert.deepEqual(final.steps.map(step => step.operation), ["commit", "rename_branch"]);
+  assert.deepEqual(final.completedEarlier, [plan.steps[0].summary]);
+  assert.ok(final.effects?.every(effect => !effect.includes(plan.steps[0].summary)) ?? true);
+  const finished = await ipc.execute(work.path, final.id);
+  assert.equal(finished.error, undefined);
+  writeFileSync(join(work.path, "nuevo.txt"), "dejar fuera\n");
+  await assert.rejects(ipc.prepareRetry(work.path, retry.id), /attempt is no longer available/);
+  assert.equal(work.run("rev-list", "--count", "main..HEAD").trim(), "1");
+  assert.equal(work.run("rev-parse", "main"), original);
+  assert.equal(work.run("branch", "--show-current").trim(), "feature/listo");
+  assert.equal(work.run("status", "--porcelain").trim(), "?? nuevo.txt");
+});
+
 test("un plan desfasado no se ejecuta, se explica como tal y se puede preparar de nuevo con el estado actual", async () => {
   const work = seeded("gitcat-rec-stale-");
   work.run("switch", "-c", "feature/desfase");
@@ -421,7 +537,7 @@ test("si falla la red después de guardar, reintentar solo publica", async () =>
   assert.deepEqual(kinds(report.actions), ["retry", "refresh"]);
   const retried = await service.prepareRetry(work.path, record, "en");
   assert.deepEqual(retried.steps.map((step) => step.operation), ["push"], "the commit that completed is not replayed");
-  assert.match(retried.effects.join(" "), /Already done, not repeated/);
+  assert.deepEqual(retried.completedEarlier, [plan.steps[0].summary]);
   assert.equal(work.run("rev-list", "--count", "HEAD").trim(), commits);
 });
 

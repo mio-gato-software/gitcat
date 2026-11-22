@@ -1,6 +1,7 @@
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
 import type { ActionPlan, DeliveryRequest, Locale, OperationProgress } from "../shared/types.js";
-import { executePlan, prepareBranchDelivery, StalePlanError, type FailedPlanRecord } from "./git-service.js";
+import { executePlan, prepareBranchDelivery, prepareRetry, StalePlanError, type FailedPlanRecord } from "./git-service.js";
+import { localized, normalizeLocale } from "./i18n.js";
 
 type PlanHandlerDependencies = {
   assertTrustedSender: (event: IpcMainInvokeEvent) => void;
@@ -60,23 +61,53 @@ export function createPlanHandlers({ assertTrustedSender, assertOpenedRepository
       return rememberPlan(await tracked(event, repoPath, "planning", () => prepareBranchDelivery(repoPath, delivery, locale)));
     });
 
+    ipc.handle("action:prepare-retry", async (event, cwd: unknown, planId: unknown, locale?: Locale) => {
+      assertTrustedSender(event);
+      const repoPath = assertOpenedRepository(cwd);
+      return tracked(event, repoPath, "planning", async () => {
+        const record = getFailure(planId);
+        if (!record || record.plan.repoPath !== repoPath) throw new Error(localized(normalizeLocale(locale),
+          "Ese intento ya no está disponible. Revisa el resultado más reciente.",
+          "That attempt is no longer available. Review the latest result."));
+        const retry = await prepareRetry(repoPath, record, locale);
+        return retry.allowed ? rememberPlan({ ...retry, retryOf: record.plan.id }) : retry;
+      }, false, "wait");
+    });
+
     ipc.handle("action:execute", async (event, cwd: unknown, planId: unknown, locale?: Locale) => {
       assertTrustedSender(event);
       const repoPath = assertOpenedRepository(cwd);
       const plan = typeof planId === "string" ? issued.get(planId) : undefined;
       if (!plan) throw new Error("El plan ya no es válido. Prepara la acción de nuevo.");
-      issued.delete(plan.id);
       if (plan.repoPath !== repoPath) throw new Error("El plan pertenece a otro repositorio.");
+      issued.delete(plan.id);
+      const previous = getFailure(plan.retryOf);
+      if (plan.retryOf && !previous) throw new Error(localized(normalizeLocale(locale),
+        "Ya se inició otra continuación para ese intento. Revisa el resultado más reciente.",
+        "Another continuation already started for that attempt. Review the latest result."));
+      // Claim the stopped attempt before waiting for execution. Any other review of it is obsolete.
+      if (previous) failed.delete(previous.plan.id);
+      const completedBefore = previous ? [
+        ...(previous.completedBefore ?? []),
+        ...previous.outcomes.filter(outcome => outcome.status === "completed").map(outcome => outcome.summary)
+      ] : undefined;
       try {
         const result = await tracked(event, repoPath, "executing", () => executePlan(repoPath, plan, locale), true, "wait");
-        if (result.error) rememberFailure({ plan, outcomes: result.outcomes, stale: false });
+        if (result.error) {
+          const { currentBranch, head } = result.snapshot;
+          const progressed = result.outcomes.some(outcome => outcome.status === "completed");
+          const resumeAt = progressed ? result.snapshotStale ? null : { currentBranch, head } : previous?.resumeAt;
+          rememberFailure({ plan, outcomes: result.outcomes, stale: false, resumeAt, completedBefore });
+        }
         return result;
       } catch (error) {
         // A thrown execution error happened before any step ran. Partial results are returned above.
         rememberFailure({
           plan,
           outcomes: plan.steps.map(({ command, summary }) => ({ command, summary, status: "skipped", output: "" })),
-          stale: error instanceof StalePlanError
+          stale: error instanceof StalePlanError,
+          resumeAt: previous?.resumeAt,
+          completedBefore
         });
         throw error;
       }
