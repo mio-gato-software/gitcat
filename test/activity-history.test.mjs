@@ -610,8 +610,9 @@ for (const mode of ['choices', 'proposal']) {
     const nativeSpawn = cp.spawn;
     let stagedCount = 0;
     t.mock.method(cp, 'spawn', (exe, args, options) => {
-      if (Array.isArray(args) && args[0] === 'add') stagedCount += 1;
-      if (stagedCount >= 2 && Array.isArray(args) && args[0] === 'status') {
+      const command = args?.[0] === '-c' && args[1] === 'core.longpaths=true' ? args[2] : args?.[0];
+      if (command === 'add') stagedCount += 1;
+      if (stagedCount >= 2 && command === 'status') {
         return nativeSpawn(process.execPath, ['-e', 'process.stderr.write("fatal: simulated snapshot read error\\n"); process.exit(128);'], options);
       }
       return nativeSpawn(exe, args, options);
