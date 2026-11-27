@@ -1252,10 +1252,14 @@ app.whenReady().then(async () => {
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, 'Save one file');
     field.dispatchEvent(new Event('input', { bubbles: true }));
   })()`);
-  await waitFor(`document.querySelector('.commit-form-actions .primary-button')?.innerText.includes('Guardar 1 archivo')`);
+  const oneClickSave = `document.querySelector('.commit-form-actions .primary-button:enabled')`;
+  await waitFor(`${oneClickSave}?.innerText.includes('Guardar 1 archivo')`);
   const saveBefore = git('rev-parse', 'HEAD');
-  await js(`document.querySelector('.commit-form-actions .primary-button').click()`);
-  for (let attempt = 0; attempt < 100 && git('rev-parse', 'HEAD') === saveBefore; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+  await js(`${oneClickSave}.click()`);
+  // The commit can move HEAD while GitCat is still updating the real index. Wait for the
+  // completed save to clear the draft and render the updated working changes before reading Git.
+  await waitFor(`document.querySelector('#commit-description')?.value === '' && !(${rowFor('one-click.txt')})`, 120_000);
+  assert.notEqual(git('rev-parse', 'HEAD'), saveBefore);
   assert.equal(git('log', '-1', '--format=%s'), 'Save one file');
   assert.equal(git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'), 'one-click.txt');
   assert.equal(git('status', '--porcelain'), '?? .env');
