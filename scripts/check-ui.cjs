@@ -212,9 +212,6 @@ app.whenReady().then(async () => {
   let recoverCalls = 0;
   ipcMain.handle('action:describe-failure', (_, p, failure) => service.describeFailure(p, failure, planHandlers.getFailure(failure.planId)));
   ipcMain.handle('action:recover', (_, p, failure, context, locale) => { recoverCalls += 1; return service.planRecovery(p, failure, context, locale); });
-  ipcMain.handle('action:prepare-retry', async (_, p, id, locale) => {
-    return planHandlers.rememberPlan(await service.prepareRetry(p, planHandlers.getFailure(id), locale));
-  });
   ipcMain.handle('action:prepare', async (_, p, operation, args, locale) => {
     return planHandlers.rememberPlan(await service.prepareOperation(p, operation, args, locale));
   });
