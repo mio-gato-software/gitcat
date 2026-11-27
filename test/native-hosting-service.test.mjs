@@ -27,7 +27,8 @@ mock.method(cp,'spawn',(executable,args,options)=>{
   if(current.localPushOnly&&operation==='push')return originalSpawn(executable,args,{...options,env:{...options.env,GIT_ALLOW_PROTOCOL:'file'}});
   return originalSpawn(executable,['-c',`url.${current.bare}.insteadOf=${current.location.gitUrl}`,...args],options);
  }
- if(current?.failUpstream==='branch'&&/^git(?:\.exe)?$/i.test(basename(executable))&&args[0]==='branch'&&args.some(arg=>arg.startsWith('--set-upstream-to='))){
+ const command = args?.[0] === '-c' && args[1] === 'core.longpaths=true' ? args[2] : args?.[0];
+ if(current?.failUpstream==='branch'&&/^git(?:\.exe)?$/i.test(basename(executable))&&command==='branch'&&args.some(arg=>arg.startsWith('--set-upstream-to='))){
   return originalSpawn(process.execPath,['-e',"process.stderr.write('Could not configure upstream');process.exit(1)"],options);
  }
  return originalSpawn(executable,args,options);
