@@ -42,6 +42,15 @@ specialized workflow first.
 - Trace the existing UI, IPC/preload bridge, service validation, and execution path before adding a parallel path.
 - Read the relevant tests and update the smallest contract that expresses the new behavior.
 
+## Task tracking
+
+Track development work in the **GitCat** project in [Uncurved](https://uncurved.miogatosoftware.com).
+For API access, load `UNCURVED_BASE_URL` and `UNCURVED_API_TOKEN` from
+`~/.config/uncurved/.env.uncurved` and send the token as a bearer credential.
+This is the **All projects** key shared with the owner's other projects. Keep
+the file outside the repository with permissions `0600`.
+Use the [API guide](https://uncurved.miogatosoftware.com/api/docs) for requests.
+
 ## Personal use and immediate delivery
 
 - This repository is currently for the owner's personal use. Keep this assumption until the owner
