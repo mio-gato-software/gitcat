@@ -648,6 +648,12 @@ test("las lecturas distinguen una rama sin commits, los conteos filtrados y el n
   const path = mkdtempSync(join(tmpdir(), "gitcat-answer-history-coverage-"));
   t.after(() => rmSync(path, { recursive: true, force: true }));
   const run = (...args) => execFileSync("git", args, { cwd: path, encoding: "utf8" }).trim();
+  // Git's --follow traversal can lose the original name when commits share a timestamp.
+  const runAt = (date, ...args) => execFileSync("git", args, {
+    cwd: path,
+    encoding: "utf8",
+    env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }
+  }).trim();
   run("init", "-q", "-b", "trunk");
   run("config", "user.name", "QA");
   run("config", "user.email", "qa@example.test");
@@ -657,13 +663,13 @@ test("las lecturas distinguen una rama sin commits, los conteos filtrados y el n
   assert.equal(unborn.requiresConfirmation, false);
   writeFileSync(join(path, "antiguo [1].txt"), "base\n");
   run("add", "--", "antiguo [1].txt");
-  run("commit", "-qm", "crear");
+  runAt("2026-11-20T00:00:00Z", "commit", "-qm", "crear");
   const creation = run("rev-parse", "--short", "HEAD");
   run("switch", "-qc", "change");
   run("mv", "--", "antiguo [1].txt", "vigente [2].txt");
-  run("commit", "-qm", "renombrar");
+  runAt("2026-11-20T00:00:01Z", "commit", "-qm", "renombrar");
   run("switch", "-q", "trunk");
-  run("merge", "-q", "--no-ff", "change", "-m", "integrar");
+  runAt("2026-11-20T00:00:02Z", "merge", "-q", "--no-ff", "change", "-m", "integrar");
   reply(plan({ intent: "answer", reads: [
     { kind: "git", args: ["rev-list", "--no-merges", "--count", "HEAD", "--"] },
     { kind: "commit_count", args: ["--all", "all"] },
